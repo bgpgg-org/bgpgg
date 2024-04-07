@@ -1,8 +1,6 @@
 use std::net::{TcpListener, TcpStream};
-use super::message::read_bgp_message;
 
-pub struct Peer {
-}
+pub struct Peer {}
 
 pub struct BgpServer {
     pub peers: Vec<Peer>,
@@ -18,14 +16,10 @@ impl BgpServer {
                 Ok(stream) => {
                     self.add_peer(stream);
                 }
-                Err(e) => {
-
-                }
+                Err(e) => {}
             }
         }
     }
 
-    fn add_peer(&self, stream: TcpStream) {
-    }
+    fn add_peer(&self, stream: TcpStream) {}
 }
-
