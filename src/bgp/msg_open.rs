@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
 #[derive(Debug)]
@@ -78,6 +79,54 @@ struct Capability {
     val: Vec<u8>,
 }
 
+impl Capability {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(self.code.as_u8());
+        bytes.push(self.len);
+        bytes.extend_from_slice(&self.val);
+        bytes
+    }
+}
+
+impl BgpCapabiltyCode {
+    fn as_u8(&self) -> u8 {
+        match self {
+            BgpCapabiltyCode::Multiprotocol => 1,
+            BgpCapabiltyCode::RouteRefresh => 2,
+            BgpCapabiltyCode::Unknown => 0,
+        }
+    }
+}
+
+impl ParamVal {
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ParamVal::Capability(cap) => cap.to_bytes(),
+            ParamVal::Unknown(data) => data.clone(),
+        }
+    }
+}
+
+impl OptionalParamTypes {
+    fn as_u8(&self) -> u8 {
+        match self {
+            OptionalParamTypes::Capabilities => 2,
+            OptionalParamTypes::Unknown(val) => *val,
+        }
+    }
+}
+
+impl OptionalParam {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(self.param_type.as_u8());
+        bytes.push(self.param_len);
+        bytes.extend_from_slice(&self.param_value.to_bytes());
+        bytes
+    }
+}
+
 fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
     let mut cursor = 0;
     let mut params: Vec<OptionalParam> = Vec::new();
@@ -124,6 +173,26 @@ fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
 }
 
 impl OpenMessage {
+    /// Creates a new OpenMessage with the specified parameters
+    ///
+    /// # Arguments
+    /// * `asn` - Autonomous System Number
+    /// * `hold_time` - Hold time in seconds
+    /// * `bgp_identifier` - BGP identifier (usually an IPv4 address as u32)
+    ///
+    /// # Returns
+    /// A new OpenMessage with version 4 and no optional parameters
+    pub fn new(asn: u16, hold_time: u16, bgp_identifier: u32) -> Self {
+        OpenMessage {
+            version: 4,
+            asn,
+            hold_time,
+            bgp_identifier,
+            optional_params_len: 0,
+            optional_params: vec![],
+        }
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         if bytes.len() < 10 {
             return Err(ParserError::InvalidLength(
@@ -161,9 +230,38 @@ impl OpenMessage {
         })
     }
 
-    // pub fn to_bytes() -> Vec<u8> {
+}
 
-    // }
+impl Message for OpenMessage {
+    fn kind(&self) -> MessageType {
+        MessageType::OPEN
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Version
+        bytes.push(self.version);
+
+        // ASN
+        bytes.extend_from_slice(&self.asn.to_be_bytes());
+
+        // Hold time
+        bytes.extend_from_slice(&self.hold_time.to_be_bytes());
+
+        // BGP identifier
+        bytes.extend_from_slice(&self.bgp_identifier.to_be_bytes());
+
+        // Optional parameters length
+        bytes.push(self.optional_params_len);
+
+        // Optional parameters (if any)
+        for param in &self.optional_params {
+            bytes.extend_from_slice(&param.to_bytes());
+        }
+
+        bytes
+    }
 }
 
 #[cfg(test)]
@@ -425,5 +523,56 @@ mod tests {
         ];
 
         assert_eq!(result, expected);
+    }
+
+    const TEST_OPEN_MESSAGE_BODY: &[u8] = &[
+        0x04,       // Version
+        0xfd, 0xe9, // ASN: 65001
+        0x00, 0xb4, // Hold time: 180
+        0x01, 0x01, 0x01, 0x01, // BGP ID: 0x01010101
+        0x00,       // Optional params len
+    ];
+
+    #[test]
+    fn test_open_message_encode_decode() {
+        // Create an OpenMessage using new()
+        let open_msg = OpenMessage::new(65001, 180, 0x01010101);
+
+        // Encode to bytes
+        let bytes = open_msg.to_bytes();
+
+        assert_eq!(bytes, TEST_OPEN_MESSAGE_BODY);
+
+        // Decode: parse the bytes back
+        let parsed = OpenMessage::from_bytes(bytes).unwrap();
+        assert_eq!(parsed.version, 4);
+        assert_eq!(parsed.asn, 65001);
+        assert_eq!(parsed.hold_time, 180);
+        assert_eq!(parsed.bgp_identifier, 0x01010101);
+        assert_eq!(parsed.optional_params_len, 0);
+    }
+
+    #[test]
+    fn test_open_message_serialize() {
+        // Create an OpenMessage using new()
+        let open_msg = OpenMessage::new(65001, 180, 0x01010101);
+
+        // Serialize to complete BGP message with header
+        let message = open_msg.serialize();
+
+        // Expected complete message: header + body
+        let mut expected = Vec::new();
+        // BGP header marker (16 bytes of 0xFF)
+        expected.extend_from_slice(&[0xff; 16]);
+        // Message length (19 byte header + body length)
+        let total_length = 19u16 + TEST_OPEN_MESSAGE_BODY.len() as u16;
+        expected.extend_from_slice(&total_length.to_be_bytes());
+        // Message type (OPEN = 1)
+        expected.push(0x01);
+        // Message body
+        expected.extend_from_slice(TEST_OPEN_MESSAGE_BODY);
+
+        assert_eq!(message, expected);
+        assert_eq!(message.len(), 19 + TEST_OPEN_MESSAGE_BODY.len());
     }
 }

@@ -12,7 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bgp;
-pub mod peer;
-pub mod rib;
-pub mod server;
+use std::net::SocketAddr;
+
+#[derive(Debug)]
+pub enum PeerState {
+    Idle,
+    Connect,
+    Active,
+    OpenSent,
+    OpenConfirm,
+    Established,
+}
+
+pub struct Peer {
+    pub addr: SocketAddr,
+    pub state: PeerState,
+}
+
+impl Peer {
+    pub fn new(addr: SocketAddr) -> Self {
+        Peer {
+            addr,
+            state: PeerState::Connect,
+        }
+    }
+}

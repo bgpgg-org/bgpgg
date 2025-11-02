@@ -22,11 +22,55 @@ use std::io::Read;
 // maximum message size is 4096 octets.
 const BGP_HEADER_SIZE_BYTES: usize = 19;
 
-enum MessageType {
+// BGP header marker (16 bytes of 0xFF)
+const BGP_MARKER: [u8; 16] = [0xff; 16];
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum MessageType {
     OPEN = 1,
     UPDATE = 2,
     NOTIFICATION = 3,
     KEEPALIVE = 4,
+}
+
+impl MessageType {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Trait for BGP message types that can serialize themselves
+pub trait Message {
+    /// Returns the message type identifier
+    fn kind(&self) -> MessageType;
+
+    /// Serializes the message body (without BGP header)
+    fn to_bytes(&self) -> Vec<u8>;
+
+    /// Serializes the complete BGP message with header
+    ///
+    /// This method has a default implementation that uses to_bytes()
+    /// and adds the BGP header automatically.
+    fn serialize(&self) -> Vec<u8> {
+        let body = self.to_bytes();
+        let mut message = Vec::new();
+
+        // BGP header marker (16 bytes of 0xFF)
+        message.extend_from_slice(&BGP_MARKER);
+
+        // Message length (header + body)
+        let length = BGP_HEADER_SIZE_BYTES as u16 + body.len() as u16;
+        message.extend_from_slice(&length.to_be_bytes());
+
+        // Message type
+        message.push(self.kind().as_u8());
+
+        // Message body
+        message.extend_from_slice(&body);
+
+        message
+    }
 }
 
 impl TryFrom<u8> for MessageType {
@@ -74,20 +118,26 @@ impl BgpMessage {
 
 pub fn read_bgp_message<R: Read>(mut stream: R) -> Result<BgpMessage, ParserError> {
     let mut header_buffer = [0u8; BGP_HEADER_SIZE_BYTES];
-    let _ = match stream.read_exact(&mut header_buffer) {
-        Err(err) => Err(ParserError::IoError(err.to_string())),
-        Ok(val) => Ok(val),
-    };
+    stream.read_exact(&mut header_buffer)
+        .map_err(|err| ParserError::IoError(err.to_string()))?;
 
     let message_length = u16::from_be_bytes([header_buffer[16], header_buffer[17]]);
     let message_type = header_buffer[18];
 
+    // Validate message length
+    if message_length < BGP_HEADER_SIZE_BYTES as u16 {
+        return Err(ParserError::InvalidLength(
+            format!("Message length {} is less than header size {}", message_length, BGP_HEADER_SIZE_BYTES)
+        ));
+    }
+
     let body_length = message_length - BGP_HEADER_SIZE_BYTES as u16;
     let mut message_buffer = vec![0u8; body_length.into()];
-    let _ = match stream.read_exact(&mut message_buffer) {
-        Err(err) => Err(ParserError::IoError(err.to_string())),
-        Ok(val) => Ok(val),
-    };
+
+    if body_length > 0 {
+        stream.read_exact(&mut message_buffer)
+            .map_err(|err| ParserError::IoError(err.to_string()))?;
+    }
 
     BgpMessage::from_bytes(message_type, message_buffer)
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg::{Message, MessageType};
 use super::utils::{parse_nlri_list, read_u32, IpNetwork, ParserError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -74,7 +75,7 @@ impl TryFrom<u8> for AttrType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum Origin {
     IGP = 0,
     EGP = 1,
@@ -101,7 +102,7 @@ struct AsPathSegment {
     asn_list: Vec<u16>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum AsPathSegmentType {
     AsSet = 1,
     AsSequence = 2,
@@ -279,6 +280,100 @@ fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError>
     return Ok(path_attributes);
 }
 
+fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for network in nlri_list {
+        match network {
+            IpNetwork::V4(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = ((net.prefix_length + 7) / 8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+            IpNetwork::V6(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = ((net.prefix_length + 7) / 8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+        }
+    }
+    bytes
+}
+
+fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
+    let mut bytes = Vec::new();
+
+    // Serialize attribute value first to determine length
+    let attr_value_bytes = match &attr.value {
+        PathAttrValue::Origin(origin) => {
+            vec![*origin as u8]
+        }
+        PathAttrValue::AsPath(as_path) => {
+            let mut path_bytes = Vec::new();
+            for segment in &as_path.segments {
+                path_bytes.push(segment.segment_type as u8);
+                path_bytes.push(segment.segment_len);
+                for asn in &segment.asn_list {
+                    path_bytes.extend_from_slice(&asn.to_be_bytes());
+                }
+            }
+            path_bytes
+        }
+        PathAttrValue::NextHop(next_hop) => {
+            match next_hop {
+                NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
+                NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
+            }
+        }
+        PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
+        PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),
+        PathAttrValue::AtomicAggregate => vec![],
+        PathAttrValue::Aggregator(agg) => {
+            let mut agg_bytes = Vec::new();
+            agg_bytes.extend_from_slice(&agg.asn.to_be_bytes());
+            agg_bytes.extend_from_slice(&agg.ip_addr.octets());
+            agg_bytes
+        }
+    };
+
+    // Write flags
+    bytes.push(attr.flags.0);
+
+    // Write attribute type
+    let attr_type = match &attr.value {
+        PathAttrValue::Origin(_) => AttrType::Origin as u8,
+        PathAttrValue::AsPath(_) => AttrType::AsPath as u8,
+        PathAttrValue::NextHop(_) => AttrType::NextHop as u8,
+        PathAttrValue::MultiExtiDisc(_) => AttrType::MultiExtiDisc as u8,
+        PathAttrValue::LocalPref(_) => AttrType::LocalPref as u8,
+        PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
+        PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
+    };
+    bytes.push(attr_type);
+
+    // Write length
+    let attr_len = attr_value_bytes.len();
+    if attr.flags.extended_len() {
+        bytes.extend_from_slice(&(attr_len as u16).to_be_bytes());
+    } else {
+        bytes.push(attr_len as u8);
+    }
+
+    // Write attribute value
+    bytes.extend_from_slice(&attr_value_bytes);
+
+    bytes
+}
+
+fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for attr in path_attributes {
+        bytes.extend_from_slice(&write_path_attribute(attr));
+    }
+    bytes
+}
+
 impl UpdateMessage {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         let mut data = bytes;
@@ -319,6 +414,32 @@ pub struct UpdateMessage {
     nlri_list: Vec<IpNetwork>,
 }
 
+impl Message for UpdateMessage {
+    fn kind(&self) -> MessageType {
+        MessageType::UPDATE
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Withdrawn routes
+        let withdrawn_routes_bytes = write_nlri_list(&self.withdrawn_routes);
+        bytes.extend_from_slice(&self.withdrawn_routes_len.to_be_bytes());
+        bytes.extend_from_slice(&withdrawn_routes_bytes);
+
+        // Path attributes
+        let path_attributes_bytes = write_path_attributes(&self.path_attributes);
+        bytes.extend_from_slice(&self.total_path_attributes_len.to_be_bytes());
+        bytes.extend_from_slice(&path_attributes_bytes);
+
+        // NLRI
+        let nlri_bytes = write_nlri_list(&self.nlri_list);
+        bytes.extend_from_slice(&nlri_bytes);
+
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,10 +476,10 @@ mod tests {
     ];
 
     const WITHDRAWN_ROUTES_BYTES: &[u8] = &[
-        0x00, 0x0f, // Withdrawn routes length
-        0x18, 0x0a, 0x0b, 0x0c, 0x00, // Withdrawn route #1
-        0x18, 0x0a, 0x0b, 0x0d, 0x00, // Withdrawn route #2
-        0x18, 0x0a, 0x0b, 0x0e, 0x00, // Withdrawn route #2
+        0x00, 0x0c, // Withdrawn routes length (12 bytes: 3 routes * 4 bytes each)
+        0x18, 0x0a, 0x0b, 0x0c, // Withdrawn route #1: /24 prefix
+        0x18, 0x0a, 0x0b, 0x0d, // Withdrawn route #2: /24 prefix
+        0x18, 0x0a, 0x0b, 0x0e, // Withdrawn route #3: /24 prefix
     ];
 
     #[test]
@@ -654,13 +775,13 @@ mod tests {
             PATH_ATTR_AS_PATH,
             PATH_ATTR_NEXT_HOP_IPV4,
             &[
-                0x18, 0x0a, 0x0b, 0x0f, 0x00, // NLRI #1
-                0x18, 0x0a, 0x0b, 0x10, 0x00, // NLRI #2
+                0x18, 0x0a, 0x0b, 0x0f, // NLRI #1: /24 prefix
+                0x18, 0x0a, 0x0b, 0x10, // NLRI #2: /24 prefix
             ]
 
         ].concat(),
         expected UpdateMessage{
-            withdrawn_routes_len: 15,
+            withdrawn_routes_len: 12,
             withdrawn_routes: vec![
                 IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 12, 0),
@@ -724,7 +845,7 @@ mod tests {
             PATH_ATTR_AS_PATH,
             PATH_ATTR_NEXT_HOP_IPV4,
             &[
-                0x18, 0x0a, 0x0b, 0x0f, 0x00, // NLRI #1
+                0x18, 0x0a, 0x0b, 0x0f, // NLRI #1: /24 prefix
             ]
 
         ].concat(),
@@ -774,7 +895,7 @@ mod tests {
             ],
         ].concat(),
         expected UpdateMessage{
-            withdrawn_routes_len: 15,
+            withdrawn_routes_len: 12,
             withdrawn_routes: vec![
                 IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 12, 0),
@@ -794,4 +915,64 @@ mod tests {
             nlri_list: vec![],
         }
     );
+
+    const INPUT_BODY: &[u8] = &[
+        0x00, 0x0c, // Withdrawn routes length (12 bytes)
+        0x18, 0x0a, 0x0b, 0x0c, // Withdrawn route #1: /24 prefix
+        0x18, 0x0a, 0x0b, 0x0d, // Withdrawn route #2: /24 prefix
+        0x18, 0x0a, 0x0b, 0x0e, // Withdrawn route #3: /24 prefix
+        0x00, 0x14, // Total path attribute length
+        PathAttrFlag::TRANSITIVE, // Attribute flags
+        AttrType::Origin as u8,   // Attribute type
+        0x01,                     // Attribute length
+        1,                        // Origin value: EGP
+        PathAttrFlag::TRANSITIVE, // Attribute flags
+        AttrType::AsPath as u8,   // Attribute type
+        0x06,                     // Attribute length
+        AsPathSegmentType::AsSet as u8,
+        0x02, // Number of ASes
+        0x00,
+        0x10, // ASN: 16
+        0x01,
+        0x12, // ASN: 274
+        PathAttrFlag::TRANSITIVE, // Attribute flags
+        AttrType::NextHop as u8,  // Attribute type
+        0x04,                     // Attribute length
+        0xc8,
+        0xc9,
+        0xca,
+        0xcb,
+        0x18, 0x0a, 0x0b, 0x0f, // NLRI #1: /24 prefix
+        0x18, 0x0a, 0x0b, 0x10, // NLRI #2: /24 prefix
+    ];
+
+    #[test]
+    fn test_update_message_encode_decode() {
+        // Decode the message
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec()).unwrap();
+
+        // Encode it back
+        let encoded = message.to_bytes();
+
+        // Should match the original input
+        assert_eq!(encoded, INPUT_BODY);
+    }
+
+    #[test]
+    fn test_update_message_serialize() {
+        // Decode the message
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec()).unwrap();
+
+        // Serialize it (includes BGP header)
+        let serialized = message.serialize();
+
+        // Check BGP header
+        assert_eq!(&serialized[0..16], &[0xff; 16]); // Marker
+        let length = u16::from_be_bytes([serialized[16], serialized[17]]);
+        assert_eq!(length, 19 + INPUT_BODY.len() as u16); // Header + body
+        assert_eq!(serialized[18], 2); // Message type: UPDATE
+
+        // Check body
+        assert_eq!(&serialized[19..], INPUT_BODY);
+    }
 }

@@ -12,4 +12,44 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg::{Message, MessageType};
+
 pub struct KeepAliveMessage {}
+
+impl Message for KeepAliveMessage {
+    fn kind(&self) -> MessageType {
+        MessageType::KEEPALIVE
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        // KEEPALIVE has no body, just return empty vec
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keepalive_serialize() {
+        let keepalive_msg = KeepAliveMessage {};
+
+        // Serialize to complete BGP message with header
+        let message = keepalive_msg.serialize();
+
+        // Expected complete message
+        let expected: Vec<u8> = vec![
+            // BGP header marker (16 bytes of 0xFF)
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            // Message length (19 bytes - header only, no body)
+            0x00, 0x13,
+            // Message type (KEEPALIVE = 4)
+            0x04,
+        ];
+
+        assert_eq!(message, expected);
+        assert_eq!(message.len(), 19); // 19 byte header, no body
+    }
+}

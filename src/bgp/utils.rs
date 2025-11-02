@@ -49,8 +49,8 @@ pub struct Ipv4Net {
 
 #[derive(Debug, PartialEq)]
 pub struct Ipv6Net {
-    address: Ipv6Addr,
-    prefix_length: u8,
+    pub address: Ipv6Addr,
+    pub prefix_length: u8,
 }
 
 pub fn parse_nlri_list(bytes: &[u8]) -> Vec<IpNetwork> {
@@ -76,7 +76,7 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Vec<IpNetwork> {
 
         nlri_list.push(network);
 
-        cursor = cursor + byte_len + 1;
+        cursor = cursor + byte_len;
     }
 
     return nlri_list;
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_parse_nlri_list_single() {
-        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c, 0x00];
+        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c]; // /24 prefix: 1 byte length + 3 bytes IP
 
         let result = parse_nlri_list(&data);
         let expected = vec![IpNetwork::V4(Ipv4Net {
@@ -109,7 +109,10 @@ mod tests {
 
     #[test]
     fn test_parse_nlri_list_multiple() {
-        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c, 0x00, 0x15, 0x0a, 0x0b, 0x08, 0x00];
+        let data: Vec<u8> = vec![
+            0x18, 0x0a, 0x0b, 0x0c, // /24 prefix: 1 byte length + 3 bytes IP
+            0x15, 0x0a, 0x0b, 0x08  // /21 prefix: 1 byte length + 3 bytes IP
+        ];
 
         let result = parse_nlri_list(&data);
         let expected = vec![

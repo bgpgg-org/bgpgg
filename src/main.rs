@@ -14,8 +14,9 @@
 
 use bgpgg::server::BgpServer;
 
-fn main() {
-    let server = BgpServer { peers: Vec::new() };
-
-    server.run();
+#[tokio::main]
+async fn main() {
+    // Create and run BGP server
+    let server = BgpServer::new();
+    server.run().await;
 }
