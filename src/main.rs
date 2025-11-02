@@ -16,7 +16,7 @@ use bgpgg::server::BgpServer;
 
 #[tokio::main]
 async fn main() {
-    // Create and run BGP server
-    let server = BgpServer::new();
+    // Create and run BGP server with ASN 65000 (will be configurable later)
+    let server = BgpServer::new(65000);
     server.run().await;
 }

@@ -28,8 +28,8 @@ async fn test_two_bgp_servers_peering() {
     let server1_port = 1790;
     let server2_port = 1791;
 
-    let server1 = BgpServer::new();
-    let server2 = BgpServer::new();
+    let server1 = BgpServer::new(65100); // ASN 65100
+    let server2 = BgpServer::new(65200); // ASN 65200
 
     // Clone peer references before moving servers into tasks
     let server1_peers = server1.peers.clone();
@@ -139,9 +139,9 @@ async fn test_announce_one_route() {
     // Start a BGP server
     let server_port = 1792;
 
-    let server = BgpServer::new();
+    let server = BgpServer::new(65100); // ASN 65100
     let server_peers = server.peers.clone();
-    let server_rib_tx = server.rib_tx.clone();
+    let server_rib = server.rib.clone();
 
     // Start server in background
     tokio::spawn(async move {
@@ -209,12 +209,8 @@ async fn test_announce_one_route() {
         println!("Server has {} peer(s)", peers.len());
     }
 
-    // Verify that the route is in the RIB
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    let _ = server_rib_tx
-        .send(bgpgg::rib::RibMessage::QueryRoutes { response_tx })
-        .await;
-    let routes = response_rx.await.unwrap();
+    // Verify that the route is in the Loc-RIB
+    let routes = server_rib.query_loc_rib().await.unwrap();
 
     assert_eq!(routes.len(), 1, "RIB should contain 1 route");
 

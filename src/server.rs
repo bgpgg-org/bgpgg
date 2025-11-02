@@ -14,42 +14,27 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
 use crate::peer::{Peer, PeerState};
-use crate::rib::RibMessage;
+use crate::rib::RibHandle;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
-    pub rib_tx: mpsc::Sender<RibMessage>,
+    pub rib: RibHandle,
 }
 
 impl BgpServer {
-    pub fn new() -> Self {
-        // Create channel for RIB communication
-        let (rib_tx, rib_rx) = mpsc::channel(100);
-
-        // Create and spawn RIB actor
-        let rib = crate::rib::Rib::new();
-        tokio::spawn(async move {
-            rib.run(rib_rx).await;
-        });
-
+    pub fn new(local_asn: u16) -> Self {
         BgpServer {
             peers: Arc::new(Mutex::new(Vec::new())),
-            rib_tx,
+            rib: RibHandle::spawn(local_asn),
         }
     }
 
     pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-        // Send query message to RIB
-        let _ = self.rib_tx.send(RibMessage::QueryRoutes { response_tx }).await;
-
-        // Wait for response
-        response_rx.await.unwrap_or_else(|_| vec![])
+        self.rib.query_loc_rib().await.unwrap_or_else(|_| vec![])
     }
 
     pub async fn run(&self) {
@@ -93,13 +78,13 @@ impl BgpServer {
         }
 
         // Notify RIB about new peer
-        let _ = self.rib_tx.send(RibMessage::PeerConnected(peer_addr)).await;
+        let _ = self.rib.peer_connected(peer_addr).await;
 
         let peers_arc = Arc::clone(&self.peers);
-        let rib_tx = self.rib_tx.clone();
+        let rib = self.rib.clone();
 
         tokio::spawn(async move {
-            Self::handle_peer(stream, peer_addr, peers_arc, rib_tx).await;
+            Self::handle_peer(stream, peer_addr, peers_arc, rib).await;
         });
     }
 
@@ -107,7 +92,7 @@ impl BgpServer {
         stream: TcpStream,
         addr: SocketAddr,
         peers: Arc<Mutex<Vec<Peer>>>,
-        rib_tx: mpsc::Sender<RibMessage>,
+        rib: RibHandle,
     ) {
         println!("Handling peer: {}", addr);
 
@@ -153,12 +138,7 @@ impl BgpServer {
                     }
 
                     // Send message to RIB
-                    let _ = rib_tx
-                        .send(RibMessage::BgpMessage {
-                            from: addr,
-                            message,
-                        })
-                        .await;
+                    let _ = rib.process_bgp_message(addr, message).await;
                 }
                 Err(e) => {
                     eprintln!("Error reading message from {}: {:?}", addr, e);
@@ -179,7 +159,7 @@ impl BgpServer {
         }
 
         // Notify RIB about disconnection
-        let _ = rib_tx.send(RibMessage::PeerDisconnected(addr)).await;
+        let _ = rib.peer_disconnected(addr).await;
     }
 
     async fn update_peer_state(
