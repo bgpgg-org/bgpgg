@@ -14,6 +14,8 @@
 
 use bgpgg::bgp::msg_update::Origin;
 use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::config::Config;
+use bgpgg::fsm::BgpState;
 use bgpgg::rib::{Path, Route};
 use bgpgg::server::BgpServer;
 use std::collections::HashSet;
@@ -34,7 +36,10 @@ async fn poll_for_routes(server: &BgpServer, expected: &HashSet<Route>) {
 
     let routes = server.rib.query_loc_rib().await.unwrap();
     let actual: HashSet<Route> = routes.into_iter().collect();
-    panic!("Timeout waiting for routes. Expected: {:?}, Got: {:?}", expected, actual);
+    panic!(
+        "Timeout waiting for routes. Expected: {:?}, Got: {:?}",
+        expected, actual
+    );
 }
 
 /// Utility function to set up two BGP servers with peering established
@@ -45,8 +50,16 @@ async fn setup_two_peered_servers(
     port1: u16,
     port2: u16,
 ) -> (Arc<BgpServer>, Arc<BgpServer>) {
-    let server1 = Arc::new(BgpServer::new(asn1));
-    let server2 = Arc::new(BgpServer::new(asn2));
+    let server1 = Arc::new(BgpServer::new(Config::new(
+        asn1,
+        &format!("127.0.0.1:{}", port1),
+        Ipv4Addr::new(1, 1, 1, 1),
+    )));
+    let server2 = Arc::new(BgpServer::new(Config::new(
+        asn2,
+        &format!("127.0.0.1:{}", port2),
+        Ipv4Addr::new(2, 2, 2, 2),
+    )));
 
     tokio::spawn({
         let server = Arc::clone(&server1);
@@ -62,15 +75,33 @@ async fn setup_two_peered_servers(
 
     // Wait for peering to establish
     for _ in 0..100 {
-        let peers1 = server1.peers.lock().await.len();
-        let peers2 = server2.peers.lock().await.len();
-        if peers1 == 1 && peers2 == 1 {
-            break;
+        let established = {
+            let peers1 = server1.peers.lock().await;
+            let peers2 = server2.peers.lock().await;
+
+            let both_have_peers = peers1.len() == 1 && peers2.len() == 1;
+            let both_established = peers1.first().map(|p| p.state()) == Some(BgpState::Established)
+                && peers2.first().map(|p| p.state()) == Some(BgpState::Established);
+
+            both_have_peers && both_established
+        };
+
+        if established {
+            return (server1, server2);
         }
         sleep(Duration::from_millis(100)).await;
     }
 
-    (server1, server2)
+    // Timeout - collect state for error message
+    let peers1 = server1.peers.lock().await;
+    let peers2 = server2.peers.lock().await;
+    panic!(
+        "Timeout waiting for peers to establish. Server1: {} peers (state: {:?}), Server2: {} peers (state: {:?})",
+        peers1.len(),
+        peers1.first().map(|p| p.state()),
+        peers2.len(),
+        peers2.first().map(|p| p.state())
+    );
 }
 
 #[tokio::test]
@@ -78,8 +109,23 @@ async fn test_two_bgp_servers_peering() {
     let (server1, server2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
 
     // Verify that both servers have peers
-    assert_eq!(server1.peers.lock().await.len(), 1, "Server 1 should have 1 peer");
-    assert_eq!(server2.peers.lock().await.len(), 1, "Server 2 should have 1 peer");
+    let peers1 = server1.peers.lock().await;
+    let peers2 = server2.peers.lock().await;
+
+    assert_eq!(peers1.len(), 1, "Server 1 should have 1 peer");
+    assert_eq!(peers2.len(), 1, "Server 2 should have 1 peer");
+
+    // Verify FSM state is Established
+    assert_eq!(
+        peers1[0].state(),
+        BgpState::Established,
+        "Server 1 peer should be in Established state"
+    );
+    assert_eq!(
+        peers2[0].state(),
+        BgpState::Established,
+        "Server 2 peer should be in Established state"
+    );
 }
 
 #[tokio::test]

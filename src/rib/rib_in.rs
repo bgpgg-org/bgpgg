@@ -30,10 +30,13 @@ pub(super) struct AdjRibIn {
 
 impl Rib for AdjRibIn {
     fn add_route(&mut self, prefix: IpNetwork, path: Path) {
-        self.routes.insert(prefix, Route {
+        self.routes.insert(
             prefix,
-            paths: vec![path],
-        });
+            Route {
+                prefix,
+                paths: vec![path],
+            },
+        );
     }
 
     fn get_all_routes(&self) -> Vec<Route> {
@@ -109,8 +112,14 @@ mod tests {
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
 
         let mut expected = vec![
-            Route { prefix: prefix1, paths: vec![path1] },
-            Route { prefix: prefix2, paths: vec![path2] },
+            Route {
+                prefix: prefix1,
+                paths: vec![path1],
+            },
+            Route {
+                prefix: prefix2,
+                paths: vec![path2],
+            },
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
@@ -154,7 +163,13 @@ mod tests {
         rib_in.remove_route(prefix1);
 
         let routes = rib_in.get_all_routes();
-        assert_eq!(routes, vec![Route { prefix: prefix2, paths: vec![path2] }]);
+        assert_eq!(
+            routes,
+            vec![Route {
+                prefix: prefix2,
+                paths: vec![path2]
+            }]
+        );
     }
 
     #[test]

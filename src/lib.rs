@@ -13,6 +13,9 @@
 // limitations under the License.
 
 pub mod bgp;
+pub mod config;
+pub mod fsm;
+pub mod log;
 pub mod peer;
 pub mod rib;
 pub mod server;

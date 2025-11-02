@@ -111,7 +111,7 @@ mod tests {
     fn test_parse_nlri_list_multiple() {
         let data: Vec<u8> = vec![
             0x18, 0x0a, 0x0b, 0x0c, // /24 prefix: 1 byte length + 3 bytes IP
-            0x15, 0x0a, 0x0b, 0x08  // /21 prefix: 1 byte length + 3 bytes IP
+            0x15, 0x0a, 0x0b, 0x08, // /21 prefix: 1 byte length + 3 bytes IP
         ];
 
         let result = parse_nlri_list(&data);

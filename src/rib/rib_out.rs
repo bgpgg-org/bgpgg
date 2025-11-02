@@ -30,10 +30,13 @@ pub(super) struct AdjRibOut {
 
 impl Rib for AdjRibOut {
     fn add_route(&mut self, prefix: IpNetwork, path: Path) {
-        self.routes.insert(prefix, Route {
+        self.routes.insert(
             prefix,
-            paths: vec![path],
-        });
+            Route {
+                prefix,
+                paths: vec![path],
+            },
+        );
     }
 
     fn get_all_routes(&self) -> Vec<Route> {
@@ -86,7 +89,13 @@ mod tests {
 
         rib_out.add_route(prefix, path.clone());
 
-        assert_eq!(rib_out.get_all_routes(), vec![Route { prefix, paths: vec![path] }]);
+        assert_eq!(
+            rib_out.get_all_routes(),
+            vec![Route {
+                prefix,
+                paths: vec![path]
+            }]
+        );
         assert_eq!(rib_out.routes_len(), 1);
     }
 
@@ -111,8 +120,14 @@ mod tests {
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
 
         let mut expected = vec![
-            Route { prefix: prefix1, paths: vec![path1] },
-            Route { prefix: prefix2, paths: vec![path2] },
+            Route {
+                prefix: prefix1,
+                paths: vec![path1],
+            },
+            Route {
+                prefix: prefix2,
+                paths: vec![path2],
+            },
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
@@ -134,7 +149,13 @@ mod tests {
         rib_out.add_route(prefix, path2.clone());
 
         let routes = rib_out.get_all_routes();
-        assert_eq!(routes, vec![Route { prefix, paths: vec![path2] }]);
+        assert_eq!(
+            routes,
+            vec![Route {
+                prefix,
+                paths: vec![path2]
+            }]
+        );
     }
 
     #[test]
@@ -155,7 +176,13 @@ mod tests {
 
         rib_out.remove_route(prefix1);
 
-        assert_eq!(rib_out.get_all_routes(), vec![Route { prefix: prefix2, paths: vec![path2] }]);
+        assert_eq!(
+            rib_out.get_all_routes(),
+            vec![Route {
+                prefix: prefix2,
+                paths: vec![path2]
+            }]
+        );
         assert_eq!(rib_out.routes_len(), 1);
     }
 

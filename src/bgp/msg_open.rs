@@ -229,7 +229,6 @@ impl OpenMessage {
             optional_params,
         })
     }
-
 }
 
 impl Message for OpenMessage {
@@ -526,11 +525,11 @@ mod tests {
     }
 
     const TEST_OPEN_MESSAGE_BODY: &[u8] = &[
-        0x04,       // Version
+        0x04, // Version
         0xfd, 0xe9, // ASN: 65001
         0x00, 0xb4, // Hold time: 180
         0x01, 0x01, 0x01, 0x01, // BGP ID: 0x01010101
-        0x00,       // Optional params len
+        0x00, // Optional params len
     ];
 
     #[test]

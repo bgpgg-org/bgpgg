@@ -1,6 +1,6 @@
-.PHONY: build clean run test
+.PHONY: build clean run test fmt
 
-build:
+build: fmt
 	cargo build --release
 
 clean:
@@ -11,3 +11,6 @@ run:
 
 test:
 	cargo test
+
+fmt:
+	cargo fmt

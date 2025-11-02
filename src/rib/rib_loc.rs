@@ -33,7 +33,11 @@ impl Rib for LocRib {
             .entry(prefix)
             .and_modify(|route| {
                 // Check if we already have a path from this peer, if so replace it
-                if let Some(existing_path) = route.paths.iter_mut().find(|p| p.from_peer == path.from_peer) {
+                if let Some(existing_path) = route
+                    .paths
+                    .iter_mut()
+                    .find(|p| p.from_peer == path.from_peer)
+                {
                     *existing_path = path.clone();
                 } else {
                     route.paths.push(path.clone());
@@ -102,7 +106,13 @@ mod tests {
 
         loc_rib.add_route(prefix, path.clone());
 
-        assert_eq!(loc_rib.get_all_routes(), vec![Route { prefix, paths: vec![path] }]);
+        assert_eq!(
+            loc_rib.get_all_routes(),
+            vec![Route {
+                prefix,
+                paths: vec![path]
+            }]
+        );
     }
 
     #[test]
@@ -126,8 +136,14 @@ mod tests {
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
 
         let mut expected = vec![
-            Route { prefix: prefix1, paths: vec![path1] },
-            Route { prefix: prefix2, paths: vec![path2] },
+            Route {
+                prefix: prefix1,
+                paths: vec![path1],
+            },
+            Route {
+                prefix: prefix2,
+                paths: vec![path2],
+            },
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
@@ -173,7 +189,13 @@ mod tests {
         loc_rib.add_route(prefix, path1);
         loc_rib.add_route(prefix, path2.clone());
 
-        assert_eq!(loc_rib.get_all_routes(), vec![Route { prefix, paths: vec![path2] }]);
+        assert_eq!(
+            loc_rib.get_all_routes(),
+            vec![Route {
+                prefix,
+                paths: vec![path2]
+            }]
+        );
     }
 
     #[test]
@@ -191,7 +213,13 @@ mod tests {
 
         loc_rib.remove_routes_from_peer(peer1);
 
-        assert_eq!(loc_rib.get_all_routes(), vec![Route { prefix, paths: vec![path2] }]);
+        assert_eq!(
+            loc_rib.get_all_routes(),
+            vec![Route {
+                prefix,
+                paths: vec![path2]
+            }]
+        );
     }
 
     #[test]

@@ -15,10 +15,11 @@
 use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::rib_out::AdjRibOut;
 use crate::rib::rib_loc::LocRib;
+use crate::rib::rib_out::AdjRibOut;
 use crate::rib::types::Path;
 use crate::rib::{Rib, RibMessage};
+use crate::{debug, info, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -52,7 +53,7 @@ impl RibManager {
     }
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<RibMessage>) {
-        println!("RIB manager started (ASN: {})", self.local_asn);
+        info!("RIB manager started", "local_asn" => self.local_asn);
 
         while let Some(msg) = rx.recv().await {
             match msg {
@@ -70,13 +71,17 @@ impl RibManager {
                     let _ = response_tx.send(routes);
                 }
                 RibMessage::QueryAdjRibIn { peer, response_tx } => {
-                    let routes = self.adj_rib_in.get(&peer)
+                    let routes = self
+                        .adj_rib_in
+                        .get(&peer)
                         .map(|rib| rib.get_all_routes())
                         .unwrap_or_default();
                     let _ = response_tx.send(routes);
                 }
                 RibMessage::QueryAdjRibOut { peer, response_tx } => {
-                    let routes = self.adj_rib_out.get(&peer)
+                    let routes = self
+                        .adj_rib_out
+                        .get(&peer)
                         .map(|rib| rib.get_all_routes())
                         .unwrap_or_default();
                     let _ = response_tx.send(routes);
@@ -84,18 +89,18 @@ impl RibManager {
             }
         }
 
-        println!("RIB manager stopped");
+        info!("RIB manager stopped");
     }
 
     fn handle_peer_connected(&mut self, addr: SocketAddr) {
-        println!("RIB: Peer {} connected - creating Adj-RIB-In and Adj-RIB-Out", addr);
+        info!("peer connected, creating Adj-RIB-In and Adj-RIB-Out", "peer_addr" => addr.to_string());
 
         self.adj_rib_in.insert(addr, AdjRibIn::new(addr));
         self.adj_rib_out.insert(addr, AdjRibOut::new(addr));
     }
 
     fn handle_peer_disconnected(&mut self, addr: SocketAddr) {
-        println!("RIB: Peer {} disconnected - cleaning up", addr);
+        info!("peer disconnected, cleaning up", "peer_addr" => addr.to_string());
 
         // Remove Adj-RIB-In for this peer
         self.adj_rib_in.remove(&addr);
@@ -109,26 +114,23 @@ impl RibManager {
         // Recompute Adj-RIB-Out for all remaining peers
         self.recompute_adj_rib_out();
 
-        println!("RIB: Cleanup complete. Total routes in Loc-RIB: {}", self.loc_rib.routes_len());
+        info!("cleanup complete", "loc_rib_routes" => self.loc_rib.routes_len());
     }
 
     fn process_bgp_message(&mut self, from: SocketAddr, message: BgpMessage) {
         match message {
             BgpMessage::Open(open_msg) => {
-                println!(
-                    "RIB: Processing OPEN from {}: ASN={}, Hold Time={}, BGP ID={}",
-                    from, open_msg.asn, open_msg.hold_time, open_msg.bgp_identifier
-                );
+                debug!("processing OPEN", "peer_addr" => from.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time, "bgp_identifier" => open_msg.bgp_identifier);
             }
             BgpMessage::Update(update_msg) => {
-                println!("RIB: Processing UPDATE from {}: {:?}", from, update_msg);
+                debug!("processing UPDATE", "peer_addr" => from.to_string(), "update" => format!("{:?}", update_msg));
                 self.process_update(from, update_msg);
             }
             BgpMessage::KeepAlive(_) => {
-                println!("RIB: Processing KEEPALIVE from {}", from);
+                debug!("processing KEEPALIVE", "peer_addr" => from.to_string());
             }
             BgpMessage::Notification(notif_msg) => {
-                println!("RIB: Processing NOTIFICATION from {}: {:?}", from, notif_msg);
+                warn!("processing NOTIFICATION", "peer_addr" => from.to_string(), "notification" => format!("{:?}", notif_msg));
             }
         }
     }
@@ -138,7 +140,7 @@ impl RibManager {
         let origin = match update_msg.get_origin() {
             Some(o) => o,
             None => {
-                println!("RIB: UPDATE from {} missing Origin attribute, skipping", from);
+                warn!("UPDATE missing Origin attribute, skipping", "peer_addr" => from.to_string());
                 return;
             }
         };
@@ -146,7 +148,7 @@ impl RibManager {
         let as_path = match update_msg.get_as_path() {
             Some(p) => p,
             None => {
-                println!("RIB: UPDATE from {} missing AS Path attribute, skipping", from);
+                warn!("UPDATE missing AS Path attribute, skipping", "peer_addr" => from.to_string());
                 return;
             }
         };
@@ -154,20 +156,22 @@ impl RibManager {
         let next_hop = match update_msg.get_next_hop() {
             Some(nh) => nh,
             None => {
-                println!("RIB: UPDATE from {} missing Next Hop attribute, skipping", from);
+                warn!("UPDATE missing Next Hop attribute, skipping", "peer_addr" => from.to_string());
                 return;
             }
         };
 
         // Get or create Adj-RIB-In for this peer
-        let adj_rib_in = self.adj_rib_in.entry(from)
+        let adj_rib_in = self
+            .adj_rib_in
+            .entry(from)
             .or_insert_with(|| AdjRibIn::new(from));
 
         // Step 1: Update Adj-RIB-In (raw routes from peer)
 
         // Process withdrawn routes
         for prefix in update_msg.withdrawn_routes() {
-            println!("RIB: Withdrawing route for prefix {:?} from peer {}", prefix, from);
+            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
             adj_rib_in.remove_route(*prefix);
         }
 
@@ -181,7 +185,7 @@ impl RibManager {
                 local_pref: None,
                 med: None,
             };
-            println!("RIB: Adding route to Adj-RIB-In for prefix {:?} from peer {}", prefix, from);
+            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
             adj_rib_in.add_route(*prefix, path.clone());
         }
 
@@ -194,7 +198,7 @@ impl RibManager {
         // Step 4: Apply export policy and update all Adj-RIB-Out
         self.recompute_adj_rib_out();
 
-        println!("RIB: Total routes in Loc-RIB: {}", self.loc_rib.routes_len());
+        info!("UPDATE processing complete", "loc_rib_routes" => self.loc_rib.routes_len());
     }
 
     fn update_loc_rib_from_peer(&mut self, peer_addr: SocketAddr) {
@@ -211,10 +215,10 @@ impl RibManager {
             for mut path in route.paths {
                 // Apply import policy
                 if self.apply_import_policy(&mut path) {
-                    println!("RIB: Adding route to Loc-RIB for prefix {:?} from peer {}", route.prefix, peer_addr);
+                    info!("adding route to Loc-RIB", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
                     self.loc_rib.add_route(route.prefix, path);
                 } else {
-                    println!("RIB: Route for prefix {:?} from peer {} rejected by import policy", route.prefix, peer_addr);
+                    debug!("route rejected by import policy", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
                 }
             }
         }
@@ -229,7 +233,7 @@ impl RibManager {
 
         // Reject routes with our own ASN (loop prevention)
         if path.as_path.contains(&self.local_asn) {
-            println!("RIB: Rejecting route due to AS loop (contains AS {})", self.local_asn);
+            debug!("rejecting route due to AS loop", "local_asn" => self.local_asn);
             return false;
         }
 
@@ -244,7 +248,7 @@ impl RibManager {
         // 3. Keep only the best path
 
         // For now, we keep all paths (simple implementation)
-        println!("RIB: Best path selection (keeping all paths for now)");
+        debug!("best path selection (keeping all paths for now)");
     }
 
     fn recompute_adj_rib_out(&mut self) {
@@ -274,7 +278,7 @@ impl RibManager {
                 for (prefix, path) in routes_to_add {
                     adj_rib_out.add_route(prefix, path);
                 }
-                println!("RIB: Updated Adj-RIB-Out for peer {} with {} routes", peer_addr, adj_rib_out.routes_len());
+                info!("updated Adj-RIB-Out for peer", "peer_addr" => peer_addr.to_string(), "routes_count" => adj_rib_out.routes_len());
             }
         }
     }

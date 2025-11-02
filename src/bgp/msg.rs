@@ -116,9 +116,12 @@ impl BgpMessage {
     }
 }
 
-pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(mut stream: R) -> Result<BgpMessage, ParserError> {
+pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
+    mut stream: R,
+) -> Result<BgpMessage, ParserError> {
     let mut header_buffer = [0u8; BGP_HEADER_SIZE_BYTES];
-    stream.read_exact(&mut header_buffer)
+    stream
+        .read_exact(&mut header_buffer)
         .await
         .map_err(|err| ParserError::IoError(err.to_string()))?;
 
@@ -127,16 +130,18 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(mut stream: R) -> Result<
 
     // Validate message length
     if message_length < BGP_HEADER_SIZE_BYTES as u16 {
-        return Err(ParserError::InvalidLength(
-            format!("Message length {} is less than header size {}", message_length, BGP_HEADER_SIZE_BYTES)
-        ));
+        return Err(ParserError::InvalidLength(format!(
+            "Message length {} is less than header size {}",
+            message_length, BGP_HEADER_SIZE_BYTES
+        )));
     }
 
     let body_length = message_length - BGP_HEADER_SIZE_BYTES as u16;
     let mut message_buffer = vec![0u8; body_length.into()];
 
     if body_length > 0 {
-        stream.read_exact(&mut message_buffer)
+        stream
+            .read_exact(&mut message_buffer)
             .await
             .map_err(|err| ParserError::IoError(err.to_string()))?;
     }

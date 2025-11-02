@@ -320,12 +320,10 @@ fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             }
             path_bytes
         }
-        PathAttrValue::NextHop(next_hop) => {
-            match next_hop {
-                NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
-                NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
-            }
-        }
+        PathAttrValue::NextHop(next_hop) => match next_hop {
+            NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
+            NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
+        },
         PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
         PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),
         PathAttrValue::AtomicAggregate => vec![],
@@ -996,11 +994,22 @@ mod tests {
     );
 
     const INPUT_BODY: &[u8] = &[
-        0x00, 0x0c, // Withdrawn routes length (12 bytes)
-        0x18, 0x0a, 0x0b, 0x0c, // Withdrawn route #1: /24 prefix
-        0x18, 0x0a, 0x0b, 0x0d, // Withdrawn route #2: /24 prefix
-        0x18, 0x0a, 0x0b, 0x0e, // Withdrawn route #3: /24 prefix
-        0x00, 0x14, // Total path attribute length
+        0x00,
+        0x0c, // Withdrawn routes length (12 bytes)
+        0x18,
+        0x0a,
+        0x0b,
+        0x0c, // Withdrawn route #1: /24 prefix
+        0x18,
+        0x0a,
+        0x0b,
+        0x0d, // Withdrawn route #2: /24 prefix
+        0x18,
+        0x0a,
+        0x0b,
+        0x0e, // Withdrawn route #3: /24 prefix
+        0x00,
+        0x14,                     // Total path attribute length
         PathAttrFlag::TRANSITIVE, // Attribute flags
         AttrType::Origin as u8,   // Attribute type
         0x01,                     // Attribute length
@@ -1013,7 +1022,7 @@ mod tests {
         0x00,
         0x10, // ASN: 16
         0x01,
-        0x12, // ASN: 274
+        0x12,                     // ASN: 274
         PathAttrFlag::TRANSITIVE, // Attribute flags
         AttrType::NextHop as u8,  // Attribute type
         0x04,                     // Attribute length
@@ -1021,8 +1030,14 @@ mod tests {
         0xc9,
         0xca,
         0xcb,
-        0x18, 0x0a, 0x0b, 0x0f, // NLRI #1: /24 prefix
-        0x18, 0x0a, 0x0b, 0x10, // NLRI #2: /24 prefix
+        0x18,
+        0x0a,
+        0x0b,
+        0x0f, // NLRI #1: /24 prefix
+        0x18,
+        0x0a,
+        0x0b,
+        0x10, // NLRI #2: /24 prefix
     ];
 
     #[test]

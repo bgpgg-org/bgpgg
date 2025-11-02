@@ -22,10 +22,10 @@
 //! The RIB manager coordinates these tables and handles BGP message processing,
 //! policy application, and best path selection.
 
-mod rib_in;
-mod rib_out;
-mod rib_loc;
 mod manager;
+mod rib_in;
+mod rib_loc;
+mod rib_out;
 mod types;
 
 // Re-exports
@@ -53,10 +53,21 @@ use tokio::sync::mpsc;
 pub enum RibMessage {
     PeerConnected(SocketAddr),
     PeerDisconnected(SocketAddr),
-    BgpMessage { from: SocketAddr, message: BgpMessage },
-    QueryLocRib { response_tx: tokio::sync::oneshot::Sender<Vec<Route>> },
-    QueryAdjRibIn { peer: SocketAddr, response_tx: tokio::sync::oneshot::Sender<Vec<Route>> },
-    QueryAdjRibOut { peer: SocketAddr, response_tx: tokio::sync::oneshot::Sender<Vec<Route>> },
+    BgpMessage {
+        from: SocketAddr,
+        message: BgpMessage,
+    },
+    QueryLocRib {
+        response_tx: tokio::sync::oneshot::Sender<Vec<Route>>,
+    },
+    QueryAdjRibIn {
+        peer: SocketAddr,
+        response_tx: tokio::sync::oneshot::Sender<Vec<Route>>,
+    },
+    QueryAdjRibOut {
+        peer: SocketAddr,
+        response_tx: tokio::sync::oneshot::Sender<Vec<Route>>,
+    },
 }
 
 /// Handle for interacting with the RIB manager
@@ -82,24 +93,35 @@ impl RibHandle {
     }
 
     /// Notify RIB that a peer has connected
-    pub async fn peer_connected(&self, addr: SocketAddr) -> Result<(), mpsc::error::SendError<RibMessage>> {
+    pub async fn peer_connected(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(), mpsc::error::SendError<RibMessage>> {
         self.tx.send(RibMessage::PeerConnected(addr)).await
     }
 
     /// Notify RIB that a peer has disconnected
-    pub async fn peer_disconnected(&self, addr: SocketAddr) -> Result<(), mpsc::error::SendError<RibMessage>> {
+    pub async fn peer_disconnected(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(), mpsc::error::SendError<RibMessage>> {
         self.tx.send(RibMessage::PeerDisconnected(addr)).await
     }
 
     /// Send a BGP message to the RIB for processing
-    pub async fn process_bgp_message(&self, from: SocketAddr, message: BgpMessage) -> Result<(), mpsc::error::SendError<RibMessage>> {
+    pub async fn process_bgp_message(
+        &self,
+        from: SocketAddr,
+        message: BgpMessage,
+    ) -> Result<(), mpsc::error::SendError<RibMessage>> {
         self.tx.send(RibMessage::BgpMessage { from, message }).await
     }
 
     /// Query the Loc-RIB (best routes)
     pub async fn query_loc_rib(&self) -> Result<Vec<Route>, QueryError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(RibMessage::QueryLocRib { response_tx })
+        self.tx
+            .send(RibMessage::QueryLocRib { response_tx })
             .await
             .map_err(|_| QueryError::RibUnavailable)?;
         response_rx.await.map_err(|_| QueryError::RibUnavailable)
@@ -108,7 +130,8 @@ impl RibHandle {
     /// Query Adj-RIB-In for a specific peer (routes received from peer)
     pub async fn query_adj_rib_in(&self, peer: SocketAddr) -> Result<Vec<Route>, QueryError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(RibMessage::QueryAdjRibIn { peer, response_tx })
+        self.tx
+            .send(RibMessage::QueryAdjRibIn { peer, response_tx })
             .await
             .map_err(|_| QueryError::RibUnavailable)?;
         response_rx.await.map_err(|_| QueryError::RibUnavailable)
@@ -117,7 +140,8 @@ impl RibHandle {
     /// Query Adj-RIB-Out for a specific peer (routes to advertise to peer)
     pub async fn query_adj_rib_out(&self, peer: SocketAddr) -> Result<Vec<Route>, QueryError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(RibMessage::QueryAdjRibOut { peer, response_tx })
+        self.tx
+            .send(RibMessage::QueryAdjRibOut { peer, response_tx })
             .await
             .map_err(|_| QueryError::RibUnavailable)?;
         response_rx.await.map_err(|_| QueryError::RibUnavailable)
