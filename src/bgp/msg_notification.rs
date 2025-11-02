@@ -1,3 +1,19 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::msg::{Message, MessageType};
+
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
 enum MessageHeaderError {
@@ -91,24 +107,24 @@ enum BgpError {
 
 #[repr(u8)]
 enum ErrorCode {
-    Cease = 0,
     MessageHeaderError = 1,
     OpenMessageError = 2,
     UpdateMessageError = 3,
     HoldTimerExpired = 4,
     FiniteStateMachineError = 5,
+    Cease = 6,
     Unknown(u8),
 }
 
 impl From<u8> for ErrorCode {
     fn from(value: u8) -> Self {
         match value {
-            0 => ErrorCode::Cease,
             1 => ErrorCode::MessageHeaderError,
             2 => ErrorCode::OpenMessageError,
             3 => ErrorCode::UpdateMessageError,
             4 => ErrorCode::HoldTimerExpired,
             5 => ErrorCode::FiniteStateMachineError,
+            6 => ErrorCode::Cease,
             val => ErrorCode::Unknown(val),
         }
     }
@@ -132,6 +148,52 @@ impl BgpError {
             _ => BgpError::Unknown,
         }
     }
+
+    fn error_code(&self) -> u8 {
+        match self {
+            BgpError::MessageHeaderError(_) => 1,
+            BgpError::OpenMessageError(_) => 2,
+            BgpError::UpdateMessageError(_) => 3,
+            BgpError::HoldTimerExpired => 4,
+            BgpError::FiniteStateMachineError => 5,
+            BgpError::Cease => 6,
+            BgpError::Unknown => 0,
+        }
+    }
+
+    fn error_subcode(&self) -> u8 {
+        match self {
+            BgpError::MessageHeaderError(err) => match err {
+                MessageHeaderError::ConnectionNotSynchronized => 1,
+                MessageHeaderError::BadMessageLength => 2,
+                MessageHeaderError::BadMessageType => 3,
+                MessageHeaderError::Unknown(val) => *val,
+            },
+            BgpError::OpenMessageError(err) => match err {
+                OpenMessageError::UnsupportedVersionNumber => 1,
+                OpenMessageError::BadPeerAs => 2,
+                OpenMessageError::BadBgpIdentifier => 3,
+                OpenMessageError::UnsupportedOptionalParameter => 4,
+                OpenMessageError::UnacceptedHoldTime => 6,
+                OpenMessageError::Unknown(val) => *val,
+            },
+            BgpError::UpdateMessageError(err) => match err {
+                UpdateMessageError::MalformedAttributeList => 1,
+                UpdateMessageError::UnrecognizedWellKnownAttribute => 2,
+                UpdateMessageError::MissingWellKnownAttribute => 3,
+                UpdateMessageError::AttributeFlagsError => 4,
+                UpdateMessageError::AttributeLengthError => 5,
+                UpdateMessageError::InvalidOriginAttribute => 6,
+                UpdateMessageError::InvalidNextHopAttribute => 7,
+                UpdateMessageError::OptionalAttributeError => 8,
+                UpdateMessageError::InvalidNetworkField => 9,
+                UpdateMessageError::MalformedASPath => 10,
+                UpdateMessageError::MalformedNextHop => 11,
+                UpdateMessageError::Unknown(val) => *val,
+            },
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -152,6 +214,20 @@ impl NotifcationMessage {
             error: bgp_error,
             data: data.to_vec(),
         }
+    }
+}
+
+impl Message for NotifcationMessage {
+    fn kind(&self) -> MessageType {
+        MessageType::NOTIFICATION
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(self.error.error_code());
+        bytes.push(self.error.error_subcode());
+        bytes.extend_from_slice(&self.data);
+        bytes
     }
 }
 
@@ -190,7 +266,7 @@ mod tests {
         expected BgpError::FiniteStateMachineError
     );
     test_bgp_error_new!(
-        bgp_error_new_cease, 0, 0,
+        bgp_error_new_cease, 6, 0,
         expected BgpError::Cease
     );
     test_bgp_error_new!(

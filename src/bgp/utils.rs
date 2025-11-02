@@ -1,3 +1,17 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -21,22 +35,22 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum IpNetwork {
     V4(Ipv4Net),
     V6(Ipv6Net),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Ipv4Net {
     pub address: Ipv4Addr,
     pub prefix_length: u8,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Ipv6Net {
-    address: Ipv6Addr,
-    prefix_length: u8,
+    pub address: Ipv6Addr,
+    pub prefix_length: u8,
 }
 
 pub fn parse_nlri_list(bytes: &[u8]) -> Vec<IpNetwork> {
@@ -62,7 +76,7 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Vec<IpNetwork> {
 
         nlri_list.push(network);
 
-        cursor = cursor + byte_len + 1;
+        cursor = cursor + byte_len;
     }
 
     return nlri_list;
@@ -83,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_parse_nlri_list_single() {
-        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c, 0x00];
+        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c]; // /24 prefix: 1 byte length + 3 bytes IP
 
         let result = parse_nlri_list(&data);
         let expected = vec![IpNetwork::V4(Ipv4Net {
@@ -95,7 +109,10 @@ mod tests {
 
     #[test]
     fn test_parse_nlri_list_multiple() {
-        let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c, 0x00, 0x15, 0x0a, 0x0b, 0x08, 0x00];
+        let data: Vec<u8> = vec![
+            0x18, 0x0a, 0x0b, 0x0c, // /24 prefix: 1 byte length + 3 bytes IP
+            0x15, 0x0a, 0x0b, 0x08  // /21 prefix: 1 byte length + 3 bytes IP
+        ];
 
         let result = parse_nlri_list(&data);
         let expected = vec![

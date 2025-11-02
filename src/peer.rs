@@ -12,9 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod msg;
-pub mod msg_keepalive;
-pub mod msg_notification;
-pub mod msg_open;
-pub mod msg_update;
-pub mod utils;
+use std::net::SocketAddr;
+use tokio::net::tcp::OwnedWriteHalf;
+
+#[derive(Debug)]
+pub enum PeerState {
+    Idle,
+    Connect,
+    Active,
+    OpenSent,
+    OpenConfirm,
+    Established,
+}
+
+pub struct Peer {
+    pub addr: SocketAddr,
+    pub state: PeerState,
+    pub writer: OwnedWriteHalf,
+    pub asn: u16,
+}
+
+impl Peer {
+    pub fn new(addr: SocketAddr, writer: OwnedWriteHalf, asn: u16) -> Self {
+        Peer {
+            addr,
+            state: PeerState::Connect,
+            writer,
+            asn,
+        }
+    }
+}
