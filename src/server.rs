@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, Mutex};
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
-    rib_tx: mpsc::Sender<RibMessage>,
+    pub rib_tx: mpsc::Sender<RibMessage>,
 }
 
 impl BgpServer {
@@ -40,6 +40,16 @@ impl BgpServer {
             peers: Arc::new(Mutex::new(Vec::new())),
             rib_tx,
         }
+    }
+
+    pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        // Send query message to RIB
+        let _ = self.rib_tx.send(RibMessage::QueryRoutes { response_tx }).await;
+
+        // Wait for response
+        response_rx.await.unwrap_or_else(|_| vec![])
     }
 
     pub async fn run(&self) {

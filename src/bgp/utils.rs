@@ -35,19 +35,19 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum IpNetwork {
     V4(Ipv4Net),
     V6(Ipv6Net),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Ipv4Net {
     pub address: Ipv4Addr,
     pub prefix_length: u8,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Ipv6Net {
     pub address: Ipv6Addr,
     pub prefix_length: u8,

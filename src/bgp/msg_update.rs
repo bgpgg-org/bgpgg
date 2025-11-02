@@ -76,7 +76,7 @@ impl TryFrom<u8> for AttrType {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum Origin {
+pub enum Origin {
     IGP = 0,
     EGP = 1,
     INCOMPLETE = 2,
@@ -96,14 +96,14 @@ impl TryFrom<u8> for Origin {
 }
 
 #[derive(Debug, PartialEq)]
-struct AsPathSegment {
-    segment_type: AsPathSegmentType,
-    segment_len: u8,
-    asn_list: Vec<u16>,
+pub struct AsPathSegment {
+    pub segment_type: AsPathSegmentType,
+    pub segment_len: u8,
+    pub asn_list: Vec<u16>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum AsPathSegmentType {
+pub enum AsPathSegmentType {
     AsSet = 1,
     AsSequence = 2,
 }
@@ -375,6 +375,85 @@ fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
 }
 
 impl UpdateMessage {
+    pub fn new(
+        origin: Origin,
+        as_path_segments: Vec<AsPathSegment>,
+        next_hop: Ipv4Addr,
+        nlri_list: Vec<IpNetwork>,
+    ) -> Self {
+        let path_attributes = vec![
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Origin(origin),
+            },
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AsPath(AsPath {
+                    segments: as_path_segments,
+                }),
+            },
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::NextHop(NextHopAddr::Ipv4(next_hop)),
+            },
+        ];
+
+        let path_attributes_bytes = write_path_attributes(&path_attributes);
+
+        UpdateMessage {
+            withdrawn_routes_len: 0,
+            withdrawn_routes: vec![],
+            total_path_attributes_len: path_attributes_bytes.len() as u16,
+            path_attributes,
+            nlri_list,
+        }
+    }
+
+    pub fn nlri_list(&self) -> &[IpNetwork] {
+        &self.nlri_list
+    }
+
+    pub fn withdrawn_routes(&self) -> &[IpNetwork] {
+        &self.withdrawn_routes
+    }
+
+    pub fn get_origin(&self) -> Option<Origin> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::Origin(origin) = attr.value {
+                Some(origin)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_as_path(&self) -> Option<Vec<u16>> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::AsPath(ref as_path) = attr.value {
+                let mut asns = Vec::new();
+                for segment in &as_path.segments {
+                    asns.extend_from_slice(&segment.asn_list);
+                }
+                Some(asns)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_next_hop(&self) -> Option<Ipv4Addr> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::NextHop(ref next_hop) = attr.value {
+                match next_hop {
+                    NextHopAddr::Ipv4(addr) => Some(*addr),
+                    NextHopAddr::Ipv6(_) => None, // For now, only support IPv4
+                }
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         let mut data = bytes;
 
