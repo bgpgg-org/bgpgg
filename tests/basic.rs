@@ -14,6 +14,7 @@
 
 use bgpgg::bgp::msg_update::Origin;
 use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::fsm::BgpState;
 use bgpgg::rib::{Path, Route};
 use bgpgg::server::BgpServer;
 use std::collections::HashSet;
@@ -62,15 +63,33 @@ async fn setup_two_peered_servers(
 
     // Wait for peering to establish
     for _ in 0..100 {
-        let peers1 = server1.peers.lock().await.len();
-        let peers2 = server2.peers.lock().await.len();
-        if peers1 == 1 && peers2 == 1 {
-            break;
+        let established = {
+            let peers1 = server1.peers.lock().await;
+            let peers2 = server2.peers.lock().await;
+
+            let both_have_peers = peers1.len() == 1 && peers2.len() == 1;
+            let both_established = peers1.first().map(|p| p.state()) == Some(BgpState::Established)
+                && peers2.first().map(|p| p.state()) == Some(BgpState::Established);
+
+            both_have_peers && both_established
+        };
+
+        if established {
+            return (server1, server2);
         }
         sleep(Duration::from_millis(100)).await;
     }
 
-    (server1, server2)
+    // Timeout - collect state for error message
+    let peers1 = server1.peers.lock().await;
+    let peers2 = server2.peers.lock().await;
+    panic!(
+        "Timeout waiting for peers to establish. Server1: {} peers (state: {:?}), Server2: {} peers (state: {:?})",
+        peers1.len(),
+        peers1.first().map(|p| p.state()),
+        peers2.len(),
+        peers2.first().map(|p| p.state())
+    );
 }
 
 #[tokio::test]
@@ -78,8 +97,23 @@ async fn test_two_bgp_servers_peering() {
     let (server1, server2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
 
     // Verify that both servers have peers
-    assert_eq!(server1.peers.lock().await.len(), 1, "Server 1 should have 1 peer");
-    assert_eq!(server2.peers.lock().await.len(), 1, "Server 2 should have 1 peer");
+    let peers1 = server1.peers.lock().await;
+    let peers2 = server2.peers.lock().await;
+
+    assert_eq!(peers1.len(), 1, "Server 1 should have 1 peer");
+    assert_eq!(peers2.len(), 1, "Server 2 should have 1 peer");
+
+    // Verify FSM state is Established
+    assert_eq!(
+        peers1[0].state(),
+        BgpState::Established,
+        "Server 1 peer should be in Established state"
+    );
+    assert_eq!(
+        peers2[0].state(),
+        BgpState::Established,
+        "Server 2 peer should be in Established state"
+    );
 }
 
 #[tokio::test]

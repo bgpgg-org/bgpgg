@@ -17,7 +17,8 @@ use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
-use crate::peer::{Peer, PeerState};
+use crate::fsm::{BgpEvent, BgpState};
+use crate::peer::Peer;
 use crate::rib::RibHandle;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -113,7 +114,7 @@ impl BgpServer {
         println!("Sent KEEPALIVE to {}", addr);
 
         // Handle incoming messages from this peer (will add peer after receiving OPEN)
-        Self::handle_peer(read_half, write_half, addr, peers, rib).await;
+        Self::handle_peer(read_half, write_half, addr, local_asn, local_bgp_id, peers, rib).await;
     }
 
     pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
@@ -140,12 +141,21 @@ impl BgpServer {
         // Send to all established peers
         let mut peers = self.peers.lock().await;
         for peer in peers.iter_mut() {
-            if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
-                eprintln!("Failed to send UPDATE to peer {}: {}", peer.addr, e);
+            // Only send to peers in Established state
+            if peer.state() == BgpState::Established {
+                if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
+                    eprintln!("Failed to send UPDATE to peer {}: {}", peer.addr, e);
+                } else {
+                    println!(
+                        "Announced route {:?} with next hop {} to peer {}",
+                        prefix, next_hop, peer.addr
+                    );
+                }
             } else {
                 println!(
-                    "Announced route {:?} with next hop {} to peer {}",
-                    prefix, next_hop, peer.addr
+                    "Skipping peer {} (state: {:?}), not established",
+                    peer.addr,
+                    peer.state()
                 );
             }
         }
@@ -204,9 +214,11 @@ impl BgpServer {
 
         let peers_arc = Arc::clone(&self.peers);
         let rib = self.rib.clone();
+        let local_asn = self.local_asn;
+        let local_bgp_id = self.local_bgp_id;
 
         tokio::spawn(async move {
-            Self::handle_peer(read_half, write_half, peer_addr, peers_arc, rib).await;
+            Self::handle_peer(read_half, write_half, peer_addr, local_asn, local_bgp_id, peers_arc, rib).await;
         });
     }
 
@@ -214,6 +226,8 @@ impl BgpServer {
         mut read_half: tokio::net::tcp::OwnedReadHalf,
         write_half: tokio::net::tcp::OwnedWriteHalf,
         addr: SocketAddr,
+        local_asn: u16,
+        local_bgp_id: u32,
         peers: Arc<Mutex<Vec<Peer>>>,
         rib: RibHandle,
     ) {
@@ -247,7 +261,21 @@ impl BgpServer {
         };
 
         // Now add the peer with the ASN we received
-        let peer = Peer::new(addr, write_half, peer_asn);
+        let mut peer = Peer::new(addr, write_half, peer_asn, local_asn, local_bgp_id);
+
+        // Process FSM events for connection establishment
+        if let Err(e) = peer
+            .process_events(&[
+                BgpEvent::ManualStart,
+                BgpEvent::TcpConnectionConfirmed,
+                BgpEvent::BgpOpenReceived,
+            ])
+            .await
+        {
+            eprintln!("Failed to process FSM events for {}: {}", addr, e);
+            return;
+        }
+
         {
             let mut peer_list = peers.lock().await;
             peer_list.push(peer);
@@ -257,29 +285,40 @@ impl BgpServer {
         // Notify RIB about new peer
         let _ = rib.peer_connected(addr).await;
 
-        // Update peer state to OpenConfirm
-        Self::update_peer_state(&peers, addr, PeerState::OpenConfirm).await;
-
         // Now continue handling subsequent messages
         loop {
             let result = read_bgp_message(&mut read_half).await;
 
             match result {
                 Ok(message) => {
-                    match &message {
+                    // Process FSM events based on message type
+                    let event = match &message {
                         BgpMessage::Open(_) => {
                             eprintln!("Received duplicate OPEN from {}, ignoring", addr);
+                            None
                         }
                         BgpMessage::Update(_) => {
                             println!("Received UPDATE from {}", addr);
+                            Some(BgpEvent::BgpUpdateReceived)
                         }
                         BgpMessage::KeepAlive(_) => {
                             println!("Received KEEPALIVE from {}", addr);
-                            // Update peer state to Established if not already
-                            Self::update_peer_state(&peers, addr, PeerState::Established).await;
+                            Some(BgpEvent::BgpKeepaliveReceived)
                         }
                         BgpMessage::Notification(notif_msg) => {
                             println!("Received NOTIFICATION from {}: {:?}", addr, notif_msg);
+                            Some(BgpEvent::NotificationReceived)
+                        }
+                    };
+
+                    // Update FSM state
+                    if let Some(event) = event {
+                        if let Err(e) = Self::process_peer_event(&peers, addr, event).await {
+                            eprintln!("Failed to process FSM event for {}: {}", addr, e);
+                        }
+
+                        // If notification received, break the loop
+                        if event == BgpEvent::NotificationReceived {
                             break;
                         }
                     }
@@ -309,15 +348,15 @@ impl BgpServer {
         let _ = rib.peer_disconnected(addr).await;
     }
 
-    async fn update_peer_state(
+    async fn process_peer_event(
         peers: &Arc<Mutex<Vec<Peer>>>,
         addr: SocketAddr,
-        new_state: PeerState,
-    ) {
+        event: BgpEvent,
+    ) -> Result<(), std::io::Error> {
         let mut peer_list = peers.lock().await;
         if let Some(peer) = peer_list.iter_mut().find(|p| p.addr == addr) {
-            peer.state = new_state;
-            println!("Peer {} state updated to {:?}", addr, peer.state);
+            peer.process_event(event).await?;
         }
+        Ok(())
     }
 }
