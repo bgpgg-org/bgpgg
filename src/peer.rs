@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use tokio::net::tcp::OwnedWriteHalf;
 
 #[derive(Debug)]
 pub enum PeerState {
@@ -27,13 +28,17 @@ pub enum PeerState {
 pub struct Peer {
     pub addr: SocketAddr,
     pub state: PeerState,
+    pub writer: OwnedWriteHalf,
+    pub asn: u16,
 }
 
 impl Peer {
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addr: SocketAddr, writer: OwnedWriteHalf, asn: u16) -> Self {
         Peer {
             addr,
             state: PeerState::Connect,
+            writer,
+            asn,
         }
     }
 }

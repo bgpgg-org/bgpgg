@@ -20,118 +20,39 @@ use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use bgpgg::server::BgpServer;
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream};
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 #[tokio::test]
 async fn test_two_bgp_servers_peering() {
-    // Start two BGP servers on different ports
-    let server1_port = 1790;
-    let server2_port = 1791;
-
-    let server1 = BgpServer::new(65100); // ASN 65100
-    let server2 = BgpServer::new(65200); // ASN 65200
-
-    // Clone peer references before moving servers into tasks
-    let server1_peers = server1.peers.clone();
-    let server2_peers = server2.peers.clone();
-
-    // Start server1 in background
-    tokio::spawn(async move {
-        server1.run_on(&format!("127.0.0.1:{}", server1_port)).await;
+    // Start two BGP servers
+    let server1 = Arc::new(BgpServer::new(65100));
+    let server2 = Arc::new(BgpServer::new(65200));
+    tokio::spawn({
+        let server = Arc::clone(&server1);
+        async move { server.run_on("127.0.0.1:1790").await }
+    });
+    tokio::spawn({
+        let server = Arc::clone(&server2);
+        async move { server.run_on("127.0.0.1:1791").await }
     });
 
-    // Start server2 in background
-    tokio::spawn(async move {
-        server2.run_on(&format!("127.0.0.1:{}", server2_port)).await;
-    });
+    // Server1 connects to Server2
+    server1.add_peer("127.0.0.1:1791").await;
 
-    // Give servers time to start
-    sleep(Duration::from_millis(100)).await;
-
-    // Connect from a test client to server1 and send OPEN + KEEPALIVE
-    let client1_handle = tokio::spawn(async move {
-        sleep(Duration::from_millis(200)).await;
-
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", server1_port))
-            .expect("Failed to connect to server1");
-        println!("Client 1 connected to server 1");
-
-        // Send OPEN message
-        let open_msg = OpenMessage::new(65001, 180, 0x01010101);
-        stream
-            .write_all(&open_msg.serialize())
-            .expect("Failed to send OPEN to server1");
-        println!("Client 1 sent OPEN to server 1");
-
-        // Send KEEPALIVE message
-        sleep(Duration::from_millis(100)).await;
-        let keepalive_msg = KeepAliveMessage {};
-        stream
-            .write_all(&keepalive_msg.serialize())
-            .expect("Failed to send KEEPALIVE to server1");
-        println!("Client 1 sent KEEPALIVE to server 1");
-
-        // Keep connection alive while we check peer counts
-        sleep(Duration::from_millis(500)).await;
-        stream
-    });
-
-    // Connect from another test client to server2 and send OPEN + KEEPALIVE
-    let client2_handle = tokio::spawn(async move {
-        sleep(Duration::from_millis(200)).await;
-
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", server2_port))
-            .expect("Failed to connect to server2");
-        println!("Client 2 connected to server 2");
-
-        // Send OPEN message
-        let open_msg = OpenMessage::new(65002, 180, 0x02020202);
-        stream
-            .write_all(&open_msg.serialize())
-            .expect("Failed to send OPEN to server2");
-        println!("Client 2 sent OPEN to server 2");
-
-        // Send KEEPALIVE message
-        sleep(Duration::from_millis(100)).await;
-        let keepalive_msg = KeepAliveMessage {};
-        stream
-            .write_all(&keepalive_msg.serialize())
-            .expect("Failed to send KEEPALIVE to server2");
-        println!("Client 2 sent KEEPALIVE to server 2");
-
-        // Keep connection alive while we check peer counts
-        sleep(Duration::from_millis(500)).await;
-        stream
-    });
-
-    // Give servers time to process messages and establish peering
-    sleep(Duration::from_millis(500)).await;
-
-    // Verify that both servers have peers WHILE connections are still open
-    {
-        let peers1 = server1_peers.lock().await;
-        assert_eq!(
-            peers1.len(),
-            1,
-            "Server 1 should have 1 peer after peering"
-        );
-        println!("Server 1 has {} peer(s)", peers1.len());
+    // Wait for peering to establish by polling peer counts
+    for _ in 0..100 {
+        let peers1 = server1.peers.lock().await.len();
+        let peers2 = server2.peers.lock().await.len();
+        if peers1 == 1 && peers2 == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
     }
 
-    {
-        let peers2 = server2_peers.lock().await;
-        assert_eq!(
-            peers2.len(),
-            1,
-            "Server 2 should have 1 peer after peering"
-        );
-        println!("Server 2 has {} peer(s)", peers2.len());
-    }
-
-    println!("E2E peering test completed successfully!");
-
-    // Now let the connections close
-    let _ = tokio::join!(client1_handle, client2_handle);
+    // Verify that both servers have peers
+    assert_eq!(server1.peers.lock().await.len(), 1, "Server 1 should have 1 peer");
+    assert_eq!(server2.peers.lock().await.len(), 1, "Server 2 should have 1 peer");
 }
 
 #[tokio::test]

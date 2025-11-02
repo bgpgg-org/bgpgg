@@ -12,25 +12,106 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{read_bgp_message, BgpMessage};
+use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
+use crate::bgp::msg_keepalive::KeepAliveMessage;
+use crate::bgp::msg_open::OpenMessage;
 use crate::peer::{Peer, PeerState};
 use crate::rib::RibHandle;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub rib: RibHandle,
+    local_asn: u16,
+    local_bgp_id: u32,
 }
 
 impl BgpServer {
     pub fn new(local_asn: u16) -> Self {
+        // Generate a BGP ID from the local ASN (simple approach for testing)
+        // In production, this would typically be derived from a router ID
+        let local_bgp_id = ((local_asn as u32) << 16) | (local_asn as u32);
+
         BgpServer {
             peers: Arc::new(Mutex::new(Vec::new())),
             rib: RibHandle::spawn(local_asn),
+            local_asn,
+            local_bgp_id,
         }
+    }
+
+    /// Add a peer and initiate BGP session
+    pub async fn add_peer(&self, peer_addr: &str) {
+        let peers_arc = Arc::clone(&self.peers);
+        let rib = self.rib.clone();
+        let local_asn = self.local_asn;
+        let local_bgp_id = self.local_bgp_id;
+        let peer_addr_string = peer_addr.to_string();
+
+        tokio::spawn(async move {
+            Self::initiate_peer_connection(
+                &peer_addr_string,
+                local_asn,
+                local_bgp_id,
+                peers_arc,
+                rib,
+            )
+            .await;
+        });
+    }
+
+    async fn initiate_peer_connection(
+        peer_addr: &str,
+        local_asn: u16,
+        local_bgp_id: u32,
+        peers: Arc<Mutex<Vec<Peer>>>,
+        rib: RibHandle,
+    ) {
+        println!("Attempting to connect to peer at {}", peer_addr);
+
+        // Connect to the peer
+        let stream = match TcpStream::connect(peer_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to connect to peer {}: {}", peer_addr, e);
+                return;
+            }
+        };
+
+        let addr = match stream.peer_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Failed to get peer address: {}", e);
+                return;
+            }
+        };
+
+        println!("Connected to peer at {}", addr);
+
+        let (read_half, mut write_half) = stream.into_split();
+
+        // Send OPEN message
+        let open_msg = OpenMessage::new(local_asn, 180, local_bgp_id);
+        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
+            eprintln!("Failed to send OPEN to {}: {}", addr, e);
+            return;
+        }
+        println!("Sent OPEN to {}", addr);
+
+        // Send KEEPALIVE message
+        let keepalive_msg = KeepAliveMessage {};
+        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
+            eprintln!("Failed to send KEEPALIVE to {}: {}", addr, e);
+            return;
+        }
+        println!("Sent KEEPALIVE to {}", addr);
+
+        // Handle incoming messages from this peer (will add peer after receiving OPEN)
+        Self::handle_peer(read_half, write_half, addr, peers, rib).await;
     }
 
     pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
@@ -48,7 +129,7 @@ impl BgpServer {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    self.add_peer(stream).await;
+                    self.accept_peer(stream).await;
                 }
                 Err(e) => {
                     eprintln!("Error accepting connection: {}", e);
@@ -57,7 +138,7 @@ impl BgpServer {
         }
     }
 
-    async fn add_peer(&self, stream: TcpStream) {
+    async fn accept_peer(&self, stream: TcpStream) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -68,60 +149,91 @@ impl BgpServer {
 
         println!("New peer connection from: {}", peer_addr);
 
-        let peer = Peer::new(peer_addr);
+        let (read_half, mut write_half) = stream.into_split();
 
-        // Add peer to the shared list
-        {
-            let mut peers = self.peers.lock().await;
-            peers.push(peer);
-            println!("Peer {} added. Total peers: {}", peer_addr, peers.len());
+        // Send OPEN message
+        let open_msg = OpenMessage::new(self.local_asn, 180, self.local_bgp_id);
+        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
+            eprintln!("Failed to send OPEN to {}: {}", peer_addr, e);
+            return;
         }
+        println!("Sent OPEN to {}", peer_addr);
 
-        // Notify RIB about new peer
-        let _ = self.rib.peer_connected(peer_addr).await;
+        // Send KEEPALIVE message
+        let keepalive_msg = KeepAliveMessage {};
+        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
+            eprintln!("Failed to send KEEPALIVE to {}: {}", peer_addr, e);
+            return;
+        }
+        println!("Sent KEEPALIVE to {}", peer_addr);
 
         let peers_arc = Arc::clone(&self.peers);
         let rib = self.rib.clone();
 
         tokio::spawn(async move {
-            Self::handle_peer(stream, peer_addr, peers_arc, rib).await;
+            Self::handle_peer(read_half, write_half, peer_addr, peers_arc, rib).await;
         });
     }
 
     async fn handle_peer(
-        stream: TcpStream,
+        mut read_half: tokio::net::tcp::OwnedReadHalf,
+        write_half: tokio::net::tcp::OwnedWriteHalf,
         addr: SocketAddr,
         peers: Arc<Mutex<Vec<Peer>>>,
         rib: RibHandle,
     ) {
         println!("Handling peer: {}", addr);
 
-        // Convert to std::net::TcpStream for read_bgp_message
-        // (since read_bgp_message uses std::io::Read trait)
-        let std_stream = stream.into_std().unwrap();
-
-        // Set to blocking mode (into_std() creates a non-blocking stream)
-        std_stream.set_nonblocking(false).unwrap();
-
-        loop {
-            // Use spawn_blocking to avoid blocking the async runtime
-            let result = tokio::task::spawn_blocking({
-                let stream_clone = std_stream.try_clone().expect("Failed to clone stream");
-                move || read_bgp_message(&stream_clone)
-            })
-            .await
-            .expect("Task panicked");
+        // First, wait for OPEN message
+        let peer_asn = loop {
+            let result = read_bgp_message(&mut read_half).await;
 
             match result {
                 Ok(message) => {
-                    match &message {
+                    match message {
                         BgpMessage::Open(open_msg) => {
                             println!(
                                 "Received OPEN from {}: ASN={}, Hold Time={}, BGP ID={}",
                                 addr, open_msg.asn, open_msg.hold_time, open_msg.bgp_identifier
                             );
-                            // Update peer state to OpenConfirm
-                            Self::update_peer_state(&peers, addr, PeerState::OpenConfirm).await;
+                            break open_msg.asn;
+                        }
+                        _ => {
+                            eprintln!("Expected OPEN as first message from {}, got something else", addr);
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading first message from {}: {:?}", addr, e);
+                    return;
+                }
+            }
+        };
+
+        // Now add the peer with the ASN we received
+        let peer = Peer::new(addr, write_half, peer_asn);
+        {
+            let mut peer_list = peers.lock().await;
+            peer_list.push(peer);
+            println!("Peer {} added with ASN {}. Total peers: {}", addr, peer_asn, peer_list.len());
+        }
+
+        // Notify RIB about new peer
+        let _ = rib.peer_connected(addr).await;
+
+        // Update peer state to OpenConfirm
+        Self::update_peer_state(&peers, addr, PeerState::OpenConfirm).await;
+
+        // Now continue handling subsequent messages
+        loop {
+            let result = read_bgp_message(&mut read_half).await;
+
+            match result {
+                Ok(message) => {
+                    match &message {
+                        BgpMessage::Open(_) => {
+                            eprintln!("Received duplicate OPEN from {}, ignoring", addr);
                         }
                         BgpMessage::Update(_) => {
                             println!("Received UPDATE from {}", addr);

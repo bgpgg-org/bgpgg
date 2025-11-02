@@ -17,7 +17,7 @@ use super::msg_notification::NotifcationMessage;
 use super::msg_open::OpenMessage;
 use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
-use std::io::Read;
+use tokio::io::AsyncReadExt;
 
 // maximum message size is 4096 octets.
 const BGP_HEADER_SIZE_BYTES: usize = 19;
@@ -116,9 +116,10 @@ impl BgpMessage {
     }
 }
 
-pub fn read_bgp_message<R: Read>(mut stream: R) -> Result<BgpMessage, ParserError> {
+pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(mut stream: R) -> Result<BgpMessage, ParserError> {
     let mut header_buffer = [0u8; BGP_HEADER_SIZE_BYTES];
     stream.read_exact(&mut header_buffer)
+        .await
         .map_err(|err| ParserError::IoError(err.to_string()))?;
 
     let message_length = u16::from_be_bytes([header_buffer[16], header_buffer[17]]);
@@ -136,6 +137,7 @@ pub fn read_bgp_message<R: Read>(mut stream: R) -> Result<BgpMessage, ParserErro
 
     if body_length > 0 {
         stream.read_exact(&mut message_buffer)
+            .await
             .map_err(|err| ParserError::IoError(err.to_string()))?;
     }
 
@@ -158,11 +160,11 @@ mod tests {
         0x00, // Optional parameters length
     ];
 
-    #[test]
-    fn test_read_open_message() {
+    #[tokio::test]
+    async fn test_read_open_message() {
         let stream = Cursor::new(MOCK_OPEN_MESSAGE);
 
-        match read_bgp_message(stream).unwrap() {
+        match read_bgp_message(stream).await.unwrap() {
             BgpMessage::Open(open_message) => {
                 assert_eq!(open_message.version, 4);
                 assert_eq!(open_message.asn, 1234);

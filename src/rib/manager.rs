@@ -87,10 +87,6 @@ impl RibManager {
         println!("RIB manager stopped");
     }
 
-    // ========================================================================
-    // Peer Lifecycle
-    // ========================================================================
-
     fn handle_peer_connected(&mut self, addr: SocketAddr) {
         println!("RIB: Peer {} connected - creating Adj-RIB-In and Adj-RIB-Out", addr);
 
@@ -115,10 +111,6 @@ impl RibManager {
 
         println!("RIB: Cleanup complete. Total routes in Loc-RIB: {}", self.loc_rib.routes_len());
     }
-
-    // ========================================================================
-    // BGP Message Processing
-    // ========================================================================
 
     fn process_bgp_message(&mut self, from: SocketAddr, message: BgpMessage) {
         match message {
@@ -204,10 +196,6 @@ impl RibManager {
 
         println!("RIB: Total routes in Loc-RIB: {}", self.loc_rib.routes_len());
     }
-
-    // ========================================================================
-    // Policy and Best Path Selection
-    // ========================================================================
 
     fn update_loc_rib_from_peer(&mut self, peer_addr: SocketAddr) {
         // Get routes from Adj-RIB-In
