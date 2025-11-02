@@ -222,6 +222,7 @@ impl RibManager {
 
     fn apply_import_policy(&self, path: &mut Path) -> bool {
         // Set default local preference if not set
+        // TODO: only do this for iBGP
         if path.local_pref.is_none() {
             path.local_pref = Some(100);
         }

@@ -75,7 +75,7 @@ impl TryFrom<u8> for AttrType {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Origin {
     IGP = 0,
     EGP = 1,

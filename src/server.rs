@@ -15,9 +15,11 @@
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+use crate::bgp::utils::IpNetwork;
 use crate::peer::{Peer, PeerState};
 use crate::rib::RibHandle;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -116,6 +118,39 @@ impl BgpServer {
 
     pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
         self.rib.query_loc_rib().await.unwrap_or_else(|_| vec![])
+    }
+
+    /// Announce a route to all established peers
+    pub async fn announce_route(
+        &self,
+        prefix: IpNetwork,
+        next_hop: Ipv4Addr,
+        origin: Origin,
+    ) -> Result<(), std::io::Error> {
+        // Build AS path with local ASN
+        let as_path_segments = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![self.local_asn],
+        }];
+
+        // Create UPDATE message
+        let update_msg = UpdateMessage::new(origin, as_path_segments, next_hop, vec![prefix]);
+
+        // Send to all established peers
+        let mut peers = self.peers.lock().await;
+        for peer in peers.iter_mut() {
+            if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
+                eprintln!("Failed to send UPDATE to peer {}: {}", peer.addr, e);
+            } else {
+                println!(
+                    "Announced route {:?} with next hop {} to peer {}",
+                    prefix, next_hop, peer.addr
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn run(&self) {

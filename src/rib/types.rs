@@ -17,7 +17,7 @@ use crate::bgp::utils::IpNetwork;
 use std::net::{Ipv4Addr, SocketAddr};
 
 /// Represents a BGP path with all its attributes
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub origin: Origin,
     pub as_path: Vec<u16>,
@@ -28,7 +28,7 @@ pub struct Path {
 }
 
 /// Represents a route with one or more paths to a prefix
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Path>,
