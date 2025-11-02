@@ -26,13 +26,72 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+// Commands that can be sent to the BGP server
+pub enum BgpCommand {
+    AddPeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemovePeer {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    AnnounceRoute {
+        prefix: IpNetwork,
+        next_hop: Ipv4Addr,
+        origin: Origin,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+// Handle for interacting with the BGP server from gRPC
+#[derive(Clone)]
+pub struct BgpServerHandle {
+    pub peers: Arc<Mutex<Vec<Peer>>>,
+    pub rib: RibHandle,
+    command_tx: mpsc::Sender<BgpCommand>,
+}
+
+impl BgpServerHandle {
+    pub async fn send_command(
+        &self,
+        cmd: BgpCommand,
+    ) -> Result<(), mpsc::error::SendError<BgpCommand>> {
+        self.command_tx.send(cmd).await
+    }
+
+    pub async fn announce_route(
+        &self,
+        prefix: IpNetwork,
+        next_hop: Ipv4Addr,
+        origin: Origin,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = BgpCommand::AnnounceRoute {
+            prefix,
+            next_hop,
+            origin,
+            response: tx,
+        };
+
+        self.send_command(cmd)
+            .await
+            .map_err(|_| "failed to send command".to_string())?;
+
+        rx.await
+            .map_err(|_| "command processing failed".to_string())?
+    }
+}
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub rib: RibHandle,
+    pub handle: BgpServerHandle,
     config: Config,
     local_bgp_id: u32,
+    command_rx: Option<mpsc::Receiver<BgpCommand>>,
 }
 
 impl BgpServer {
@@ -40,11 +99,23 @@ impl BgpServer {
         // Convert the configured router_id (Ipv4Addr) to u32 for BGP identifier
         let local_bgp_id = u32::from(config.router_id);
 
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let rib = RibHandle::spawn(config.asn);
+
+        let handle = BgpServerHandle {
+            peers: peers.clone(),
+            rib: rib.clone(),
+            command_tx: cmd_tx,
+        };
+
         BgpServer {
-            peers: Arc::new(Mutex::new(Vec::new())),
-            rib: RibHandle::spawn(config.asn),
+            peers,
+            rib,
+            handle,
             config,
             local_bgp_id,
+            command_rx: Some(cmd_rx),
         }
     }
 
@@ -166,22 +237,69 @@ impl BgpServer {
         Ok(())
     }
 
-    pub async fn run(&self) {
+    pub async fn run(&mut self) {
         let addr = self.config.listen_addr.clone();
-        self.run_on(&addr).await;
-    }
+        info!("BGP server starting", "listen_addr" => addr);
 
-    pub async fn run_on(&self, addr: &str) {
-        info!("BGP server is running", "listen_addr" => addr);
-        let listener = TcpListener::bind(addr).await.unwrap();
+        let listener = TcpListener::bind(&addr).await.unwrap();
+        let mut cmd_rx = self.command_rx.take().expect("event loop already running");
 
+        // Unified event loop: handle both BGP connections and gRPC commands
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
+            tokio::select! {
+                // Handle incoming BGP connections
+                Ok((stream, _)) = listener.accept() => {
                     self.accept_peer(stream).await;
                 }
-                Err(e) => {
-                    error!("error accepting connection", "error" => e.to_string());
+
+                // Handle gRPC commands
+                Some(cmd) = cmd_rx.recv() => {
+                    self.handle_command(cmd).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&self, cmd: BgpCommand) {
+        match cmd {
+            BgpCommand::AddPeer { addr, response } => {
+                info!("adding peer via command", "peer_addr" => &addr);
+                self.add_peer(&addr).await;
+                let _ = response.send(Ok(()));
+            }
+            BgpCommand::RemovePeer { addr, response } => {
+                info!("removing peer via command", "peer_addr" => addr.to_string());
+
+                // Remove peer from list
+                let mut peers = self.peers.lock().await;
+                let initial_len = peers.len();
+                peers.retain(|p| p.addr != addr);
+                let removed = initial_len > peers.len();
+                drop(peers);
+
+                // Notify RIB
+                let _ = self.rib.peer_disconnected(addr).await;
+
+                if removed {
+                    let _ = response.send(Ok(()));
+                } else {
+                    let _ = response.send(Err(format!("peer {} not found", addr)));
+                }
+            }
+            BgpCommand::AnnounceRoute {
+                prefix,
+                next_hop,
+                origin,
+                response,
+            } => {
+                info!("announcing route via command", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+                match self.announce_route(prefix, next_hop, origin).await {
+                    Ok(_) => {
+                        let _ = response.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = response.send(Err(e.to_string()));
+                    }
                 }
             }
         }

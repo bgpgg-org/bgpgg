@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package bgp;
+
+// ============================================================================
+// Peer Management Service
+// ============================================================================
+service PeerService {
+    rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
+    rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
+    rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+}
+
+// Add peer request/response
+message AddPeerRequest {
+    string address = 1;  // IP:PORT format (e.g., "192.168.1.1:179")
+}
+
+message AddPeerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Remove peer request/response
+message RemovePeerRequest {
+    string address = 1;
+}
+
+message RemovePeerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Get peers request/response
+message GetPeersRequest {}
+
+message GetPeersResponse {
+    repeated Peer peers = 1;
+}
+
+// Peer information
+message Peer {
+    string address = 1;
+    uint32 asn = 2;
+    string state = 3;
+}

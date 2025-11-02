@@ -21,6 +21,12 @@ pub struct Config {
     pub asn: u16,
     pub listen_addr: String,
     pub router_id: Ipv4Addr,
+    #[serde(default = "default_grpc_listen_addr")]
+    pub grpc_listen_addr: String,
+}
+
+fn default_grpc_listen_addr() -> String {
+    "[::1]:50051".to_string()
 }
 
 impl Config {
@@ -30,6 +36,7 @@ impl Config {
             asn,
             listen_addr: listen_addr.to_string(),
             router_id,
+            grpc_listen_addr: "[::1]:50051".to_string(),
         }
     }
 
@@ -46,6 +53,7 @@ impl Default for Config {
             asn: 65000,
             listen_addr: "127.0.0.1:179".to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
+            grpc_listen_addr: "[::1]:50051".to_string(),
         }
     }
 }

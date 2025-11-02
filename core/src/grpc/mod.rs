@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bgp;
-pub mod config;
-pub mod fsm;
-pub mod log;
-pub mod peer;
-pub mod rib;
-pub mod server;
+pub mod service;
+
+// Include generated protobuf code
+pub mod proto {
+    tonic::include_proto!("bgp");
+}
+
+pub use service::BgpGrpcService;
