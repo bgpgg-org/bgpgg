@@ -1,0 +1,15 @@
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bgpggd"
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+tokio.workspace = true
+tonic.workspace = true
+clap.workspace = true
+serde_json.workspace = true

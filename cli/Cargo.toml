@@ -1,0 +1,15 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bgpgg"
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+tokio.workspace = true
+tonic.workspace = true
+clap.workspace = true
+prost.workspace = true

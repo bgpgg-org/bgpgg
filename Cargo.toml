@@ -1,12 +1,20 @@
-[package]
-name = "bgpgg"
+[workspace]
+members = [
+    "core",
+    "daemon",
+    "cli",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1.0"

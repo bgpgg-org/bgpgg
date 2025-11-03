@@ -17,16 +17,15 @@ use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use bgpgg::config::Config;
 use bgpgg::fsm::BgpState;
 use bgpgg::rib::{Path, Route};
-use bgpgg::server::BgpServer;
+use bgpgg::server::{BgpCommand, BgpServer, BgpServerHandle};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 /// Poll until routes match expected set (ignoring order)
-async fn poll_for_routes(server: &BgpServer, expected: &HashSet<Route>) {
+async fn poll_for_routes(handle: &BgpServerHandle, expected: &HashSet<Route>) {
     for _ in 0..100 {
-        let routes = server.rib.query_loc_rib().await.unwrap();
+        let routes = handle.rib.query_loc_rib().await.unwrap();
         let actual: HashSet<Route> = routes.into_iter().collect();
         if actual == *expected {
             return;
@@ -34,7 +33,7 @@ async fn poll_for_routes(server: &BgpServer, expected: &HashSet<Route>) {
         sleep(Duration::from_millis(100)).await;
     }
 
-    let routes = server.rib.query_loc_rib().await.unwrap();
+    let routes = handle.rib.query_loc_rib().await.unwrap();
     let actual: HashSet<Route> = routes.into_iter().collect();
     panic!(
         "Timeout waiting for routes. Expected: {:?}, Got: {:?}",
@@ -43,41 +42,47 @@ async fn poll_for_routes(server: &BgpServer, expected: &HashSet<Route>) {
 }
 
 /// Utility function to set up two BGP servers with peering established
-/// Returns (server1, server2) where server2 has connected to server1
+/// Returns (handle1, handle2) where server2 has connected to server1
 async fn setup_two_peered_servers(
     asn1: u16,
     asn2: u16,
     port1: u16,
     port2: u16,
-) -> (Arc<BgpServer>, Arc<BgpServer>) {
-    let server1 = Arc::new(BgpServer::new(Config::new(
+) -> (BgpServerHandle, BgpServerHandle) {
+    let mut server1 = BgpServer::new(Config::new(
         asn1,
         &format!("127.0.0.1:{}", port1),
         Ipv4Addr::new(1, 1, 1, 1),
-    )));
-    let server2 = Arc::new(BgpServer::new(Config::new(
+    ));
+    let mut server2 = BgpServer::new(Config::new(
         asn2,
         &format!("127.0.0.1:{}", port2),
         Ipv4Addr::new(2, 2, 2, 2),
-    )));
+    ));
 
-    tokio::spawn({
-        let server = Arc::clone(&server1);
-        async move { server.run_on(&format!("127.0.0.1:{}", port1)).await }
-    });
-    tokio::spawn({
-        let server = Arc::clone(&server2);
-        async move { server.run_on(&format!("127.0.0.1:{}", port2)).await }
-    });
+    // Get handles before moving servers into spawned tasks
+    let handle1 = server1.handle.clone();
+    let handle2 = server2.handle.clone();
+
+    tokio::spawn(async move { server1.run().await });
+    tokio::spawn(async move { server2.run().await });
 
     // Server2 connects to Server1
-    server2.add_peer(&format!("127.0.0.1:{}", port1)).await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle2
+        .send_command(BgpCommand::AddPeer {
+            addr: format!("127.0.0.1:{}", port1),
+            response: tx,
+        })
+        .await
+        .unwrap();
+    rx.await.unwrap().unwrap();
 
     // Wait for peering to establish
     for _ in 0..100 {
         let established = {
-            let peers1 = server1.peers.lock().await;
-            let peers2 = server2.peers.lock().await;
+            let peers1 = handle1.peers.lock().await;
+            let peers2 = handle2.peers.lock().await;
 
             let both_have_peers = peers1.len() == 1 && peers2.len() == 1;
             let both_established = peers1.first().map(|p| p.state()) == Some(BgpState::Established)
@@ -87,14 +92,14 @@ async fn setup_two_peered_servers(
         };
 
         if established {
-            return (server1, server2);
+            return (handle1, handle2);
         }
         sleep(Duration::from_millis(100)).await;
     }
 
     // Timeout - collect state for error message
-    let peers1 = server1.peers.lock().await;
-    let peers2 = server2.peers.lock().await;
+    let peers1 = handle1.peers.lock().await;
+    let peers2 = handle2.peers.lock().await;
     panic!(
         "Timeout waiting for peers to establish. Server1: {} peers (state: {:?}), Server2: {} peers (state: {:?})",
         peers1.len(),
@@ -106,11 +111,11 @@ async fn setup_two_peered_servers(
 
 #[tokio::test]
 async fn test_two_bgp_servers_peering() {
-    let (server1, server2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
+    let (handle1, handle2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
 
     // Verify that both servers have peers
-    let peers1 = server1.peers.lock().await;
-    let peers2 = server2.peers.lock().await;
+    let peers1 = handle1.peers.lock().await;
+    let peers2 = handle2.peers.lock().await;
 
     assert_eq!(peers1.len(), 1, "Server 1 should have 1 peer");
     assert_eq!(peers2.len(), 1, "Server 2 should have 1 peer");
@@ -130,7 +135,7 @@ async fn test_two_bgp_servers_peering() {
 
 #[tokio::test]
 async fn test_announce_one_route() {
-    let (server1, server2) = setup_two_peered_servers(65100, 65001, 1792, 1793).await;
+    let (handle1, handle2) = setup_two_peered_servers(65100, 65001, 1794, 1795).await;
 
     // Server2 announces a route to Server1
     let prefix = IpNetwork::V4(Ipv4Net {
@@ -139,13 +144,13 @@ async fn test_announce_one_route() {
     });
     let next_hop = Ipv4Addr::new(192, 168, 1, 1);
 
-    server2
+    handle2
         .announce_route(prefix, next_hop, Origin::IGP)
         .await
         .expect("Failed to announce route");
 
     // Get the peer address (server2's connection to server1)
-    let peer_addr = server1.peers.lock().await[0].addr;
+    let peer_addr = handle1.peers.lock().await[0].addr;
 
     // Build expected routes set
     let expected: HashSet<Route> = [Route {
@@ -163,5 +168,5 @@ async fn test_announce_one_route() {
     .collect();
 
     // Poll and verify server1 received the route
-    poll_for_routes(&server1, &expected).await;
+    poll_for_routes(&handle1, &expected).await;
 }
