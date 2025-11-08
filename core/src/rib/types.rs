@@ -16,13 +16,22 @@ use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::IpNetwork;
 use std::net::{Ipv4Addr, SocketAddr};
 
+/// Source of a route
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RouteSource {
+    /// Route learned from a BGP peer
+    Peer(SocketAddr),
+    /// Route originated locally by this router
+    Local,
+}
+
 /// Represents a BGP path with all its attributes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub origin: Origin,
     pub as_path: Vec<u16>,
     pub next_hop: Ipv4Addr,
-    pub from_peer: SocketAddr,
+    pub source: RouteSource,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
 }

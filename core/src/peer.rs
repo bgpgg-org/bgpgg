@@ -201,7 +201,7 @@ impl Peer {
                 origin,
                 as_path: as_path.clone(),
                 next_hop,
-                from_peer: self.addr,
+                source: crate::rib::RouteSource::Peer(self.addr),
                 local_pref: None,
                 med: None,
             };

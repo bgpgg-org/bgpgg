@@ -45,6 +45,10 @@ pub enum BgpRequest {
         origin: Origin,
         response: oneshot::Sender<Result<(), String>>,
     },
+    WithdrawRoute {
+        prefix: IpNetwork,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     GetPeers {
         response: oneshot::Sender<Vec<(SocketAddr, u16, BgpState)>>,
     },
@@ -272,6 +276,9 @@ impl BgpServer {
             } => {
                 info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
+                // Add route to Loc-RIB as locally originated
+                loc_rib.lock().await.add_local_route(prefix, next_hop, origin);
+
                 // Build AS path with local ASN
                 let as_path_segments = vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -303,6 +310,47 @@ impl BgpServer {
                     let _ = response.send(Ok(()));
                 } else {
                     let _ = response.send(Err("failed to announce to some peers".to_string()));
+                }
+            }
+            BgpRequest::WithdrawRoute { prefix, response } => {
+                info!("withdrawing route via request", "prefix" => format!("{:?}", prefix));
+
+                // Remove local route from Loc-RIB
+                loc_rib.lock().await.remove_local_route(prefix);
+
+                // Check if prefix still exists in Loc-RIB (i.e., we have a path from a peer)
+                let has_alternate_path = loc_rib.lock().await.has_prefix(&prefix);
+
+                if !has_alternate_path {
+                    // No alternate path, send withdraw to all peers
+                    let update_msg = UpdateMessage::new_withdraw(vec![prefix]);
+
+                    let mut peer_map = peers.lock().await;
+                    let mut success = true;
+                    for peer in peer_map.values_mut() {
+                        if peer.state() == BgpState::Established {
+                            if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
+                                error!("failed to send WITHDRAW to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                                success = false;
+                            } else {
+                                info!("withdrew route from peer", "prefix" => format!("{:?}", prefix), "peer_addr" => peer.addr.to_string());
+                            }
+                        } else {
+                            debug!("skipping peer not in established state", "peer_addr" => peer.addr.to_string(), "state" => format!("{:?}", peer.state()));
+                        }
+                    }
+
+                    if success {
+                        let _ = response.send(Ok(()));
+                    } else {
+                        let _ = response.send(Err("failed to withdraw from some peers".to_string()));
+                    }
+                } else {
+                    // We still have an alternate path from a peer, so we should announce that
+                    // For now, just return success without sending updates
+                    // TODO: Implement proper Adj-RIB-Out computation and send new best path
+                    info!("local route withdrawn but alternate path exists", "prefix" => format!("{:?}", prefix));
+                    let _ = response.send(Ok(()));
                 }
             }
             BgpRequest::GetPeers { response } => {

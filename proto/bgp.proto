@@ -10,6 +10,7 @@ service BgpService {
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
     rpc AnnounceRoute(AnnounceRouteRequest) returns (AnnounceRouteResponse);
+    rpc WithdrawRoute(WithdrawRouteRequest) returns (WithdrawRouteResponse);
     rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
 }
 
@@ -55,6 +56,16 @@ message AnnounceRouteRequest {
 }
 
 message AnnounceRouteResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Withdraw route request/response
+message WithdrawRouteRequest {
+    string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
+}
+
+message WithdrawRouteResponse {
     bool success = 1;
     string message = 2;
 }

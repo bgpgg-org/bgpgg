@@ -24,7 +24,7 @@ pub mod rib_loc;
 mod types;
 
 // Re-exports
-pub use types::{Path, Route};
+pub use types::{Path, Route, RouteSource};
 
 #[cfg(test)]
 mod test_helpers {
@@ -38,7 +38,7 @@ mod test_helpers {
             origin: Origin::IGP,
             as_path: vec![100, 200],
             next_hop: Ipv4Addr::new(192, 0, 2, 1),
-            from_peer: peer_addr,
+            source: RouteSource::Peer(peer_addr),
             local_pref: Some(100),
             med: Some(0),
         }

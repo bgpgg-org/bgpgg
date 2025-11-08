@@ -407,6 +407,18 @@ impl UpdateMessage {
         }
     }
 
+    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>) -> Self {
+        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_routes);
+
+        UpdateMessage {
+            withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
+            withdrawn_routes,
+            total_path_attributes_len: 0,
+            path_attributes: vec![],
+            nlri_list: vec![],
+        }
+    }
+
     pub fn nlri_list(&self) -> &[IpNetwork] {
         &self.nlri_list
     }
@@ -1068,5 +1080,71 @@ mod tests {
 
         // Check body
         assert_eq!(&serialized[19..], INPUT_BODY);
+    }
+
+    #[test]
+    fn test_new_withdraw() {
+        // Create a withdraw message with multiple prefixes
+        let withdrawn_routes = vec![
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            }),
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(192, 168, 1, 0),
+                prefix_length: 24,
+            }),
+        ];
+
+        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone());
+
+        // Verify message structure
+        assert_eq!(message.withdrawn_routes, withdrawn_routes);
+        assert_eq!(message.path_attributes, vec![]);
+        assert_eq!(message.nlri_list, vec![]);
+        assert_eq!(message.total_path_attributes_len, 0);
+
+        // Verify the withdrawn routes length is calculated correctly
+        // 10.0.0.0/24 = 1 byte (prefix length) + 3 bytes (address) = 4 bytes
+        // 192.168.1.0/24 = 1 byte (prefix length) + 3 bytes (address) = 4 bytes
+        // Total = 8 bytes
+        assert_eq!(message.withdrawn_routes_len, 8);
+    }
+
+    #[test]
+    fn test_new_withdraw_serialization() {
+        // Create a withdraw message
+        let withdrawn_routes = vec![IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        })];
+
+        let message = UpdateMessage::new_withdraw(withdrawn_routes);
+
+        // Serialize the message
+        let serialized = message.serialize();
+
+        // Verify BGP header
+        assert_eq!(&serialized[0..16], &[0xff; 16]); // Marker
+        let length = u16::from_be_bytes([serialized[16], serialized[17]]);
+        assert_eq!(serialized[18], 2); // Message type: UPDATE
+
+        // Decode the body
+        let body = &serialized[19..];
+
+        // Withdrawn routes length
+        let withdrawn_len = u16::from_be_bytes([body[0], body[1]]);
+        assert_eq!(withdrawn_len, 4); // 1 byte prefix length + 3 bytes address
+
+        // Withdrawn route data
+        assert_eq!(body[2], 24); // Prefix length
+        assert_eq!(&body[3..6], &[10, 0, 0]); // Address (only significant octets)
+
+        // Total path attributes length
+        let path_attr_len = u16::from_be_bytes([body[6], body[7]]);
+        assert_eq!(path_attr_len, 0);
+
+        // No NLRI
+        assert_eq!(body.len(), 8);
     }
 }
