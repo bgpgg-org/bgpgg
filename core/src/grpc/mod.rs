@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod client;
 pub mod service;
 
 // Include generated protobuf code
@@ -19,4 +20,5 @@ pub mod proto {
     tonic::include_proto!("bgp");
 }
 
+pub use client::BgpClient;
 pub use service::BgpGrpcService;

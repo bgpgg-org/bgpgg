@@ -12,161 +12,169 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::bgp::msg_update::Origin;
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use bgpgg::config::Config;
-use bgpgg::fsm::BgpState;
-use bgpgg::rib::{Path, Route};
-use bgpgg::server::{BgpCommand, BgpServer, BgpServerHandle};
-use std::collections::HashSet;
+use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
+use bgpgg::grpc::{BgpClient, BgpGrpcService};
+use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
-/// Poll until routes match expected set (ignoring order)
-async fn poll_for_routes(handle: &BgpServerHandle, expected: &HashSet<Route>) {
-    for _ in 0..100 {
-        let routes = handle.rib.query_loc_rib().await.unwrap();
-        let actual: HashSet<Route> = routes.into_iter().collect();
-        if actual == *expected {
-            return;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
+/// Test helper: starts BGP server + gRPC server, returns gRPC client
+async fn start_test_server(asn: u16, bgp_port: u16, grpc_port: u16, router_id: Ipv4Addr) -> BgpClient {
+    let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id);
 
-    let routes = handle.rib.query_loc_rib().await.unwrap();
-    let actual: HashSet<Route> = routes.into_iter().collect();
-    panic!(
-        "Timeout waiting for routes. Expected: {:?}, Got: {:?}",
-        expected, actual
+    let mut server = BgpServer::new(config);
+
+    // Create gRPC service
+    let grpc_service = BgpGrpcService::new(
+        server.peers.clone(),
+        server.rib.clone(),
+        server.command_tx.clone(),
     );
+
+    // Spawn both servers
+    tokio::spawn(async move { server.run().await });
+
+    let grpc_addr = format!("[::1]:{}", grpc_port).parse().unwrap();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(BgpServiceServer::new(grpc_service))
+            .serve(grpc_addr)
+            .await
+            .unwrap();
+    });
+
+    // Wait for servers to start
+    sleep(Duration::from_millis(100)).await;
+
+    BgpClient::connect(format!("http://[::1]:{}", grpc_port))
+        .await
+        .unwrap()
 }
 
 /// Utility function to set up two BGP servers with peering established
-/// Returns (handle1, handle2) where server2 has connected to server1
+/// Returns (client1, client2) gRPC clients for each server
 async fn setup_two_peered_servers(
     asn1: u16,
     asn2: u16,
-    port1: u16,
-    port2: u16,
-) -> (BgpServerHandle, BgpServerHandle) {
-    let mut server1 = BgpServer::new(Config::new(
-        asn1,
-        &format!("127.0.0.1:{}", port1),
-        Ipv4Addr::new(1, 1, 1, 1),
-    ));
-    let mut server2 = BgpServer::new(Config::new(
-        asn2,
-        &format!("127.0.0.1:{}", port2),
-        Ipv4Addr::new(2, 2, 2, 2),
-    ));
+    bgp_port1: u16,
+    bgp_port2: u16,
+    grpc_port1: u16,
+    grpc_port2: u16,
+) -> (BgpClient, BgpClient) {
+    // Start both servers
+    let mut client1 =
+        start_test_server(asn1, bgp_port1, grpc_port1, Ipv4Addr::new(1, 1, 1, 1)).await;
+    let mut client2 =
+        start_test_server(asn2, bgp_port2, grpc_port2, Ipv4Addr::new(2, 2, 2, 2)).await;
 
-    // Get handles before moving servers into spawned tasks
-    let handle1 = server1.handle.clone();
-    let handle2 = server2.handle.clone();
-
-    tokio::spawn(async move { server1.run().await });
-    tokio::spawn(async move { server2.run().await });
-
-    // Server2 connects to Server1
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle2
-        .send_command(BgpCommand::AddPeer {
-            addr: format!("127.0.0.1:{}", port1),
-            response: tx,
-        })
+    // Server2 connects to Server1 via gRPC
+    client2
+        .add_peer(format!("127.0.0.1:{}", bgp_port1))
         .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
+        .expect("Failed to add peer");
 
-    // Wait for peering to establish
+    // Wait for peering to establish by polling via gRPC
     for _ in 0..100 {
-        let established = {
-            let peers1 = handle1.peers.lock().await;
-            let peers2 = handle2.peers.lock().await;
+        let peers1 = client1.get_peers().await.unwrap();
+        let peers2 = client2.get_peers().await.unwrap();
 
-            let both_have_peers = peers1.len() == 1 && peers2.len() == 1;
-            let both_established = peers1.first().map(|p| p.state()) == Some(BgpState::Established)
-                && peers2.first().map(|p| p.state()) == Some(BgpState::Established);
+        let both_established = peers1.len() == 1
+            && peers2.len() == 1
+            && peers1[0].state == "Established"
+            && peers2[0].state == "Established";
 
-            both_have_peers && both_established
-        };
-
-        if established {
-            return (handle1, handle2);
+        if both_established {
+            return (client1, client2);
         }
         sleep(Duration::from_millis(100)).await;
     }
 
-    // Timeout - collect state for error message
-    let peers1 = handle1.peers.lock().await;
-    let peers2 = handle2.peers.lock().await;
-    panic!(
-        "Timeout waiting for peers to establish. Server1: {} peers (state: {:?}), Server2: {} peers (state: {:?})",
-        peers1.len(),
-        peers1.first().map(|p| p.state()),
-        peers2.len(),
-        peers2.first().map(|p| p.state())
-    );
+    panic!("Timeout waiting for peers to establish");
 }
 
 #[tokio::test]
 async fn test_two_bgp_servers_peering() {
-    let (handle1, handle2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
+    let (mut client1, mut client2) =
+        setup_two_peered_servers(65100, 65200, 1790, 1791, 50051, 50052).await;
 
-    // Verify that both servers have peers
-    let peers1 = handle1.peers.lock().await;
-    let peers2 = handle2.peers.lock().await;
+    // Verify that both servers have peers via gRPC
+    let peers1 = client1.get_peers().await.unwrap();
+    let peers2 = client2.get_peers().await.unwrap();
 
     assert_eq!(peers1.len(), 1, "Server 1 should have 1 peer");
     assert_eq!(peers2.len(), 1, "Server 2 should have 1 peer");
 
     // Verify FSM state is Established
     assert_eq!(
-        peers1[0].state(),
-        BgpState::Established,
+        peers1[0].state, "Established",
         "Server 1 peer should be in Established state"
     );
     assert_eq!(
-        peers2[0].state(),
-        BgpState::Established,
+        peers2[0].state, "Established",
         "Server 2 peer should be in Established state"
     );
+
+    // Verify ASNs
+    assert_eq!(peers1[0].asn, 65200, "Server 1 peer should have ASN 65200");
+    assert_eq!(peers2[0].asn, 65100, "Server 2 peer should have ASN 65100");
 }
 
 #[tokio::test]
 async fn test_announce_one_route() {
-    let (handle1, handle2) = setup_two_peered_servers(65100, 65001, 1794, 1795).await;
+    let (mut client1, mut client2) =
+        setup_two_peered_servers(65100, 65001, 1794, 1795, 50053, 50054).await;
 
-    // Server2 announces a route to Server1
-    let prefix = IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 0, 0, 0),
-        prefix_length: 24,
-    });
-    let next_hop = Ipv4Addr::new(192, 168, 1, 1);
-
-    handle2
-        .announce_route(prefix, next_hop, Origin::IGP)
+    // Server2 announces a route to Server1 via gRPC
+    client2
+        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
         .await
         .expect("Failed to announce route");
 
-    // Get the peer address (server2's connection to server1)
-    let peer_addr = handle1.peers.lock().await[0].addr;
+    // Poll for route to appear in Server1's RIB
+    let mut route_found = false;
+    for _ in 0..100 {
+        let routes = client1.get_routes().await.unwrap();
 
-    // Build expected routes set
-    let expected: HashSet<Route> = [Route {
-        prefix,
-        paths: vec![Path {
-            origin: Origin::IGP,
-            as_path: vec![65001],
-            next_hop,
-            from_peer: peer_addr,
-            local_pref: Some(100),
-            med: None,
-        }],
-    }]
-    .into_iter()
-    .collect();
+        if routes.len() == 1 {
+            let route = &routes[0];
+            assert_eq!(route.prefix, "10.0.0.0/24", "Route prefix mismatch");
+            assert_eq!(route.paths.len(), 1, "Should have exactly one path");
 
-    // Poll and verify server1 received the route
-    poll_for_routes(&handle1, &expected).await;
+            let path = &route.paths[0];
+            assert_eq!(path.origin, 0, "Origin should be IGP");
+            assert_eq!(
+                path.as_path,
+                vec![65001],
+                "AS path should contain only 65001"
+            );
+            assert_eq!(path.next_hop, "192.168.1.1", "Next hop mismatch");
+            assert_eq!(path.local_pref, Some(100), "Local pref should be 100");
+
+            route_found = true;
+            break;
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        route_found,
+        "Route 10.0.0.0/24 not found in Server1's RIB"
+    );
+
+    // Verify peers are still established after route announcement
+    let peers1 = client1.get_peers().await.unwrap();
+    let peers2 = client2.get_peers().await.unwrap();
+
+    assert_eq!(peers1.len(), 1, "Server 1 should still have 1 peer");
+    assert_eq!(peers2.len(), 1, "Server 2 should still have 1 peer");
+    assert_eq!(
+        peers1[0].state, "Established",
+        "Server 1 peer should still be in Established state"
+    );
+    assert_eq!(
+        peers2[0].state, "Established",
+        "Server 2 peer should still be in Established state"
+    );
 }

@@ -46,49 +46,10 @@ pub enum BgpCommand {
     },
 }
 
-// Handle for interacting with the BGP server from gRPC
-#[derive(Clone)]
-pub struct BgpServerHandle {
-    pub peers: Arc<Mutex<Vec<Peer>>>,
-    pub rib: RibHandle,
-    command_tx: mpsc::Sender<BgpCommand>,
-}
-
-impl BgpServerHandle {
-    pub async fn send_command(
-        &self,
-        cmd: BgpCommand,
-    ) -> Result<(), mpsc::error::SendError<BgpCommand>> {
-        self.command_tx.send(cmd).await
-    }
-
-    pub async fn announce_route(
-        &self,
-        prefix: IpNetwork,
-        next_hop: Ipv4Addr,
-        origin: Origin,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let cmd = BgpCommand::AnnounceRoute {
-            prefix,
-            next_hop,
-            origin,
-            response: tx,
-        };
-
-        self.send_command(cmd)
-            .await
-            .map_err(|_| "failed to send command".to_string())?;
-
-        rx.await
-            .map_err(|_| "command processing failed".to_string())?
-    }
-}
-
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub rib: RibHandle,
-    pub handle: BgpServerHandle,
+    pub command_tx: mpsc::Sender<BgpCommand>,
     config: Config,
     local_bgp_id: u32,
     command_rx: Option<mpsc::Receiver<BgpCommand>>,
@@ -103,16 +64,10 @@ impl BgpServer {
         let peers = Arc::new(Mutex::new(Vec::new()));
         let rib = RibHandle::spawn(config.asn);
 
-        let handle = BgpServerHandle {
-            peers: peers.clone(),
-            rib: rib.clone(),
-            command_tx: cmd_tx,
-        };
-
         BgpServer {
             peers,
             rib,
-            handle,
+            command_tx: cmd_tx,
             config,
             local_bgp_id,
             command_rx: Some(cmd_rx),

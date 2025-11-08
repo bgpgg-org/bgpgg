@@ -3,12 +3,14 @@ syntax = "proto3";
 package bgp;
 
 // ============================================================================
-// Peer Management Service
+// BGP Service
 // ============================================================================
-service PeerService {
+service BgpService {
     rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+    rpc AnnounceRoute(AnnounceRouteRequest) returns (AnnounceRouteResponse);
+    rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
 }
 
 // Add peer request/response
@@ -43,4 +45,46 @@ message Peer {
     string address = 1;
     uint32 asn = 2;
     string state = 3;
+}
+
+// Announce route request/response
+message AnnounceRouteRequest {
+    string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
+    string next_hop = 2;    // IPv4 address (e.g., "192.168.1.1")
+    Origin origin = 3;      // Route origin
+}
+
+message AnnounceRouteResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// BGP Origin attribute
+enum Origin {
+    IGP = 0;
+    EGP = 1;
+    INCOMPLETE = 2;
+}
+
+// Get routes request/response
+message GetRoutesRequest {}
+
+message GetRoutesResponse {
+    repeated Route routes = 1;
+}
+
+// Route information
+message Route {
+    string prefix = 1;      // CIDR format
+    repeated Path paths = 2; // Multiple paths to same prefix
+}
+
+// Path information
+message Path {
+    Origin origin = 1;
+    repeated uint32 as_path = 2;
+    string next_hop = 3;
+    string from_peer = 4;
+    optional uint32 local_pref = 5;
+    optional uint32 med = 6;
 }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use clap::{Parser, Subcommand};
-use tonic::transport::Channel;
 
 mod commands;
 
@@ -58,16 +57,12 @@ pub enum PeerCommands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Connect to gRPC server
-    let channel = Channel::from_shared(cli.addr.clone())?
-        .connect()
-        .await
-        .map_err(|e| format!("Failed to connect to BGP daemon at {}: {}", cli.addr, e))?;
-
     // Dispatch to command handlers
     match cli.command {
         Commands::Peer(peer_cmd) => {
-            commands::peer::handle(channel, peer_cmd).await?;
+            commands::peer::handle(cli.addr, peer_cmd)
+                .await
+                .map_err(|e| format!("Failed to execute command: {}", e))?;
         }
     }
 
