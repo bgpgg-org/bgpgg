@@ -18,11 +18,11 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
-use crate::fsm::{BgpEvent, BgpState};
+use crate::fsm::BgpState;
 use crate::peer::Peer;
 use crate::rib::rib_loc::LocRib;
-use crate::rib::Path;
-use crate::{debug, error, info, warn};
+use crate::{debug, error, info};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -54,7 +54,7 @@ pub enum BgpRequest {
 }
 
 pub struct BgpServer {
-    pub peers: Arc<Mutex<Vec<Peer>>>,
+    pub peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
     pub loc_rib: Arc<Mutex<LocRib>>,
     pub request_tx: mpsc::Sender<BgpRequest>,
     config: Config,
@@ -68,7 +68,7 @@ impl BgpServer {
         let local_bgp_id = u32::from(config.router_id);
 
         let (req_tx, req_rx) = mpsc::channel(100);
-        let peers = Arc::new(Mutex::new(Vec::new()));
+        let peers = Arc::new(Mutex::new(HashMap::new()));
         let loc_rib = Arc::new(Mutex::new(LocRib::new(config.asn)));
 
         BgpServer {
@@ -105,7 +105,7 @@ impl BgpServer {
         peer_addr: &str,
         local_asn: u16,
         local_bgp_id: u32,
-        peers: Arc<Mutex<Vec<Peer>>>,
+        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
         info!("attempting to connect to peer", "peer_addr" => peer_addr);
@@ -183,7 +183,7 @@ impl BgpServer {
 
         // Send to all established peers
         let mut peers = self.peers.lock().await;
-        for peer in peers.iter_mut() {
+        for peer in peers.values_mut() {
             // Only send to peers in Established state
             if peer.state() == BgpState::Established {
                 if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
@@ -233,7 +233,7 @@ impl BgpServer {
 
     async fn handle_request(
         req: BgpRequest,
-        peers: Arc<Mutex<Vec<Peer>>>,
+        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
@@ -250,12 +250,10 @@ impl BgpServer {
             BgpRequest::RemovePeer { addr, response } => {
                 info!("removing peer via request", "peer_addr" => addr.to_string());
 
-                // Remove peer from list
-                let mut peer_list = peers.lock().await;
-                let initial_len = peer_list.len();
-                peer_list.retain(|p| p.addr != addr);
-                let removed = initial_len > peer_list.len();
-                drop(peer_list);
+                // Remove peer from map
+                let mut peer_map = peers.lock().await;
+                let removed = peer_map.remove(&addr).is_some();
+                drop(peer_map);
 
                 // Notify Loc-RIB to remove routes from this peer
                 loc_rib.lock().await.remove_routes_from_peer(addr);
@@ -285,9 +283,9 @@ impl BgpServer {
                 let update_msg = UpdateMessage::new(origin, as_path_segments, next_hop, vec![prefix]);
 
                 // Send to all established peers
-                let mut peer_list = peers.lock().await;
+                let mut peer_map = peers.lock().await;
                 let mut success = true;
-                for peer in peer_list.iter_mut() {
+                for peer in peer_map.values_mut() {
                     // Only send to peers in Established state
                     if peer.state() == BgpState::Established {
                         if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
@@ -308,9 +306,9 @@ impl BgpServer {
                 }
             }
             BgpRequest::GetPeers { response } => {
-                let peer_list = peers.lock().await;
-                let peer_info: Vec<(SocketAddr, u16, BgpState)> = peer_list
-                    .iter()
+                let peer_map = peers.lock().await;
+                let peer_info: Vec<(SocketAddr, u16, BgpState)> = peer_map
+                    .values()
                     .map(|p| (p.addr, p.asn, p.state()))
                     .collect();
                 let _ = response.send(peer_info);
@@ -324,7 +322,7 @@ impl BgpServer {
 
     async fn accept_peer(
         stream: TcpStream,
-        peers: Arc<Mutex<Vec<Peer>>>,
+        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
@@ -377,7 +375,7 @@ impl BgpServer {
         addr: SocketAddr,
         local_asn: u16,
         local_bgp_id: u32,
-        peers: Arc<Mutex<Vec<Peer>>>,
+        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
         debug!("handling peer", "peer_addr" => addr.to_string());
@@ -407,168 +405,70 @@ impl BgpServer {
         // Now add the peer with the ASN we received
         let mut peer = Peer::new(addr, write_half, peer_asn, local_asn, local_bgp_id);
 
-        // Process FSM events for connection establishment
-        for event in &[
-            BgpEvent::ManualStart,
-            BgpEvent::TcpConnectionConfirmed,
-            BgpEvent::BgpOpenReceived,
-        ] {
-            let transition = peer.fsm.process_event(*event);
-            debug!("FSM transition", "peer_addr" => addr.to_string(), "event" => format!("{:?}", event), "new_state" => format!("{:?}", transition.new_state));
-
-            for action in transition.actions {
-                if let Err(e) = peer.execute_action(action).await {
-                    error!("failed to execute FSM action", "peer_addr" => addr.to_string(), "error" => e.to_string());
-                    return;
-                }
-            }
+        // Initialize the BGP connection
+        if let Err(e) = peer.initialize_connection().await {
+            error!("failed to initialize connection", "peer_addr" => addr.to_string(), "error" => e.to_string());
+            return;
         }
 
         {
-            let mut peer_list = peers.lock().await;
-            peer_list.push(peer);
-            info!("peer added", "peer_addr" => addr.to_string(), "peer_asn" => peer_asn, "total_peers" => peer_list.len());
+            let mut peer_map = peers.lock().await;
+            peer_map.insert(addr, peer);
+            info!("peer added", "peer_addr" => addr.to_string(), "peer_asn" => peer_asn, "total_peers" => peer_map.len());
         }
 
         // Now continue handling subsequent messages
         loop {
             let result = read_bgp_message(&mut read_half).await;
 
+            let mut peer_map = peers.lock().await;
+            let Some(peer) = peer_map.get_mut(&addr) else {
+                error!("peer not found in map", "peer_addr" => addr.to_string());
+                break;
+            };
+
             match result {
                 Ok(message) => {
-                    // Process FSM events based on message type
-                    let event = match &message {
-                        BgpMessage::Open(_) => {
-                            warn!("received duplicate OPEN, ignoring", "peer_addr" => addr.to_string());
+                    let is_notification = matches!(&message, BgpMessage::Notification(_));
+
+                    // Process message with peer
+                    let routes = match peer.process_message(message).await {
+                        Ok(routes) => routes,
+                        Err(e) => {
+                            error!("failed to process message", "peer_addr" => addr.to_string(), "error" => e.to_string());
                             None
                         }
-                        BgpMessage::Update(_) => {
-                            info!("received UPDATE", "peer_addr" => addr.to_string());
-                            Some(BgpEvent::BgpUpdateReceived)
-                        }
-                        BgpMessage::KeepAlive(_) => {
-                            debug!("received KEEPALIVE", "peer_addr" => addr.to_string());
-                            Some(BgpEvent::BgpKeepaliveReceived)
-                        }
-                        BgpMessage::Notification(notif_msg) => {
-                            warn!("received NOTIFICATION", "peer_addr" => addr.to_string(), "notification" => format!("{:?}", notif_msg));
-                            Some(BgpEvent::NotificationReceived)
-                        }
                     };
+                    drop(peer_map);
 
-                    // Update FSM state
-                    if let Some(event) = event {
-                        if let Err(e) = Self::process_peer_event(&peers, addr, event).await {
-                            error!("failed to process FSM event", "peer_addr" => addr.to_string(), "error" => e.to_string());
-                        }
-
-                        // If notification received, break the loop
-                        if event == BgpEvent::NotificationReceived {
-                            break;
-                        }
+                    // Update Loc-RIB if we have routes
+                    if let Some(routes) = routes {
+                        loc_rib.lock().await.update_from_peer(addr, routes);
+                        info!("UPDATE processing complete", "peer_addr" => addr.to_string());
                     }
 
-                    // Process UPDATE messages
-                    if let BgpMessage::Update(update_msg) = message {
-                        Self::process_update(&peers, &loc_rib, addr, update_msg).await;
+                    // If notification received, break the loop
+                    if is_notification {
+                        break;
                     }
                 }
                 Err(e) => {
+                    drop(peer_map);
                     error!("error reading message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
                     break;
                 }
             }
         }
 
-        // Remove peer from the list when disconnected
+        // Remove peer from the map when disconnected
         {
-            let mut peer_list = peers.lock().await;
-            peer_list.retain(|p| p.addr != addr);
-            info!("peer disconnected", "peer_addr" => addr.to_string(), "total_peers" => peer_list.len());
+            let mut peer_map = peers.lock().await;
+            peer_map.remove(&addr);
+            info!("peer disconnected", "peer_addr" => addr.to_string(), "total_peers" => peer_map.len());
         }
 
         // Notify Loc-RIB about disconnection
         loc_rib.lock().await.remove_routes_from_peer(addr);
     }
 
-    async fn process_update(
-        peers: &Arc<Mutex<Vec<Peer>>>,
-        loc_rib: &Arc<Mutex<LocRib>>,
-        from: SocketAddr,
-        update_msg: UpdateMessage,
-    ) {
-        // Extract path attributes
-        let origin = match update_msg.get_origin() {
-            Some(o) => o,
-            None => {
-                warn!("UPDATE missing Origin attribute, skipping", "peer_addr" => from.to_string());
-                return;
-            }
-        };
-
-        let as_path = match update_msg.get_as_path() {
-            Some(p) => p,
-            None => {
-                warn!("UPDATE missing AS Path attribute, skipping", "peer_addr" => from.to_string());
-                return;
-            }
-        };
-
-        let next_hop = match update_msg.get_next_hop() {
-            Some(nh) => nh,
-            None => {
-                warn!("UPDATE missing Next Hop attribute, skipping", "peer_addr" => from.to_string());
-                return;
-            }
-        };
-
-        // Update peer's Adj-RIB-In
-        let mut peer_list = peers.lock().await;
-        if let Some(peer) = peer_list.iter_mut().find(|p| p.addr == from) {
-            // Process withdrawn routes
-            for prefix in update_msg.withdrawn_routes() {
-                info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
-                peer.adj_rib_in.remove_route(*prefix);
-            }
-
-            // Process announced routes (NLRI)
-            for prefix in update_msg.nlri_list() {
-                let path = Path {
-                    origin,
-                    as_path: as_path.clone(),
-                    next_hop,
-                    from_peer: from,
-                    local_pref: None,
-                    med: None,
-                };
-                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
-                peer.adj_rib_in.add_route(*prefix, path);
-            }
-
-            // Get all routes from this peer's Adj-RIB-In
-            let routes = peer.adj_rib_in.get_all_routes();
-            drop(peer_list); // Release peers lock before locking loc_rib
-
-            // Update Loc-RIB from peer's routes
-            loc_rib.lock().await.update_from_peer(from, routes);
-            info!("UPDATE processing complete", "peer_addr" => from.to_string());
-        }
-    }
-
-    async fn process_peer_event(
-        peers: &Arc<Mutex<Vec<Peer>>>,
-        addr: SocketAddr,
-        event: BgpEvent,
-    ) -> Result<(), std::io::Error> {
-        let mut peer_list = peers.lock().await;
-        if let Some(peer) = peer_list.iter_mut().find(|p| p.addr == addr) {
-            let transition = peer.fsm.process_event(event);
-            debug!("FSM transition", "peer_addr" => addr.to_string(), "event" => format!("{:?}", event), "new_state" => format!("{:?}", transition.new_state));
-
-            for action in transition.actions {
-                peer.execute_action(action).await?;
-            }
-        }
-        Ok(())
-    }
 }

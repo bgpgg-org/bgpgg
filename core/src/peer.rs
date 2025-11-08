@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::Message;
+use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
-use crate::fsm::{BgpState, Fsm, FsmAction};
+use crate::bgp::msg_update::UpdateMessage;
+use crate::fsm::{BgpEvent, BgpState, Fsm, FsmAction};
 use crate::rib::rib_in::AdjRibIn;
+use crate::rib::Path;
 use crate::{debug, info, warn};
 use std::io;
 use std::net::SocketAddr;
@@ -60,6 +62,116 @@ impl Peer {
     /// Check if peer is established
     pub fn is_established(&self) -> bool {
         self.fsm.is_established()
+    }
+
+    /// Initialize the BGP connection after receiving OPEN
+    pub async fn initialize_connection(&mut self) -> Result<(), io::Error> {
+        // Process FSM events for connection establishment
+        for event in &[
+            BgpEvent::ManualStart,
+            BgpEvent::TcpConnectionConfirmed,
+            BgpEvent::BgpOpenReceived,
+        ] {
+            self.process_event(*event).await?;
+        }
+        Ok(())
+    }
+
+    /// Process a BGP message and return routes for Loc-RIB update if applicable
+    pub async fn process_message(&mut self, message: BgpMessage) -> Result<Option<Vec<crate::rib::Route>>, io::Error> {
+        // Determine FSM event and process it
+        let event = match &message {
+            BgpMessage::Open(_) => {
+                warn!("received duplicate OPEN, ignoring", "peer_addr" => self.addr.to_string());
+                None
+            }
+            BgpMessage::Update(_) => {
+                info!("received UPDATE", "peer_addr" => self.addr.to_string());
+                Some(BgpEvent::BgpUpdateReceived)
+            }
+            BgpMessage::KeepAlive(_) => {
+                debug!("received KEEPALIVE", "peer_addr" => self.addr.to_string());
+                Some(BgpEvent::BgpKeepaliveReceived)
+            }
+            BgpMessage::Notification(notif_msg) => {
+                warn!("received NOTIFICATION", "peer_addr" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
+                Some(BgpEvent::NotificationReceived)
+            }
+        };
+
+        // Process FSM event if present
+        if let Some(event) = event {
+            self.process_event(event).await?;
+        }
+
+        // Process UPDATE message content
+        if let BgpMessage::Update(update_msg) = message {
+            Ok(self.process_update(update_msg))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Process a BGP event and execute resulting actions
+    async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
+        let transition = self.fsm.process_event(event);
+
+        for action in transition.actions {
+            self.execute_action(action).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Process a BGP UPDATE message
+    pub fn process_update(&mut self, update_msg: UpdateMessage) -> Option<Vec<crate::rib::Route>> {
+        // Extract path attributes
+        let origin = match update_msg.get_origin() {
+            Some(o) => o,
+            None => {
+                warn!("UPDATE missing Origin attribute, skipping", "peer_addr" => self.addr.to_string());
+                return None;
+            }
+        };
+
+        let as_path = match update_msg.get_as_path() {
+            Some(p) => p,
+            None => {
+                warn!("UPDATE missing AS Path attribute, skipping", "peer_addr" => self.addr.to_string());
+                return None;
+            }
+        };
+
+        let next_hop = match update_msg.get_next_hop() {
+            Some(nh) => nh,
+            None => {
+                warn!("UPDATE missing Next Hop attribute, skipping", "peer_addr" => self.addr.to_string());
+                return None;
+            }
+        };
+
+        // Process withdrawn routes
+        for prefix in update_msg.withdrawn_routes() {
+            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
+            self.adj_rib_in.remove_route(*prefix);
+        }
+
+        // Process announced routes (NLRI)
+        for prefix in update_msg.nlri_list() {
+            let path = Path {
+                origin,
+                as_path: as_path.clone(),
+                next_hop,
+                from_peer: self.addr,
+                local_pref: None,
+                med: None,
+            };
+            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
+            self.adj_rib_in.add_route(*prefix, path);
+        }
+
+        // Return all routes from this peer's Adj-RIB-In for Loc-RIB update
+        Some(self.adj_rib_in.get_all_routes())
     }
 
     /// Execute an FSM action
