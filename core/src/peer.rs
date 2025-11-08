@@ -15,7 +15,8 @@
 use crate::bgp::msg::Message;
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
-use crate::fsm::{BgpEvent, BgpState, Fsm, FsmAction};
+use crate::fsm::{BgpState, Fsm, FsmAction};
+use crate::rib::rib_in::AdjRibIn;
 use crate::{debug, info, warn};
 use std::io;
 use std::net::SocketAddr;
@@ -27,6 +28,7 @@ pub struct Peer {
     pub fsm: Fsm,
     pub writer: OwnedWriteHalf,
     pub asn: u16,
+    pub adj_rib_in: AdjRibIn,
     local_asn: u16,
     local_bgp_id: u32,
 }
@@ -44,6 +46,7 @@ impl Peer {
             fsm: Fsm::new(),
             writer,
             asn,
+            adj_rib_in: AdjRibIn::new(addr),
             local_asn,
             local_bgp_id,
         }
@@ -59,30 +62,8 @@ impl Peer {
         self.fsm.is_established()
     }
 
-    /// Process an FSM event and execute the resulting actions
-    pub async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
-        let transition = self.fsm.process_event(event);
-
-        debug!("FSM transition", "peer_addr" => self.addr.to_string(), "new_state" => format!("{:?}", transition.new_state), "event" => format!("{:?}", event));
-
-        // Execute actions
-        for action in transition.actions {
-            self.execute_action(action).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Process multiple FSM events in sequence
-    pub async fn process_events(&mut self, events: &[BgpEvent]) -> Result<(), io::Error> {
-        for &event in events {
-            self.process_event(event).await?;
-        }
-        Ok(())
-    }
-
     /// Execute an FSM action
-    async fn execute_action(&mut self, action: FsmAction) -> Result<(), io::Error> {
+    pub async fn execute_action(&mut self, action: FsmAction) -> Result<(), io::Error> {
         match action {
             FsmAction::InitializeResources => {
                 debug!("initializing resources", "peer_addr" => self.addr.to_string());
@@ -140,10 +121,6 @@ impl Peer {
             FsmAction::StartKeepaliveTimer => {
                 self.fsm.timers.start_keepalive_timer();
                 debug!("started Keepalive timer", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::ProcessUpdate => {
-                debug!("process UPDATE (handled by RIB)", "peer_addr" => self.addr.to_string());
             }
         }
 

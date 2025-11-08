@@ -92,9 +92,6 @@ pub enum FsmAction {
 
     /// Start Keepalive timer
     StartKeepaliveTimer,
-
-    /// Process UPDATE message
-    ProcessUpdate,
 }
 
 /// BGP FSM timers
@@ -442,7 +439,7 @@ impl Fsm {
 
             (BgpState::Established, BgpEvent::BgpUpdateReceived) => StateTransition {
                 new_state: BgpState::Established,
-                actions: vec![FsmAction::ResetHoldTimer, FsmAction::ProcessUpdate],
+                actions: vec![FsmAction::ResetHoldTimer],
             },
 
             (BgpState::Established, BgpEvent::NotificationReceived) => StateTransition {

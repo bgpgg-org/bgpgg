@@ -20,7 +20,8 @@ use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::{BgpEvent, BgpState};
 use crate::peer::Peer;
-use crate::rib::RibHandle;
+use crate::rib::rib_loc::LocRib;
+use crate::rib::Path;
 use crate::{debug, error, info, warn};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -54,7 +55,7 @@ pub enum BgpRequest {
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
-    pub rib: RibHandle,
+    pub loc_rib: Arc<Mutex<LocRib>>,
     pub request_tx: mpsc::Sender<BgpRequest>,
     config: Config,
     local_bgp_id: u32,
@@ -68,11 +69,11 @@ impl BgpServer {
 
         let (req_tx, req_rx) = mpsc::channel(100);
         let peers = Arc::new(Mutex::new(Vec::new()));
-        let rib = RibHandle::spawn(config.asn);
+        let loc_rib = Arc::new(Mutex::new(LocRib::new(config.asn)));
 
         BgpServer {
             peers,
-            rib,
+            loc_rib,
             request_tx: req_tx,
             config,
             local_bgp_id,
@@ -83,7 +84,7 @@ impl BgpServer {
     /// Add a peer and initiate BGP session
     pub async fn add_peer(&self, peer_addr: &str) {
         let peers_arc = Arc::clone(&self.peers);
-        let rib = self.rib.clone();
+        let loc_rib = self.loc_rib.clone();
         let local_asn = self.config.asn;
         let local_bgp_id = self.local_bgp_id;
         let peer_addr_string = peer_addr.to_string();
@@ -94,7 +95,7 @@ impl BgpServer {
                 local_asn,
                 local_bgp_id,
                 peers_arc,
-                rib,
+                loc_rib,
             )
             .await;
         });
@@ -105,7 +106,7 @@ impl BgpServer {
         local_asn: u16,
         local_bgp_id: u32,
         peers: Arc<Mutex<Vec<Peer>>>,
-        rib: RibHandle,
+        loc_rib: Arc<Mutex<LocRib>>,
     ) {
         info!("attempting to connect to peer", "peer_addr" => peer_addr);
 
@@ -154,13 +155,13 @@ impl BgpServer {
             local_asn,
             local_bgp_id,
             peers,
-            rib,
+            loc_rib,
         )
         .await;
     }
 
     pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
-        self.rib.query_loc_rib().await.unwrap_or_else(|_| vec![])
+        self.loc_rib.lock().await.get_all_routes()
     }
 
     /// Announce a route to all established peers
@@ -207,7 +208,7 @@ impl BgpServer {
         // Destructure to avoid partial move issues
         let BgpServer {
             peers,
-            rib,
+            loc_rib,
             config,
             local_bgp_id,
             mut request_rx,
@@ -219,12 +220,12 @@ impl BgpServer {
             tokio::select! {
                 // Handle incoming BGP connections
                 Ok((stream, _)) = listener.accept() => {
-                    Self::accept_peer(stream, peers.clone(), rib.clone(), config.asn, local_bgp_id).await;
+                    Self::accept_peer(stream, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id).await;
                 }
 
                 // Handle gRPC requests
                 Some(req) = request_rx.recv() => {
-                    Self::handle_request(req, peers.clone(), rib.clone(), config.asn, local_bgp_id).await;
+                    Self::handle_request(req, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id).await;
                 }
             }
         }
@@ -233,7 +234,7 @@ impl BgpServer {
     async fn handle_request(
         req: BgpRequest,
         peers: Arc<Mutex<Vec<Peer>>>,
-        rib: RibHandle,
+        loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
     ) {
@@ -242,7 +243,7 @@ impl BgpServer {
                 info!("adding peer via request", "peer_addr" => &addr);
 
                 tokio::spawn(async move {
-                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, rib).await;
+                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, loc_rib).await;
                 });
                 let _ = response.send(Ok(()));
             }
@@ -256,8 +257,8 @@ impl BgpServer {
                 let removed = initial_len > peer_list.len();
                 drop(peer_list);
 
-                // Notify RIB
-                let _ = rib.peer_disconnected(addr).await;
+                // Notify Loc-RIB to remove routes from this peer
+                loc_rib.lock().await.remove_routes_from_peer(addr);
 
                 if removed {
                     let _ = response.send(Ok(()));
@@ -315,7 +316,7 @@ impl BgpServer {
                 let _ = response.send(peer_info);
             }
             BgpRequest::GetRoutes { response } => {
-                let routes = rib.query_loc_rib().await.unwrap_or_else(|_| vec![]);
+                let routes = loc_rib.lock().await.get_all_routes();
                 let _ = response.send(routes);
             }
         }
@@ -324,7 +325,7 @@ impl BgpServer {
     async fn accept_peer(
         stream: TcpStream,
         peers: Arc<Mutex<Vec<Peer>>>,
-        rib: RibHandle,
+        loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
     ) {
@@ -364,7 +365,7 @@ impl BgpServer {
                 local_asn,
                 local_bgp_id,
                 peers,
-                rib,
+                loc_rib,
             )
             .await;
         });
@@ -377,7 +378,7 @@ impl BgpServer {
         local_asn: u16,
         local_bgp_id: u32,
         peers: Arc<Mutex<Vec<Peer>>>,
-        rib: RibHandle,
+        loc_rib: Arc<Mutex<LocRib>>,
     ) {
         debug!("handling peer", "peer_addr" => addr.to_string());
 
@@ -407,16 +408,20 @@ impl BgpServer {
         let mut peer = Peer::new(addr, write_half, peer_asn, local_asn, local_bgp_id);
 
         // Process FSM events for connection establishment
-        if let Err(e) = peer
-            .process_events(&[
-                BgpEvent::ManualStart,
-                BgpEvent::TcpConnectionConfirmed,
-                BgpEvent::BgpOpenReceived,
-            ])
-            .await
-        {
-            error!("failed to process FSM events", "peer_addr" => addr.to_string(), "error" => e.to_string());
-            return;
+        for event in &[
+            BgpEvent::ManualStart,
+            BgpEvent::TcpConnectionConfirmed,
+            BgpEvent::BgpOpenReceived,
+        ] {
+            let transition = peer.fsm.process_event(*event);
+            debug!("FSM transition", "peer_addr" => addr.to_string(), "event" => format!("{:?}", event), "new_state" => format!("{:?}", transition.new_state));
+
+            for action in transition.actions {
+                if let Err(e) = peer.execute_action(action).await {
+                    error!("failed to execute FSM action", "peer_addr" => addr.to_string(), "error" => e.to_string());
+                    return;
+                }
+            }
         }
 
         {
@@ -424,9 +429,6 @@ impl BgpServer {
             peer_list.push(peer);
             info!("peer added", "peer_addr" => addr.to_string(), "peer_asn" => peer_asn, "total_peers" => peer_list.len());
         }
-
-        // Notify RIB about new peer
-        let _ = rib.peer_connected(addr).await;
 
         // Now continue handling subsequent messages
         loop {
@@ -466,8 +468,10 @@ impl BgpServer {
                         }
                     }
 
-                    // Send message to RIB
-                    let _ = rib.process_bgp_message(addr, message).await;
+                    // Process UPDATE messages
+                    if let BgpMessage::Update(update_msg) = message {
+                        Self::process_update(&peers, &loc_rib, addr, update_msg).await;
+                    }
                 }
                 Err(e) => {
                     error!("error reading message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
@@ -483,8 +487,72 @@ impl BgpServer {
             info!("peer disconnected", "peer_addr" => addr.to_string(), "total_peers" => peer_list.len());
         }
 
-        // Notify RIB about disconnection
-        let _ = rib.peer_disconnected(addr).await;
+        // Notify Loc-RIB about disconnection
+        loc_rib.lock().await.remove_routes_from_peer(addr);
+    }
+
+    async fn process_update(
+        peers: &Arc<Mutex<Vec<Peer>>>,
+        loc_rib: &Arc<Mutex<LocRib>>,
+        from: SocketAddr,
+        update_msg: UpdateMessage,
+    ) {
+        // Extract path attributes
+        let origin = match update_msg.get_origin() {
+            Some(o) => o,
+            None => {
+                warn!("UPDATE missing Origin attribute, skipping", "peer_addr" => from.to_string());
+                return;
+            }
+        };
+
+        let as_path = match update_msg.get_as_path() {
+            Some(p) => p,
+            None => {
+                warn!("UPDATE missing AS Path attribute, skipping", "peer_addr" => from.to_string());
+                return;
+            }
+        };
+
+        let next_hop = match update_msg.get_next_hop() {
+            Some(nh) => nh,
+            None => {
+                warn!("UPDATE missing Next Hop attribute, skipping", "peer_addr" => from.to_string());
+                return;
+            }
+        };
+
+        // Update peer's Adj-RIB-In
+        let mut peer_list = peers.lock().await;
+        if let Some(peer) = peer_list.iter_mut().find(|p| p.addr == from) {
+            // Process withdrawn routes
+            for prefix in update_msg.withdrawn_routes() {
+                info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
+                peer.adj_rib_in.remove_route(*prefix);
+            }
+
+            // Process announced routes (NLRI)
+            for prefix in update_msg.nlri_list() {
+                let path = Path {
+                    origin,
+                    as_path: as_path.clone(),
+                    next_hop,
+                    from_peer: from,
+                    local_pref: None,
+                    med: None,
+                };
+                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => from.to_string());
+                peer.adj_rib_in.add_route(*prefix, path);
+            }
+
+            // Get all routes from this peer's Adj-RIB-In
+            let routes = peer.adj_rib_in.get_all_routes();
+            drop(peer_list); // Release peers lock before locking loc_rib
+
+            // Update Loc-RIB from peer's routes
+            loc_rib.lock().await.update_from_peer(from, routes);
+            info!("UPDATE processing complete", "peer_addr" => from.to_string());
+        }
     }
 
     async fn process_peer_event(
@@ -494,7 +562,12 @@ impl BgpServer {
     ) -> Result<(), std::io::Error> {
         let mut peer_list = peers.lock().await;
         if let Some(peer) = peer_list.iter_mut().find(|p| p.addr == addr) {
-            peer.process_event(event).await?;
+            let transition = peer.fsm.process_event(event);
+            debug!("FSM transition", "peer_addr" => addr.to_string(), "event" => format!("{:?}", event), "new_state" => format!("{:?}", transition.new_state));
+
+            for action in transition.actions {
+                peer.execute_action(action).await?;
+            }
         }
         Ok(())
     }

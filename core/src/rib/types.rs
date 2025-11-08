@@ -33,9 +33,3 @@ pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Path>,
 }
-
-/// Error type for RIB queries
-#[derive(Debug)]
-pub enum QueryError {
-    RibUnavailable,
-}

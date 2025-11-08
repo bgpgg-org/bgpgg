@@ -14,7 +14,6 @@
 
 use crate::bgp::utils::IpNetwork;
 use crate::rib::types::{Path, Route};
-use crate::rib::Rib;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -22,12 +21,13 @@ use std::net::SocketAddr;
 ///
 /// Contains the best paths selected after applying import policies
 /// and the BGP best path selection algorithm.
-pub(super) struct LocRib {
+pub struct LocRib {
     // Map from prefix to best route(s)
     routes: HashMap<IpNetwork, Route>,
+    local_asn: u16,
 }
 
-impl Rib for LocRib {
+impl LocRib {
     fn add_route(&mut self, prefix: IpNetwork, path: Path) {
         self.routes
             .entry(prefix)
@@ -49,37 +49,80 @@ impl Rib for LocRib {
             });
     }
 
-    fn get_all_routes(&self) -> Vec<Route> {
+    pub fn get_all_routes(&self) -> Vec<Route> {
         self.routes.values().cloned().collect()
     }
 
-    fn clear(&mut self) {
-        self.routes.clear();
+    /// Update Loc-RIB from a peer's Adj-RIB-In with import policy applied
+    pub fn update_from_peer(&mut self, peer_addr: SocketAddr, routes: Vec<Route>) {
+        use crate::{debug, info};
+
+        // Remove old routes from this peer
+        self.remove_routes_from_peer(peer_addr);
+
+        // Apply import policy and add to Loc-RIB
+        for route in routes {
+            for mut path in route.paths {
+                // Apply import policy
+                if self.apply_import_policy(&mut path) {
+                    info!("adding route to Loc-RIB", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
+                    self.add_route(route.prefix, path);
+                } else {
+                    debug!("route rejected by import policy", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
+                }
+            }
+        }
+
+        // Run best path selection
+        self.run_best_path_selection();
+    }
+
+    fn apply_import_policy(&self, path: &mut Path) -> bool {
+        // Set default local preference if not set
+        // TODO: only do this for iBGP
+        if path.local_pref.is_none() {
+            path.local_pref = Some(100);
+        }
+
+        // Reject routes with our own ASN (loop prevention)
+        if path.as_path.contains(&self.local_asn) {
+            use crate::debug;
+            debug!("rejecting route due to AS loop", "local_asn" => self.local_asn);
+            return false;
+        }
+
+        // Accept by default
+        true
+    }
+
+    fn run_best_path_selection(&mut self) {
+        // In a real implementation, this would:
+        // 1. For each prefix in Loc-RIB with multiple paths
+        // 2. Apply BGP best path algorithm (highest local_pref, shortest AS path, etc.)
+        // 3. Keep only the best path
+
+        // For now, we keep all paths (simple implementation)
+        use crate::debug;
+        debug!("best path selection (keeping all paths for now)");
     }
 }
 
 impl LocRib {
-    pub(super) fn new() -> Self {
+    pub fn new(local_asn: u16) -> Self {
         LocRib {
             routes: HashMap::new(),
+            local_asn,
         }
     }
 
-    pub(super) fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) {
+    pub fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) {
         for route in self.routes.values_mut() {
             route.paths.retain(|p| p.from_peer != peer_addr);
         }
         self.routes.retain(|_, route| !route.paths.is_empty());
     }
 
-    fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Path> {
-        self.routes.get(prefix).and_then(|route| {
-            // Simple best path: first path (in real BGP: complex decision process)
-            route.paths.first()
-        })
-    }
-
-    pub(super) fn routes_len(&self) -> usize {
+    pub fn routes_len(&self) -> usize {
         self.routes.len()
     }
 }
@@ -92,14 +135,14 @@ mod tests {
 
     #[test]
     fn test_new_loc_rib() {
-        let loc_rib = LocRib::new();
+        let loc_rib = LocRib::new(65000);
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
     }
 
     #[test]
     fn test_add_route() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_addr);
@@ -117,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_routes_different_prefixes() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
 
         let prefix1 = create_test_prefix();
@@ -152,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_paths_same_prefix_different_peers() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer1: SocketAddr = "192.0.2.1:179".parse().unwrap();
         let peer2: SocketAddr = "192.0.2.2:179".parse().unwrap();
         let prefix = create_test_prefix();
@@ -178,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_add_route_same_peer_updates_path() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
         let prefix = create_test_prefix();
 
@@ -200,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer1: SocketAddr = "192.0.2.1:179".parse().unwrap();
         let peer2: SocketAddr = "192.0.2.2:179".parse().unwrap();
         let prefix = create_test_prefix();
@@ -224,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_removes_empty_routes() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::new(65000);
         let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_addr);

@@ -14,7 +14,6 @@
 
 use crate::bgp::utils::IpNetwork;
 use crate::rib::types::{Path, Route};
-use crate::rib::Rib;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -22,14 +21,13 @@ use std::net::SocketAddr;
 ///
 /// Stores routes received from a specific BGP peer before any import policy
 /// or best path selection has been applied.
-pub(super) struct AdjRibIn {
+pub struct AdjRibIn {
     // Map from prefix to routes learned from this specific peer
     routes: HashMap<IpNetwork, Route>,
-    peer_addr: SocketAddr,
 }
 
-impl Rib for AdjRibIn {
-    fn add_route(&mut self, prefix: IpNetwork, path: Path) {
+impl AdjRibIn {
+    pub fn add_route(&mut self, prefix: IpNetwork, path: Path) {
         self.routes.insert(
             prefix,
             Route {
@@ -39,24 +37,24 @@ impl Rib for AdjRibIn {
         );
     }
 
-    fn get_all_routes(&self) -> Vec<Route> {
+    pub fn get_all_routes(&self) -> Vec<Route> {
         self.routes.values().cloned().collect()
     }
 
-    fn clear(&mut self) {
+    #[cfg(test)]
+    pub fn clear(&mut self) {
         self.routes.clear();
     }
 }
 
 impl AdjRibIn {
-    pub(super) fn new(peer_addr: SocketAddr) -> Self {
+    pub fn new(_peer_addr: SocketAddr) -> Self {
         AdjRibIn {
             routes: HashMap::new(),
-            peer_addr,
         }
     }
 
-    pub(super) fn remove_route(&mut self, prefix: IpNetwork) {
+    pub fn remove_route(&mut self, prefix: IpNetwork) {
         self.routes.remove(&prefix);
     }
 }
@@ -73,7 +71,6 @@ mod tests {
         let rib_in = AdjRibIn::new(peer_addr);
 
         assert_eq!(rib_in.get_all_routes().len(), 0);
-        assert_eq!(rib_in.peer_addr, peer_addr);
     }
 
     #[test]
