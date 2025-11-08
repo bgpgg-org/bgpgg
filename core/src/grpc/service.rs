@@ -14,12 +14,9 @@
 
 use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
-use crate::peer::Peer;
-use crate::rib::RibHandle;
-use crate::server::BgpCommand;
+use crate::server::BgpRequest;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
@@ -31,22 +28,12 @@ use super::proto::{
 
 #[derive(Clone)]
 pub struct BgpGrpcService {
-    peers: Arc<Mutex<Vec<Peer>>>,
-    rib: RibHandle,
-    command_tx: mpsc::Sender<BgpCommand>,
+    bgp_request_tx: mpsc::Sender<BgpRequest>,
 }
 
 impl BgpGrpcService {
-    pub fn new(
-        peers: Arc<Mutex<Vec<Peer>>>,
-        rib: RibHandle,
-        command_tx: mpsc::Sender<BgpCommand>,
-    ) -> Self {
-        Self {
-            peers,
-            rib,
-            command_tx,
-        }
+    pub fn new(bgp_request_tx: mpsc::Sender<BgpRequest>) -> Self {
+        Self { bgp_request_tx }
     }
 }
 
@@ -58,17 +45,17 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<AddPeerResponse>, Status> {
         let addr = request.into_inner().address;
 
-        // Send command to BGP server via channel
+        // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let cmd = BgpCommand::AddPeer {
+        let req = BgpRequest::AddPeer {
             addr: addr.clone(),
             response: tx,
         };
 
-        self.command_tx
-            .send(cmd)
+        self.bgp_request_tx
+            .send(req)
             .await
-            .map_err(|_| Status::internal("failed to send command"))?;
+            .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         match rx.await {
@@ -80,7 +67,7 @@ impl BgpService for BgpGrpcService {
                 success: false,
                 message: e,
             })),
-            Err(_) => Err(Status::internal("command processing failed")),
+            Err(_) => Err(Status::internal("request processing failed")),
         }
     }
 
@@ -95,14 +82,14 @@ impl BgpService for BgpGrpcService {
             .parse()
             .map_err(|_| Status::invalid_argument("invalid address format"))?;
 
-        // Send command to BGP server
+        // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let cmd = BgpCommand::RemovePeer { addr, response: tx };
+        let req = BgpRequest::RemovePeer { addr, response: tx };
 
-        self.command_tx
-            .send(cmd)
+        self.bgp_request_tx
+            .send(req)
             .await
-            .map_err(|_| Status::internal("failed to send command"))?;
+            .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         match rx.await {
@@ -114,7 +101,7 @@ impl BgpService for BgpGrpcService {
                 success: false,
                 message: e,
             })),
-            Err(_) => Err(Status::internal("command processing failed")),
+            Err(_) => Err(Status::internal("request processing failed")),
         }
     }
 
@@ -122,15 +109,26 @@ impl BgpService for BgpGrpcService {
         &self,
         _request: Request<GetPeersRequest>,
     ) -> Result<Response<GetPeersResponse>, Status> {
-        // Direct read access to peers
-        let peers = self.peers.lock().await;
+        // Send request to BGP server
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = BgpRequest::GetPeers { response: tx };
+
+        self.bgp_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        // Wait for response
+        let peers = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|p| ProtoPeer {
-                address: p.addr.to_string(),
-                asn: p.asn as u32,
-                state: format!("{:?}", p.state()),
+            .map(|(addr, asn, state)| ProtoPeer {
+                address: addr.to_string(),
+                asn: *asn as u32,
+                state: format!("{:?}", state),
             })
             .collect();
 
@@ -178,31 +176,32 @@ impl BgpService for BgpGrpcService {
             _ => return Err(Status::invalid_argument("Invalid origin value")),
         };
 
-        // Send command to BGP server
+        // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let cmd = BgpCommand::AnnounceRoute {
+        let prefix_str = req.prefix.clone();
+        let bgp_req = BgpRequest::AnnounceRoute {
             prefix,
             next_hop,
             origin,
             response: tx,
         };
 
-        self.command_tx
-            .send(cmd)
+        self.bgp_request_tx
+            .send(bgp_req)
             .await
-            .map_err(|_| Status::internal("failed to send command"))?;
+            .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         match rx.await {
             Ok(Ok(())) => Ok(Response::new(AnnounceRouteResponse {
                 success: true,
-                message: format!("Route {} announced", req.prefix),
+                message: format!("Route {} announced", prefix_str),
             })),
             Ok(Err(e)) => Ok(Response::new(AnnounceRouteResponse {
                 success: false,
                 message: e,
             })),
-            Err(_) => Err(Status::internal("command processing failed")),
+            Err(_) => Err(Status::internal("request processing failed")),
         }
     }
 
@@ -210,12 +209,19 @@ impl BgpService for BgpGrpcService {
         &self,
         _request: Request<GetRoutesRequest>,
     ) -> Result<Response<GetRoutesResponse>, Status> {
-        // Query Loc-RIB for all routes
-        let routes = self
-            .rib
-            .query_loc_rib()
+        // Send request to BGP server
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = BgpRequest::GetRoutes { response: tx };
+
+        self.bgp_request_tx
+            .send(req)
             .await
-            .map_err(|_| Status::internal("failed to query RIB"))?;
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        // Wait for response
+        let routes = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
 
         // Convert Rust routes to proto routes
         let proto_routes: Vec<ProtoRoute> = routes

@@ -19,18 +19,13 @@ use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
-/// Test helper: starts BGP server + gRPC server, returns gRPC client
 async fn start_test_server(asn: u16, bgp_port: u16, grpc_port: u16, router_id: Ipv4Addr) -> BgpClient {
     let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id);
 
-    let mut server = BgpServer::new(config);
+    let server = BgpServer::new(config);
 
     // Create gRPC service
-    let grpc_service = BgpGrpcService::new(
-        server.peers.clone(),
-        server.rib.clone(),
-        server.command_tx.clone(),
-    );
+    let grpc_service = BgpGrpcService::new(server.request_tx.clone());
 
     // Spawn both servers
     tokio::spawn(async move { server.run().await });
@@ -44,12 +39,21 @@ async fn start_test_server(asn: u16, bgp_port: u16, grpc_port: u16, router_id: I
             .unwrap();
     });
 
-    // Wait for servers to start
-    sleep(Duration::from_millis(100)).await;
+    // Retry connecting to gRPC server until it's ready
+    let mut client = None;
+    for _ in 0..50 {
+        match BgpClient::connect(format!("http://[::1]:{}", grpc_port)).await {
+            Ok(c) => {
+                client = Some(c);
+                break;
+            }
+            Err(_) => {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 
-    BgpClient::connect(format!("http://[::1]:{}", grpc_port))
-        .await
-        .unwrap()
+    client.expect("Failed to connect to gRPC server after retries")
 }
 
 /// Utility function to set up two BGP servers with peering established

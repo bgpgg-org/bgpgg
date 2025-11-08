@@ -28,8 +28,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-// Commands that can be sent to the BGP server
-pub enum BgpCommand {
+// Requests that can be sent to the BGP server
+pub enum BgpRequest {
     AddPeer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
@@ -44,15 +44,21 @@ pub enum BgpCommand {
         origin: Origin,
         response: oneshot::Sender<Result<(), String>>,
     },
+    GetPeers {
+        response: oneshot::Sender<Vec<(SocketAddr, u16, BgpState)>>,
+    },
+    GetRoutes {
+        response: oneshot::Sender<Vec<crate::rib::Route>>,
+    },
 }
 
 pub struct BgpServer {
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub rib: RibHandle,
-    pub command_tx: mpsc::Sender<BgpCommand>,
+    pub request_tx: mpsc::Sender<BgpRequest>,
     config: Config,
     local_bgp_id: u32,
-    command_rx: Option<mpsc::Receiver<BgpCommand>>,
+    request_rx: mpsc::Receiver<BgpRequest>,
 }
 
 impl BgpServer {
@@ -60,17 +66,17 @@ impl BgpServer {
         // Convert the configured router_id (Ipv4Addr) to u32 for BGP identifier
         let local_bgp_id = u32::from(config.router_id);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (req_tx, req_rx) = mpsc::channel(100);
         let peers = Arc::new(Mutex::new(Vec::new()));
         let rib = RibHandle::spawn(config.asn);
 
         BgpServer {
             peers,
             rib,
-            command_tx: cmd_tx,
+            request_tx: req_tx,
             config,
             local_bgp_id,
-            command_rx: Some(cmd_rx),
+            request_rx: req_rx,
         }
     }
 
@@ -192,48 +198,66 @@ impl BgpServer {
         Ok(())
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(self) {
         let addr = self.config.listen_addr.clone();
         info!("BGP server starting", "listen_addr" => addr);
 
         let listener = TcpListener::bind(&addr).await.unwrap();
-        let mut cmd_rx = self.command_rx.take().expect("event loop already running");
 
-        // Unified event loop: handle both BGP connections and gRPC commands
+        // Destructure to avoid partial move issues
+        let BgpServer {
+            peers,
+            rib,
+            config,
+            local_bgp_id,
+            mut request_rx,
+            ..
+        } = self;
+
+        // Unified event loop: handle both BGP connections and gRPC requests
         loop {
             tokio::select! {
                 // Handle incoming BGP connections
                 Ok((stream, _)) = listener.accept() => {
-                    self.accept_peer(stream).await;
+                    Self::accept_peer(stream, peers.clone(), rib.clone(), config.asn, local_bgp_id).await;
                 }
 
-                // Handle gRPC commands
-                Some(cmd) = cmd_rx.recv() => {
-                    self.handle_command(cmd).await;
+                // Handle gRPC requests
+                Some(req) = request_rx.recv() => {
+                    Self::handle_request(req, peers.clone(), rib.clone(), config.asn, local_bgp_id).await;
                 }
             }
         }
     }
 
-    async fn handle_command(&self, cmd: BgpCommand) {
-        match cmd {
-            BgpCommand::AddPeer { addr, response } => {
-                info!("adding peer via command", "peer_addr" => &addr);
-                self.add_peer(&addr).await;
+    async fn handle_request(
+        req: BgpRequest,
+        peers: Arc<Mutex<Vec<Peer>>>,
+        rib: RibHandle,
+        local_asn: u16,
+        local_bgp_id: u32,
+    ) {
+        match req {
+            BgpRequest::AddPeer { addr, response } => {
+                info!("adding peer via request", "peer_addr" => &addr);
+
+                tokio::spawn(async move {
+                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, rib).await;
+                });
                 let _ = response.send(Ok(()));
             }
-            BgpCommand::RemovePeer { addr, response } => {
-                info!("removing peer via command", "peer_addr" => addr.to_string());
+            BgpRequest::RemovePeer { addr, response } => {
+                info!("removing peer via request", "peer_addr" => addr.to_string());
 
                 // Remove peer from list
-                let mut peers = self.peers.lock().await;
-                let initial_len = peers.len();
-                peers.retain(|p| p.addr != addr);
-                let removed = initial_len > peers.len();
-                drop(peers);
+                let mut peer_list = peers.lock().await;
+                let initial_len = peer_list.len();
+                peer_list.retain(|p| p.addr != addr);
+                let removed = initial_len > peer_list.len();
+                drop(peer_list);
 
                 // Notify RIB
-                let _ = self.rib.peer_disconnected(addr).await;
+                let _ = rib.peer_disconnected(addr).await;
 
                 if removed {
                     let _ = response.send(Ok(()));
@@ -241,26 +265,69 @@ impl BgpServer {
                     let _ = response.send(Err(format!("peer {} not found", addr)));
                 }
             }
-            BgpCommand::AnnounceRoute {
+            BgpRequest::AnnounceRoute {
                 prefix,
                 next_hop,
                 origin,
                 response,
             } => {
-                info!("announcing route via command", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
-                match self.announce_route(prefix, next_hop, origin).await {
-                    Ok(_) => {
-                        let _ = response.send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = response.send(Err(e.to_string()));
+                info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+
+                // Build AS path with local ASN
+                let as_path_segments = vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![local_asn],
+                }];
+
+                // Create UPDATE message
+                let update_msg = UpdateMessage::new(origin, as_path_segments, next_hop, vec![prefix]);
+
+                // Send to all established peers
+                let mut peer_list = peers.lock().await;
+                let mut success = true;
+                for peer in peer_list.iter_mut() {
+                    // Only send to peers in Established state
+                    if peer.state() == BgpState::Established {
+                        if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
+                            error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                            success = false;
+                        } else {
+                            info!("announced route to peer", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string(), "peer_addr" => peer.addr.to_string());
+                        }
+                    } else {
+                        debug!("skipping peer not in established state", "peer_addr" => peer.addr.to_string(), "state" => format!("{:?}", peer.state()));
                     }
                 }
+
+                if success {
+                    let _ = response.send(Ok(()));
+                } else {
+                    let _ = response.send(Err("failed to announce to some peers".to_string()));
+                }
+            }
+            BgpRequest::GetPeers { response } => {
+                let peer_list = peers.lock().await;
+                let peer_info: Vec<(SocketAddr, u16, BgpState)> = peer_list
+                    .iter()
+                    .map(|p| (p.addr, p.asn, p.state()))
+                    .collect();
+                let _ = response.send(peer_info);
+            }
+            BgpRequest::GetRoutes { response } => {
+                let routes = rib.query_loc_rib().await.unwrap_or_else(|_| vec![]);
+                let _ = response.send(routes);
             }
         }
     }
 
-    async fn accept_peer(&self, stream: TcpStream) {
+    async fn accept_peer(
+        stream: TcpStream,
+        peers: Arc<Mutex<Vec<Peer>>>,
+        rib: RibHandle,
+        local_asn: u16,
+        local_bgp_id: u32,
+    ) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -274,7 +341,7 @@ impl BgpServer {
         let (read_half, mut write_half) = stream.into_split();
 
         // Send OPEN message
-        let open_msg = OpenMessage::new(self.config.asn, 180, self.local_bgp_id);
+        let open_msg = OpenMessage::new(local_asn, 180, local_bgp_id);
         if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
             error!("failed to send OPEN", "peer_addr" => peer_addr.to_string(), "error" => e.to_string());
             return;
@@ -289,11 +356,6 @@ impl BgpServer {
         }
         info!("sent KEEPALIVE", "peer_addr" => peer_addr.to_string());
 
-        let peers_arc = Arc::clone(&self.peers);
-        let rib = self.rib.clone();
-        let local_asn = self.config.asn;
-        let local_bgp_id = self.local_bgp_id;
-
         tokio::spawn(async move {
             Self::handle_peer(
                 read_half,
@@ -301,7 +363,7 @@ impl BgpServer {
                 peer_addr,
                 local_asn,
                 local_bgp_id,
-                peers_arc,
+                peers,
                 rib,
             )
             .await;
