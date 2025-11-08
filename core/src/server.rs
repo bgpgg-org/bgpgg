@@ -186,7 +186,7 @@ impl BgpServer {
         for peer in peers.values_mut() {
             // Only send to peers in Established state
             if peer.state() == BgpState::Established {
-                if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
+                if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
                     error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
                 } else {
                     info!("announced route to peer", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string(), "peer_addr" => peer.addr.to_string());
@@ -288,7 +288,7 @@ impl BgpServer {
                 for peer in peer_map.values_mut() {
                     // Only send to peers in Established state
                     if peer.state() == BgpState::Established {
-                        if let Err(e) = peer.writer.write_all(&update_msg.serialize()).await {
+                        if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
                             error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
                             success = false;
                         } else {
