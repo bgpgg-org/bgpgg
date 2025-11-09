@@ -201,8 +201,6 @@ impl LocRib {
     }
 
     pub fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) {
-        use crate::rib::types::RouteSource;
-
         for route in self.routes.values_mut() {
             route
                 .paths

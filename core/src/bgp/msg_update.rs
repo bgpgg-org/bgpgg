@@ -1127,6 +1127,7 @@ mod tests {
         // Verify BGP header
         assert_eq!(&serialized[0..16], &[0xff; 16]); // Marker
         let length = u16::from_be_bytes([serialized[16], serialized[17]]);
+        assert_eq!(length, serialized.len() as u16); // Length field matches actual length
         assert_eq!(serialized[18], 2); // Message type: UPDATE
 
         // Decode the body

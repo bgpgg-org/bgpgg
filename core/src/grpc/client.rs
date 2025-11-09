@@ -16,24 +16,40 @@ use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeersRequest,
     GetRoutesRequest, Peer, RemovePeerRequest, Route, WithdrawRouteRequest,
 };
+use std::net::Ipv4Addr;
 use tonic::transport::Channel;
 
 /// Simplified wrapper around the gRPC client that hides boilerplate
 pub struct BgpClient {
     inner: BgpServiceClient<Channel>,
+    /// Router ID of the BGP server this client is connected to.
+    pub router_id: Ipv4Addr,
 }
 
 impl BgpClient {
     /// Connect to a BGP gRPC server
     pub async fn connect(addr: impl Into<String>) -> Result<Self, tonic::transport::Error> {
         let inner = BgpServiceClient::connect(addr.into()).await?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            router_id: Ipv4Addr::UNSPECIFIED,
+        })
+    }
+
+    /// Connect to a BGP gRPC server with a known router ID
+    pub async fn connect_with_router_id(
+        addr: impl Into<String>,
+        router_id: Ipv4Addr,
+    ) -> Result<Self, tonic::transport::Error> {
+        let inner = BgpServiceClient::connect(addr.into()).await?;
+        Ok(Self { inner, router_id })
     }
 
     /// Get all routes from the Loc-RIB
-    pub async fn get_routes(&mut self) -> Result<Vec<Route>, tonic::Status> {
+    pub async fn get_routes(&self) -> Result<Vec<Route>, tonic::Status> {
         Ok(self
             .inner
+            .clone()
             .get_routes(GetRoutesRequest {})
             .await?
             .into_inner()
@@ -41,9 +57,10 @@ impl BgpClient {
     }
 
     /// Get all configured peers
-    pub async fn get_peers(&mut self) -> Result<Vec<Peer>, tonic::Status> {
+    pub async fn get_peers(&self) -> Result<Vec<Peer>, tonic::Status> {
         Ok(self
             .inner
+            .clone()
             .get_peers(GetPeersRequest {})
             .await?
             .into_inner()

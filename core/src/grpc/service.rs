@@ -24,9 +24,8 @@ use tonic::{Request, Response, Status};
 use super::proto::{
     bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AnnounceRouteRequest,
     AnnounceRouteResponse, BgpState as ProtoBgpState, GetPeersRequest, GetPeersResponse,
-    GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
-    RemovePeerRequest, RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest,
-    WithdrawRouteResponse,
+    GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer, RemovePeerRequest,
+    RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "local";
