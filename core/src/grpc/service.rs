@@ -14,6 +14,7 @@
 
 use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
+use crate::fsm::BgpState;
 use crate::rib::RouteSource;
 use crate::server::BgpRequest;
 use std::net::Ipv4Addr;
@@ -22,12 +23,25 @@ use tonic::{Request, Response, Status};
 
 use super::proto::{
     bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AnnounceRouteRequest,
-    AnnounceRouteResponse, GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse,
-    Path as ProtoPath, Peer as ProtoPeer, RemovePeerRequest, RemovePeerResponse,
-    Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
+    AnnounceRouteResponse, BgpState as ProtoBgpState, GetPeersRequest, GetPeersResponse,
+    GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
+    RemovePeerRequest, RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest,
+    WithdrawRouteResponse,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "local";
+
+/// Convert internal BgpState to proto BgpState
+fn to_proto_state(state: BgpState) -> i32 {
+    match state {
+        BgpState::Idle => ProtoBgpState::Idle as i32,
+        BgpState::Connect => ProtoBgpState::Connect as i32,
+        BgpState::Active => ProtoBgpState::Active as i32,
+        BgpState::OpenSent => ProtoBgpState::OpenSent as i32,
+        BgpState::OpenConfirm => ProtoBgpState::OpenConfirm as i32,
+        BgpState::Established => ProtoBgpState::Established as i32,
+    }
+}
 
 #[derive(Clone)]
 pub struct BgpGrpcService {
@@ -131,7 +145,7 @@ impl BgpService for BgpGrpcService {
             .map(|(addr, asn, state)| ProtoPeer {
                 address: addr.to_string(),
                 asn: *asn as u32,
-                state: format!("{:?}", state),
+                state: to_proto_state(*state),
             })
             .collect();
 

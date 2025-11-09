@@ -96,6 +96,26 @@ impl LocRib {
                 changed_prefixes.push(prefix);
             } else {
                 debug!("route rejected by import policy", "prefix" => format!("{:?}", prefix), "peer_addr" => peer_addr.to_string());
+
+                // Implicit withdrawal: remove any existing route for this prefix from this peer
+                if let Some(route) = self.routes.get_mut(&prefix) {
+                    let had_path = route
+                        .paths
+                        .iter()
+                        .any(|p| p.source == RouteSource::Peer(peer_addr));
+                    route
+                        .paths
+                        .retain(|p| p.source != RouteSource::Peer(peer_addr));
+
+                    if had_path {
+                        changed_prefixes.push(prefix);
+                    }
+
+                    // Remove route if no paths left
+                    if route.paths.is_empty() {
+                        self.routes.remove(&prefix);
+                    }
+                }
             }
         }
 

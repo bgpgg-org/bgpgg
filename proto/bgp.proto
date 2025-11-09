@@ -41,11 +41,21 @@ message GetPeersResponse {
     repeated Peer peers = 1;
 }
 
+// BGP FSM states
+enum BgpState {
+    IDLE = 0;
+    CONNECT = 1;
+    ACTIVE = 2;
+    OPEN_SENT = 3;
+    OPEN_CONFIRM = 4;
+    ESTABLISHED = 5;
+}
+
 // Peer information
 message Peer {
     string address = 1;
     uint32 asn = 2;
-    string state = 3;
+    BgpState state = 3;
 }
 
 // Announce route request/response
