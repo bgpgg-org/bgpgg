@@ -1,0 +1,259 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod common;
+
+use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
+use common::{
+    peer_in_state, poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
+    setup_two_peered_servers, verify_peers_established, TestServer,
+};
+
+/// Helper to verify server has expected peers
+async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) {
+    let mut peers = server.client.get_peers().await.unwrap();
+
+    // Sort both by address for consistent comparison
+    peers.sort_by(|a, b| a.address.cmp(&b.address));
+    expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
+
+    assert_eq!(
+        peers, expected_peers,
+        "Server {} peers don't match expected",
+        server.client.router_id
+    );
+}
+
+#[tokio::test]
+async fn test_peer_down() {
+    let hold_timer_secs = 3;
+    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    // Server2 announces a route to Server1 via gRPC
+    server2
+        .client
+        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route");
+
+    // Get the actual peer address (with OS-allocated port)
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // Poll for route to appear in Server1's RIB
+    poll_route_propagation(&[(
+        &server1,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![Path {
+                origin: Origin::Igp.into(),
+                as_path: vec![65002],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: peer_addr.clone(),
+                local_pref: Some(100),
+                med: None,
+            }],
+        }],
+    )])
+    .await;
+
+    // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
+    server2.kill();
+
+    // Give some time for Server1 to detect the disconnection
+    // With a 3-second hold time, the peer should be detected as down
+    // when the next keepalive fails (keepalive is sent every hold_time/3 = 1 second)
+    tokio::time::sleep(tokio::time::Duration::from_secs((hold_timer_secs + 2).into())).await;
+
+    // Poll for route withdrawal - route should be withdrawn when peer goes down
+    poll_route_withdrawal(&[&server1]).await;
+
+    // Verify Server1 has no peers in Established state anymore
+    verify_peers(&server1, vec![]).await;
+}
+
+#[tokio::test]
+async fn test_peer_down_four_node_mesh() {
+    let hold_timer_secs = 3;
+    let (mut server1, server2, server3, mut server4) =
+        setup_four_meshed_servers(Some(hold_timer_secs)).await;
+
+    // Server1 announces a route
+    server1
+        .client
+        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Poll for route to propagate to all peers
+    poll_route_propagation(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server4,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+    ])
+    .await;
+
+    // Kill Server4 to simulate peer going down
+    server4.kill();
+
+    // Give time for other servers to detect Server4 is down
+    tokio::time::sleep(tokio::time::Duration::from_secs((hold_timer_secs + 2).into())).await;
+
+    // Verify Server2 and Server3 still have the route (learned from Server1, not Server4)
+    poll_route_propagation(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+    ])
+    .await;
+
+    // Verify all servers have correct peers after Server4 goes down
+    // Peers are now identified by IP address only (no port)
+    verify_peers(
+        &server1,
+        vec![
+            Peer {
+                address: server2.address.clone(),
+                asn: server2.asn as u32,
+                state: BgpState::Established.into(),
+            },
+            Peer {
+                address: server3.address.clone(),
+                asn: server3.asn as u32,
+                state: BgpState::Established.into(),
+            },
+        ],
+    )
+    .await;
+    verify_peers(
+        &server2,
+        vec![
+            Peer {
+                address: server1.address.clone(),
+                asn: server1.asn as u32,
+                state: BgpState::Established.into(),
+            },
+            Peer {
+                address: server3.address.clone(),
+                asn: server3.asn as u32,
+                state: BgpState::Established.into(),
+            },
+        ],
+    )
+    .await;
+    verify_peers(
+        &server3,
+        vec![
+            Peer {
+                address: server1.address.clone(),
+                asn: server1.asn as u32,
+                state: BgpState::Established.into(),
+            },
+            Peer {
+                address: server2.address.clone(),
+                asn: server2.asn as u32,
+                state: BgpState::Established.into(),
+            },
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_peer_up() {
+    let hold_timer_secs = 3;
+    let (server1, server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connection stays up
+    tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
+
+    // Verify both peers are still in Established state
+    verify_peers_established(&[&server1, &server2], 1).await;
+}
+
+#[tokio::test]
+async fn test_peer_up_four_node_mesh() {
+    let hold_timer_secs = 3;
+    let (server1, server2, server3, server4) = setup_four_meshed_servers(Some(hold_timer_secs)).await;
+
+    // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connections stay up
+    tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
+
+    // Verify all peers are still in Established state
+    verify_peers_established(&[&server1, &server2, &server3, &server4], 3).await;
+}

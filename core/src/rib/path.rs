@@ -111,7 +111,7 @@ mod tests {
             origin: Origin::IGP,
             as_path: vec![65001],
             next_hop: Ipv4Addr::new(192, 168, 1, 1),
-            source: RouteSource::Ebgp("10.0.0.1:179".parse::<SocketAddr>().unwrap()),
+            source: RouteSource::Ebgp("10.0.0.1".to_string()),
             local_pref: Some(100),
             med: None,
         }
@@ -173,7 +173,7 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ebgp("10.0.0.1:179".parse::<SocketAddr>().unwrap());
+        path2.source = RouteSource::Ebgp("10.0.0.1".to_string());
 
         assert!(path1 > path2);
     }
@@ -183,7 +183,7 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ibgp("10.0.0.1:179".parse::<SocketAddr>().unwrap());
+        path2.source = RouteSource::Ibgp("10.0.0.1".to_string());
 
         assert!(path1 > path2);
     }
@@ -192,8 +192,8 @@ mod tests {
     fn test_ebgp_vs_ibgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp("10.0.0.1:179".parse::<SocketAddr>().unwrap());
-        path2.source = RouteSource::Ibgp("10.0.0.2:179".parse::<SocketAddr>().unwrap());
+        path1.source = RouteSource::Ebgp("10.0.0.1".to_string());
+        path2.source = RouteSource::Ibgp("10.0.0.2".to_string());
 
         assert!(path1 > path2);
     }
@@ -202,8 +202,8 @@ mod tests {
     fn test_peer_address_tiebreaker() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp("10.0.0.1:179".parse::<SocketAddr>().unwrap());
-        path2.source = RouteSource::Ebgp("10.0.0.2:179".parse::<SocketAddr>().unwrap());
+        path1.source = RouteSource::Ebgp("10.0.0.1".to_string());
+        path2.source = RouteSource::Ebgp("10.0.0.2".to_string());
 
         // Lower peer address should win
         assert!(path1 > path2);

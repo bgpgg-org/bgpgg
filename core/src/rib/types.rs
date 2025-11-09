@@ -20,9 +20,9 @@ use std::net::SocketAddr;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RouteSource {
     /// Route learned from an EBGP peer (external AS)
-    Ebgp(SocketAddr),
+    Ebgp(String),
     /// Route learned from an IBGP peer (same AS)
-    Ibgp(SocketAddr),
+    Ibgp(String),
     /// Route originated locally by this router
     Local,
 }

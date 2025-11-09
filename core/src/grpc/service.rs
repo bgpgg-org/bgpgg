@@ -93,14 +93,15 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<RemovePeerResponse>, Status> {
         let addr_str = request.into_inner().address;
 
-        // Parse address
+        // Parse address and extract IP
         let addr: std::net::SocketAddr = addr_str
             .parse()
             .map_err(|_| Status::invalid_argument("invalid address format"))?;
+        let peer_ip = addr.ip().to_string();
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::RemovePeer { addr, response: tx };
+        let req = BgpRequest::RemovePeer { addr: peer_ip.clone(), response: tx };
 
         self.bgp_request_tx
             .send(req)
@@ -111,7 +112,7 @@ impl BgpService for BgpGrpcService {
         match rx.await {
             Ok(Ok(())) => Ok(Response::new(RemovePeerResponse {
                 success: true,
-                message: format!("Peer {} removed", addr),
+                message: format!("Peer {} removed", peer_ip),
             })),
             Ok(Err(e)) => Ok(Response::new(RemovePeerResponse {
                 success: false,
