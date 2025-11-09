@@ -33,7 +33,7 @@ mod test_helpers {
     use super::*;
     use crate::bgp::msg_update::Origin;
     use crate::bgp::utils::IpNetwork;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::Ipv4Addr;
 
     pub(super) fn create_test_path(peer_ip: String) -> Path {
         Path {

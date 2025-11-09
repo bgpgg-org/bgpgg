@@ -14,7 +14,6 @@
 
 use crate::bgp::utils::IpNetwork;
 use crate::rib::path::Path;
-use std::net::SocketAddr;
 
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

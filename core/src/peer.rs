@@ -22,7 +22,6 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Path;
 use crate::{debug, info, warn};
 use std::io;
-use std::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 

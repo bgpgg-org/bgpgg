@@ -15,7 +15,6 @@
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 /// Adj-RIB-In: Per-peer input routing table
 ///
@@ -63,7 +62,7 @@ impl AdjRibIn {
 mod tests {
     use super::*;
     use crate::rib::test_helpers::*;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_new_adj_rib_in() {

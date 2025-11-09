@@ -16,7 +16,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 
 /// Loc-RIB: Local routing table
 ///
@@ -243,7 +243,7 @@ impl LocRib {
 mod tests {
     use super::*;
     use crate::rib::test_helpers::*;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_new_loc_rib() {

@@ -104,7 +104,6 @@ impl Ord for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     fn make_base_path() -> Path {
         Path {

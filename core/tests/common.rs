@@ -175,22 +175,25 @@ pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServ
         .expect("Failed to add peer");
 
     // Wait for peering to establish by polling via gRPC
-    for _ in 0..100 {
-        let peers1 = server1.client.get_peers().await.unwrap();
-        let peers2 = server2.client.get_peers().await.unwrap();
+    poll_until(
+        || async {
+            let Ok(peers1) = server1.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers2) = server2.client.get_peers().await else {
+                return false;
+            };
 
-        let both_established = peers1.len() == 1
-            && peers2.len() == 1
-            && peer_in_state(&peers1[0], BgpState::Established)
-            && peer_in_state(&peers2[0], BgpState::Established);
+            peers1.len() == 1
+                && peers2.len() == 1
+                && peer_in_state(&peers1[0], BgpState::Established)
+                && peer_in_state(&peers2[0], BgpState::Established)
+        },
+        "Timeout waiting for peers to establish",
+    )
+    .await;
 
-        if both_established {
-            return (server1, server2);
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("Timeout waiting for peers to establish");
+    (server1, server2)
 }
 
 /// Sets up three BGP servers in a full mesh topology
@@ -253,31 +256,36 @@ pub async fn setup_three_meshed_servers(
         .expect("Failed to add peer 3 to server 2");
 
     // Wait for all peerings to establish
-    for _ in 0..100 {
-        let peers1 = server1.client.get_peers().await.unwrap();
-        let peers2 = server2.client.get_peers().await.unwrap();
-        let peers3 = server3.client.get_peers().await.unwrap();
+    poll_until(
+        || async {
+            let Ok(peers1) = server1.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers2) = server2.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers3) = server3.client.get_peers().await else {
+                return false;
+            };
 
-        let all_established = peers1.len() == 2
-            && peers2.len() == 2
-            && peers3.len() == 2
-            && peers1
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established))
-            && peers2
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established))
-            && peers3
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established));
+            peers1.len() == 2
+                && peers2.len() == 2
+                && peers3.len() == 2
+                && peers1
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+                && peers2
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+                && peers3
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+        },
+        "Timeout waiting for mesh peers to establish",
+    )
+    .await;
 
-        if all_established {
-            return (server1, server2, server3);
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("Timeout waiting for mesh peers to establish");
+    (server1, server2, server3)
 }
 
 /// Sets up four BGP servers in a full mesh topology
@@ -367,36 +375,43 @@ pub async fn setup_four_meshed_servers(
         .expect("Failed to add peer 4 to server 3");
 
     // Wait for all peerings to establish
-    for _ in 0..100 {
-        let peers1 = server1.client.get_peers().await.unwrap();
-        let peers2 = server2.client.get_peers().await.unwrap();
-        let peers3 = server3.client.get_peers().await.unwrap();
-        let peers4 = server4.client.get_peers().await.unwrap();
+    poll_until(
+        || async {
+            let Ok(peers1) = server1.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers2) = server2.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers3) = server3.client.get_peers().await else {
+                return false;
+            };
+            let Ok(peers4) = server4.client.get_peers().await else {
+                return false;
+            };
 
-        let all_established = peers1.len() == 3
-            && peers2.len() == 3
-            && peers3.len() == 3
-            && peers4.len() == 3
-            && peers1
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established))
-            && peers2
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established))
-            && peers3
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established))
-            && peers4
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established));
+            peers1.len() == 3
+                && peers2.len() == 3
+                && peers3.len() == 3
+                && peers4.len() == 3
+                && peers1
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+                && peers2
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+                && peers3
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+                && peers4
+                    .iter()
+                    .all(|p| peer_in_state(p, BgpState::Established))
+        },
+        "Timeout waiting for mesh peers to establish",
+    )
+    .await;
 
-        if all_established {
-            return (server1, server2, server3, server4);
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("Timeout waiting for mesh peers to establish");
+    (server1, server2, server3, server4)
 }
 
 /// Polls for route propagation to multiple servers with expected routes
@@ -404,20 +419,22 @@ pub async fn setup_four_meshed_servers(
 /// # Arguments
 /// * `expectations` - Slice of tuples containing (TestServer, expected routes)
 pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) {
-    'retry: for _ in 0..100 {
-        for (server, expected_routes) in expectations {
-            let routes = server.client.get_routes().await.unwrap();
+    poll_until(
+        || async {
+            for (server, expected_routes) in expectations {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
 
-            if routes != *expected_routes {
-                sleep(Duration::from_millis(100)).await;
-                continue 'retry;
+                if routes != *expected_routes {
+                    return false;
+                }
             }
-        }
-        // All expectations matched
-        return;
-    }
-
-    panic!("Timeout waiting for routes to propagate");
+            true
+        },
+        "Timeout waiting for routes to propagate",
+    )
+    .await;
 }
 
 /// Polls for route withdrawal from multiple servers
@@ -425,25 +442,21 @@ pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) 
 /// # Arguments
 /// * `servers` - Slice of TestServer instances to check
 pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
-    for _ in 0..100 {
-        let mut all_withdrawn = true;
-
-        for server in servers.iter() {
-            let routes = server.client.get_routes().await.unwrap();
-            if !routes.is_empty() {
-                all_withdrawn = false;
-                break;
+    poll_until(
+        || async {
+            for server in servers.iter() {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                if !routes.is_empty() {
+                    return false;
+                }
             }
-        }
-
-        if all_withdrawn {
-            return;
-        }
-
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    panic!("Timeout waiting for route withdrawal");
+            true
+        },
+        "Timeout waiting for route withdrawal",
+    )
+    .await;
 }
 
 /// Generic polling helper that retries until a condition is met
