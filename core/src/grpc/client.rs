@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeersRequest,
-    GetRoutesRequest, Peer, RemovePeerRequest, Route, WithdrawRouteRequest,
+    bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeerRequest,
+    GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest, Route,
+    WithdrawRouteRequest,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -65,6 +66,21 @@ impl BgpClient {
             .await?
             .into_inner()
             .peers)
+    }
+
+    /// Get a specific peer with statistics
+    pub async fn get_peer(
+        &self,
+        address: String,
+    ) -> Result<(Option<Peer>, Option<PeerStatistics>), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .get_peer(GetPeerRequest { address })
+            .await?
+            .into_inner();
+
+        Ok((resp.peer, resp.statistics))
     }
 
     /// Add a new BGP peer

@@ -9,6 +9,7 @@ service BgpService {
     rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+    rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AnnounceRoute(AnnounceRouteRequest) returns (AnnounceRouteResponse);
     rpc WithdrawRoute(WithdrawRouteRequest) returns (WithdrawRouteResponse);
     rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
@@ -39,6 +40,28 @@ message GetPeersRequest {}
 
 message GetPeersResponse {
     repeated Peer peers = 1;
+}
+
+// Get peer request/response
+message GetPeerRequest {
+    string address = 1;  // Peer IP address
+}
+
+message GetPeerResponse {
+    Peer peer = 1;
+    PeerStatistics statistics = 2;
+}
+
+// Peer statistics
+message PeerStatistics {
+    uint64 open_sent = 1;
+    uint64 keepalive_sent = 2;
+    uint64 update_sent = 3;
+    uint64 notification_sent = 4;
+    uint64 open_received = 5;
+    uint64 keepalive_received = 6;
+    uint64 update_received = 7;
+    uint64 notification_received = 8;
 }
 
 // BGP FSM states

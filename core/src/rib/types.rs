@@ -14,15 +14,14 @@
 
 use crate::bgp::utils::IpNetwork;
 use crate::rib::path::Path;
-use std::net::SocketAddr;
 
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RouteSource {
     /// Route learned from an EBGP peer (external AS)
-    Ebgp(SocketAddr),
+    Ebgp(String),
     /// Route learned from an IBGP peer (same AS)
-    Ibgp(SocketAddr),
+    Ibgp(String),
     /// Route originated locally by this router
     Local,
 }

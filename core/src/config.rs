@@ -23,20 +23,27 @@ pub struct Config {
     pub router_id: Ipv4Addr,
     #[serde(default = "default_grpc_listen_addr")]
     pub grpc_listen_addr: String,
+    #[serde(default = "default_hold_time")]
+    pub hold_time_secs: u64,
 }
 
 fn default_grpc_listen_addr() -> String {
     "[::1]:50051".to_string()
 }
 
+fn default_hold_time() -> u64 {
+    180
+}
+
 impl Config {
     /// Create a new configuration
-    pub fn new(asn: u16, listen_addr: &str, router_id: Ipv4Addr) -> Self {
+    pub fn new(asn: u16, listen_addr: &str, router_id: Ipv4Addr, hold_time_secs: u64) -> Self {
         Config {
             asn,
             listen_addr: listen_addr.to_string(),
             router_id,
             grpc_listen_addr: "[::1]:50051".to_string(),
+            hold_time_secs,
         }
     }
 
@@ -54,6 +61,7 @@ impl Default for Config {
             listen_addr: "127.0.0.1:179".to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             grpc_listen_addr: "[::1]:50051".to_string(),
+            hold_time_secs: default_hold_time(),
         }
     }
 }
@@ -72,10 +80,11 @@ mod tests {
 
     #[test]
     fn test_config_new() {
-        let config = Config::new(65100, "192.168.1.1:179", Ipv4Addr::new(192, 168, 1, 1));
+        let config = Config::new(65100, "192.168.1.1:179", Ipv4Addr::new(192, 168, 1, 1), 180);
         assert_eq!(config.asn, 65100);
         assert_eq!(config.listen_addr, "192.168.1.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(config.hold_time_secs, 180);
     }
 
     #[test]

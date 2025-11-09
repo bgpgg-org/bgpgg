@@ -15,7 +15,6 @@
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 /// Adj-RIB-In: Per-peer input routing table
 ///
@@ -48,7 +47,7 @@ impl AdjRibIn {
 }
 
 impl AdjRibIn {
-    pub fn new(_peer_addr: SocketAddr) -> Self {
+    pub fn new(_peer_ip: String) -> Self {
         AdjRibIn {
             routes: HashMap::new(),
         }
@@ -63,22 +62,22 @@ impl AdjRibIn {
 mod tests {
     use super::*;
     use crate::rib::test_helpers::*;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_new_adj_rib_in() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let rib_in = AdjRibIn::new(peer_ip);
 
         assert_eq!(rib_in.get_all_routes().len(), 0);
     }
 
     #[test]
     fn test_add_route() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
         let prefix = create_test_prefix();
-        let path = create_test_path(peer_addr);
+        let path = create_test_path(peer_ip.clone());
 
         rib_in.add_route(prefix, path.clone());
 
@@ -90,8 +89,8 @@ mod tests {
 
     #[test]
     fn test_add_multiple_routes() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
 
         let prefix1 = create_test_prefix();
         let prefix2 = IpNetwork::V4(crate::bgp::utils::Ipv4Net {
@@ -99,8 +98,8 @@ mod tests {
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_addr);
-        let path2 = create_test_path(peer_addr);
+        let path1 = create_test_path(peer_ip.clone());
+        let path2 = create_test_path(peer_ip.clone());
 
         rib_in.add_route(prefix1, path1.clone());
         rib_in.add_route(prefix2, path2.clone());
@@ -125,12 +124,12 @@ mod tests {
 
     #[test]
     fn test_add_route_overwrite() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
         let prefix = create_test_prefix();
 
-        let path1 = create_test_path(peer_addr);
-        let mut path2 = create_test_path(peer_addr);
+        let path1 = create_test_path(peer_ip.clone());
+        let mut path2 = create_test_path(peer_ip.clone());
         path2.as_path = vec![300, 400];
 
         rib_in.add_route(prefix, path1);
@@ -143,16 +142,16 @@ mod tests {
 
     #[test]
     fn test_remove_route() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
         let prefix1 = create_test_prefix();
         let prefix2 = IpNetwork::V4(crate::bgp::utils::Ipv4Net {
             address: Ipv4Addr::new(10, 1, 0, 0),
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_addr);
-        let path2 = create_test_path(peer_addr);
+        let path1 = create_test_path(peer_ip.clone());
+        let path2 = create_test_path(peer_ip.clone());
 
         rib_in.add_route(prefix1, path1);
         rib_in.add_route(prefix2, path2.clone());
@@ -171,8 +170,8 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent_route() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
         let prefix = create_test_prefix();
 
         rib_in.remove_route(prefix);
@@ -181,16 +180,16 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let peer_addr: SocketAddr = "192.0.2.1:179".parse().unwrap();
-        let mut rib_in = AdjRibIn::new(peer_addr);
+        let peer_ip = "192.0.2.1".to_string();
+        let mut rib_in = AdjRibIn::new(peer_ip.clone());
 
-        rib_in.add_route(create_test_prefix(), create_test_path(peer_addr));
+        rib_in.add_route(create_test_prefix(), create_test_path(peer_ip.clone()));
         rib_in.add_route(
             IpNetwork::V4(crate::bgp::utils::Ipv4Net {
                 address: Ipv4Addr::new(10, 1, 0, 0),
                 prefix_length: 24,
             }),
-            create_test_path(peer_addr),
+            create_test_path(peer_ip.clone()),
         );
 
         assert_eq!(rib_in.get_all_routes().len(), 2);

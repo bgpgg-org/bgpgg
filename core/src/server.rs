@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
-use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
-use crate::fsm::BgpState;
+use crate::fsm::{BgpEvent, BgpState};
 use crate::peer::Peer;
 use crate::rib::rib_loc::LocRib;
 use crate::{debug, error, info};
@@ -36,7 +35,7 @@ pub enum BgpRequest {
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePeer {
-        addr: SocketAddr,
+        addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
     AnnounceRoute {
@@ -50,7 +49,11 @@ pub enum BgpRequest {
         response: oneshot::Sender<Result<(), String>>,
     },
     GetPeers {
-        response: oneshot::Sender<Vec<(SocketAddr, u16, BgpState)>>,
+        response: oneshot::Sender<Vec<(String, u16, BgpState)>>,
+    },
+    GetPeer {
+        addr: String,
+        response: oneshot::Sender<Option<(String, u16, BgpState, crate::peer::PeerStatistics)>>,
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
@@ -58,7 +61,7 @@ pub enum BgpRequest {
 }
 
 pub struct BgpServer {
-    pub peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+    pub peers: Arc<Mutex<HashMap<String, Peer>>>,
     pub loc_rib: Arc<Mutex<LocRib>>,
     pub request_tx: mpsc::Sender<BgpRequest>,
     config: Config,
@@ -87,15 +90,44 @@ impl BgpServer {
 
     async fn initiate_peer_connection(
         peer_addr: &str,
+        local_bind_ip: &str,
         local_asn: u16,
         local_bgp_id: u32,
-        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        hold_time: u16,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
         info!("attempting to connect to peer", "peer_addr" => peer_addr);
 
+        // Parse the configured peer address
+        let configured_addr: SocketAddr = match peer_addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                error!("invalid peer address", "peer_addr" => peer_addr, "error" => e.to_string());
+                return;
+            }
+        };
+
+        // Extract just the IP address (no port) to use as peer identifier
+        let peer_ip = configured_addr.ip().to_string();
+
+        // Bind to local IP before connecting (so remote sees us from the correct IP)
+        use tokio::net::TcpSocket;
+        let socket = if configured_addr.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }
+        .unwrap();
+
+        let local_bind_addr: SocketAddr = format!("{}:0", local_bind_ip).parse().unwrap();
+        if let Err(e) = socket.bind(local_bind_addr) {
+            error!("failed to bind to local address", "local_addr" => local_bind_ip, "error" => e.to_string());
+            return;
+        }
+
         // Connect to the peer
-        let stream = match TcpStream::connect(peer_addr).await {
+        let stream = match socket.connect(configured_addr).await {
             Ok(s) => s,
             Err(e) => {
                 error!("failed to connect to peer", "peer_addr" => peer_addr, "error" => e.to_string());
@@ -103,40 +135,17 @@ impl BgpServer {
             }
         };
 
-        let addr = match stream.peer_addr() {
-            Ok(a) => a,
-            Err(e) => {
-                error!("failed to get peer address", "error" => e.to_string());
-                return;
-            }
-        };
+        info!("connected to peer", "peer_ip" => &peer_ip);
 
-        info!("connected to peer", "peer_addr" => addr.to_string());
+        let (read_half, write_half) = stream.into_split();
 
-        let (read_half, mut write_half) = stream.into_split();
-
-        // Send OPEN message
-        let open_msg = OpenMessage::new(local_asn, 180, local_bgp_id);
-        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
-            error!("failed to send OPEN", "peer_addr" => addr.to_string(), "error" => e.to_string());
-            return;
-        }
-        info!("sent OPEN", "peer_addr" => addr.to_string());
-
-        // Send KEEPALIVE message
-        let keepalive_msg = KeepAliveMessage {};
-        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
-            error!("failed to send KEEPALIVE", "peer_addr" => addr.to_string(), "error" => e.to_string());
-            return;
-        }
-        info!("sent KEEPALIVE", "peer_addr" => addr.to_string());
-
-        // Handle incoming messages from this peer (will add peer after receiving OPEN)
+        // Handle incoming messages from this peer (will create Peer after receiving OPEN)
         Self::handle_peer(
             read_half,
             write_half,
-            addr,
+            peer_ip,
             local_asn,
+            hold_time,
             local_bgp_id,
             peers,
             loc_rib,
@@ -169,12 +178,14 @@ impl BgpServer {
             tokio::select! {
                 // Handle incoming BGP connections
                 Ok((stream, _)) = listener.accept() => {
-                    Self::accept_peer(stream, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id).await;
+                    Self::accept_peer(stream, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
                 }
 
                 // Handle gRPC requests
                 Some(req) = request_rx.recv() => {
-                    Self::handle_request(req, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id).await;
+                    // Extract local bind IP from listen address
+                    let local_bind_ip = config.listen_addr.split(':').next().unwrap_or("127.0.0.1");
+                    Self::handle_request(req, local_bind_ip, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
                 }
             }
         }
@@ -182,23 +193,34 @@ impl BgpServer {
 
     async fn handle_request(
         req: BgpRequest,
-        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        local_bind_ip: &str,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
+        hold_time: u16,
     ) {
         match req {
             BgpRequest::AddPeer { addr, response } => {
                 info!("adding peer via request", "peer_addr" => &addr);
 
+                let local_bind_ip = local_bind_ip.to_string();
                 tokio::spawn(async move {
-                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, loc_rib)
-                        .await;
+                    Self::initiate_peer_connection(
+                        &addr,
+                        &local_bind_ip,
+                        local_asn,
+                        local_bgp_id,
+                        hold_time,
+                        peers,
+                        loc_rib,
+                    )
+                    .await;
                 });
                 let _ = response.send(Ok(()));
             }
             BgpRequest::RemovePeer { addr, response } => {
-                info!("removing peer via request", "peer_addr" => addr.to_string());
+                info!("removing peer via request", "peer_ip" => &addr);
 
                 // Remove peer from map
                 let mut peer_map = peers.lock().await;
@@ -206,7 +228,17 @@ impl BgpServer {
                 drop(peer_map);
 
                 // Notify Loc-RIB to remove routes from this peer
-                loc_rib.lock().await.remove_routes_from_peer(addr);
+                let changed_prefixes = loc_rib.lock().await.remove_routes_from_peer(addr.clone());
+
+                // Propagate route changes (withdrawals or new best paths) to all remaining peers
+                Self::propagate_routes(
+                    changed_prefixes,
+                    None, // Don't exclude any peer since the removed peer is already gone
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
 
                 if removed {
                     let _ = response.send(Ok(()));
@@ -262,10 +294,17 @@ impl BgpServer {
             }
             BgpRequest::GetPeers { response } => {
                 let peer_map = peers.lock().await;
-                let peer_info: Vec<(SocketAddr, u16, BgpState)> = peer_map
+                let peer_info: Vec<(String, u16, BgpState)> = peer_map
                     .values()
-                    .map(|p| (p.addr, p.asn, p.state()))
+                    .map(|p| (p.addr.clone(), p.asn, p.state()))
                     .collect();
+                let _ = response.send(peer_info);
+            }
+            BgpRequest::GetPeer { addr, response } => {
+                let peer_map = peers.lock().await;
+                let peer_info = peer_map
+                    .get(&addr)
+                    .map(|p| (p.addr.clone(), p.asn, p.state(), p.statistics.clone()));
                 let _ = response.send(peer_info);
             }
             BgpRequest::GetRoutes { response } => {
@@ -277,10 +316,11 @@ impl BgpServer {
 
     async fn accept_peer(
         stream: TcpStream,
-        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
         local_bgp_id: u32,
+        hold_time: u16,
     ) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
@@ -290,32 +330,20 @@ impl BgpServer {
             }
         };
 
-        info!("new peer connection", "peer_addr" => peer_addr.to_string());
+        // Extract just the IP address (no port) to use as peer identifier
+        let peer_ip = peer_addr.ip().to_string();
 
-        let (read_half, mut write_half) = stream.into_split();
+        info!("new peer connection", "peer_ip" => &peer_ip);
 
-        // Send OPEN message
-        let open_msg = OpenMessage::new(local_asn, 180, local_bgp_id);
-        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
-            error!("failed to send OPEN", "peer_addr" => peer_addr.to_string(), "error" => e.to_string());
-            return;
-        }
-        info!("sent OPEN", "peer_addr" => peer_addr.to_string());
-
-        // Send KEEPALIVE message
-        let keepalive_msg = KeepAliveMessage {};
-        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
-            error!("failed to send KEEPALIVE", "peer_addr" => peer_addr.to_string(), "error" => e.to_string());
-            return;
-        }
-        info!("sent KEEPALIVE", "peer_addr" => peer_addr.to_string());
+        let (read_half, write_half) = stream.into_split();
 
         tokio::spawn(async move {
             Self::handle_peer(
                 read_half,
                 write_half,
-                peer_addr,
+                peer_ip,
                 local_asn,
+                hold_time,
                 local_bgp_id,
                 peers,
                 loc_rib,
@@ -327,105 +355,209 @@ impl BgpServer {
     async fn handle_peer(
         mut read_half: tokio::net::tcp::OwnedReadHalf,
         write_half: tokio::net::tcp::OwnedWriteHalf,
-        addr: SocketAddr,
+        peer_ip: String,
         local_asn: u16,
+        hold_time: u16,
         local_bgp_id: u32,
-        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
-        debug!("handling peer", "peer_addr" => addr.to_string());
+        debug!("handling peer", "peer_ip" => &peer_ip);
 
-        // First, wait for OPEN message
-        let peer_asn = loop {
+        // Create a placeholder Peer to send OPEN immediately (we don't know peer_asn yet)
+        let mut peer = Peer::new(
+            peer_ip.clone(),
+            write_half,
+            0,
+            crate::peer::SessionType::Ebgp,
+        );
+
+        // Send OPEN via FSM to avoid deadlock
+        if let Err(e) = peer.process_event(&BgpEvent::ManualStart).await {
+            error!("failed to start FSM", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        if let Err(e) = peer
+            .process_event(&BgpEvent::TcpConnectionConfirmed {
+                local_asn,
+                hold_time,
+                bgp_id: local_bgp_id,
+            })
+            .await
+        {
+            error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        // Wait for peer's OPEN message
+        let (peer_asn, peer_hold_time) = loop {
             let result = read_bgp_message(&mut read_half).await;
 
             match result {
                 Ok(message) => match message {
                     BgpMessage::Open(open_msg) => {
-                        info!("received OPEN from peer", "peer_addr" => addr.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time, "bgp_identifier" => open_msg.bgp_identifier);
-                        break open_msg.asn;
+                        info!("received OPEN from peer", "peer_ip" => &peer_ip, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time, "bgp_identifier" => open_msg.bgp_identifier);
+                        break (open_msg.asn, open_msg.hold_time);
                     }
                     _ => {
-                        error!("expected OPEN as first message", "peer_addr" => addr.to_string());
+                        error!("expected OPEN as first message", "peer_ip" => &peer_ip);
                         return;
                     }
                 },
                 Err(e) => {
-                    error!("error reading first message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
+                    error!("error reading first message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
                     return;
                 }
             }
         };
 
-        // Now add the peer with the ASN we received
-        let mut peer = Peer::new(addr, write_half, peer_asn, local_asn, local_bgp_id);
+        // Negotiate hold time: use minimum of our hold time and peer's hold time (RFC 4271)
+        let negotiated_hold_time = hold_time.min(peer_hold_time);
 
-        // Initialize the BGP connection
-        if let Err(e) = peer.initialize_connection().await {
-            error!("failed to initialize connection", "peer_addr" => addr.to_string(), "error" => e.to_string());
+        // Determine session type
+        let session_type = if peer_asn == local_asn {
+            crate::peer::SessionType::Ibgp
+        } else {
+            crate::peer::SessionType::Ebgp
+        };
+
+        // Update peer with correct ASN and session type
+        peer.asn = peer_asn;
+        peer.session_type = session_type;
+
+        // Track that we received OPEN (it was received before peer was fully created)
+        peer.statistics.open_received += 1;
+
+        // Process receiving peer's OPEN (sends KEEPALIVE)
+        if let Err(e) = peer
+            .process_event(&BgpEvent::BgpOpenReceived {
+                peer_asn,
+                peer_hold_time: negotiated_hold_time,
+            })
+            .await
+        {
+            error!("failed to complete connection", "peer_ip" => &peer_ip, "error" => e.to_string());
             return;
         }
 
+        // Add peer to the map
         {
             let mut peer_map = peers.lock().await;
-            peer_map.insert(addr, peer);
-            info!("peer added", "peer_addr" => addr.to_string(), "peer_asn" => peer_asn, "total_peers" => peer_map.len());
+            peer_map.insert(peer_ip.clone(), peer);
+            info!("peer established", "peer_ip" => &peer_ip, "peer_asn" => peer_asn, "session_type" => format!("{:?}", session_type), "total_peers" => peer_map.len());
         }
+
+        // Create keepalive interval timer (RFC 4271)
+        let mut keepalive_interval = if negotiated_hold_time > 0 {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // Skip first immediate tick
+            Some(interval)
+        } else {
+            None
+        };
+
+        // RFC 4271: Hold timer - track last KEEPALIVE or UPDATE received
+        let hold_timeout = tokio::time::Duration::from_secs(negotiated_hold_time as u64);
+        let mut last_keepalive_or_update = tokio::time::Instant::now();
+
+        // Check hold timer every 500ms
+        let mut hold_check_interval =
+            tokio::time::interval(tokio::time::Duration::from_millis(500));
+        hold_check_interval.tick().await; // Skip first immediate tick
 
         // Now continue handling subsequent messages
         loop {
-            let result = read_bgp_message(&mut read_half).await;
-
-            let mut peer_map = peers.lock().await;
-            let Some(peer) = peer_map.get_mut(&addr) else {
-                error!("peer not found in map", "peer_addr" => addr.to_string());
-                break;
-            };
-
-            match result {
-                Ok(message) => {
-                    let is_notification = matches!(&message, BgpMessage::Notification(_));
-
-                    // Process message with peer
-                    let delta = match peer.process_message(message).await {
-                        Ok(delta) => delta,
-                        Err(e) => {
-                            error!("failed to process message", "peer_addr" => addr.to_string(), "error" => e.to_string());
-                            None
-                        }
+            tokio::select! {
+                // Read messages from peer
+                result = read_bgp_message(&mut read_half) => {
+                    let mut peer_map = peers.lock().await;
+                    let Some(peer) = peer_map.get_mut(&peer_ip) else {
+                        error!("peer not found in map", "peer_ip" => &peer_ip);
+                        break;
                     };
-                    drop(peer_map);
 
-                    // Update Loc-RIB if we have route changes (withdrawn or announced)
-                    if let Some((withdrawn, announced)) = delta {
-                        let changed_prefixes = loc_rib
-                            .lock()
-                            .await
-                            .update_from_peer(addr, withdrawn, announced);
-                        info!("UPDATE processing complete", "peer_addr" => addr.to_string());
+                    match result {
+                        Ok(message) => {
+                            // RFC 4271: Only restart hold timer on KEEPALIVE or UPDATE
+                            let is_keepalive_or_update = matches!(&message, BgpMessage::KeepAlive(_) | BgpMessage::Update(_));
+                            let is_notification = matches!(&message, BgpMessage::Notification(_));
 
-                        // Propagate changed routes to other peers
-                        if !changed_prefixes.is_empty() {
-                            Self::propagate_routes(
-                                changed_prefixes,
-                                Some(addr),
-                                peers.clone(),
-                                loc_rib.clone(),
-                                local_asn,
-                            )
-                            .await;
+                            // Process message with peer
+                            let delta = match peer.process_message(message).await {
+                                Ok(delta) => delta,
+                                Err(e) => {
+                                    error!("failed to process message", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                    None
+                                }
+                            };
+                            drop(peer_map);
+
+                            // RFC 4271: Restart hold timer on KEEPALIVE or UPDATE
+                            if is_keepalive_or_update {
+                                last_keepalive_or_update = tokio::time::Instant::now();
+                            }
+
+                            // Update Loc-RIB if we have route changes (withdrawn or announced)
+                            if let Some((withdrawn, announced)) = delta {
+                                let changed_prefixes = loc_rib
+                                    .lock()
+                                    .await
+                                    .update_from_peer(peer_ip.clone(), withdrawn, announced);
+                                info!("UPDATE processing complete", "peer_ip" => &peer_ip);
+
+                                // Propagate changed routes to other peers
+                                if !changed_prefixes.is_empty() {
+                                    Self::propagate_routes(
+                                        changed_prefixes,
+                                        Some(peer_ip.clone()),
+                                        peers.clone(),
+                                        loc_rib.clone(),
+                                        local_asn,
+                                    )
+                                    .await;
+                                }
+                            }
+
+                            // If notification received, break the loop
+                            if is_notification {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            drop(peer_map);
+                            error!("error reading message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+                            break;
                         }
                     }
+                }
 
-                    // If notification received, break the loop
-                    if is_notification {
+                // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
+                _ = hold_check_interval.tick() => {
+                    if last_keepalive_or_update.elapsed() > hold_timeout {
+                        error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_ip" => &peer_ip);
                         break;
                     }
                 }
-                Err(e) => {
-                    drop(peer_map);
-                    error!("error reading message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
-                    break;
+
+                // Periodic KEEPALIVE check
+                _ = async {
+                    match &mut keepalive_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let mut peer_map = peers.lock().await;
+                    if let Some(peer) = peer_map.get_mut(&peer_ip) {
+                        if peer.fsm.timers.keepalive_timer_expired() {
+                            if let Err(e) = peer.process_event(&crate::fsm::BgpEvent::KeepaliveTimerExpires).await {
+                                error!("failed to send keepalive", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                drop(peer_map);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -433,20 +565,29 @@ impl BgpServer {
         // Remove peer from the map when disconnected
         {
             let mut peer_map = peers.lock().await;
-            peer_map.remove(&addr);
-            info!("peer disconnected", "peer_addr" => addr.to_string(), "total_peers" => peer_map.len());
+            peer_map.remove(&peer_ip);
+            info!("peer disconnected", "peer_ip" => &peer_ip, "total_peers" => peer_map.len());
         }
 
-        // Notify Loc-RIB about disconnection
-        loc_rib.lock().await.remove_routes_from_peer(addr);
+        // Notify Loc-RIB about disconnection and get affected prefixes
+        let changed_prefixes = loc_rib
+            .lock()
+            .await
+            .remove_routes_from_peer(peer_ip.clone());
+
+        // Propagate withdrawals to other peers
+        if !changed_prefixes.is_empty() {
+            Self::propagate_routes(changed_prefixes, Some(peer_ip), peers, loc_rib, local_asn)
+                .await;
+        }
     }
 
     /// Propagate route changes to all established peers (except the originating peer)
     /// If originating_peer is None, propagates to all peers (used for locally originated routes)
     async fn propagate_routes(
         changed_prefixes: Vec<IpNetwork>,
-        originating_peer: Option<SocketAddr>,
-        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        originating_peer: Option<String>,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
         local_asn: u16,
     ) {
@@ -471,8 +612,8 @@ impl BgpServer {
         let mut peer_map = peers.lock().await;
         for (peer_addr, peer) in peer_map.iter_mut() {
             // Skip the peer that sent us the original update (if any)
-            if let Some(orig_peer) = originating_peer {
-                if *peer_addr == orig_peer {
+            if let Some(ref orig_peer) = originating_peer {
+                if peer_addr == orig_peer {
                     continue;
                 }
             }
@@ -485,10 +626,10 @@ impl BgpServer {
             // Send withdrawals if any
             if !to_withdraw.is_empty() {
                 let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.clone());
-                if let Err(e) = peer.tcp_tx.write_all(&withdraw_msg.serialize()).await {
-                    error!("failed to send WITHDRAW to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                if let Err(e) = peer.send_update(withdraw_msg).await {
+                    error!("failed to send WITHDRAW to peer", "peer_ip" => &peer.addr, "error" => e.to_string());
                 } else {
-                    info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_addr" => peer.addr.to_string());
+                    info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => &peer.addr);
                 }
             }
 
@@ -515,10 +656,10 @@ impl BgpServer {
                 let update_msg =
                     UpdateMessage::new(path.origin, as_path_segments, path.next_hop, vec![*prefix]);
 
-                if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
-                    error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                if let Err(e) = peer.send_update(update_msg).await {
+                    error!("failed to send UPDATE to peer", "peer_ip" => &peer.addr, "error" => e.to_string());
                 } else {
-                    info!("propagated route to peer", "prefix" => format!("{:?}", prefix), "peer_addr" => peer.addr.to_string());
+                    info!("propagated route to peer", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer.addr);
                 }
             }
         }
