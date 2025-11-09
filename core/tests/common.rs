@@ -27,7 +27,7 @@ pub struct TestServer {
     pub client: BgpClient,
     pub bgp_port: u16,
     pub asn: u16,
-    pub address: String,  // IP address the server is bound to (no port)
+    pub address: String, // IP address the server is bound to (no port)
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -152,8 +152,20 @@ pub async fn start_test_server(
 /// Both servers will be in Established state when this function returns.
 pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServer, TestServer) {
     // Start both servers on different loopback IPs - OS allocates ports automatically
-    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs, "127.0.0.1").await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, "127.0.0.2").await;
+    let server1 = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs,
+        "127.0.0.1",
+    )
+    .await;
+    let mut server2 = start_test_server(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs,
+        "127.0.0.2",
+    )
+    .await;
 
     // Server2 connects to Server1 via gRPC
     server2
@@ -198,9 +210,27 @@ pub async fn setup_three_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer) {
     // Start all three servers on different loopback IPs - OS allocates ports automatically
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs, "127.0.0.1").await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, "127.0.0.2").await;
-    let server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3), hold_timer_secs, "127.0.0.3").await;
+    let mut server1 = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs,
+        "127.0.0.1",
+    )
+    .await;
+    let mut server2 = start_test_server(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs,
+        "127.0.0.2",
+    )
+    .await;
+    let server3 = start_test_server(
+        65003,
+        Ipv4Addr::new(3, 3, 3, 3),
+        hold_timer_secs,
+        "127.0.0.3",
+    )
+    .await;
 
     // Create full mesh: each server peers with the other two
     // Server1 connects to Server2 and Server3
@@ -270,10 +300,34 @@ pub async fn setup_four_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer, TestServer) {
     // Start all four servers on different loopback IPs - OS allocates ports automatically
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs, "127.0.0.1").await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, "127.0.0.2").await;
-    let mut server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3), hold_timer_secs, "127.0.0.3").await;
-    let server4 = start_test_server(65004, Ipv4Addr::new(4, 4, 4, 4), hold_timer_secs, "127.0.0.4").await;
+    let mut server1 = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs,
+        "127.0.0.1",
+    )
+    .await;
+    let mut server2 = start_test_server(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs,
+        "127.0.0.2",
+    )
+    .await;
+    let mut server3 = start_test_server(
+        65003,
+        Ipv4Addr::new(3, 3, 3, 3),
+        hold_timer_secs,
+        "127.0.0.3",
+    )
+    .await;
+    let server4 = start_test_server(
+        65004,
+        Ipv4Addr::new(4, 4, 4, 4),
+        hold_timer_secs,
+        "127.0.0.4",
+    )
+    .await;
 
     // Create full mesh: each server peers with the other three
     // Server1 connects to Server2, Server3, and Server4
@@ -392,34 +446,35 @@ pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
     panic!("Timeout waiting for route withdrawal");
 }
 
-/// Verifies all servers have expected peer count in Established state
+/// Generic polling helper that retries until a condition is met
 ///
 /// # Arguments
-/// * `servers` - Slice of TestServer instances to verify
-/// * `expected_peer_count` - Expected number of peers per server
-pub async fn verify_peers_established(servers: &[&TestServer], expected_peer_count: usize) {
-    for server in servers.iter() {
-        let routes = server.client.get_routes().await.unwrap();
-        assert!(
-            routes.is_empty(),
-            "Route not withdrawn from server {}",
-            server.client.router_id
-        );
-
-        let peers = server.client.get_peers().await.unwrap();
-        assert_eq!(
-            peers.len(),
-            expected_peer_count,
-            "Server {} should have {} peers",
-            server.client.router_id,
-            expected_peer_count
-        );
-        assert!(
-            peers
-                .iter()
-                .all(|p| peer_in_state(p, BgpState::Established)),
-            "Server {} peers should be established",
-            server.client.router_id
-        );
+/// * `check` - Async function that returns true when condition is met
+/// * `timeout_message` - Message to display if timeout occurs
+pub async fn poll_until<F, Fut>(check: F, timeout_message: &str)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..100 {
+        if check().await {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
     }
+
+    panic!("{}", timeout_message);
+}
+
+/// Helper to check if server has expected peers (returns bool, suitable for poll_until)
+pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) -> bool {
+    let Ok(mut peers) = server.client.get_peers().await else {
+        return false;
+    };
+
+    // Sort both by address for consistent comparison
+    peers.sort_by(|a, b| a.address.cmp(&b.address));
+    expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
+
+    peers == expected_peers
 }

@@ -14,10 +14,10 @@
 
 mod common;
 
-use bgpgg::grpc::proto::{Origin, Path, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
 use common::{
     poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
-    setup_three_meshed_servers, setup_two_peered_servers, verify_peers_established,
+    setup_three_meshed_servers, setup_two_peered_servers, verify_peers,
 };
 
 #[tokio::test]
@@ -59,13 +59,34 @@ async fn test_announce_withdraw() {
         .await
         .expect("Failed to withdraw route");
 
-    // Poll for withdrawal and verify peers
+    // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server1]).await;
-    verify_peers_established(&[&server1, &server2], 1).await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![Peer {
+                address: server2.address.clone(),
+                asn: server2.asn as u32,
+                state: BgpState::Established.into(),
+            }],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![Peer {
+                address: server1.address.clone(),
+                asn: server1.asn as u32,
+                state: BgpState::Established.into(),
+            }],
+        )
+        .await
+    );
 }
 
 #[tokio::test]
-async fn test_announce_withdraw_three_node_mesh() {
+async fn test_announce_withdraw_mesh() {
     let (mut server1, server2, server3) = setup_three_meshed_servers(None).await;
 
     // Server1 announces a route
@@ -77,6 +98,14 @@ async fn test_announce_withdraw_three_node_mesh() {
 
     // Poll for route propagation with expected AS paths
     // After best path selection, only the best path (shortest AS_PATH) should remain
+
+    // Get actual peer addresses
+    let peers2 = server2.client.get_peers().await.unwrap();
+    let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers3 = server3.client.get_peers().await.unwrap();
+    let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
+
     poll_route_propagation(&[
         (
             &server2,
@@ -86,7 +115,7 @@ async fn test_announce_withdraw_three_node_mesh() {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
                     next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
+                    peer_address: peer2_from_server1.address.clone(),
                     local_pref: Some(100),
                     med: None,
                 }],
@@ -100,7 +129,7 @@ async fn test_announce_withdraw_three_node_mesh() {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
                     next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
+                    peer_address: peer3_from_server1.address.clone(),
                     local_pref: Some(100),
                     med: None,
                 }],
@@ -116,9 +145,62 @@ async fn test_announce_withdraw_three_node_mesh() {
         .await
         .expect("Failed to withdraw route from server 1");
 
-    // Poll for withdrawal and verify peers
+    // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server2, &server3]).await;
-    verify_peers_established(&[&server1, &server2, &server3], 2).await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server3,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
 }
 
 #[tokio::test]
@@ -134,6 +216,17 @@ async fn test_announce_withdraw_four_node_mesh() {
 
     // Poll for route propagation with expected AS paths
     // After best path selection, only the best path (shortest AS_PATH) should remain
+
+    // Get actual peer addresses
+    let peers2 = server2.client.get_peers().await.unwrap();
+    let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers3 = server3.client.get_peers().await.unwrap();
+    let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers4 = server4.client.get_peers().await.unwrap();
+    let peer4_from_server1 = peers4.iter().find(|p| p.asn == 65001).unwrap();
+
     poll_route_propagation(&[
         (
             &server2,
@@ -143,7 +236,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
                     next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
+                    peer_address: peer2_from_server1.address.clone(),
                     local_pref: Some(100),
                     med: None,
                 }],
@@ -157,7 +250,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
                     next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
+                    peer_address: peer3_from_server1.address.clone(),
                     local_pref: Some(100),
                     med: None,
                 }],
@@ -171,7 +264,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
                     next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
+                    peer_address: peer4_from_server1.address.clone(),
                     local_pref: Some(100),
                     med: None,
                 }],
@@ -187,8 +280,98 @@ async fn test_announce_withdraw_four_node_mesh() {
         .await
         .expect("Failed to withdraw route from server 1");
 
-    // Poll for withdrawal and verify peers
+    // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server2, &server3, &server4]).await;
-    verify_peers_established(&[&server1, &server2, &server3, &server4], 3).await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server3,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server4,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
 }
-

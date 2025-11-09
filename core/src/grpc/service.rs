@@ -101,7 +101,10 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::RemovePeer { addr: peer_ip.clone(), response: tx };
+        let req = BgpRequest::RemovePeer {
+            addr: peer_ip.clone(),
+            response: tx,
+        };
 
         self.bgp_request_tx
             .send(req)

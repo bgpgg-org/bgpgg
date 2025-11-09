@@ -16,24 +16,9 @@ mod common;
 
 use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
 use common::{
-    peer_in_state, poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
-    setup_two_peered_servers, verify_peers_established, TestServer,
+    poll_route_propagation, poll_route_withdrawal, poll_until, setup_four_meshed_servers,
+    setup_two_peered_servers, verify_peers,
 };
-
-/// Helper to verify server has expected peers
-async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) {
-    let mut peers = server.client.get_peers().await.unwrap();
-
-    // Sort both by address for consistent comparison
-    peers.sort_by(|a, b| a.address.cmp(&b.address));
-    expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
-
-    assert_eq!(
-        peers, expected_peers,
-        "Server {} peers don't match expected",
-        server.client.router_id
-    );
-}
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -74,13 +59,16 @@ async fn test_peer_down() {
     // Give some time for Server1 to detect the disconnection
     // With a 3-second hold time, the peer should be detected as down
     // when the next keepalive fails (keepalive is sent every hold_time/3 = 1 second)
-    tokio::time::sleep(tokio::time::Duration::from_secs((hold_timer_secs + 2).into())).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        (hold_timer_secs + 2).into(),
+    ))
+    .await;
 
     // Poll for route withdrawal - route should be withdrawn when peer goes down
     poll_route_withdrawal(&[&server1]).await;
 
     // Verify Server1 has no peers in Established state anymore
-    verify_peers(&server1, vec![]).await;
+    assert!(verify_peers(&server1, vec![]).await);
 }
 
 #[tokio::test]
@@ -147,7 +135,10 @@ async fn test_peer_down_four_node_mesh() {
     server4.kill();
 
     // Give time for other servers to detect Server4 is down
-    tokio::time::sleep(tokio::time::Duration::from_secs((hold_timer_secs + 2).into())).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        (hold_timer_secs + 2).into(),
+    ))
+    .await;
 
     // Verify Server2 and Server3 still have the route (learned from Server1, not Server4)
     poll_route_propagation(&[
@@ -184,54 +175,60 @@ async fn test_peer_down_four_node_mesh() {
 
     // Verify all servers have correct peers after Server4 goes down
     // Peers are now identified by IP address only (no port)
-    verify_peers(
-        &server1,
-        vec![
-            Peer {
-                address: server2.address.clone(),
-                asn: server2.asn as u32,
-                state: BgpState::Established.into(),
-            },
-            Peer {
-                address: server3.address.clone(),
-                asn: server3.asn as u32,
-                state: BgpState::Established.into(),
-            },
-        ],
-    )
-    .await;
-    verify_peers(
-        &server2,
-        vec![
-            Peer {
-                address: server1.address.clone(),
-                asn: server1.asn as u32,
-                state: BgpState::Established.into(),
-            },
-            Peer {
-                address: server3.address.clone(),
-                asn: server3.asn as u32,
-                state: BgpState::Established.into(),
-            },
-        ],
-    )
-    .await;
-    verify_peers(
-        &server3,
-        vec![
-            Peer {
-                address: server1.address.clone(),
-                asn: server1.asn as u32,
-                state: BgpState::Established.into(),
-            },
-            Peer {
-                address: server2.address.clone(),
-                asn: server2.asn as u32,
-                state: BgpState::Established.into(),
-            },
-        ],
-    )
-    .await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server3,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
 }
 
 #[tokio::test]
@@ -243,17 +240,197 @@ async fn test_peer_up() {
     tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
 
     // Verify both peers are still in Established state
-    verify_peers_established(&[&server1, &server2], 1).await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![Peer {
+                address: server2.address.clone(),
+                asn: server2.asn as u32,
+                state: BgpState::Established.into(),
+            }],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![Peer {
+                address: server1.address.clone(),
+                asn: server1.asn as u32,
+                state: BgpState::Established.into(),
+            }],
+        )
+        .await
+    );
 }
 
 #[tokio::test]
 async fn test_peer_up_four_node_mesh() {
     let hold_timer_secs = 3;
-    let (server1, server2, server3, server4) = setup_four_meshed_servers(Some(hold_timer_secs)).await;
+    let (server1, server2, server3, server4) =
+        setup_four_meshed_servers(Some(hold_timer_secs)).await;
 
     // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connections stay up
     tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
 
     // Verify all peers are still in Established state
-    verify_peers_established(&[&server1, &server2, &server3, &server4], 3).await;
+    assert!(
+        verify_peers(
+            &server1,
+            vec![
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server2,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server3,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server4.address.clone(),
+                    asn: server4.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+    assert!(
+        verify_peers(
+            &server4,
+            vec![
+                Peer {
+                    address: server1.address.clone(),
+                    asn: server1.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn test_peer_crash_and_recover() {
+    use common::start_test_server;
+
+    let hold_timer_secs = 3;
+    let crash_count = 5;
+    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    let server2_port = server1.bgp_port; // Server1's port that Server2 connects to
+    let server2_asn = server2.asn;
+    let server2_router_id = server2.client.router_id;
+    let server2_bind_ip = server2.address.clone();
+
+    // Crash and recover the peer multiple times
+    for _ in 0..crash_count {
+        // Kill Server2 (simulates crash)
+        server2.kill();
+
+        // Wait a bit before restarting
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Restart Server2 with same configuration
+        server2 = start_test_server(
+            server2_asn,
+            server2_router_id,
+            Some(hold_timer_secs),
+            &server2_bind_ip,
+        )
+        .await;
+
+        // Server2 reconnects to Server1
+        server2
+            .client
+            .add_peer(format!("127.0.0.1:{}", server2_port))
+            .await
+            .expect("Failed to re-add peer after crash");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // Wait for peers to re-establish after the final crash and recovery
+    poll_until(
+        || async {
+            verify_peers(
+                &server1,
+                vec![Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                }],
+            )
+            .await
+                && verify_peers(
+                    &server2,
+                    vec![Peer {
+                        address: server1.address.clone(),
+                        asn: server1.asn as u32,
+                        state: BgpState::Established.into(),
+                    }],
+                )
+                .await
+        },
+        "Timeout waiting for peers to re-establish after crash and recovery",
+    )
+    .await;
 }

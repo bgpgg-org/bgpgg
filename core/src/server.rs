@@ -114,7 +114,8 @@ impl BgpServer {
             TcpSocket::new_v4()
         } else {
             TcpSocket::new_v6()
-        }.unwrap();
+        }
+        .unwrap();
 
         let local_bind_addr: SocketAddr = format!("{}:0", local_bind_ip).parse().unwrap();
         if let Err(e) = socket.bind(local_bind_addr) {
@@ -548,11 +549,15 @@ impl BgpServer {
         }
 
         // Notify Loc-RIB about disconnection and get affected prefixes
-        let changed_prefixes = loc_rib.lock().await.remove_routes_from_peer(peer_ip.clone());
+        let changed_prefixes = loc_rib
+            .lock()
+            .await
+            .remove_routes_from_peer(peer_ip.clone());
 
         // Propagate withdrawals to other peers
         if !changed_prefixes.is_empty() {
-            Self::propagate_routes(changed_prefixes, Some(peer_ip), peers, loc_rib, local_asn).await;
+            Self::propagate_routes(changed_prefixes, Some(peer_ip), peers, loc_rib, local_asn)
+                .await;
         }
     }
 
