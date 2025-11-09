@@ -16,7 +16,7 @@
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
-use bgpgg::grpc::proto::{BgpState, Peer, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
@@ -50,9 +50,32 @@ impl Drop for TestServer {
     }
 }
 
+impl TestServer {
+    /// Converts a TestServer to a Peer struct for use in test assertions
+    pub fn to_peer(&self, state: BgpState) -> Peer {
+        Peer {
+            address: self.address.clone(),
+            asn: self.asn as u32,
+            state: state.into(),
+        }
+    }
+}
+
 /// Helper to check if peer is in a specific BGP state
 pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
     peer.state == state as i32
+}
+
+/// Helper to build a Path with common default values
+pub fn build_path(as_path: Vec<u32>, next_hop: &str, peer_address: String) -> Path {
+    Path {
+        origin: Origin::Igp.into(),
+        as_path,
+        next_hop: next_hop.to_string(),
+        peer_address,
+        local_pref: Some(100),
+        med: None,
+    }
 }
 
 /// Starts a single BGP server with gRPC interface for testing
@@ -177,17 +200,8 @@ pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServ
     // Wait for peering to establish by polling via gRPC
     poll_until(
         || async {
-            let Ok(peers1) = server1.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers2) = server2.client.get_peers().await else {
-                return false;
-            };
-
-            peers1.len() == 1
-                && peers2.len() == 1
-                && peer_in_state(&peers1[0], BgpState::Established)
-                && peer_in_state(&peers2[0], BgpState::Established)
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for peers to establish",
     )
@@ -258,28 +272,30 @@ pub async fn setup_three_meshed_servers(
     // Wait for all peerings to establish
     poll_until(
         || async {
-            let Ok(peers1) = server1.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers2) = server2.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers3) = server3.client.get_peers().await else {
-                return false;
-            };
-
-            peers1.len() == 2
-                && peers2.len() == 2
-                && peers3.len() == 2
-                && peers1
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
-                && peers2
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
-                && peers3
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
+            verify_peers(
+                &server1,
+                vec![
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
+                ],
+            )
+            .await
+                && verify_peers(
+                    &server2,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                && verify_peers(
+                    &server3,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
         },
         "Timeout waiting for mesh peers to establish",
     )
@@ -377,35 +393,42 @@ pub async fn setup_four_meshed_servers(
     // Wait for all peerings to establish
     poll_until(
         || async {
-            let Ok(peers1) = server1.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers2) = server2.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers3) = server3.client.get_peers().await else {
-                return false;
-            };
-            let Ok(peers4) = server4.client.get_peers().await else {
-                return false;
-            };
-
-            peers1.len() == 3
-                && peers2.len() == 3
-                && peers3.len() == 3
-                && peers4.len() == 3
-                && peers1
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
-                && peers2
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
-                && peers3
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
-                && peers4
-                    .iter()
-                    .all(|p| peer_in_state(p, BgpState::Established))
+            verify_peers(
+                &server1,
+                vec![
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
+                    server4.to_peer(BgpState::Established),
+                ],
+            )
+            .await
+                && verify_peers(
+                    &server2,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                && verify_peers(
+                    &server3,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                && verify_peers(
+                    &server4,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
         },
         "Timeout waiting for mesh peers to establish",
     )

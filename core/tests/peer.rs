@@ -15,7 +15,7 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
+use bgpgg::grpc::proto::{BgpState, Route};
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -38,14 +38,7 @@ async fn test_peer_down() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![Path {
-                origin: Origin::Igp.into(),
-                as_path: vec![65002],
-                next_hop: "192.168.1.1".to_string(),
-                peer_address: peer_addr.clone(),
-                local_pref: Some(100),
-                med: None,
-            }],
+            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
         }],
     )])
     .await;
@@ -87,42 +80,33 @@ async fn test_peer_down_four_node_mesh() {
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65001],
-                    next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65001],
+                    "192.168.1.1",
+                    server1.address.clone(),
+                )],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65001],
-                    next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65001],
+                    "192.168.1.1",
+                    server1.address.clone(),
+                )],
             }],
         ),
         (
             &server4,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65001],
-                    next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65001],
+                    "192.168.1.1",
+                    server1.address.clone(),
+                )],
             }],
         ),
     ])
@@ -143,28 +127,22 @@ async fn test_peer_down_four_node_mesh() {
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65001],
-                    next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65001],
+                    "192.168.1.1",
+                    server1.address.clone(),
+                )],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65001],
-                    next_hop: "192.168.1.1".to_string(),
-                    peer_address: server1.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65001],
+                    "192.168.1.1",
+                    server1.address.clone(),
+                )],
             }],
         ),
     ])
@@ -176,16 +154,8 @@ async fn test_peer_down_four_node_mesh() {
         verify_peers(
             &server1,
             vec![
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -194,16 +164,8 @@ async fn test_peer_down_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                Peer {
-                    address: server1.address.clone(),
-                    asn: server1.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -212,16 +174,8 @@ async fn test_peer_down_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                Peer {
-                    address: server1.address.clone(),
-                    asn: server1.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -249,14 +203,7 @@ async fn test_remove_peer() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![Path {
-                origin: Origin::Igp.into(),
-                as_path: vec![65002],
-                next_hop: "192.168.1.1".to_string(),
-                peer_address: peer_addr.clone(),
-                local_pref: Some(100),
-                med: None,
-            }],
+            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
         }],
     )])
     .await;
@@ -296,14 +243,7 @@ async fn test_remove_peer_withdraw_routes() {
         &server1,
         vec![Route {
             prefix: "10.2.0.0/24".to_string(),
-            paths: vec![Path {
-                origin: Origin::Igp.into(),
-                as_path: vec![65002],
-                next_hop: "192.168.2.1".to_string(),
-                peer_address: peer_addr.clone(),
-                local_pref: Some(100),
-                med: None,
-            }],
+            paths: vec![build_path(vec![65002], "192.168.2.1", peer_addr.clone())],
         }],
     )])
     .await;
@@ -341,42 +281,33 @@ async fn test_remove_peer_four_node_mesh() {
             &server1,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65004],
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server4.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65004],
+                    "192.168.4.1",
+                    server4.address.clone(),
+                )],
             }],
         ),
         (
             &server2,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65004],
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server4.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65004],
+                    "192.168.4.1",
+                    server4.address.clone(),
+                )],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65004],
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server4.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65004],
+                    "192.168.4.1",
+                    server4.address.clone(),
+                )],
             }],
         ),
     ])
@@ -397,42 +328,33 @@ async fn test_remove_peer_four_node_mesh() {
             &server1,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65002, 65004], // Via server2 (127.0.0.2 < 127.0.0.3)
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server2.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65002, 65004],
+                    "192.168.4.1",
+                    server2.address.clone(),
+                )], // Via server2 (127.0.0.2 < 127.0.0.3)
             }],
         ),
         (
             &server2,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65004],
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server4.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65004],
+                    "192.168.4.1",
+                    server4.address.clone(),
+                )],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![Path {
-                    origin: Origin::Igp.into(),
-                    as_path: vec![65004],
-                    next_hop: "192.168.4.1".to_string(),
-                    peer_address: server4.address.clone(),
-                    local_pref: Some(100),
-                    med: None,
-                }],
+                paths: vec![build_path(
+                    vec![65004],
+                    "192.168.4.1",
+                    server4.address.clone(),
+                )],
             }],
         ),
     ])
@@ -443,16 +365,8 @@ async fn test_remove_peer_four_node_mesh() {
         verify_peers(
             &server1,
             vec![
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -468,28 +382,8 @@ async fn test_peer_up() {
     tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
 
     // Verify both peers are still in Established state
-    assert!(
-        verify_peers(
-            &server1,
-            vec![Peer {
-                address: server2.address.clone(),
-                asn: server2.asn as u32,
-                state: BgpState::Established.into(),
-            }],
-        )
-        .await
-    );
-    assert!(
-        verify_peers(
-            &server2,
-            vec![Peer {
-                address: server1.address.clone(),
-                asn: server1.asn as u32,
-                state: BgpState::Established.into(),
-            }],
-        )
-        .await
-    );
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -506,21 +400,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server1,
             vec![
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server4.address.clone(),
-                    asn: server4.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -529,21 +411,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                Peer {
-                    address: server1.address.clone(),
-                    asn: server1.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server4.address.clone(),
-                    asn: server4.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -552,21 +422,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                Peer {
-                    address: server1.address.clone(),
-                    asn: server1.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server4.address.clone(),
-                    asn: server4.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -575,21 +433,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                Peer {
-                    address: server1.address.clone(),
-                    asn: server1.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                },
-                Peer {
-                    address: server3.address.clone(),
-                    asn: server3.asn as u32,
-                    state: BgpState::Established.into(),
-                },
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -637,24 +483,8 @@ async fn test_peer_crash_and_recover() {
     // Wait for peers to re-establish after the final crash and recovery
     poll_until(
         || async {
-            verify_peers(
-                &server1,
-                vec![Peer {
-                    address: server2.address.clone(),
-                    asn: server2.asn as u32,
-                    state: BgpState::Established.into(),
-                }],
-            )
-            .await
-                && verify_peers(
-                    &server2,
-                    vec![Peer {
-                        address: server1.address.clone(),
-                        asn: server1.asn as u32,
-                        state: BgpState::Established.into(),
-                    }],
-                )
-                .await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for peers to re-establish after crash and recovery",
     )
