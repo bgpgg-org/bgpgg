@@ -22,19 +22,29 @@ use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
-/// Test server handle that includes abort handles for killing the server
+/// Test server handle that includes runtime for killing the server
 pub struct TestServer {
     pub client: BgpClient,
     pub bgp_port: u16,
-    pub bgp_abort_handle: tokio::task::AbortHandle,
-    pub grpc_abort_handle: tokio::task::AbortHandle,
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl TestServer {
-    /// Kill the BGP server and gRPC server tasks
-    pub fn kill(&self) {
-        self.bgp_abort_handle.abort();
-        self.grpc_abort_handle.abort();
+    /// Kill the BGP server by shutting down its runtime (simulates process death)
+    pub fn kill(&mut self) {
+        // Shutdown the runtime - this kills ALL tasks in it (simulates process death)
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        // Shutdown runtime in background when TestServer is dropped
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -45,8 +55,17 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
 
 /// Starts a single BGP server with gRPC interface for testing
 ///
+/// # Arguments
+/// * `asn` - Autonomous System Number
+/// * `router_id` - Router ID (IPv4 address)
+/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+///
 /// Returns a TestServer struct containing the client, port, and abort handles
-pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> TestServer {
+pub async fn start_test_server(
+    asn: u16,
+    router_id: Ipv4Addr,
+    hold_timer_secs: Option<u16>,
+) -> TestServer {
     use tokio::net::TcpListener;
 
     // Bind to port 0 to let OS allocate a free BGP port
@@ -59,27 +78,38 @@ pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> TestServer {
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     drop(grpc_listener);
 
-    // Use a short hold time for testing (3 seconds) so peers detect disconnections quickly
-    let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id, 3);
+    // Use the provided hold timer, or default to 3 seconds for testing (short time so peers detect disconnections quickly)
+    let hold_timer_secs = hold_timer_secs.unwrap_or(3);
+    let config = Config::new(
+        asn,
+        &format!("127.0.0.1:{}", bgp_port),
+        router_id,
+        hold_timer_secs as u64,
+    );
 
     let server = BgpServer::new(config);
 
     // Create gRPC service
     let grpc_service = BgpGrpcService::new(server.request_tx.clone());
 
-    // Spawn both servers and capture abort handles
-    let bgp_handle = tokio::spawn(async move { server.run().await });
-    let bgp_abort_handle = bgp_handle.abort_handle();
+    // Create a separate runtime for this server (simulates separate process)
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
+    // Spawn BGP server in its own runtime
+    runtime.spawn(async move { server.run().await });
+
+    // Spawn gRPC server in the same runtime
     let grpc_addr = format!("[::1]:{}", grpc_port).parse().unwrap();
-    let grpc_handle = tokio::spawn(async move {
+    runtime.spawn(async move {
         tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
             .serve(grpc_addr)
             .await
             .unwrap();
     });
-    let grpc_abort_handle = grpc_handle.abort_handle();
 
     // Retry connecting to gRPC server until it's ready
     let mut client = None;
@@ -102,8 +132,7 @@ pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> TestServer {
     TestServer {
         client,
         bgp_port,
-        bgp_abort_handle,
-        grpc_abort_handle,
+        runtime: Some(runtime),
     }
 }
 
@@ -111,12 +140,15 @@ pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> TestServer {
 ///
 /// Server1 (AS65001) <-----> Server2 (AS65002)
 ///
+/// # Arguments
+/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+///
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
-pub async fn setup_two_peered_servers() -> (TestServer, TestServer) {
+pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServer, TestServer) {
     // Start both servers - OS allocates ports automatically
-    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
+    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs).await;
 
     // Server2 connects to Server1 via gRPC
     server2
@@ -152,13 +184,18 @@ pub async fn setup_two_peered_servers() -> (TestServer, TestServer) {
 /// Server2 -- Server3
 /// (AS65002)  (AS65003)
 ///
+/// # Arguments
+/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+///
 /// Returns (server1, server2, server3) TestServer instances for each server.
 /// All servers will have 2 peers each in Established state when this function returns.
-pub async fn setup_three_meshed_servers() -> (TestServer, TestServer, TestServer) {
+pub async fn setup_three_meshed_servers(
+    hold_timer_secs: Option<u16>,
+) -> (TestServer, TestServer, TestServer) {
     // Start all three servers - OS allocates ports automatically
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
-    let server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
+    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs).await;
+    let server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3), hold_timer_secs).await;
 
     // Create full mesh: each server peers with the other two
     // Server1 connects to Server2 and Server3
@@ -219,14 +256,19 @@ pub async fn setup_three_meshed_servers() -> (TestServer, TestServer, TestServer
 ///     S3----S4
 /// (AS65003) (AS65004)
 ///
+/// # Arguments
+/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+///
 /// Returns (server1, server2, server3, server4) TestServer instances for each server.
 /// All servers will have 3 peers each in Established state when this function returns.
-pub async fn setup_four_meshed_servers() -> (TestServer, TestServer, TestServer, TestServer) {
+pub async fn setup_four_meshed_servers(
+    hold_timer_secs: Option<u16>,
+) -> (TestServer, TestServer, TestServer, TestServer) {
     // Start all four servers - OS allocates ports automatically
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
-    let mut server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
-    let server4 = start_test_server(65004, Ipv4Addr::new(4, 4, 4, 4)).await;
+    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), hold_timer_secs).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs).await;
+    let mut server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3), hold_timer_secs).await;
+    let server4 = start_test_server(65004, Ipv4Addr::new(4, 4, 4, 4), hold_timer_secs).await;
 
     // Create full mesh: each server peers with the other three
     // Server1 connects to Server2, Server3, and Server4

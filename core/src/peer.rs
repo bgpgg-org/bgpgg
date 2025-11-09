@@ -121,7 +121,7 @@ impl Peer {
     }
 
     /// Process a BGP event and handle state transitions
-    async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
+    pub async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
         let new_state = self.fsm.process_event(event);
 
@@ -218,6 +218,15 @@ impl Peer {
 
         // Return only what changed in this UPDATE
         (withdrawn, announced)
+    }
+
+    /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
+    pub async fn send_update(&mut self, update_msg: UpdateMessage) -> Result<(), io::Error> {
+        self.tcp_tx.write_all(&update_msg.serialize()).await?;
+        // RFC 4271: "Each time the local system sends a KEEPALIVE or UPDATE message,
+        // it restarts its KeepaliveTimer"
+        self.fsm.timers.reset_keepalive_timer();
+        Ok(())
     }
 
     /// Set negotiated hold time from received OPEN message

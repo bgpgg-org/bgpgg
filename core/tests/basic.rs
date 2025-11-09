@@ -22,7 +22,7 @@ use common::{
 
 #[tokio::test]
 async fn test_announce_withdraw() {
-    let (server1, mut server2) = setup_two_peered_servers().await;
+    let (server1, mut server2) = setup_two_peered_servers(None).await;
 
     // Server2 announces a route to Server1 via gRPC
     server2
@@ -66,7 +66,7 @@ async fn test_announce_withdraw() {
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh() {
-    let (mut server1, server2, server3) = setup_three_meshed_servers().await;
+    let (mut server1, server2, server3) = setup_three_meshed_servers(None).await;
 
     // Server1 announces a route
     server1
@@ -128,7 +128,7 @@ async fn test_announce_withdraw_mesh() {
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh_2() {
-    let (mut server1, server2, server3, server4) = setup_four_meshed_servers().await;
+    let (mut server1, server2, server3, server4) = setup_four_meshed_servers(None).await;
 
     // Server1 announces a route
     server1
@@ -203,8 +203,8 @@ async fn test_announce_withdraw_mesh_2() {
 }
 
 #[tokio::test]
-async fn test_peer_down_withdraws_routes() {
-    let (server1, mut server2) = setup_two_peered_servers().await;
+async fn test_peer_down() {
+    let (server1, mut server2) = setup_two_peered_servers(Some(3)).await;
 
     // Server2 announces a route to Server1 via gRPC
     server2
@@ -234,7 +234,7 @@ async fn test_peer_down_withdraws_routes() {
     )
     .await;
 
-    // Kill Server2 to simulate peer going down
+    // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
     server2.kill();
 
     // Give some time for Server1 to detect the disconnection
@@ -254,4 +254,16 @@ async fn test_peer_down_withdraws_routes() {
                 .any(|p| peer_in_state(p, BgpState::Established)),
         "Server1 should have no established peers after Server2 is killed"
     );
+}
+
+#[tokio::test]
+async fn test_peer_up() {
+    let hold_timer_secs = 3;
+    let (server1, server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connection stays up
+    tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
+
+    // Verify both peers are still in Established state
+    verify_peers_established(&[&server1, &server2], 1).await;
 }

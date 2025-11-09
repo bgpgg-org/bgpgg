@@ -383,6 +383,9 @@ impl BgpServer {
             negotiated_hold_time,
         );
 
+        // Set the negotiated hold time in FSM timers
+        peer.set_negotiated_hold_time(negotiated_hold_time);
+
         // Initialize the BGP connection
         if let Err(e) = peer.initialize_connection().await {
             error!("failed to initialize connection", "peer_addr" => addr.to_string(), "error" => e.to_string());
@@ -395,75 +398,116 @@ impl BgpServer {
             info!("peer added", "peer_addr" => addr.to_string(), "peer_asn" => peer_asn, "total_peers" => peer_map.len());
         }
 
+        // Create keepalive interval timer (RFC 4271)
+        let mut keepalive_interval = if negotiated_hold_time > 0 {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // Skip first immediate tick
+            Some(interval)
+        } else {
+            None
+        };
+
+        // RFC 4271: Hold timer - track last KEEPALIVE or UPDATE received
+        let hold_timeout = tokio::time::Duration::from_secs(negotiated_hold_time as u64);
+        let mut last_keepalive_or_update = tokio::time::Instant::now();
+
+        // Check hold timer every 500ms
+        let mut hold_check_interval =
+            tokio::time::interval(tokio::time::Duration::from_millis(500));
+        hold_check_interval.tick().await; // Skip first immediate tick
+
         // Now continue handling subsequent messages
         loop {
-            // Use hold timer as timeout for reads - if no message received within hold time, peer is down
-            let timeout_result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(negotiated_hold_time as u64),
-                read_bgp_message(&mut read_half),
-            )
-            .await;
-
-            // Check if hold timer expired (timeout)
-            let result = match timeout_result {
-                Ok(r) => r, // Got a result before timeout
-                Err(_) => {
-                    // Hold timer expired - peer is down
-                    error!("hold timer expired, peer is down", "peer_addr" => addr.to_string());
-                    break;
-                }
-            };
-
-            let mut peer_map = peers.lock().await;
-            let Some(peer) = peer_map.get_mut(&addr) else {
-                error!("peer not found in map", "peer_addr" => addr.to_string());
-                break;
-            };
-
-            match result {
-                Ok(message) => {
-                    let is_notification = matches!(&message, BgpMessage::Notification(_));
-
-                    // Process message with peer
-                    let delta = match peer.process_message(message).await {
-                        Ok(delta) => delta,
-                        Err(e) => {
-                            error!("failed to process message", "peer_addr" => addr.to_string(), "error" => e.to_string());
-                            None
-                        }
+            tokio::select! {
+                // Read messages from peer
+                result = read_bgp_message(&mut read_half) => {
+                    let mut peer_map = peers.lock().await;
+                    let Some(peer) = peer_map.get_mut(&addr) else {
+                        error!("peer not found in map", "peer_addr" => addr.to_string());
+                        break;
                     };
-                    drop(peer_map);
 
-                    // Update Loc-RIB if we have route changes (withdrawn or announced)
-                    if let Some((withdrawn, announced)) = delta {
-                        let changed_prefixes = loc_rib
-                            .lock()
-                            .await
-                            .update_from_peer(addr, withdrawn, announced);
-                        info!("UPDATE processing complete", "peer_addr" => addr.to_string());
+                    match result {
+                        Ok(message) => {
+                            // RFC 4271: Only restart hold timer on KEEPALIVE or UPDATE
+                            let is_keepalive_or_update = matches!(&message, BgpMessage::KeepAlive(_) | BgpMessage::Update(_));
+                            let is_notification = matches!(&message, BgpMessage::Notification(_));
 
-                        // Propagate changed routes to other peers
-                        if !changed_prefixes.is_empty() {
-                            Self::propagate_routes(
-                                changed_prefixes,
-                                Some(addr),
-                                peers.clone(),
-                                loc_rib.clone(),
-                                local_asn,
-                            )
-                            .await;
+                            // Process message with peer
+                            let delta = match peer.process_message(message).await {
+                                Ok(delta) => delta,
+                                Err(e) => {
+                                    error!("failed to process message", "peer_addr" => addr.to_string(), "error" => e.to_string());
+                                    None
+                                }
+                            };
+                            drop(peer_map);
+
+                            // RFC 4271: Restart hold timer on KEEPALIVE or UPDATE
+                            if is_keepalive_or_update {
+                                last_keepalive_or_update = tokio::time::Instant::now();
+                            }
+
+                            // Update Loc-RIB if we have route changes (withdrawn or announced)
+                            if let Some((withdrawn, announced)) = delta {
+                                let changed_prefixes = loc_rib
+                                    .lock()
+                                    .await
+                                    .update_from_peer(addr, withdrawn, announced);
+                                info!("UPDATE processing complete", "peer_addr" => addr.to_string());
+
+                                // Propagate changed routes to other peers
+                                if !changed_prefixes.is_empty() {
+                                    Self::propagate_routes(
+                                        changed_prefixes,
+                                        Some(addr),
+                                        peers.clone(),
+                                        loc_rib.clone(),
+                                        local_asn,
+                                    )
+                                    .await;
+                                }
+                            }
+
+                            // If notification received, break the loop
+                            if is_notification {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            drop(peer_map);
+                            error!("error reading message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
+                            break;
                         }
                     }
+                }
 
-                    // If notification received, break the loop
-                    if is_notification {
+                // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
+                _ = hold_check_interval.tick() => {
+                    if last_keepalive_or_update.elapsed() > hold_timeout {
+                        error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_addr" => addr.to_string());
                         break;
                     }
                 }
-                Err(e) => {
-                    drop(peer_map);
-                    error!("error reading message from peer", "peer_addr" => addr.to_string(), "error" => format!("{:?}", e));
-                    break;
+
+                // Periodic KEEPALIVE check
+                _ = async {
+                    match &mut keepalive_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let mut peer_map = peers.lock().await;
+                    if let Some(peer) = peer_map.get_mut(&addr) {
+                        if peer.fsm.timers.keepalive_timer_expired() {
+                            if let Err(e) = peer.process_event(crate::fsm::BgpEvent::KeepaliveTimerExpires).await {
+                                error!("failed to send keepalive", "peer_addr" => addr.to_string(), "error" => e.to_string());
+                                drop(peer_map);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -528,7 +572,7 @@ impl BgpServer {
             // Send withdrawals if any
             if !to_withdraw.is_empty() {
                 let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.clone());
-                if let Err(e) = peer.tcp_tx.write_all(&withdraw_msg.serialize()).await {
+                if let Err(e) = peer.send_update(withdraw_msg).await {
                     error!("failed to send WITHDRAW to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
                 } else {
                     info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_addr" => peer.addr.to_string());
@@ -558,7 +602,7 @@ impl BgpServer {
                 let update_msg =
                     UpdateMessage::new(path.origin, as_path_segments, path.next_hop, vec![*prefix]);
 
-                if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
+                if let Err(e) = peer.send_update(update_msg).await {
                     error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
                 } else {
                     info!("propagated route to peer", "prefix" => format!("{:?}", prefix), "peer_addr" => peer.addr.to_string());
