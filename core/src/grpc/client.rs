@@ -14,7 +14,7 @@
 
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeersRequest,
-    GetRoutesRequest, Peer, RemovePeerRequest, Route,
+    GetRoutesRequest, Peer, RemovePeerRequest, Route, WithdrawRouteRequest,
 };
 use tonic::transport::Channel;
 
@@ -94,6 +94,21 @@ impl BgpClient {
                 next_hop,
                 origin,
             })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Withdraw a route from all established peers
+    pub async fn withdraw_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .withdraw_route(WithdrawRouteRequest { prefix })
             .await?
             .into_inner();
 

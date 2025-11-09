@@ -152,7 +152,6 @@ impl LocRib {
         origin: crate::bgp::msg_update::Origin,
     ) {
         use crate::info;
-        use crate::rib::types::RouteSource;
 
         let path = Path {
             origin,
@@ -171,7 +170,6 @@ impl LocRib {
     /// Remove a locally originated route
     pub fn remove_local_route(&mut self, prefix: IpNetwork) {
         use crate::info;
-        use crate::rib::types::RouteSource;
 
         info!("removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
 
