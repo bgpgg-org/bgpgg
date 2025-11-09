@@ -22,6 +22,22 @@ use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
+/// Test server handle that includes abort handles for killing the server
+pub struct TestServer {
+    pub client: BgpClient,
+    pub bgp_port: u16,
+    pub bgp_abort_handle: tokio::task::AbortHandle,
+    pub grpc_abort_handle: tokio::task::AbortHandle,
+}
+
+impl TestServer {
+    /// Kill the BGP server and gRPC server tasks
+    pub fn kill(&self) {
+        self.bgp_abort_handle.abort();
+        self.grpc_abort_handle.abort();
+    }
+}
+
 /// Helper to check if peer is in a specific BGP state
 pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
     peer.state == state as i32
@@ -29,10 +45,8 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
 
 /// Starts a single BGP server with gRPC interface for testing
 ///
-/// Returns a tuple of (BgpClient, bgp_port) where:
-/// - BgpClient: gRPC client connected to the server
-/// - bgp_port: The TCP port the BGP server is listening on
-pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> (BgpClient, u16) {
+/// Returns a TestServer struct containing the client, port, and abort handles
+pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> TestServer {
     use tokio::net::TcpListener;
 
     // Bind to port 0 to let OS allocate a free BGP port
@@ -45,24 +59,27 @@ pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> (BgpClient, u16
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     drop(grpc_listener);
 
-    let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id);
+    // Use a short hold time for testing (3 seconds) so peers detect disconnections quickly
+    let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id, 3);
 
     let server = BgpServer::new(config);
 
     // Create gRPC service
     let grpc_service = BgpGrpcService::new(server.request_tx.clone());
 
-    // Spawn both servers
-    tokio::spawn(async move { server.run().await });
+    // Spawn both servers and capture abort handles
+    let bgp_handle = tokio::spawn(async move { server.run().await });
+    let bgp_abort_handle = bgp_handle.abort_handle();
 
     let grpc_addr = format!("[::1]:{}", grpc_port).parse().unwrap();
-    tokio::spawn(async move {
+    let grpc_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
             .serve(grpc_addr)
             .await
             .unwrap();
     });
+    let grpc_abort_handle = grpc_handle.abort_handle();
 
     // Retry connecting to gRPC server until it's ready
     let mut client = None;
@@ -81,30 +98,37 @@ pub async fn start_test_server(asn: u16, router_id: Ipv4Addr) -> (BgpClient, u16
     }
 
     let client = client.expect("Failed to connect to gRPC server after retries");
-    (client, bgp_port)
+
+    TestServer {
+        client,
+        bgp_port,
+        bgp_abort_handle,
+        grpc_abort_handle,
+    }
 }
 
 /// Sets up two BGP servers with peering established
 ///
 /// Server1 (AS65001) <-----> Server2 (AS65002)
 ///
-/// Returns (client1, client2) gRPC clients for each server.
+/// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
-pub async fn setup_two_peered_servers() -> (BgpClient, BgpClient) {
+pub async fn setup_two_peered_servers() -> (TestServer, TestServer) {
     // Start both servers - OS allocates ports automatically
-    let (client1, bgp_port1) = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let (mut client2, _bgp_port2) = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
+    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
 
     // Server2 connects to Server1 via gRPC
-    client2
-        .add_peer(format!("127.0.0.1:{}", bgp_port1))
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server1.bgp_port))
         .await
         .expect("Failed to add peer");
 
     // Wait for peering to establish by polling via gRPC
     for _ in 0..100 {
-        let peers1 = client1.get_peers().await.unwrap();
-        let peers2 = client2.get_peers().await.unwrap();
+        let peers1 = server1.client.get_peers().await.unwrap();
+        let peers2 = server2.client.get_peers().await.unwrap();
 
         let both_established = peers1.len() == 1
             && peers2.len() == 1
@@ -112,7 +136,7 @@ pub async fn setup_two_peered_servers() -> (BgpClient, BgpClient) {
             && peer_in_state(&peers2[0], BgpState::Established);
 
         if both_established {
-            return (client1, client2);
+            return (server1, server2);
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -128,36 +152,39 @@ pub async fn setup_two_peered_servers() -> (BgpClient, BgpClient) {
 /// Server2 -- Server3
 /// (AS65002)  (AS65003)
 ///
-/// Returns (client1, client2, client3) gRPC clients for each server.
+/// Returns (server1, server2, server3) TestServer instances for each server.
 /// All servers will have 2 peers each in Established state when this function returns.
-pub async fn setup_three_meshed_servers() -> (BgpClient, BgpClient, BgpClient) {
+pub async fn setup_three_meshed_servers() -> (TestServer, TestServer, TestServer) {
     // Start all three servers - OS allocates ports automatically
-    let (mut client1, _bgp_port1) = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let (mut client2, bgp_port2) = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
-    let (client3, bgp_port3) = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
+    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
+    let server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
 
     // Create full mesh: each server peers with the other two
     // Server1 connects to Server2 and Server3
-    client1
-        .add_peer(format!("127.0.0.1:{}", bgp_port2))
+    server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server2.bgp_port))
         .await
         .expect("Failed to add peer 2 to server 1");
-    client1
-        .add_peer(format!("127.0.0.1:{}", bgp_port3))
+    server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 1");
 
     // Server2 connects to Server3 (already connected to Server1)
-    client2
-        .add_peer(format!("127.0.0.1:{}", bgp_port3))
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 2");
 
     // Wait for all peerings to establish
     for _ in 0..100 {
-        let peers1 = client1.get_peers().await.unwrap();
-        let peers2 = client2.get_peers().await.unwrap();
-        let peers3 = client3.get_peers().await.unwrap();
+        let peers1 = server1.client.get_peers().await.unwrap();
+        let peers2 = server2.client.get_peers().await.unwrap();
+        let peers3 = server3.client.get_peers().await.unwrap();
 
         let all_established = peers1.len() == 2
             && peers2.len() == 2
@@ -173,7 +200,7 @@ pub async fn setup_three_meshed_servers() -> (BgpClient, BgpClient, BgpClient) {
                 .all(|p| peer_in_state(p, BgpState::Established));
 
         if all_established {
-            return (client1, client2, client3);
+            return (server1, server2, server3);
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -192,52 +219,58 @@ pub async fn setup_three_meshed_servers() -> (BgpClient, BgpClient, BgpClient) {
 ///     S3----S4
 /// (AS65003) (AS65004)
 ///
-/// Returns (client1, client2, client3, client4) gRPC clients for each server.
+/// Returns (server1, server2, server3, server4) TestServer instances for each server.
 /// All servers will have 3 peers each in Established state when this function returns.
-pub async fn setup_four_meshed_servers() -> (BgpClient, BgpClient, BgpClient, BgpClient) {
+pub async fn setup_four_meshed_servers() -> (TestServer, TestServer, TestServer, TestServer) {
     // Start all four servers - OS allocates ports automatically
-    let (mut client1, _bgp_port1) = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
-    let (mut client2, bgp_port2) = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
-    let (mut client3, bgp_port3) = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
-    let (client4, bgp_port4) = start_test_server(65004, Ipv4Addr::new(4, 4, 4, 4)).await;
+    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1)).await;
+    let mut server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2)).await;
+    let mut server3 = start_test_server(65003, Ipv4Addr::new(3, 3, 3, 3)).await;
+    let server4 = start_test_server(65004, Ipv4Addr::new(4, 4, 4, 4)).await;
 
     // Create full mesh: each server peers with the other three
     // Server1 connects to Server2, Server3, and Server4
-    client1
-        .add_peer(format!("127.0.0.1:{}", bgp_port2))
+    server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server2.bgp_port))
         .await
         .expect("Failed to add peer 2 to server 1");
-    client1
-        .add_peer(format!("127.0.0.1:{}", bgp_port3))
+    server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 1");
-    client1
-        .add_peer(format!("127.0.0.1:{}", bgp_port4))
+    server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 1");
 
     // Server2 connects to Server3 and Server4 (already connected to Server1)
-    client2
-        .add_peer(format!("127.0.0.1:{}", bgp_port3))
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 2");
-    client2
-        .add_peer(format!("127.0.0.1:{}", bgp_port4))
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 2");
 
     // Server3 connects to Server4 (already connected to Server1 and Server2)
-    client3
-        .add_peer(format!("127.0.0.1:{}", bgp_port4))
+    server3
+        .client
+        .add_peer(format!("127.0.0.1:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 3");
 
     // Wait for all peerings to establish
     for _ in 0..100 {
-        let peers1 = client1.get_peers().await.unwrap();
-        let peers2 = client2.get_peers().await.unwrap();
-        let peers3 = client3.get_peers().await.unwrap();
-        let peers4 = client4.get_peers().await.unwrap();
+        let peers1 = server1.client.get_peers().await.unwrap();
+        let peers2 = server2.client.get_peers().await.unwrap();
+        let peers3 = server3.client.get_peers().await.unwrap();
+        let peers4 = server4.client.get_peers().await.unwrap();
 
         let all_established = peers1.len() == 3
             && peers2.len() == 3
@@ -257,7 +290,7 @@ pub async fn setup_four_meshed_servers() -> (BgpClient, BgpClient, BgpClient, Bg
                 .all(|p| peer_in_state(p, BgpState::Established));
 
         if all_established {
-            return (client1, client2, client3, client4);
+            return (server1, server2, server3, server4);
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -291,13 +324,13 @@ pub async fn poll_route_propagation(expectations: &[(&BgpClient, Vec<Path>)], pr
 /// Polls for route withdrawal from multiple servers
 ///
 /// # Arguments
-/// * `servers` - Slice of gRPC clients for servers to check
-pub async fn poll_route_withdrawal(servers: &[&BgpClient]) {
+/// * `servers` - Slice of TestServer instances to check
+pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
     for _ in 0..100 {
         let mut all_withdrawn = true;
 
-        for client in servers.iter() {
-            let routes = client.get_routes().await.unwrap();
+        for server in servers.iter() {
+            let routes = server.client.get_routes().await.unwrap();
             if !routes.is_empty() {
                 all_withdrawn = false;
                 break;
@@ -317,23 +350,23 @@ pub async fn poll_route_withdrawal(servers: &[&BgpClient]) {
 /// Verifies all servers have expected peer count in Established state
 ///
 /// # Arguments
-/// * `servers` - Slice of gRPC clients for servers to verify
+/// * `servers` - Slice of TestServer instances to verify
 /// * `expected_peer_count` - Expected number of peers per server
-pub async fn verify_peers_established(servers: &[&BgpClient], expected_peer_count: usize) {
-    for client in servers.iter() {
-        let routes = client.get_routes().await.unwrap();
+pub async fn verify_peers_established(servers: &[&TestServer], expected_peer_count: usize) {
+    for server in servers.iter() {
+        let routes = server.client.get_routes().await.unwrap();
         assert!(
             routes.is_empty(),
             "Route not withdrawn from server {}",
-            client.router_id
+            server.client.router_id
         );
 
-        let peers = client.get_peers().await.unwrap();
+        let peers = server.client.get_peers().await.unwrap();
         assert_eq!(
             peers.len(),
             expected_peer_count,
             "Server {} should have {} peers",
-            client.router_id,
+            server.client.router_id,
             expected_peer_count
         );
         assert!(
@@ -341,7 +374,7 @@ pub async fn verify_peers_established(servers: &[&BgpClient], expected_peer_coun
                 .iter()
                 .all(|p| peer_in_state(p, BgpState::Established)),
             "Server {} peers should be established",
-            client.router_id
+            server.client.router_id
         );
     }
 }

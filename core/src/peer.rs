@@ -34,6 +34,7 @@ pub struct Peer {
     pub rib_in: AdjRibIn,
     local_asn: u16,
     local_bgp_id: u32,
+    hold_time: u16,
 }
 
 impl Peer {
@@ -43,6 +44,7 @@ impl Peer {
         asn: u16,
         local_asn: u16,
         local_bgp_id: u32,
+        hold_time: u16,
     ) -> Self {
         Peer {
             addr,
@@ -52,6 +54,7 @@ impl Peer {
             rib_in: AdjRibIn::new(addr),
             local_asn,
             local_bgp_id,
+            hold_time,
         }
     }
 
@@ -127,7 +130,7 @@ impl Peer {
             // Entering OpenSent - send OPEN
             (BgpState::Connect, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed)
             | (BgpState::Active, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) => {
-                let open_msg = OpenMessage::new(self.local_asn, 180, self.local_bgp_id);
+                let open_msg = OpenMessage::new(self.local_asn, self.hold_time, self.local_bgp_id);
                 self.tcp_tx.write_all(&open_msg.serialize()).await?;
                 info!("sent OPEN message", "peer_addr" => self.addr.to_string());
             }
@@ -237,7 +240,7 @@ mod tests {
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (_, tcp_tx) = client.into_split();
 
-        let mut peer = Peer::new(addr, tcp_tx, 65001, 65000, 0x01020304);
+        let mut peer = Peer::new(addr, tcp_tx, 65001, 65000, 0x01020304, 180);
         peer.fsm = Fsm::with_state(state);
         peer
     }

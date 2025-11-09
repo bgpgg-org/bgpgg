@@ -14,30 +14,31 @@
 
 mod common;
 
-use bgpgg::grpc::proto::{Origin, Path};
+use bgpgg::grpc::proto::{BgpState, Origin, Path};
 use common::{
-    poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
+    peer_in_state, poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
     setup_three_meshed_servers, setup_two_peered_servers, verify_peers_established,
 };
 
 #[tokio::test]
 async fn test_announce_withdraw() {
-    let (client1, mut client2) = setup_two_peered_servers().await;
+    let (server1, mut server2) = setup_two_peered_servers().await;
 
     // Server2 announces a route to Server1 via gRPC
-    client2
+    server2
+        .client
         .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
         .await
         .expect("Failed to announce route");
 
     // Get the actual peer address (with OS-allocated port)
-    let peers = client1.get_peers().await.unwrap();
+    let peers = server1.client.get_peers().await.unwrap();
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
     poll_route_propagation(
         &[(
-            &client1,
+            &server1.client,
             vec![Path {
                 origin: Origin::Igp.into(),
                 as_path: vec![65002],
@@ -52,22 +53,24 @@ async fn test_announce_withdraw() {
     .await;
 
     // Server2 withdraws the route
-    client2
+    server2
+        .client
         .withdraw_route("10.0.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route");
 
     // Poll for withdrawal and verify peers
-    poll_route_withdrawal(&[&client1]).await;
-    verify_peers_established(&[&client1, &client2], 1).await;
+    poll_route_withdrawal(&[&server1]).await;
+    verify_peers_established(&[&server1, &server2], 1).await;
 }
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh() {
-    let (mut client1, client2, client3) = setup_three_meshed_servers().await;
+    let (mut server1, server2, server3) = setup_three_meshed_servers().await;
 
     // Server1 announces a route
-    client1
+    server1
+        .client
         .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
         .await
         .expect("Failed to announce route from server 1");
@@ -76,16 +79,16 @@ async fn test_announce_withdraw_mesh() {
     // After best path selection, only the best path (shortest AS_PATH) should remain
 
     // Get actual peer addresses
-    let peers2 = client2.get_peers().await.unwrap();
+    let peers2 = server2.client.get_peers().await.unwrap();
     let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
 
-    let peers3 = client3.get_peers().await.unwrap();
+    let peers3 = server3.client.get_peers().await.unwrap();
     let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
 
     poll_route_propagation(
         &[
             (
-                &client2,
+                &server2.client,
                 vec![Path {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
@@ -96,7 +99,7 @@ async fn test_announce_withdraw_mesh() {
                 }],
             ),
             (
-                &client3,
+                &server3.client,
                 vec![Path {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
@@ -112,22 +115,24 @@ async fn test_announce_withdraw_mesh() {
     .await;
 
     // Server1 withdraws the route
-    client1
+    server1
+        .client
         .withdraw_route("10.1.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route from server 1");
 
     // Poll for withdrawal and verify peers
-    poll_route_withdrawal(&[&client2, &client3]).await;
-    verify_peers_established(&[&client1, &client2, &client3], 2).await;
+    poll_route_withdrawal(&[&server2, &server3]).await;
+    verify_peers_established(&[&server1, &server2, &server3], 2).await;
 }
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh_2() {
-    let (mut client1, client2, client3, client4) = setup_four_meshed_servers().await;
+    let (mut server1, server2, server3, server4) = setup_four_meshed_servers().await;
 
     // Server1 announces a route
-    client1
+    server1
+        .client
         .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
         .await
         .expect("Failed to announce route from server 1");
@@ -136,19 +141,19 @@ async fn test_announce_withdraw_mesh_2() {
     // After best path selection, only the best path (shortest AS_PATH) should remain
 
     // Get actual peer addresses
-    let peers2 = client2.get_peers().await.unwrap();
+    let peers2 = server2.client.get_peers().await.unwrap();
     let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
 
-    let peers3 = client3.get_peers().await.unwrap();
+    let peers3 = server3.client.get_peers().await.unwrap();
     let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
 
-    let peers4 = client4.get_peers().await.unwrap();
+    let peers4 = server4.client.get_peers().await.unwrap();
     let peer4_from_server1 = peers4.iter().find(|p| p.asn == 65001).unwrap();
 
     poll_route_propagation(
         &[
             (
-                &client2,
+                &server2.client,
                 vec![Path {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
@@ -159,7 +164,7 @@ async fn test_announce_withdraw_mesh_2() {
                 }],
             ),
             (
-                &client3,
+                &server3.client,
                 vec![Path {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
@@ -170,7 +175,7 @@ async fn test_announce_withdraw_mesh_2() {
                 }],
             ),
             (
-                &client4,
+                &server4.client,
                 vec![Path {
                     origin: Origin::Igp.into(),
                     as_path: vec![65001],
@@ -186,12 +191,67 @@ async fn test_announce_withdraw_mesh_2() {
     .await;
 
     // Server1 withdraws the route
-    client1
+    server1
+        .client
         .withdraw_route("10.1.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route from server 1");
 
     // Poll for withdrawal and verify peers
-    poll_route_withdrawal(&[&client2, &client3, &client4]).await;
-    verify_peers_established(&[&client1, &client2, &client3, &client4], 3).await;
+    poll_route_withdrawal(&[&server2, &server3, &server4]).await;
+    verify_peers_established(&[&server1, &server2, &server3, &server4], 3).await;
+}
+
+#[tokio::test]
+async fn test_peer_down_withdraws_routes() {
+    let (server1, mut server2) = setup_two_peered_servers().await;
+
+    // Server2 announces a route to Server1 via gRPC
+    server2
+        .client
+        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route");
+
+    // Get the actual peer address (with OS-allocated port)
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // Poll for route to appear in Server1's RIB
+    poll_route_propagation(
+        &[(
+            &server1.client,
+            vec![Path {
+                origin: Origin::Igp.into(),
+                as_path: vec![65002],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: peer_addr.clone(),
+                local_pref: Some(100),
+                med: None,
+            }],
+        )],
+        "10.0.0.0/24",
+    )
+    .await;
+
+    // Kill Server2 to simulate peer going down
+    server2.kill();
+
+    // Give some time for Server1 to detect the disconnection
+    // With a 3-second hold time, the peer should be detected as down
+    // when the next keepalive fails (keepalive is sent every hold_time/3 = 1 second)
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    // Poll for route withdrawal - route should be withdrawn when peer goes down
+    poll_route_withdrawal(&[&server1]).await;
+
+    // Verify Server1 has no peers in Established state anymore
+    let peers = server1.client.get_peers().await.unwrap();
+    assert!(
+        peers.is_empty()
+            || !peers
+                .iter()
+                .any(|p| peer_in_state(p, BgpState::Established)),
+        "Server1 should have no established peers after Server2 is killed"
+    );
 }

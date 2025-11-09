@@ -198,16 +198,28 @@ impl LocRib {
         self.run_best_path_selection(&[prefix]);
     }
 
-    pub fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) {
-        for route in self.routes.values_mut() {
+    pub fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) -> Vec<IpNetwork> {
+        let mut changed_prefixes = Vec::new();
+
+        for (prefix, route) in self.routes.iter_mut() {
+            let original_len = route.paths.len();
             route.paths.retain(|p| {
                 !matches!(
                     p.source,
                     RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) if addr == peer_addr
                 )
             });
+            // If paths were removed, this prefix was affected
+            if route.paths.len() != original_len {
+                changed_prefixes.push(*prefix);
+            }
         }
         self.routes.retain(|_, route| !route.paths.is_empty());
+
+        // Run best path selection on all affected prefixes
+        self.run_best_path_selection(&changed_prefixes);
+
+        changed_prefixes
     }
 
     pub fn routes_len(&self) -> usize {
