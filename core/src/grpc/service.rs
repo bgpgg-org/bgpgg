@@ -91,13 +91,12 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<RemovePeerRequest>,
     ) -> Result<Response<RemovePeerResponse>, Status> {
-        let addr_str = request.into_inner().address;
+        let peer_ip = request.into_inner().address;
 
-        // Parse address and extract IP
-        let addr: std::net::SocketAddr = addr_str
-            .parse()
-            .map_err(|_| Status::invalid_argument("invalid address format"))?;
-        let peer_ip = addr.ip().to_string();
+        // Validate that it's a valid IP address
+        peer_ip
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| Status::invalid_argument("invalid IP address format"))?;
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();

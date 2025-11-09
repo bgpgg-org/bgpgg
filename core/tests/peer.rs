@@ -229,6 +229,237 @@ async fn test_peer_down_four_node_mesh() {
 }
 
 #[tokio::test]
+async fn test_remove_peer() {
+    let hold_timer_secs = 3;
+    let (mut server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    // Server2 announces a route to Server1 via gRPC
+    server2
+        .client
+        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route");
+
+    // Get the actual peer address (with OS-allocated port)
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // Poll for route to appear in Server1's RIB
+    poll_route_propagation(&[(
+        &server1,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![Path {
+                origin: Origin::Igp.into(),
+                as_path: vec![65002],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: peer_addr.clone(),
+                local_pref: Some(100),
+                med: None,
+            }],
+        }],
+    )])
+    .await;
+
+    // Remove peer via API call instead of killing the server
+    server1
+        .client
+        .remove_peer(peer_addr.clone())
+        .await
+        .expect("Failed to remove peer");
+
+    // Poll for route withdrawal - route should be withdrawn when peer is removed
+    poll_route_withdrawal(&[&server1]).await;
+
+    // Verify Server1 has no peers in Established state anymore
+    assert!(verify_peers(&server1, vec![]).await);
+}
+
+#[tokio::test]
+async fn test_remove_peer_withdraw_routes() {
+    let hold_timer_secs = 3;
+    let (mut server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+
+    // Server2 announces a route
+    server2
+        .client
+        .announce_route("10.2.0.0/24".to_string(), "192.168.2.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route from server 2");
+
+    // Get the actual peer address
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // Poll for route to appear in Server1's RIB
+    poll_route_propagation(&[(
+        &server1,
+        vec![Route {
+            prefix: "10.2.0.0/24".to_string(),
+            paths: vec![Path {
+                origin: Origin::Igp.into(),
+                as_path: vec![65002],
+                next_hop: "192.168.2.1".to_string(),
+                peer_address: peer_addr.clone(),
+                local_pref: Some(100),
+                med: None,
+            }],
+        }],
+    )])
+    .await;
+
+    // Remove Server2's peer from Server1 via API call
+    server1
+        .client
+        .remove_peer(peer_addr.clone())
+        .await
+        .expect("Failed to remove peer");
+
+    // Poll for route withdrawal from Server1 - Server1 should withdraw the route learned from Server2
+    poll_route_withdrawal(&[&server1]).await;
+
+    // Verify Server1 no longer has Server2 as a peer
+    assert!(verify_peers(&server1, vec![]).await);
+}
+
+#[tokio::test]
+async fn test_remove_peer_four_node_mesh() {
+    let hold_timer_secs = 3;
+    let (mut server1, server2, server3, mut server4) =
+        setup_four_meshed_servers(Some(hold_timer_secs)).await;
+
+    // Server4 announces a route
+    server4
+        .client
+        .announce_route("10.4.0.0/24".to_string(), "192.168.4.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route from server 4");
+
+    // Poll for route to propagate to all peers
+    poll_route_propagation(&[
+        (
+            &server1,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65004],
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server4.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65004],
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server4.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65004],
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server4.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+    ])
+    .await;
+
+    // Remove Server4's peer from Server1 via API call
+    server1
+        .client
+        .remove_peer(server4.address.clone())
+        .await
+        .expect("Failed to remove peer");
+
+    // Verify all servers still have the route
+    // Server1 now learns via server2 (deterministically chosen due to lower peer IP)
+    // Server2 and Server3 still learn directly from Server4
+    poll_route_propagation(&[
+        (
+            &server1,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65002, 65004], // Via server2 (127.0.0.2 < 127.0.0.3)
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server2.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65004],
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server4.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.4.0.0/24".to_string(),
+                paths: vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65004],
+                    next_hop: "192.168.4.1".to_string(),
+                    peer_address: server4.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            }],
+        ),
+    ])
+    .await;
+
+    // Verify Server1 no longer has Server4 as a peer
+    assert!(
+        verify_peers(
+            &server1,
+            vec![
+                Peer {
+                    address: server2.address.clone(),
+                    asn: server2.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+                Peer {
+                    address: server3.address.clone(),
+                    asn: server3.asn as u32,
+                    state: BgpState::Established.into(),
+                },
+            ],
+        )
+        .await
+    );
+}
+
+#[tokio::test]
 async fn test_peer_up() {
     let hold_timer_secs = 3;
     let (server1, server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;

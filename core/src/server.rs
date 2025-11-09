@@ -242,7 +242,17 @@ impl BgpServer {
                 drop(peer_map);
 
                 // Notify Loc-RIB to remove routes from this peer
-                loc_rib.lock().await.remove_routes_from_peer(addr.clone());
+                let changed_prefixes = loc_rib.lock().await.remove_routes_from_peer(addr.clone());
+
+                // Propagate route changes (withdrawals or new best paths) to all remaining peers
+                Self::propagate_routes(
+                    changed_prefixes,
+                    None, // Don't exclude any peer since the removed peer is already gone
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
 
                 if removed {
                     let _ = response.send(Ok(()));
