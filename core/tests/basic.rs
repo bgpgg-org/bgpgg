@@ -12,161 +12,186 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::bgp::msg_update::Origin;
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
-use bgpgg::config::Config;
-use bgpgg::fsm::BgpState;
-use bgpgg::rib::{Path, Route};
-use bgpgg::server::{BgpCommand, BgpServer, BgpServerHandle};
-use std::collections::HashSet;
-use std::net::Ipv4Addr;
-use tokio::time::{sleep, Duration};
+mod common;
 
-/// Poll until routes match expected set (ignoring order)
-async fn poll_for_routes(handle: &BgpServerHandle, expected: &HashSet<Route>) {
-    for _ in 0..100 {
-        let routes = handle.rib.query_loc_rib().await.unwrap();
-        let actual: HashSet<Route> = routes.into_iter().collect();
-        if actual == *expected {
-            return;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    let routes = handle.rib.query_loc_rib().await.unwrap();
-    let actual: HashSet<Route> = routes.into_iter().collect();
-    panic!(
-        "Timeout waiting for routes. Expected: {:?}, Got: {:?}",
-        expected, actual
-    );
-}
-
-/// Utility function to set up two BGP servers with peering established
-/// Returns (handle1, handle2) where server2 has connected to server1
-async fn setup_two_peered_servers(
-    asn1: u16,
-    asn2: u16,
-    port1: u16,
-    port2: u16,
-) -> (BgpServerHandle, BgpServerHandle) {
-    let mut server1 = BgpServer::new(Config::new(
-        asn1,
-        &format!("127.0.0.1:{}", port1),
-        Ipv4Addr::new(1, 1, 1, 1),
-    ));
-    let mut server2 = BgpServer::new(Config::new(
-        asn2,
-        &format!("127.0.0.1:{}", port2),
-        Ipv4Addr::new(2, 2, 2, 2),
-    ));
-
-    // Get handles before moving servers into spawned tasks
-    let handle1 = server1.handle.clone();
-    let handle2 = server2.handle.clone();
-
-    tokio::spawn(async move { server1.run().await });
-    tokio::spawn(async move { server2.run().await });
-
-    // Server2 connects to Server1
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    handle2
-        .send_command(BgpCommand::AddPeer {
-            addr: format!("127.0.0.1:{}", port1),
-            response: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-
-    // Wait for peering to establish
-    for _ in 0..100 {
-        let established = {
-            let peers1 = handle1.peers.lock().await;
-            let peers2 = handle2.peers.lock().await;
-
-            let both_have_peers = peers1.len() == 1 && peers2.len() == 1;
-            let both_established = peers1.first().map(|p| p.state()) == Some(BgpState::Established)
-                && peers2.first().map(|p| p.state()) == Some(BgpState::Established);
-
-            both_have_peers && both_established
-        };
-
-        if established {
-            return (handle1, handle2);
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Timeout - collect state for error message
-    let peers1 = handle1.peers.lock().await;
-    let peers2 = handle2.peers.lock().await;
-    panic!(
-        "Timeout waiting for peers to establish. Server1: {} peers (state: {:?}), Server2: {} peers (state: {:?})",
-        peers1.len(),
-        peers1.first().map(|p| p.state()),
-        peers2.len(),
-        peers2.first().map(|p| p.state())
-    );
-}
+use bgpgg::grpc::proto::{Origin, Path};
+use common::{
+    poll_route_propagation, poll_route_withdrawal, setup_four_meshed_servers,
+    setup_three_meshed_servers, setup_two_peered_servers, verify_peers_established,
+};
 
 #[tokio::test]
-async fn test_two_bgp_servers_peering() {
-    let (handle1, handle2) = setup_two_peered_servers(65100, 65200, 1790, 1791).await;
+async fn test_announce_withdraw() {
+    let (client1, mut client2) = setup_two_peered_servers().await;
 
-    // Verify that both servers have peers
-    let peers1 = handle1.peers.lock().await;
-    let peers2 = handle2.peers.lock().await;
-
-    assert_eq!(peers1.len(), 1, "Server 1 should have 1 peer");
-    assert_eq!(peers2.len(), 1, "Server 2 should have 1 peer");
-
-    // Verify FSM state is Established
-    assert_eq!(
-        peers1[0].state(),
-        BgpState::Established,
-        "Server 1 peer should be in Established state"
-    );
-    assert_eq!(
-        peers2[0].state(),
-        BgpState::Established,
-        "Server 2 peer should be in Established state"
-    );
-}
-
-#[tokio::test]
-async fn test_announce_one_route() {
-    let (handle1, handle2) = setup_two_peered_servers(65100, 65001, 1794, 1795).await;
-
-    // Server2 announces a route to Server1
-    let prefix = IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 0, 0, 0),
-        prefix_length: 24,
-    });
-    let next_hop = Ipv4Addr::new(192, 168, 1, 1);
-
-    handle2
-        .announce_route(prefix, next_hop, Origin::IGP)
+    // Server2 announces a route to Server1 via gRPC
+    client2
+        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
         .await
         .expect("Failed to announce route");
 
-    // Get the peer address (server2's connection to server1)
-    let peer_addr = handle1.peers.lock().await[0].addr;
+    // Get the actual peer address (with OS-allocated port)
+    let peers = client1.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
 
-    // Build expected routes set
-    let expected: HashSet<Route> = [Route {
-        prefix,
-        paths: vec![Path {
-            origin: Origin::IGP,
-            as_path: vec![65001],
-            next_hop,
-            from_peer: peer_addr,
-            local_pref: Some(100),
-            med: None,
-        }],
-    }]
-    .into_iter()
-    .collect();
+    // Poll for route to appear in Server1's RIB
+    poll_route_propagation(
+        &[(
+            &client1,
+            vec![Path {
+                origin: Origin::Igp.into(),
+                as_path: vec![65002],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: peer_addr.clone(),
+                local_pref: Some(100),
+                med: None,
+            }],
+        )],
+        "10.0.0.0/24",
+    )
+    .await;
 
-    // Poll and verify server1 received the route
-    poll_for_routes(&handle1, &expected).await;
+    // Server2 withdraws the route
+    client2
+        .withdraw_route("10.0.0.0/24".to_string())
+        .await
+        .expect("Failed to withdraw route");
+
+    // Poll for withdrawal and verify peers
+    poll_route_withdrawal(&[&client1]).await;
+    verify_peers_established(&[&client1, &client2], 1).await;
+}
+
+#[tokio::test]
+async fn test_announce_withdraw_mesh() {
+    let (mut client1, client2, client3) = setup_three_meshed_servers().await;
+
+    // Server1 announces a route
+    client1
+        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Poll for route propagation with expected AS paths
+    // After best path selection, only the best path (shortest AS_PATH) should remain
+
+    // Get actual peer addresses
+    let peers2 = client2.get_peers().await.unwrap();
+    let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers3 = client3.get_peers().await.unwrap();
+    let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
+
+    poll_route_propagation(
+        &[
+            (
+                &client2,
+                vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: peer2_from_server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            ),
+            (
+                &client3,
+                vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: peer3_from_server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            ),
+        ],
+        "10.1.0.0/24",
+    )
+    .await;
+
+    // Server1 withdraws the route
+    client1
+        .withdraw_route("10.1.0.0/24".to_string())
+        .await
+        .expect("Failed to withdraw route from server 1");
+
+    // Poll for withdrawal and verify peers
+    poll_route_withdrawal(&[&client2, &client3]).await;
+    verify_peers_established(&[&client1, &client2, &client3], 2).await;
+}
+
+#[tokio::test]
+async fn test_announce_withdraw_mesh_2() {
+    let (mut client1, client2, client3, client4) = setup_four_meshed_servers().await;
+
+    // Server1 announces a route
+    client1
+        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Poll for route propagation with expected AS paths
+    // After best path selection, only the best path (shortest AS_PATH) should remain
+
+    // Get actual peer addresses
+    let peers2 = client2.get_peers().await.unwrap();
+    let peer2_from_server1 = peers2.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers3 = client3.get_peers().await.unwrap();
+    let peer3_from_server1 = peers3.iter().find(|p| p.asn == 65001).unwrap();
+
+    let peers4 = client4.get_peers().await.unwrap();
+    let peer4_from_server1 = peers4.iter().find(|p| p.asn == 65001).unwrap();
+
+    poll_route_propagation(
+        &[
+            (
+                &client2,
+                vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: peer2_from_server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            ),
+            (
+                &client3,
+                vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: peer3_from_server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            ),
+            (
+                &client4,
+                vec![Path {
+                    origin: Origin::Igp.into(),
+                    as_path: vec![65001],
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: peer4_from_server1.address.clone(),
+                    local_pref: Some(100),
+                    med: None,
+                }],
+            ),
+        ],
+        "10.1.0.0/24",
+    )
+    .await;
+
+    // Server1 withdraws the route
+    client1
+        .withdraw_route("10.1.0.0/24".to_string())
+        .await
+        .expect("Failed to withdraw route from server 1");
+
+    // Poll for withdrawal and verify peers
+    poll_route_withdrawal(&[&client2, &client3, &client4]).await;
+    verify_peers_established(&[&client1, &client2, &client3, &client4], 3).await;
 }

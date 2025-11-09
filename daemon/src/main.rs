@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::peer_service_server::PeerServiceServer;
+use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use bgpgg::{error, info};
@@ -49,10 +49,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create BGP server
-    let mut server = BgpServer::new(config);
+    let server = BgpServer::new(config);
 
-    // Create gRPC service with cloned handle
-    let grpc_service = BgpGrpcService::new(server.handle.clone());
+    // Create gRPC service with cloned components
+    let grpc_service = BgpGrpcService::new(server.request_tx.clone());
 
     // Run both servers concurrently
     tokio::select! {
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
 
         result = tonic::transport::Server::builder()
-            .add_service(PeerServiceServer::new(grpc_service))
+            .add_service(BgpServiceServer::new(grpc_service))
             .serve(grpc_addr) => {
             if let Err(e) = result {
                 error!("gRPC server error", "error" => e.to_string());

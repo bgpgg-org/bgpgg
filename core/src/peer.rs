@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::Message;
+use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
-use crate::fsm::{BgpEvent, BgpState, Fsm, FsmAction};
+use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::utils::IpNetwork;
+use crate::fsm::{BgpEvent, BgpState, Fsm};
+use crate::rib::rib_in::AdjRibIn;
+use crate::rib::Path;
 use crate::{debug, info, warn};
 use std::io;
 use std::net::SocketAddr;
@@ -25,8 +29,9 @@ use tokio::net::tcp::OwnedWriteHalf;
 pub struct Peer {
     pub addr: SocketAddr,
     pub fsm: Fsm,
-    pub writer: OwnedWriteHalf,
+    pub tcp_tx: OwnedWriteHalf,
     pub asn: u16,
+    pub rib_in: AdjRibIn,
     local_asn: u16,
     local_bgp_id: u32,
 }
@@ -34,7 +39,7 @@ pub struct Peer {
 impl Peer {
     pub fn new(
         addr: SocketAddr,
-        writer: OwnedWriteHalf,
+        tcp_tx: OwnedWriteHalf,
         asn: u16,
         local_asn: u16,
         local_bgp_id: u32,
@@ -42,8 +47,9 @@ impl Peer {
         Peer {
             addr,
             fsm: Fsm::new(),
-            writer,
+            tcp_tx,
             asn,
+            rib_in: AdjRibIn::new(addr),
             local_asn,
             local_bgp_id,
         }
@@ -59,100 +65,207 @@ impl Peer {
         self.fsm.is_established()
     }
 
-    /// Process an FSM event and execute the resulting actions
-    pub async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
-        let transition = self.fsm.process_event(event);
-
-        debug!("FSM transition", "peer_addr" => self.addr.to_string(), "new_state" => format!("{:?}", transition.new_state), "event" => format!("{:?}", event));
-
-        // Execute actions
-        for action in transition.actions {
-            self.execute_action(action).await?;
+    /// Initialize the BGP connection after receiving OPEN
+    pub async fn initialize_connection(&mut self) -> Result<(), io::Error> {
+        // Process FSM events for connection establishment
+        for event in &[
+            BgpEvent::ManualStart,
+            BgpEvent::TcpConnectionConfirmed,
+            BgpEvent::BgpOpenReceived,
+        ] {
+            self.process_event(*event).await?;
         }
-
         Ok(())
     }
 
-    /// Process multiple FSM events in sequence
-    pub async fn process_events(&mut self, events: &[BgpEvent]) -> Result<(), io::Error> {
-        for &event in events {
+    /// Process a BGP message and return route changes for Loc-RIB update if applicable
+    /// Returns (withdrawn_prefixes, announced_routes) or None if not an UPDATE
+    pub async fn process_message(
+        &mut self,
+        message: BgpMessage,
+    ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
+        // Determine FSM event and process it
+        let event = match &message {
+            BgpMessage::Open(_) => {
+                warn!("received duplicate OPEN, ignoring", "peer_addr" => self.addr.to_string());
+                None
+            }
+            BgpMessage::Update(_) => {
+                info!("received UPDATE", "peer_addr" => self.addr.to_string());
+                Some(BgpEvent::BgpUpdateReceived)
+            }
+            BgpMessage::KeepAlive(_) => {
+                debug!("received KEEPALIVE", "peer_addr" => self.addr.to_string());
+                Some(BgpEvent::BgpKeepaliveReceived)
+            }
+            BgpMessage::Notification(notif_msg) => {
+                warn!("received NOTIFICATION", "peer_addr" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
+                Some(BgpEvent::NotificationReceived)
+            }
+        };
+
+        // Process FSM event if present
+        if let Some(event) = event {
             self.process_event(event).await?;
         }
-        Ok(())
+
+        // Process UPDATE message content
+        if let BgpMessage::Update(update_msg) = message {
+            Ok(Some(self.process_update(update_msg)))
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Execute an FSM action
-    async fn execute_action(&mut self, action: FsmAction) -> Result<(), io::Error> {
-        match action {
-            FsmAction::InitializeResources => {
-                debug!("initializing resources", "peer_addr" => self.addr.to_string());
-            }
+    /// Process a BGP event and handle state transitions
+    async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
+        let old_state = self.fsm.state();
+        let new_state = self.fsm.process_event(event);
 
-            FsmAction::ReleaseResources => {
-                debug!("releasing resources", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::StartConnectRetryTimer => {
-                self.fsm.timers.start_connect_retry();
-                debug!("started ConnectRetry timer", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::StopConnectRetryTimer => {
-                self.fsm.timers.stop_connect_retry();
-                debug!("stopped ConnectRetry timer", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::InitiateTcpConnection => {
-                debug!("initiate TCP connection (handled externally)", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::CloseTcpConnection => {
-                debug!("close TCP connection (handled externally)", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::SendOpen => {
+        // Handle state-specific actions based on transitions
+        match (old_state, new_state, event) {
+            // Entering OpenSent - send OPEN
+            (BgpState::Connect, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed)
+            | (BgpState::Active, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) => {
                 let open_msg = OpenMessage::new(self.local_asn, 180, self.local_bgp_id);
-                self.writer.write_all(&open_msg.serialize()).await?;
+                self.tcp_tx.write_all(&open_msg.serialize()).await?;
                 info!("sent OPEN message", "peer_addr" => self.addr.to_string());
             }
 
-            FsmAction::SendKeepalive => {
-                let keepalive_msg = KeepAliveMessage {};
-                self.writer.write_all(&keepalive_msg.serialize()).await?;
-                debug!("sent KEEPALIVE message", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::SendNotification => {
-                warn!("send NOTIFICATION not yet implemented", "peer_addr" => self.addr.to_string());
-                // TODO: Implement notification sending with proper error codes
-            }
-
-            FsmAction::StartHoldTimer => {
-                self.fsm.timers.start_hold_timer();
-                debug!("started Hold timer", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::ResetHoldTimer => {
+            // Entering OpenConfirm - send KEEPALIVE
+            (BgpState::OpenSent, BgpState::OpenConfirm, BgpEvent::BgpOpenReceived) => {
                 self.fsm.timers.reset_hold_timer();
-                debug!("reset Hold timer", "peer_addr" => self.addr.to_string());
-            }
-
-            FsmAction::StartKeepaliveTimer => {
+                let keepalive_msg = KeepAliveMessage {};
+                self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
+                debug!("sent KEEPALIVE message", "peer_addr" => self.addr.to_string());
                 self.fsm.timers.start_keepalive_timer();
-                debug!("started Keepalive timer", "peer_addr" => self.addr.to_string());
             }
 
-            FsmAction::ProcessUpdate => {
-                debug!("process UPDATE (handled by RIB)", "peer_addr" => self.addr.to_string());
+            // In OpenConfirm or Established - handle keepalive timer expiry
+            (_, BgpState::OpenConfirm, BgpEvent::KeepaliveTimerExpires)
+            | (_, BgpState::Established, BgpEvent::KeepaliveTimerExpires) => {
+                let keepalive_msg = KeepAliveMessage {};
+                self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
+                debug!("sent KEEPALIVE message", "peer_addr" => self.addr.to_string());
+                self.fsm.timers.start_keepalive_timer();
             }
+
+            // Received keepalive in OpenConfirm - entering Established
+            (BgpState::OpenConfirm, BgpState::Established, BgpEvent::BgpKeepaliveReceived) => {
+                self.fsm.timers.reset_hold_timer();
+            }
+
+            // In Established - reset hold timer on keepalive/update
+            (BgpState::Established, BgpState::Established, BgpEvent::BgpKeepaliveReceived)
+            | (BgpState::Established, BgpState::Established, BgpEvent::BgpUpdateReceived) => {
+                self.fsm.timers.reset_hold_timer();
+            }
+
+            _ => {}
         }
 
         Ok(())
+    }
+
+    /// Process a BGP UPDATE message
+    /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
+    pub fn process_update(
+        &mut self,
+        update_msg: UpdateMessage,
+    ) -> (Vec<IpNetwork>, Vec<(IpNetwork, Path)>) {
+        let mut withdrawn = Vec::new();
+        let mut announced = Vec::new();
+
+        // Process withdrawn routes
+        for prefix in update_msg.withdrawn_routes() {
+            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
+            self.rib_in.remove_route(*prefix);
+            withdrawn.push(*prefix);
+        }
+
+        // Extract path attributes for announced routes
+        let origin = update_msg.get_origin();
+        let as_path = update_msg.get_as_path();
+        let next_hop = update_msg.get_next_hop();
+
+        // Only process announcements if we have required attributes
+        if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
+            // Process announced routes (NLRI)
+            for prefix in update_msg.nlri_list() {
+                let source = if self.asn == self.local_asn {
+                    crate::rib::RouteSource::Ibgp(self.addr)
+                } else {
+                    crate::rib::RouteSource::Ebgp(self.addr)
+                };
+                let path = Path {
+                    origin,
+                    as_path: as_path.clone(),
+                    next_hop,
+                    source,
+                    local_pref: None,
+                    med: None,
+                };
+                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
+                self.rib_in.add_route(*prefix, path.clone());
+                announced.push((*prefix, path));
+            }
+        } else if !update_msg.nlri_list().is_empty() {
+            warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_addr" => self.addr.to_string());
+        }
+
+        // Return only what changed in this UPDATE
+        (withdrawn, announced)
     }
 
     /// Set negotiated hold time from received OPEN message
     pub fn set_negotiated_hold_time(&mut self, hold_time: u16) {
         self.fsm.timers.set_negotiated_hold_time(hold_time);
         info!("negotiated hold time", "peer_addr" => self.addr.to_string(), "hold_time_seconds" => hold_time);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn create_test_peer_with_state(state: BgpState) -> Peer {
+        // Create a test TCP connection
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_, tcp_tx) = client.into_split();
+
+        let mut peer = Peer::new(addr, tcp_tx, 65001, 65000, 0x01020304);
+        peer.fsm = Fsm::with_state(state);
+        peer
+    }
+
+    #[tokio::test]
+    async fn test_state() {
+        let peer = create_test_peer_with_state(BgpState::Idle).await;
+        assert_eq!(peer.state(), BgpState::Idle);
+
+        let peer = create_test_peer_with_state(BgpState::Connect).await;
+        assert_eq!(peer.state(), BgpState::Connect);
+
+        let peer = create_test_peer_with_state(BgpState::Established).await;
+        assert_eq!(peer.state(), BgpState::Established);
+    }
+
+    #[tokio::test]
+    async fn test_is_established() {
+        let peer = create_test_peer_with_state(BgpState::Idle).await;
+        assert!(!peer.is_established());
+
+        let peer = create_test_peer_with_state(BgpState::Connect).await;
+        assert!(!peer.is_established());
+
+        let peer = create_test_peer_with_state(BgpState::OpenSent).await;
+        assert!(!peer.is_established());
+
+        let peer = create_test_peer_with_state(BgpState::Established).await;
+        assert!(peer.is_established());
     }
 }

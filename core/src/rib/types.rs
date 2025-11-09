@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::IpNetwork;
-use std::net::{Ipv4Addr, SocketAddr};
+use crate::rib::path::Path;
+use std::net::SocketAddr;
 
-/// Represents a BGP path with all its attributes
+/// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Path {
-    pub origin: Origin,
-    pub as_path: Vec<u16>,
-    pub next_hop: Ipv4Addr,
-    pub from_peer: SocketAddr,
-    pub local_pref: Option<u32>,
-    pub med: Option<u32>,
+pub enum RouteSource {
+    /// Route learned from an EBGP peer (external AS)
+    Ebgp(SocketAddr),
+    /// Route learned from an IBGP peer (same AS)
+    Ibgp(SocketAddr),
+    /// Route originated locally by this router
+    Local,
 }
 
 /// Represents a route with one or more paths to a prefix
@@ -32,10 +32,4 @@ pub struct Path {
 pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Path>,
-}
-
-/// Error type for RIB queries
-#[derive(Debug)]
-pub enum QueryError {
-    RibUnavailable,
 }
