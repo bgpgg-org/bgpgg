@@ -16,7 +16,7 @@
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
-use bgpgg::grpc::proto::{BgpState, Peer};
+use bgpgg::grpc::proto::{BgpState, Path, Peer};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
@@ -265,55 +265,24 @@ pub async fn setup_four_meshed_servers() -> (BgpClient, BgpClient, BgpClient, Bg
     panic!("Timeout waiting for mesh peers to establish");
 }
 
-/// Polls for route propagation to multiple servers with expected AS paths
+/// Polls for route propagation to multiple servers with expected paths
 ///
 /// # Arguments
-/// * `expectations` - Slice of tuples containing (gRPC client, expected AS paths)
+/// * `expectations` - Slice of tuples containing (gRPC client, expected paths)
 /// * `prefix` - The route prefix to check for
-/// * `expected_path_count` - Expected number of paths per server
-pub async fn poll_route_propagation(
-    expectations: &[(&BgpClient, Vec<Vec<u32>>)],
-    prefix: &str,
-    expected_path_count: usize,
-) {
-    for _ in 0..100 {
-        let mut all_found = true;
-
-        for (client, expected_paths) in expectations.iter() {
+pub async fn poll_route_propagation(expectations: &[(&BgpClient, Vec<Path>)], prefix: &str) {
+    'retry: for _ in 0..100 {
+        for (client, expected_paths) in expectations {
             let routes = client.get_routes().await.unwrap();
 
-            if routes.len() != 1 || routes[0].paths.len() != expected_path_count {
-                all_found = false;
-                break;
-            }
-
-            let route = &routes[0];
-            assert_eq!(
-                route.prefix, prefix,
-                "Route prefix mismatch in server {}",
-                client.router_id
-            );
-
-            let mut as_paths: Vec<_> = route.paths.iter().map(|p| &p.as_path).collect();
-            as_paths.sort();
-
-            for exp_path in expected_paths.iter() {
-                if !as_paths.contains(&exp_path) {
-                    all_found = false;
-                    break;
-                }
-            }
-
-            if !all_found {
-                break;
+            if routes.len() != 1 || routes[0].prefix != prefix || routes[0].paths != *expected_paths
+            {
+                sleep(Duration::from_millis(100)).await;
+                continue 'retry;
             }
         }
-
-        if all_found {
-            return;
-        }
-
-        sleep(Duration::from_millis(100)).await;
+        // All expectations matched
+        return;
     }
 
     panic!("Timeout waiting for route {} to propagate", prefix);

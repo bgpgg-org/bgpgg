@@ -19,12 +19,14 @@
 //! - Loc-RIB: Local routing table containing best paths (owned by BgpServer)
 //! - Adj-RIB-Out: Computed dynamically on-demand (not stored)
 
+mod path;
 pub mod rib_in;
 pub mod rib_loc;
 mod types;
 
 // Re-exports
-pub use types::{Path, Route, RouteSource};
+pub use path::Path;
+pub use types::{Route, RouteSource};
 
 #[cfg(test)]
 mod test_helpers {
@@ -38,7 +40,7 @@ mod test_helpers {
             origin: Origin::IGP,
             as_path: vec![100, 200],
             next_hop: Ipv4Addr::new(192, 0, 2, 1),
-            source: RouteSource::Peer(peer_addr),
+            source: RouteSource::Ebgp(peer_addr),
             local_pref: Some(100),
             med: Some(0),
         }

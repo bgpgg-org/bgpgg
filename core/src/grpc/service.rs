@@ -28,7 +28,7 @@ use super::proto::{
     RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
 };
 
-const LOCAL_ROUTE_SOURCE_STR: &str = "local";
+const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
 
 /// Convert internal BgpState to proto BgpState
 fn to_proto_state(state: BgpState) -> i32 {
@@ -318,8 +318,8 @@ impl BgpService for BgpGrpcService {
                         },
                         as_path: path.as_path.into_iter().map(|asn| asn as u32).collect(),
                         next_hop: path.next_hop.to_string(),
-                        from_peer: match path.source {
-                            RouteSource::Peer(addr) => addr.to_string(),
+                        peer_address: match path.source {
+                            RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr.to_string(),
                             RouteSource::Local => LOCAL_ROUTE_SOURCE_STR.to_string(),
                         },
                         local_pref: path.local_pref,

@@ -105,7 +105,7 @@ message Path {
     Origin origin = 1;
     repeated uint32 as_path = 2;
     string next_hop = 3;
-    string from_peer = 4;
+    string peer_address = 4;
     optional uint32 local_pref = 5;
     optional uint32 med = 6;
 }

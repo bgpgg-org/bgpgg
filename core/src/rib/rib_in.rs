@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::utils::IpNetwork;
-use crate::rib::types::{Path, Route};
+use crate::rib::{Path, Route};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 

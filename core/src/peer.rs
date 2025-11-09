@@ -192,11 +192,16 @@ impl Peer {
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
             // Process announced routes (NLRI)
             for prefix in update_msg.nlri_list() {
+                let source = if self.asn == self.local_asn {
+                    crate::rib::RouteSource::Ibgp(self.addr)
+                } else {
+                    crate::rib::RouteSource::Ebgp(self.addr)
+                };
                 let path = Path {
                     origin,
                     as_path: as_path.clone(),
                     next_hop,
-                    source: crate::rib::RouteSource::Peer(self.addr),
+                    source,
                     local_pref: None,
                     med: None,
                 };
