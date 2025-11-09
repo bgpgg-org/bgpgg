@@ -14,7 +14,6 @@
 
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpEvent, BgpState, Fsm};
@@ -25,15 +24,22 @@ use std::io;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 
+/// Type of BGP session based on AS relationship
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionType {
+    /// External BGP session (different AS)
+    Ebgp,
+    /// Internal BGP session (same AS)
+    Ibgp,
+}
+
 pub struct Peer {
     pub addr: String,
     pub fsm: Fsm,
     pub tcp_tx: OwnedWriteHalf,
     pub asn: u16,
     pub rib_in: AdjRibIn,
-    local_asn: u16,
-    local_bgp_id: u32,
-    hold_time: u16,
+    pub session_type: SessionType,
 }
 
 impl Peer {
@@ -41,9 +47,7 @@ impl Peer {
         addr: String,
         tcp_tx: OwnedWriteHalf,
         asn: u16,
-        local_asn: u16,
-        local_bgp_id: u32,
-        hold_time: u16,
+        session_type: SessionType,
     ) -> Self {
         Peer {
             addr: addr.clone(),
@@ -51,9 +55,7 @@ impl Peer {
             tcp_tx,
             asn,
             rib_in: AdjRibIn::new(addr),
-            local_asn,
-            local_bgp_id,
-            hold_time,
+            session_type,
         }
     }
 
@@ -126,13 +128,8 @@ impl Peer {
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
-            // Entering OpenSent - send OPEN
-            (BgpState::Connect, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed)
-            | (BgpState::Active, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) => {
-                let open_msg = OpenMessage::new(self.local_asn, self.hold_time, self.local_bgp_id);
-                self.tcp_tx.write_all(&open_msg.serialize()).await?;
-                info!("sent OPEN message", "peer_ip" => &self.addr);
-            }
+            // Note: OPEN message is sent by the server before Peer is created,
+            // so we don't send it here during FSM state transitions
 
             // Entering OpenConfirm - send KEEPALIVE
             (BgpState::OpenSent, BgpState::OpenConfirm, BgpEvent::BgpOpenReceived) => {
@@ -194,10 +191,9 @@ impl Peer {
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
             // Process announced routes (NLRI)
             for prefix in update_msg.nlri_list() {
-                let source = if self.asn == self.local_asn {
-                    crate::rib::RouteSource::Ibgp(self.addr.clone())
-                } else {
-                    crate::rib::RouteSource::Ebgp(self.addr.clone())
+                let source = match self.session_type {
+                    SessionType::Ebgp => crate::rib::RouteSource::Ebgp(self.addr.clone()),
+                    SessionType::Ibgp => crate::rib::RouteSource::Ibgp(self.addr.clone()),
                 };
                 let path = Path {
                     origin,
@@ -248,7 +244,7 @@ mod tests {
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (_, tcp_tx) = client.into_split();
 
-        let mut peer = Peer::new(addr.ip().to_string(), tcp_tx, 65001, 65000, 0x01020304, 180);
+        let mut peer = Peer::new(addr.ip().to_string(), tcp_tx, 65001, SessionType::Ebgp);
         peer.fsm = Fsm::with_state(state);
         peer
     }

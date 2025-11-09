@@ -159,7 +159,6 @@ impl BgpServer {
             write_half,
             peer_ip,
             local_asn,
-            local_bgp_id,
             hold_time,
             peers,
             loc_rib,
@@ -366,7 +365,6 @@ impl BgpServer {
                 write_half,
                 peer_ip,
                 local_asn,
-                local_bgp_id,
                 hold_time,
                 peers,
                 loc_rib,
@@ -380,7 +378,6 @@ impl BgpServer {
         write_half: tokio::net::tcp::OwnedWriteHalf,
         peer_ip: String,
         local_asn: u16,
-        local_bgp_id: u32,
         hold_time: u16,
         peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
@@ -412,15 +409,15 @@ impl BgpServer {
         // Negotiate hold time: use minimum of our hold time and peer's hold time (RFC 4271)
         let negotiated_hold_time = hold_time.min(peer_hold_time);
 
+        // Determine session type based on AS numbers
+        let session_type = if peer_asn == local_asn {
+            crate::peer::SessionType::Ibgp
+        } else {
+            crate::peer::SessionType::Ebgp
+        };
+
         // Now add the peer with the ASN we received and negotiated hold time
-        let mut peer = Peer::new(
-            peer_ip.clone(),
-            write_half,
-            peer_asn,
-            local_asn,
-            local_bgp_id,
-            negotiated_hold_time,
-        );
+        let mut peer = Peer::new(peer_ip.clone(), write_half, peer_asn, session_type);
 
         // Set the negotiated hold time in FSM timers
         peer.set_negotiated_hold_time(negotiated_hold_time);

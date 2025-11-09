@@ -437,6 +437,231 @@ pub async fn setup_four_meshed_servers(
     (server1, server2, server3, server4)
 }
 
+/// Sets up two ASes connected by one eBGP session
+///
+/// (AS65001)                    (AS65002)
+///     S1----S2                     S7
+///      |\   /|                    /  \
+///      | \ / |                   /    \
+///      | / \ |                  /      \
+///      |/   \|                 /        \
+///     S3----S4--------eBGP----S5--------S6
+///
+/// # Arguments
+/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+///
+/// Returns (server1, server2, server3, server4, server5, server6, server7) TestServer instances.
+/// AS65001 (S1, S2, S3, S4) - fully meshed iBGP (each has 3 peers within AS).
+/// AS65002 (S5, S6, S7) - triangle iBGP topology (S5-S6, S5-S7, S6-S7).
+/// S4 (AS65001) and S5 (AS65002) connected via eBGP.
+/// All connections will be in Established state when this function returns.
+pub async fn setup_two_ases_with_ebgp(
+    hold_timer_secs: Option<u16>,
+) -> (
+    TestServer,
+    TestServer,
+    TestServer,
+    TestServer,
+    TestServer,
+    TestServer,
+    TestServer,
+) {
+    // Start all seven servers on different loopback IPs
+    // Island 1: All servers use AS65001 (iBGP mesh)
+    let mut server1 = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs,
+        "127.0.0.1",
+    )
+    .await;
+    let mut server2 = start_test_server(
+        65001,
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs,
+        "127.0.0.2",
+    )
+    .await;
+    let mut server3 = start_test_server(
+        65001,
+        Ipv4Addr::new(3, 3, 3, 3),
+        hold_timer_secs,
+        "127.0.0.3",
+    )
+    .await;
+    let mut server4 = start_test_server(
+        65001,
+        Ipv4Addr::new(4, 4, 4, 4),
+        hold_timer_secs,
+        "127.0.0.4",
+    )
+    .await;
+    // Island 2: All servers use AS65002 (iBGP triangle)
+    let mut server5 = start_test_server(
+        65002,
+        Ipv4Addr::new(5, 5, 5, 5),
+        hold_timer_secs,
+        "127.0.0.5",
+    )
+    .await;
+    let mut server6 = start_test_server(
+        65002,
+        Ipv4Addr::new(6, 6, 6, 6),
+        hold_timer_secs,
+        "127.0.0.6",
+    )
+    .await;
+    let server7 = start_test_server(
+        65002,
+        Ipv4Addr::new(7, 7, 7, 7),
+        hold_timer_secs,
+        "127.0.0.7",
+    )
+    .await;
+
+    // Island 1 mesh: S1, S2, S3, S4
+    // S1 connects to S2, S3, and S4
+    server1
+        .client
+        .add_peer(format!("127.0.0.2:{}", server2.bgp_port))
+        .await
+        .expect("Failed to add peer 2 to server 1");
+    server1
+        .client
+        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
+        .await
+        .expect("Failed to add peer 3 to server 1");
+    server1
+        .client
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
+        .await
+        .expect("Failed to add peer 4 to server 1");
+
+    // S2 connects to S3 and S4 (already connected to S1)
+    server2
+        .client
+        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
+        .await
+        .expect("Failed to add peer 3 to server 2");
+    server2
+        .client
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
+        .await
+        .expect("Failed to add peer 4 to server 2");
+
+    // S3 connects to S4 (already connected to S1 and S2)
+    server3
+        .client
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
+        .await
+        .expect("Failed to add peer 4 to server 3");
+
+    // Island 2 triangle: S5, S6, S7
+    // S5 connects to S6 and S7
+    server5
+        .client
+        .add_peer(format!("127.0.0.6:{}", server6.bgp_port))
+        .await
+        .expect("Failed to add peer 6 to server 5");
+    server5
+        .client
+        .add_peer(format!("127.0.0.7:{}", server7.bgp_port))
+        .await
+        .expect("Failed to add peer 7 to server 5");
+
+    // S6 connects to S7 (already connected to S5)
+    server6
+        .client
+        .add_peer(format!("127.0.0.7:{}", server7.bgp_port))
+        .await
+        .expect("Failed to add peer 7 to server 6");
+
+    // Bridge connection: S4 (AS65001) to S5 (AS65002) - eBGP
+    server4
+        .client
+        .add_peer(format!("127.0.0.5:{}", server5.bgp_port))
+        .await
+        .expect("Failed to add eBGP bridge peer 5 to server 4");
+
+    // Wait for all peerings to establish
+    poll_until(
+        || async {
+            // Island 1 full mesh (4 servers)
+            verify_peers(
+                &server1,
+                vec![
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
+                    server4.to_peer(BgpState::Established),
+                ],
+            )
+            .await
+                && verify_peers(
+                    &server2,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                && verify_peers(
+                    &server3,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                // S4 has island peers + eBGP bridge to S5
+                && verify_peers(
+                    &server4,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                        server5.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                // Island 2 triangle (S5, S6, S7)
+                // S5 connects to S6, S7, and eBGP bridge to S4
+                && verify_peers(
+                    &server5,
+                    vec![
+                        server4.to_peer(BgpState::Established),
+                        server6.to_peer(BgpState::Established),
+                        server7.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                // S6 connects to S5 and S7
+                && verify_peers(
+                    &server6,
+                    vec![
+                        server5.to_peer(BgpState::Established),
+                        server7.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                // S7 connects to S5 and S6
+                && verify_peers(
+                    &server7,
+                    vec![
+                        server5.to_peer(BgpState::Established),
+                        server6.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+        },
+        "Timeout waiting for two-island bridge topology to establish",
+    )
+    .await;
+
+    (server1, server2, server3, server4, server5, server6, server7)
+}
+
 /// Polls for route propagation to multiple servers with expected routes
 ///
 /// # Arguments
