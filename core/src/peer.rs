@@ -14,6 +14,7 @@
 
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
+use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpEvent, BgpState, Fsm};
@@ -33,6 +34,19 @@ pub enum SessionType {
     Ibgp,
 }
 
+/// Statistics for BGP messages
+#[derive(Debug, Clone, Default)]
+pub struct PeerStatistics {
+    pub open_sent: u64,
+    pub keepalive_sent: u64,
+    pub update_sent: u64,
+    pub notification_sent: u64,
+    pub open_received: u64,
+    pub keepalive_received: u64,
+    pub update_received: u64,
+    pub notification_received: u64,
+}
+
 pub struct Peer {
     pub addr: String,
     pub fsm: Fsm,
@@ -40,15 +54,12 @@ pub struct Peer {
     pub asn: u16,
     pub rib_in: AdjRibIn,
     pub session_type: SessionType,
+    pub statistics: PeerStatistics,
 }
 
 impl Peer {
-    pub fn new(
-        addr: String,
-        tcp_tx: OwnedWriteHalf,
-        asn: u16,
-        session_type: SessionType,
-    ) -> Self {
+    /// Create a new Peer with complete information
+    pub fn new(addr: String, tcp_tx: OwnedWriteHalf, asn: u16, session_type: SessionType) -> Self {
         Peer {
             addr: addr.clone(),
             fsm: Fsm::new(),
@@ -56,7 +67,17 @@ impl Peer {
             asn,
             rib_in: AdjRibIn::new(addr),
             session_type,
+            statistics: PeerStatistics::default(),
         }
+    }
+
+    /// Update session type based on peer ASN
+    pub fn update_session_type(&mut self, peer_asn: u16, local_asn: u16) {
+        self.session_type = if peer_asn == local_asn {
+            SessionType::Ibgp
+        } else {
+            SessionType::Ebgp
+        };
     }
 
     /// Get current BGP state
@@ -69,48 +90,43 @@ impl Peer {
         self.fsm.is_established()
     }
 
-    /// Initialize the BGP connection after receiving OPEN
-    pub async fn initialize_connection(&mut self) -> Result<(), io::Error> {
-        // Process FSM events for connection establishment
-        for event in &[
-            BgpEvent::ManualStart,
-            BgpEvent::TcpConnectionConfirmed,
-            BgpEvent::BgpOpenReceived,
-        ] {
-            self.process_event(*event).await?;
-        }
-        Ok(())
-    }
-
     /// Process a BGP message and return route changes for Loc-RIB update if applicable
     /// Returns (withdrawn_prefixes, announced_routes) or None if not an UPDATE
     pub async fn process_message(
         &mut self,
         message: BgpMessage,
     ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
-        // Determine FSM event and process it
-        let event = match &message {
+        // Track received messages
+        match &message {
             BgpMessage::Open(_) => {
+                self.statistics.open_received += 1;
                 warn!("received duplicate OPEN, ignoring", "peer_ip" => &self.addr);
-                None
             }
             BgpMessage::Update(_) => {
+                self.statistics.update_received += 1;
                 info!("received UPDATE", "peer_ip" => &self.addr);
-                Some(BgpEvent::BgpUpdateReceived)
             }
             BgpMessage::KeepAlive(_) => {
+                self.statistics.keepalive_received += 1;
                 debug!("received KEEPALIVE", "peer_ip" => &self.addr);
-                Some(BgpEvent::BgpKeepaliveReceived)
             }
             BgpMessage::Notification(notif_msg) => {
+                self.statistics.notification_received += 1;
                 warn!("received NOTIFICATION", "peer_ip" => &self.addr, "notification" => format!("{:?}", notif_msg));
-                Some(BgpEvent::NotificationReceived)
             }
+        }
+
+        // Determine FSM event and process it
+        let event = match &message {
+            BgpMessage::Open(_) => None,
+            BgpMessage::Update(_) => Some(BgpEvent::BgpUpdateReceived),
+            BgpMessage::KeepAlive(_) => Some(BgpEvent::BgpKeepaliveReceived),
+            BgpMessage::Notification(_) => Some(BgpEvent::NotificationReceived),
         };
 
         // Process FSM event if present
         if let Some(event) = event {
-            self.process_event(event).await?;
+            self.process_event(&event).await?;
         }
 
         // Process UPDATE message content
@@ -122,20 +138,42 @@ impl Peer {
     }
 
     /// Process a BGP event and handle state transitions
-    pub async fn process_event(&mut self, event: BgpEvent) -> Result<(), io::Error> {
+    pub async fn process_event(&mut self, event: &BgpEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
         let new_state = self.fsm.process_event(event);
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
-            // Note: OPEN message is sent by the server before Peer is created,
-            // so we don't send it here during FSM state transitions
+            // Entering OpenSent - send OPEN message
+            (
+                BgpState::Connect,
+                BgpState::OpenSent,
+                BgpEvent::TcpConnectionConfirmed {
+                    local_asn,
+                    hold_time,
+                    bgp_id,
+                },
+            ) => {
+                let open_msg = OpenMessage::new(*local_asn, *hold_time, *bgp_id);
+                self.tcp_tx.write_all(&open_msg.serialize()).await?;
+                self.statistics.open_sent += 1;
+                info!("sent OPEN message", "peer_ip" => &self.addr);
+            }
 
             // Entering OpenConfirm - send KEEPALIVE
-            (BgpState::OpenSent, BgpState::OpenConfirm, BgpEvent::BgpOpenReceived) => {
+            (
+                BgpState::OpenSent,
+                BgpState::OpenConfirm,
+                BgpEvent::BgpOpenReceived {
+                    peer_asn: _,
+                    peer_hold_time,
+                },
+            ) => {
                 self.fsm.timers.reset_hold_timer();
+                self.fsm.timers.set_negotiated_hold_time(*peer_hold_time);
                 let keepalive_msg = KeepAliveMessage {};
                 self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
+                self.statistics.keepalive_sent += 1;
                 debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
                 self.fsm.timers.start_keepalive_timer();
             }
@@ -145,6 +183,7 @@ impl Peer {
             | (_, BgpState::Established, BgpEvent::KeepaliveTimerExpires) => {
                 let keepalive_msg = KeepAliveMessage {};
                 self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
+                self.statistics.keepalive_sent += 1;
                 debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
                 self.fsm.timers.start_keepalive_timer();
             }
@@ -218,6 +257,7 @@ impl Peer {
     /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
     pub async fn send_update(&mut self, update_msg: UpdateMessage) -> Result<(), io::Error> {
         self.tcp_tx.write_all(&update_msg.serialize()).await?;
+        self.statistics.update_sent += 1;
         // RFC 4271: "Each time the local system sends a KEEPALIVE or UPDATE message,
         // it restarts its KeepaliveTimer"
         self.fsm.timers.reset_keepalive_timer();

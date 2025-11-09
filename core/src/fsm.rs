@@ -28,20 +28,29 @@ pub enum BgpState {
 }
 
 /// BGP FSM events as defined in RFC 4271 Section 8.1
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
+/// Events now carry necessary data for the FSM to send messages
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BgpEvent {
-    ManualStart = 1,
-    ManualStop = 2,
-    ConnectRetryTimerExpires = 9,
-    HoldTimerExpires = 10,
-    KeepaliveTimerExpires = 11,
-    TcpConnectionConfirmed = 16,
-    TcpConnectionFails = 18,
-    BgpOpenReceived = 19,
-    BgpKeepaliveReceived = 26,
-    BgpUpdateReceived = 27,
-    NotificationReceived = 24,
+    ManualStart,
+    ManualStop,
+    ConnectRetryTimerExpires,
+    HoldTimerExpires,
+    KeepaliveTimerExpires,
+    /// Carries parameters needed to send OPEN message
+    TcpConnectionConfirmed {
+        local_asn: u16,
+        hold_time: u16,
+        bgp_id: u32,
+    },
+    TcpConnectionFails,
+    /// Carries peer parameters from received OPEN
+    BgpOpenReceived {
+        peer_asn: u16,
+        peer_hold_time: u16,
+    },
+    BgpKeepaliveReceived,
+    BgpUpdateReceived,
+    NotificationReceived,
 }
 
 /// BGP FSM timers
@@ -181,27 +190,27 @@ impl Fsm {
     /// Process an event and return the new state
     ///
     /// This implements the state machine logic from RFC 4271 Section 8.2.2
-    pub fn process_event(&mut self, event: BgpEvent) -> BgpState {
-        let new_state = match (self.state, event) {
+    pub fn process_event(&mut self, event: &BgpEvent) -> BgpState {
+        let new_state = match (&self.state, event) {
             // ===== Idle State =====
             (BgpState::Idle, BgpEvent::ManualStart) => BgpState::Connect,
 
             // ===== Connect State =====
             (BgpState::Connect, BgpEvent::ManualStop) => BgpState::Idle,
             (BgpState::Connect, BgpEvent::ConnectRetryTimerExpires) => BgpState::Connect,
-            (BgpState::Connect, BgpEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
+            (BgpState::Connect, BgpEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
             (BgpState::Connect, BgpEvent::TcpConnectionFails) => BgpState::Active,
 
             // ===== Active State =====
             (BgpState::Active, BgpEvent::ManualStop) => BgpState::Idle,
             (BgpState::Active, BgpEvent::ConnectRetryTimerExpires) => BgpState::Connect,
-            (BgpState::Active, BgpEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
+            (BgpState::Active, BgpEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, BgpEvent::ManualStop) => BgpState::Idle,
             (BgpState::OpenSent, BgpEvent::HoldTimerExpires) => BgpState::Idle,
             (BgpState::OpenSent, BgpEvent::TcpConnectionFails) => BgpState::Active,
-            (BgpState::OpenSent, BgpEvent::BgpOpenReceived) => BgpState::OpenConfirm,
+            (BgpState::OpenSent, BgpEvent::BgpOpenReceived { .. }) => BgpState::OpenConfirm,
             (BgpState::OpenSent, BgpEvent::NotificationReceived) => BgpState::Idle,
 
             // ===== OpenConfirm State =====
@@ -266,7 +275,7 @@ mod tests {
     #[test]
     fn test_manual_start_from_idle() {
         let mut fsm = Fsm::new();
-        let new_state = fsm.process_event(BgpEvent::ManualStart);
+        let new_state = fsm.process_event(&BgpEvent::ManualStart);
 
         assert_eq!(new_state, BgpState::Connect);
         assert_eq!(fsm.state(), BgpState::Connect);
@@ -277,19 +286,26 @@ mod tests {
         let mut fsm = Fsm::new();
 
         // Idle -> Connect
-        fsm.process_event(BgpEvent::ManualStart);
+        fsm.process_event(&BgpEvent::ManualStart);
         assert_eq!(fsm.state(), BgpState::Connect);
 
         // Connect -> OpenSent
-        fsm.process_event(BgpEvent::TcpConnectionConfirmed);
+        fsm.process_event(&BgpEvent::TcpConnectionConfirmed {
+            local_asn: 65000,
+            hold_time: 180,
+            bgp_id: 0x01010101,
+        });
         assert_eq!(fsm.state(), BgpState::OpenSent);
 
         // OpenSent -> OpenConfirm
-        fsm.process_event(BgpEvent::BgpOpenReceived);
+        fsm.process_event(&BgpEvent::BgpOpenReceived {
+            peer_asn: 65001,
+            peer_hold_time: 180,
+        });
         assert_eq!(fsm.state(), BgpState::OpenConfirm);
 
         // OpenConfirm -> Established
-        fsm.process_event(BgpEvent::BgpKeepaliveReceived);
+        fsm.process_event(&BgpEvent::BgpKeepaliveReceived);
         assert_eq!(fsm.state(), BgpState::Established);
         assert!(fsm.is_established());
     }
@@ -299,14 +315,14 @@ mod tests {
         let mut fsm = Fsm::new();
 
         // Idle -> Connect
-        fsm.process_event(BgpEvent::ManualStart);
+        fsm.process_event(&BgpEvent::ManualStart);
 
         // Connect -> Active (connection failed)
-        fsm.process_event(BgpEvent::TcpConnectionFails);
+        fsm.process_event(&BgpEvent::TcpConnectionFails);
         assert_eq!(fsm.state(), BgpState::Active);
 
         // Active -> Connect (retry)
-        fsm.process_event(BgpEvent::ConnectRetryTimerExpires);
+        fsm.process_event(&BgpEvent::ConnectRetryTimerExpires);
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
@@ -315,11 +331,15 @@ mod tests {
         let mut fsm = Fsm::new();
 
         // Move to OpenSent
-        fsm.process_event(BgpEvent::ManualStart);
-        fsm.process_event(BgpEvent::TcpConnectionConfirmed);
+        fsm.process_event(&BgpEvent::ManualStart);
+        fsm.process_event(&BgpEvent::TcpConnectionConfirmed {
+            local_asn: 65000,
+            hold_time: 180,
+            bgp_id: 0x01010101,
+        });
 
         // Hold timer expiry should go to Idle
-        fsm.process_event(BgpEvent::HoldTimerExpires);
+        fsm.process_event(&BgpEvent::HoldTimerExpires);
         assert_eq!(fsm.state(), BgpState::Idle);
     }
 
@@ -338,7 +358,11 @@ mod tests {
             ),
             (
                 BgpState::Connect,
-                BgpEvent::TcpConnectionConfirmed,
+                BgpEvent::TcpConnectionConfirmed {
+                    local_asn: 65000,
+                    hold_time: 180,
+                    bgp_id: 0x01010101,
+                },
                 BgpState::OpenSent,
             ),
             (
@@ -355,7 +379,11 @@ mod tests {
             ),
             (
                 BgpState::Active,
-                BgpEvent::TcpConnectionConfirmed,
+                BgpEvent::TcpConnectionConfirmed {
+                    local_asn: 65000,
+                    hold_time: 180,
+                    bgp_id: 0x01010101,
+                },
                 BgpState::OpenSent,
             ),
             // From OpenSent
@@ -372,7 +400,10 @@ mod tests {
             ),
             (
                 BgpState::OpenSent,
-                BgpEvent::BgpOpenReceived,
+                BgpEvent::BgpOpenReceived {
+                    peer_asn: 65001,
+                    peer_hold_time: 180,
+                },
                 BgpState::OpenConfirm,
             ),
             (
@@ -443,7 +474,7 @@ mod tests {
 
         for (initial_state, event, expected_state) in test_cases {
             let mut fsm = Fsm::with_state(initial_state);
-            let new_state = fsm.process_event(event);
+            let new_state = fsm.process_event(&event);
 
             assert_eq!(
                 new_state, expected_state,

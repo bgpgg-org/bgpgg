@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
-use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
-use crate::fsm::BgpState;
+use crate::fsm::{BgpEvent, BgpState};
 use crate::peer::Peer;
 use crate::rib::rib_loc::LocRib;
 use crate::{debug, error, info};
@@ -51,6 +50,10 @@ pub enum BgpRequest {
     },
     GetPeers {
         response: oneshot::Sender<Vec<(String, u16, BgpState)>>,
+    },
+    GetPeer {
+        addr: String,
+        response: oneshot::Sender<Option<(String, u16, BgpState, crate::peer::PeerStatistics)>>,
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
@@ -134,32 +137,16 @@ impl BgpServer {
 
         info!("connected to peer", "peer_ip" => &peer_ip);
 
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, write_half) = stream.into_split();
 
-        // Send OPEN message
-        let open_msg = OpenMessage::new(local_asn, hold_time, local_bgp_id);
-        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
-            error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
-            return;
-        }
-        info!("sent OPEN", "peer_ip" => &peer_ip);
-
-        // Send KEEPALIVE message
-        let keepalive_msg = KeepAliveMessage {};
-        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
-            error!("failed to send KEEPALIVE", "peer_ip" => &peer_ip, "error" => e.to_string());
-            return;
-        }
-        info!("sent KEEPALIVE", "peer_ip" => &peer_ip);
-
-        // Handle incoming messages from this peer (will add peer after receiving OPEN)
-        // Use the peer IP address (not socket address) as identifier
+        // Handle incoming messages from this peer (will create Peer after receiving OPEN)
         Self::handle_peer(
             read_half,
             write_half,
             peer_ip,
             local_asn,
             hold_time,
+            local_bgp_id,
             peers,
             loc_rib,
         )
@@ -313,6 +300,13 @@ impl BgpServer {
                     .collect();
                 let _ = response.send(peer_info);
             }
+            BgpRequest::GetPeer { addr, response } => {
+                let peer_map = peers.lock().await;
+                let peer_info = peer_map
+                    .get(&addr)
+                    .map(|p| (p.addr.clone(), p.asn, p.state(), p.statistics.clone()));
+                let _ = response.send(peer_info);
+            }
             BgpRequest::GetRoutes { response } => {
                 let routes = loc_rib.lock().await.get_all_routes();
                 let _ = response.send(routes);
@@ -341,23 +335,7 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
-        let (read_half, mut write_half) = stream.into_split();
-
-        // Send OPEN message
-        let open_msg = OpenMessage::new(local_asn, hold_time, local_bgp_id);
-        if let Err(e) = write_half.write_all(&open_msg.serialize()).await {
-            error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
-            return;
-        }
-        info!("sent OPEN", "peer_ip" => &peer_ip);
-
-        // Send KEEPALIVE message
-        let keepalive_msg = KeepAliveMessage {};
-        if let Err(e) = write_half.write_all(&keepalive_msg.serialize()).await {
-            error!("failed to send KEEPALIVE", "peer_ip" => &peer_ip, "error" => e.to_string());
-            return;
-        }
-        info!("sent KEEPALIVE", "peer_ip" => &peer_ip);
+        let (read_half, write_half) = stream.into_split();
 
         tokio::spawn(async move {
             Self::handle_peer(
@@ -366,6 +344,7 @@ impl BgpServer {
                 peer_ip,
                 local_asn,
                 hold_time,
+                local_bgp_id,
                 peers,
                 loc_rib,
             )
@@ -379,12 +358,39 @@ impl BgpServer {
         peer_ip: String,
         local_asn: u16,
         hold_time: u16,
+        local_bgp_id: u32,
         peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
         debug!("handling peer", "peer_ip" => &peer_ip);
 
-        // First, wait for OPEN message
+        // Create a placeholder Peer to send OPEN immediately (we don't know peer_asn yet)
+        let mut peer = Peer::new(
+            peer_ip.clone(),
+            write_half,
+            0,
+            crate::peer::SessionType::Ebgp,
+        );
+
+        // Send OPEN via FSM to avoid deadlock
+        if let Err(e) = peer.process_event(&BgpEvent::ManualStart).await {
+            error!("failed to start FSM", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        if let Err(e) = peer
+            .process_event(&BgpEvent::TcpConnectionConfirmed {
+                local_asn,
+                hold_time,
+                bgp_id: local_bgp_id,
+            })
+            .await
+        {
+            error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        // Wait for peer's OPEN message
         let (peer_asn, peer_hold_time) = loop {
             let result = read_bgp_message(&mut read_half).await;
 
@@ -409,29 +415,37 @@ impl BgpServer {
         // Negotiate hold time: use minimum of our hold time and peer's hold time (RFC 4271)
         let negotiated_hold_time = hold_time.min(peer_hold_time);
 
-        // Determine session type based on AS numbers
+        // Determine session type
         let session_type = if peer_asn == local_asn {
             crate::peer::SessionType::Ibgp
         } else {
             crate::peer::SessionType::Ebgp
         };
 
-        // Now add the peer with the ASN we received and negotiated hold time
-        let mut peer = Peer::new(peer_ip.clone(), write_half, peer_asn, session_type);
+        // Update peer with correct ASN and session type
+        peer.asn = peer_asn;
+        peer.session_type = session_type;
 
-        // Set the negotiated hold time in FSM timers
-        peer.set_negotiated_hold_time(negotiated_hold_time);
+        // Track that we received OPEN (it was received before peer was fully created)
+        peer.statistics.open_received += 1;
 
-        // Initialize the BGP connection
-        if let Err(e) = peer.initialize_connection().await {
-            error!("failed to initialize connection", "peer_ip" => &peer_ip, "error" => e.to_string());
+        // Process receiving peer's OPEN (sends KEEPALIVE)
+        if let Err(e) = peer
+            .process_event(&BgpEvent::BgpOpenReceived {
+                peer_asn,
+                peer_hold_time: negotiated_hold_time,
+            })
+            .await
+        {
+            error!("failed to complete connection", "peer_ip" => &peer_ip, "error" => e.to_string());
             return;
         }
 
+        // Add peer to the map
         {
             let mut peer_map = peers.lock().await;
             peer_map.insert(peer_ip.clone(), peer);
-            info!("peer added", "peer_ip" => &peer_ip, "peer_asn" => peer_asn, "total_peers" => peer_map.len());
+            info!("peer established", "peer_ip" => &peer_ip, "peer_asn" => peer_asn, "session_type" => format!("{:?}", session_type), "total_peers" => peer_map.len());
         }
 
         // Create keepalive interval timer (RFC 4271)
@@ -537,7 +551,7 @@ impl BgpServer {
                     let mut peer_map = peers.lock().await;
                     if let Some(peer) = peer_map.get_mut(&peer_ip) {
                         if peer.fsm.timers.keepalive_timer_expired() {
-                            if let Err(e) = peer.process_event(crate::fsm::BgpEvent::KeepaliveTimerExpires).await {
+                            if let Err(e) = peer.process_event(&crate::fsm::BgpEvent::KeepaliveTimerExpires).await {
                                 error!("failed to send keepalive", "peer_ip" => &peer_ip, "error" => e.to_string());
                                 drop(peer_map);
                                 break;

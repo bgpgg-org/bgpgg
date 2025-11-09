@@ -384,6 +384,10 @@ async fn test_peer_up() {
     // Verify both peers are still in Established state
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
     assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
+
+    // Verify OPEN message was sent exactly once by each peer, and no UPDATEs sent yet
+    verify_peer_statistics(&server1, server2.address.clone(), 1, 1, 0).await;
+    verify_peer_statistics(&server2, server1.address.clone(), 1, 1, 0).await;
 }
 
 #[tokio::test]

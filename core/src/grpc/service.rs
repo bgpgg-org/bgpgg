@@ -23,8 +23,9 @@ use tonic::{Request, Response, Status};
 
 use super::proto::{
     bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AnnounceRouteRequest,
-    AnnounceRouteResponse, BgpState as ProtoBgpState, GetPeersRequest, GetPeersResponse,
-    GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer, RemovePeerRequest,
+    AnnounceRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse,
+    GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse, Path as ProtoPath,
+    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemovePeerRequest,
     RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
 };
 
@@ -152,6 +153,57 @@ impl BgpService for BgpGrpcService {
             .collect();
 
         Ok(Response::new(GetPeersResponse { peers: proto_peers }))
+    }
+
+    async fn get_peer(
+        &self,
+        request: Request<GetPeerRequest>,
+    ) -> Result<Response<GetPeerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        // Send request to BGP server
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = BgpRequest::GetPeer {
+            addr: addr.clone(),
+            response: tx,
+        };
+
+        self.bgp_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        // Wait for response
+        let peer_info = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        match peer_info {
+            Some((addr, asn, state, statistics)) => {
+                let proto_peer = ProtoPeer {
+                    address: addr,
+                    asn: asn as u32,
+                    state: to_proto_state(state),
+                };
+
+                let proto_statistics = ProtoPeerStatistics {
+                    open_sent: statistics.open_sent,
+                    keepalive_sent: statistics.keepalive_sent,
+                    update_sent: statistics.update_sent,
+                    notification_sent: statistics.notification_sent,
+                    open_received: statistics.open_received,
+                    keepalive_received: statistics.keepalive_received,
+                    update_received: statistics.update_received,
+                    notification_received: statistics.notification_received,
+                };
+
+                Ok(Response::new(GetPeerResponse {
+                    peer: Some(proto_peer),
+                    statistics: Some(proto_statistics),
+                }))
+            }
+            None => Err(Status::not_found(format!("Peer {} not found", addr))),
+        }
     }
 
     async fn announce_route(

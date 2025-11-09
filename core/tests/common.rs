@@ -659,7 +659,9 @@ pub async fn setup_two_ases_with_ebgp(
     )
     .await;
 
-    (server1, server2, server3, server4, server5, server6, server7)
+    (
+        server1, server2, server3, server4, server5, server6, server7,
+    )
 }
 
 /// Polls for route propagation to multiple servers with expected routes
@@ -725,6 +727,47 @@ where
     }
 
     panic!("{}", timeout_message);
+}
+
+/// Verify peer statistics
+///
+/// # Arguments
+/// * `server` - Server to query for peer statistics
+/// * `peer_addr` - Address of the peer to check
+/// * `expected_open_sent` - Expected number of OPEN messages sent
+/// * `expected_open_received` - Expected number of OPEN messages received
+/// * `expected_update_sent` - Expected number of UPDATE messages sent
+pub async fn verify_peer_statistics(
+    server: &TestServer,
+    peer_addr: String,
+    expected_open_sent: u64,
+    expected_open_received: u64,
+    expected_update_sent: u64,
+) {
+    let (peer, stats) = server
+        .client
+        .get_peer(peer_addr.clone())
+        .await
+        .expect("Failed to get peer");
+
+    assert!(peer.is_some(), "Peer {} should exist", peer_addr);
+    let stats = stats.expect("Statistics should be present");
+
+    assert_eq!(
+        stats.open_sent, expected_open_sent,
+        "Peer {} should send OPEN {} time(s), got {}",
+        peer_addr, expected_open_sent, stats.open_sent
+    );
+    assert_eq!(
+        stats.open_received, expected_open_received,
+        "Peer {} should receive OPEN {} time(s), got {}",
+        peer_addr, expected_open_received, stats.open_received
+    );
+    assert_eq!(
+        stats.update_sent, expected_update_sent,
+        "Peer {} should send UPDATE {} time(s), got {}",
+        peer_addr, expected_update_sent, stats.update_sent
+    );
 }
 
 /// Helper to check if server has expected peers (returns bool, suitable for poll_until)
