@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::utils::IpNetwork;
-use crate::rib::types::{Path, Route};
+use crate::rib::types::{Path, Route, RouteSource};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -33,10 +33,8 @@ impl LocRib {
             .entry(prefix)
             .and_modify(|route| {
                 // Check if we already have a path from this source, if so replace it
-                if let Some(existing_path) = route
-                    .paths
-                    .iter_mut()
-                    .find(|p| p.source == path.source)
+                if let Some(existing_path) =
+                    route.paths.iter_mut().find(|p| p.source == path.source)
                 {
                     *existing_path = path.clone();
                 } else {
@@ -53,28 +51,59 @@ impl LocRib {
         self.routes.values().cloned().collect()
     }
 
-    /// Update Loc-RIB from a peer's Adj-RIB-In with import policy applied
-    pub fn update_from_peer(&mut self, peer_addr: SocketAddr, routes: Vec<Route>) {
+    /// Update Loc-RIB from delta changes (withdrawn and announced routes)
+    /// Returns the set of prefixes that changed for propagation to other peers
+    pub fn update_from_peer(
+        &mut self,
+        peer_addr: SocketAddr,
+        withdrawn: Vec<IpNetwork>,
+        announced: Vec<(IpNetwork, Path)>,
+    ) -> Vec<IpNetwork> {
         use crate::{debug, info};
 
-        // Remove old routes from this peer
-        self.remove_routes_from_peer(peer_addr);
+        let mut changed_prefixes = Vec::new();
 
-        // Apply import policy and add to Loc-RIB
-        for route in routes {
-            for mut path in route.paths {
-                // Apply import policy
-                if self.apply_import_policy(&mut path) {
-                    info!("adding route to Loc-RIB", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
-                    self.add_route(route.prefix, path);
-                } else {
-                    debug!("route rejected by import policy", "prefix" => format!("{:?}", route.prefix), "peer_addr" => peer_addr.to_string());
+        // Process withdrawals
+        for prefix in withdrawn {
+            info!("withdrawing route from Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_addr" => peer_addr.to_string());
+
+            if let Some(route) = self.routes.get_mut(&prefix) {
+                // Remove path from this peer for this prefix
+                let had_path = route
+                    .paths
+                    .iter()
+                    .any(|p| p.source == RouteSource::Peer(peer_addr));
+                route
+                    .paths
+                    .retain(|p| p.source != RouteSource::Peer(peer_addr));
+
+                if had_path {
+                    changed_prefixes.push(prefix);
                 }
+
+                // Remove route if no paths left
+                if route.paths.is_empty() {
+                    self.routes.remove(&prefix);
+                }
+            }
+        }
+
+        // Process announcements - apply import policy and add to Loc-RIB
+        for (prefix, mut path) in announced {
+            if self.apply_import_policy(&mut path) {
+                info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_addr" => peer_addr.to_string());
+                self.add_route(prefix, path);
+                changed_prefixes.push(prefix);
+            } else {
+                debug!("route rejected by import policy", "prefix" => format!("{:?}", prefix), "peer_addr" => peer_addr.to_string());
             }
         }
 
         // Run best path selection
         self.run_best_path_selection();
+
+        // Return changed prefixes for propagation
+        changed_prefixes
     }
 
     fn apply_import_policy(&self, path: &mut Path) -> bool {
@@ -116,9 +145,14 @@ impl LocRib {
     }
 
     /// Add a locally originated route
-    pub fn add_local_route(&mut self, prefix: IpNetwork, next_hop: Ipv4Addr, origin: crate::bgp::msg_update::Origin) {
+    pub fn add_local_route(
+        &mut self,
+        prefix: IpNetwork,
+        next_hop: Ipv4Addr,
+        origin: crate::bgp::msg_update::Origin,
+    ) {
+        use crate::info;
         use crate::rib::types::RouteSource;
-        use crate::{info};
 
         let path = Path {
             origin,
@@ -136,8 +170,8 @@ impl LocRib {
 
     /// Remove a locally originated route
     pub fn remove_local_route(&mut self, prefix: IpNetwork) {
+        use crate::info;
         use crate::rib::types::RouteSource;
-        use crate::{info};
 
         info!("removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
 
@@ -150,8 +184,11 @@ impl LocRib {
 
     pub fn remove_routes_from_peer(&mut self, peer_addr: SocketAddr) {
         use crate::rib::types::RouteSource;
+
         for route in self.routes.values_mut() {
-            route.paths.retain(|p| p.source != RouteSource::Peer(peer_addr));
+            route
+                .paths
+                .retain(|p| p.source != RouteSource::Peer(peer_addr));
         }
         self.routes.retain(|_, route| !route.paths.is_empty());
     }
@@ -162,7 +199,9 @@ impl LocRib {
 
     /// Get the best path for a specific prefix, if any
     pub fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Path> {
-        self.routes.get(prefix).and_then(|route| route.paths.first())
+        self.routes
+            .get(prefix)
+            .and_then(|route| route.paths.first())
     }
 
     /// Check if a prefix exists in Loc-RIB

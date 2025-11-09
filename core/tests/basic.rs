@@ -19,7 +19,12 @@ use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
-async fn start_test_server(asn: u16, bgp_port: u16, grpc_port: u16, router_id: Ipv4Addr) -> BgpClient {
+async fn start_test_server(
+    asn: u16,
+    bgp_port: u16,
+    grpc_port: u16,
+    router_id: Ipv4Addr,
+) -> BgpClient {
     let config = Config::new(asn, &format!("127.0.0.1:{}", bgp_port), router_id);
 
     let server = BgpServer::new(config);
@@ -162,10 +167,7 @@ async fn test_announce_one_route() {
         sleep(Duration::from_millis(100)).await;
     }
 
-    assert!(
-        route_found,
-        "Route 10.0.0.0/24 not found in Server1's RIB"
-    );
+    assert!(route_found, "Route 10.0.0.0/24 not found in Server1's RIB");
 
     // Verify peers are still established after route announcement
     let peers1 = client1.get_peers().await.unwrap();

@@ -44,7 +44,6 @@ pub enum BgpEvent {
     NotificationReceived = 24,
 }
 
-
 /// BGP FSM timers
 #[derive(Debug, Clone)]
 pub struct FsmTimers {
@@ -330,41 +329,116 @@ mod tests {
         let test_cases = vec![
             // From Idle
             (BgpState::Idle, BgpEvent::ManualStart, BgpState::Connect),
-
             // From Connect
             (BgpState::Connect, BgpEvent::ManualStop, BgpState::Idle),
-            (BgpState::Connect, BgpEvent::ConnectRetryTimerExpires, BgpState::Connect),
-            (BgpState::Connect, BgpEvent::TcpConnectionConfirmed, BgpState::OpenSent),
-            (BgpState::Connect, BgpEvent::TcpConnectionFails, BgpState::Active),
-
+            (
+                BgpState::Connect,
+                BgpEvent::ConnectRetryTimerExpires,
+                BgpState::Connect,
+            ),
+            (
+                BgpState::Connect,
+                BgpEvent::TcpConnectionConfirmed,
+                BgpState::OpenSent,
+            ),
+            (
+                BgpState::Connect,
+                BgpEvent::TcpConnectionFails,
+                BgpState::Active,
+            ),
             // From Active
             (BgpState::Active, BgpEvent::ManualStop, BgpState::Idle),
-            (BgpState::Active, BgpEvent::ConnectRetryTimerExpires, BgpState::Connect),
-            (BgpState::Active, BgpEvent::TcpConnectionConfirmed, BgpState::OpenSent),
-
+            (
+                BgpState::Active,
+                BgpEvent::ConnectRetryTimerExpires,
+                BgpState::Connect,
+            ),
+            (
+                BgpState::Active,
+                BgpEvent::TcpConnectionConfirmed,
+                BgpState::OpenSent,
+            ),
             // From OpenSent
             (BgpState::OpenSent, BgpEvent::ManualStop, BgpState::Idle),
-            (BgpState::OpenSent, BgpEvent::HoldTimerExpires, BgpState::Idle),
-            (BgpState::OpenSent, BgpEvent::TcpConnectionFails, BgpState::Active),
-            (BgpState::OpenSent, BgpEvent::BgpOpenReceived, BgpState::OpenConfirm),
-            (BgpState::OpenSent, BgpEvent::NotificationReceived, BgpState::Idle),
-
+            (
+                BgpState::OpenSent,
+                BgpEvent::HoldTimerExpires,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::OpenSent,
+                BgpEvent::TcpConnectionFails,
+                BgpState::Active,
+            ),
+            (
+                BgpState::OpenSent,
+                BgpEvent::BgpOpenReceived,
+                BgpState::OpenConfirm,
+            ),
+            (
+                BgpState::OpenSent,
+                BgpEvent::NotificationReceived,
+                BgpState::Idle,
+            ),
             // From OpenConfirm
             (BgpState::OpenConfirm, BgpEvent::ManualStop, BgpState::Idle),
-            (BgpState::OpenConfirm, BgpEvent::HoldTimerExpires, BgpState::Idle),
-            (BgpState::OpenConfirm, BgpEvent::KeepaliveTimerExpires, BgpState::OpenConfirm),
-            (BgpState::OpenConfirm, BgpEvent::TcpConnectionFails, BgpState::Idle),
-            (BgpState::OpenConfirm, BgpEvent::BgpKeepaliveReceived, BgpState::Established),
-            (BgpState::OpenConfirm, BgpEvent::NotificationReceived, BgpState::Idle),
-
+            (
+                BgpState::OpenConfirm,
+                BgpEvent::HoldTimerExpires,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::OpenConfirm,
+                BgpEvent::KeepaliveTimerExpires,
+                BgpState::OpenConfirm,
+            ),
+            (
+                BgpState::OpenConfirm,
+                BgpEvent::TcpConnectionFails,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::OpenConfirm,
+                BgpEvent::BgpKeepaliveReceived,
+                BgpState::Established,
+            ),
+            (
+                BgpState::OpenConfirm,
+                BgpEvent::NotificationReceived,
+                BgpState::Idle,
+            ),
             // From Established
             (BgpState::Established, BgpEvent::ManualStop, BgpState::Idle),
-            (BgpState::Established, BgpEvent::HoldTimerExpires, BgpState::Idle),
-            (BgpState::Established, BgpEvent::KeepaliveTimerExpires, BgpState::Established),
-            (BgpState::Established, BgpEvent::TcpConnectionFails, BgpState::Idle),
-            (BgpState::Established, BgpEvent::BgpKeepaliveReceived, BgpState::Established),
-            (BgpState::Established, BgpEvent::BgpUpdateReceived, BgpState::Established),
-            (BgpState::Established, BgpEvent::NotificationReceived, BgpState::Idle),
+            (
+                BgpState::Established,
+                BgpEvent::HoldTimerExpires,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::Established,
+                BgpEvent::KeepaliveTimerExpires,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                BgpEvent::TcpConnectionFails,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::Established,
+                BgpEvent::BgpKeepaliveReceived,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                BgpEvent::BgpUpdateReceived,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                BgpEvent::NotificationReceived,
+                BgpState::Idle,
+            ),
         ];
 
         for (initial_state, event, expected_state) in test_cases {

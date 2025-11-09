@@ -16,6 +16,7 @@ use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpEvent, BgpState, Fsm};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Path;
@@ -77,8 +78,12 @@ impl Peer {
         Ok(())
     }
 
-    /// Process a BGP message and return routes for Loc-RIB update if applicable
-    pub async fn process_message(&mut self, message: BgpMessage) -> Result<Option<Vec<crate::rib::Route>>, io::Error> {
+    /// Process a BGP message and return route changes for Loc-RIB update if applicable
+    /// Returns (withdrawn_prefixes, announced_routes) or None if not an UPDATE
+    pub async fn process_message(
+        &mut self,
+        message: BgpMessage,
+    ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
         // Determine FSM event and process it
         let event = match &message {
             BgpMessage::Open(_) => {
@@ -106,7 +111,7 @@ impl Peer {
 
         // Process UPDATE message content
         if let BgpMessage::Update(update_msg) = message {
-            Ok(self.process_update(update_msg))
+            Ok(Some(self.process_update(update_msg)))
         } else {
             Ok(None)
         }
@@ -120,8 +125,8 @@ impl Peer {
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
             // Entering OpenSent - send OPEN
-            (BgpState::Connect, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) |
-            (BgpState::Active, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) => {
+            (BgpState::Connect, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed)
+            | (BgpState::Active, BgpState::OpenSent, BgpEvent::TcpConnectionConfirmed) => {
                 let open_msg = OpenMessage::new(self.local_asn, 180, self.local_bgp_id);
                 self.tcp_tx.write_all(&open_msg.serialize()).await?;
                 info!("sent OPEN message", "peer_addr" => self.addr.to_string());
@@ -137,8 +142,8 @@ impl Peer {
             }
 
             // In OpenConfirm or Established - handle keepalive timer expiry
-            (_, BgpState::OpenConfirm, BgpEvent::KeepaliveTimerExpires) |
-            (_, BgpState::Established, BgpEvent::KeepaliveTimerExpires) => {
+            (_, BgpState::OpenConfirm, BgpEvent::KeepaliveTimerExpires)
+            | (_, BgpState::Established, BgpEvent::KeepaliveTimerExpires) => {
                 let keepalive_msg = KeepAliveMessage {};
                 self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
                 debug!("sent KEEPALIVE message", "peer_addr" => self.addr.to_string());
@@ -151,8 +156,8 @@ impl Peer {
             }
 
             // In Established - reset hold timer on keepalive/update
-            (BgpState::Established, BgpState::Established, BgpEvent::BgpKeepaliveReceived) |
-            (BgpState::Established, BgpState::Established, BgpEvent::BgpUpdateReceived) => {
+            (BgpState::Established, BgpState::Established, BgpEvent::BgpKeepaliveReceived)
+            | (BgpState::Established, BgpState::Established, BgpEvent::BgpUpdateReceived) => {
                 self.fsm.timers.reset_hold_timer();
             }
 
@@ -163,54 +168,48 @@ impl Peer {
     }
 
     /// Process a BGP UPDATE message
-    pub fn process_update(&mut self, update_msg: UpdateMessage) -> Option<Vec<crate::rib::Route>> {
-        // Extract path attributes
-        let origin = match update_msg.get_origin() {
-            Some(o) => o,
-            None => {
-                warn!("UPDATE missing Origin attribute, skipping", "peer_addr" => self.addr.to_string());
-                return None;
-            }
-        };
-
-        let as_path = match update_msg.get_as_path() {
-            Some(p) => p,
-            None => {
-                warn!("UPDATE missing AS Path attribute, skipping", "peer_addr" => self.addr.to_string());
-                return None;
-            }
-        };
-
-        let next_hop = match update_msg.get_next_hop() {
-            Some(nh) => nh,
-            None => {
-                warn!("UPDATE missing Next Hop attribute, skipping", "peer_addr" => self.addr.to_string());
-                return None;
-            }
-        };
+    /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
+    pub fn process_update(
+        &mut self,
+        update_msg: UpdateMessage,
+    ) -> (Vec<IpNetwork>, Vec<(IpNetwork, Path)>) {
+        let mut withdrawn = Vec::new();
+        let mut announced = Vec::new();
 
         // Process withdrawn routes
         for prefix in update_msg.withdrawn_routes() {
             info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
             self.rib_in.remove_route(*prefix);
+            withdrawn.push(*prefix);
         }
 
-        // Process announced routes (NLRI)
-        for prefix in update_msg.nlri_list() {
-            let path = Path {
-                origin,
-                as_path: as_path.clone(),
-                next_hop,
-                source: crate::rib::RouteSource::Peer(self.addr),
-                local_pref: None,
-                med: None,
-            };
-            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
-            self.rib_in.add_route(*prefix, path);
+        // Extract path attributes for announced routes
+        let origin = update_msg.get_origin();
+        let as_path = update_msg.get_as_path();
+        let next_hop = update_msg.get_next_hop();
+
+        // Only process announcements if we have required attributes
+        if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
+            // Process announced routes (NLRI)
+            for prefix in update_msg.nlri_list() {
+                let path = Path {
+                    origin,
+                    as_path: as_path.clone(),
+                    next_hop,
+                    source: crate::rib::RouteSource::Peer(self.addr),
+                    local_pref: None,
+                    med: None,
+                };
+                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_addr" => self.addr.to_string());
+                self.rib_in.add_route(*prefix, path.clone());
+                announced.push((*prefix, path));
+            }
+        } else if !update_msg.nlri_list().is_empty() {
+            warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_addr" => self.addr.to_string());
         }
 
-        // Return all routes from this peer's Adj-RIB-In for Loc-RIB update
-        Some(self.rib_in.get_all_routes())
+        // Return only what changed in this UPDATE
+        (withdrawn, announced)
     }
 
     /// Set negotiated hold time from received OPEN message

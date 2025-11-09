@@ -85,26 +85,6 @@ impl BgpServer {
         }
     }
 
-    /// Add a peer and initiate BGP session
-    pub async fn add_peer(&self, peer_addr: &str) {
-        let peers_arc = Arc::clone(&self.peers);
-        let loc_rib = self.loc_rib.clone();
-        let local_asn = self.config.asn;
-        let local_bgp_id = self.local_bgp_id;
-        let peer_addr_string = peer_addr.to_string();
-
-        tokio::spawn(async move {
-            Self::initiate_peer_connection(
-                &peer_addr_string,
-                local_asn,
-                local_bgp_id,
-                peers_arc,
-                loc_rib,
-            )
-            .await;
-        });
-    }
-
     async fn initiate_peer_connection(
         peer_addr: &str,
         local_asn: u16,
@@ -168,41 +148,6 @@ impl BgpServer {
         self.loc_rib.lock().await.get_all_routes()
     }
 
-    /// Announce a route to all established peers
-    pub async fn announce_route(
-        &self,
-        prefix: IpNetwork,
-        next_hop: Ipv4Addr,
-        origin: Origin,
-    ) -> Result<(), std::io::Error> {
-        // Build AS path with local ASN
-        let as_path_segments = vec![AsPathSegment {
-            segment_type: AsPathSegmentType::AsSequence,
-            segment_len: 1,
-            asn_list: vec![self.config.asn],
-        }];
-
-        // Create UPDATE message
-        let update_msg = UpdateMessage::new(origin, as_path_segments, next_hop, vec![prefix]);
-
-        // Send to all established peers
-        let mut peers = self.peers.lock().await;
-        for peer in peers.values_mut() {
-            // Only send to peers in Established state
-            if peer.state() == BgpState::Established {
-                if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
-                    error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
-                } else {
-                    info!("announced route to peer", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string(), "peer_addr" => peer.addr.to_string());
-                }
-            } else {
-                debug!("skipping peer not in established state", "peer_addr" => peer.addr.to_string(), "state" => format!("{:?}", peer.state()));
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn run(self) {
         let addr = self.config.listen_addr.clone();
         info!("BGP server starting", "listen_addr" => addr);
@@ -247,7 +192,8 @@ impl BgpServer {
                 info!("adding peer via request", "peer_addr" => &addr);
 
                 tokio::spawn(async move {
-                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, loc_rib).await;
+                    Self::initiate_peer_connection(&addr, local_asn, local_bgp_id, peers, loc_rib)
+                        .await;
                 });
                 let _ = response.send(Ok(()));
             }
@@ -277,40 +223,22 @@ impl BgpServer {
                 info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
                 // Add route to Loc-RIB as locally originated
-                loc_rib.lock().await.add_local_route(prefix, next_hop, origin);
+                loc_rib
+                    .lock()
+                    .await
+                    .add_local_route(prefix, next_hop, origin);
 
-                // Build AS path with local ASN
-                let as_path_segments = vec![AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: 1,
-                    asn_list: vec![local_asn],
-                }];
+                // Propagate to all peers using the common propagation logic
+                Self::propagate_routes(
+                    vec![prefix],
+                    None,
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
 
-                // Create UPDATE message
-                let update_msg = UpdateMessage::new(origin, as_path_segments, next_hop, vec![prefix]);
-
-                // Send to all established peers
-                let mut peer_map = peers.lock().await;
-                let mut success = true;
-                for peer in peer_map.values_mut() {
-                    // Only send to peers in Established state
-                    if peer.state() == BgpState::Established {
-                        if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
-                            error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
-                            success = false;
-                        } else {
-                            info!("announced route to peer", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string(), "peer_addr" => peer.addr.to_string());
-                        }
-                    } else {
-                        debug!("skipping peer not in established state", "peer_addr" => peer.addr.to_string(), "state" => format!("{:?}", peer.state()));
-                    }
-                }
-
-                if success {
-                    let _ = response.send(Ok(()));
-                } else {
-                    let _ = response.send(Err("failed to announce to some peers".to_string()));
-                }
+                let _ = response.send(Ok(()));
             }
             BgpRequest::WithdrawRoute { prefix, response } => {
                 info!("withdrawing route via request", "prefix" => format!("{:?}", prefix));
@@ -318,40 +246,19 @@ impl BgpServer {
                 // Remove local route from Loc-RIB
                 loc_rib.lock().await.remove_local_route(prefix);
 
-                // Check if prefix still exists in Loc-RIB (i.e., we have a path from a peer)
-                let has_alternate_path = loc_rib.lock().await.has_prefix(&prefix);
+                // Propagate to all peers using the common propagation logic
+                // This will automatically send withdrawal if no alternate path exists,
+                // or announce the new best path if an alternate path is available
+                Self::propagate_routes(
+                    vec![prefix],
+                    None,
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
 
-                if !has_alternate_path {
-                    // No alternate path, send withdraw to all peers
-                    let update_msg = UpdateMessage::new_withdraw(vec![prefix]);
-
-                    let mut peer_map = peers.lock().await;
-                    let mut success = true;
-                    for peer in peer_map.values_mut() {
-                        if peer.state() == BgpState::Established {
-                            if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
-                                error!("failed to send WITHDRAW to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
-                                success = false;
-                            } else {
-                                info!("withdrew route from peer", "prefix" => format!("{:?}", prefix), "peer_addr" => peer.addr.to_string());
-                            }
-                        } else {
-                            debug!("skipping peer not in established state", "peer_addr" => peer.addr.to_string(), "state" => format!("{:?}", peer.state()));
-                        }
-                    }
-
-                    if success {
-                        let _ = response.send(Ok(()));
-                    } else {
-                        let _ = response.send(Err("failed to withdraw from some peers".to_string()));
-                    }
-                } else {
-                    // We still have an alternate path from a peer, so we should announce that
-                    // For now, just return success without sending updates
-                    // TODO: Implement proper Adj-RIB-Out computation and send new best path
-                    info!("local route withdrawn but alternate path exists", "prefix" => format!("{:?}", prefix));
-                    let _ = response.send(Ok(()));
-                }
+                let _ = response.send(Ok(()));
             }
             BgpRequest::GetPeers { response } => {
                 let peer_map = peers.lock().await;
@@ -480,8 +387,8 @@ impl BgpServer {
                     let is_notification = matches!(&message, BgpMessage::Notification(_));
 
                     // Process message with peer
-                    let routes = match peer.process_message(message).await {
-                        Ok(routes) => routes,
+                    let delta = match peer.process_message(message).await {
+                        Ok(delta) => delta,
                         Err(e) => {
                             error!("failed to process message", "peer_addr" => addr.to_string(), "error" => e.to_string());
                             None
@@ -489,10 +396,25 @@ impl BgpServer {
                     };
                     drop(peer_map);
 
-                    // Update Loc-RIB if we have routes
-                    if let Some(routes) = routes {
-                        loc_rib.lock().await.update_from_peer(addr, routes);
+                    // Update Loc-RIB if we have route changes (withdrawn or announced)
+                    if let Some((withdrawn, announced)) = delta {
+                        let changed_prefixes = loc_rib
+                            .lock()
+                            .await
+                            .update_from_peer(addr, withdrawn, announced);
                         info!("UPDATE processing complete", "peer_addr" => addr.to_string());
+
+                        // Propagate changed routes to other peers
+                        if !changed_prefixes.is_empty() {
+                            Self::propagate_routes(
+                                changed_prefixes,
+                                Some(addr),
+                                peers.clone(),
+                                loc_rib.clone(),
+                                local_asn,
+                            )
+                            .await;
+                        }
                     }
 
                     // If notification received, break the loop
@@ -519,4 +441,86 @@ impl BgpServer {
         loc_rib.lock().await.remove_routes_from_peer(addr);
     }
 
+    /// Propagate route changes to all established peers (except the originating peer)
+    /// If originating_peer is None, propagates to all peers (used for locally originated routes)
+    async fn propagate_routes(
+        changed_prefixes: Vec<IpNetwork>,
+        originating_peer: Option<SocketAddr>,
+        peers: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+        loc_rib: Arc<Mutex<LocRib>>,
+        local_asn: u16,
+    ) {
+        let rib = loc_rib.lock().await;
+
+        // For each changed prefix, determine what to send
+        let mut to_announce = Vec::new();
+        let mut to_withdraw = Vec::new();
+
+        for prefix in changed_prefixes {
+            if let Some(best_path) = rib.get_best_path(&prefix) {
+                // We have a best path - prepare announcement
+                to_announce.push((prefix, best_path.clone()));
+            } else {
+                // No path exists - prepare withdrawal
+                to_withdraw.push(prefix);
+            }
+        }
+        drop(rib);
+
+        // Send updates to all established peers (except the originating peer)
+        let mut peer_map = peers.lock().await;
+        for (peer_addr, peer) in peer_map.iter_mut() {
+            // Skip the peer that sent us the original update (if any)
+            if let Some(orig_peer) = originating_peer {
+                if *peer_addr == orig_peer {
+                    continue;
+                }
+            }
+
+            // Only send to established peers
+            if peer.state() != BgpState::Established {
+                continue;
+            }
+
+            // Send withdrawals if any
+            if !to_withdraw.is_empty() {
+                let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.clone());
+                if let Err(e) = peer.tcp_tx.write_all(&withdraw_msg.serialize()).await {
+                    error!("failed to send WITHDRAW to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                } else {
+                    info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_addr" => peer.addr.to_string());
+                }
+            }
+
+            // Send announcements if any
+            for (prefix, path) in &to_announce {
+                // Build AS path for export
+                // For locally originated routes, AS_PATH already contains local ASN - don't prepend
+                // For routes learned from peers, prepend local ASN
+                let new_as_path = if matches!(path.source, crate::rib::RouteSource::Local) {
+                    path.as_path.clone()
+                } else {
+                    let mut as_path = vec![local_asn];
+                    as_path.extend_from_slice(&path.as_path);
+                    as_path
+                };
+
+                let as_path_segments = vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: new_as_path.len() as u8,
+                    asn_list: new_as_path,
+                }];
+
+                // Create UPDATE message with the modified AS path
+                let update_msg =
+                    UpdateMessage::new(path.origin, as_path_segments, path.next_hop, vec![*prefix]);
+
+                if let Err(e) = peer.tcp_tx.write_all(&update_msg.serialize()).await {
+                    error!("failed to send UPDATE to peer", "peer_addr" => peer.addr.to_string(), "error" => e.to_string());
+                } else {
+                    info!("propagated route to peer", "prefix" => format!("{:?}", prefix), "peer_addr" => peer.addr.to_string());
+                }
+            }
+        }
+    }
 }
