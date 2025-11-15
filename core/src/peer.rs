@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message};
+use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
@@ -20,10 +20,12 @@ use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpEvent, BgpState, Fsm};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Path;
-use crate::{debug, info, warn};
+use crate::server::{PeerHandle, PeerMessage, ServerOp};
+use crate::{debug, error, info, warn};
 use std::io;
 use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc;
 
 /// Type of BGP session based on AS relationship
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +270,228 @@ impl Peer {
     pub fn set_negotiated_hold_time(&mut self, hold_time: u16) {
         self.fsm.timers.set_negotiated_hold_time(hold_time);
         info!("negotiated hold time", "peer_ip" => &self.addr, "hold_time_seconds" => hold_time);
+    }
+
+    /// Main peer task - handles the full lifecycle of a BGP peer connection
+    pub async fn run(
+        peer_ip: String,
+        mut reader: OwnedReadHalf,
+        writer: OwnedWriteHalf,
+        local_asn: u16,
+        hold_time: u16,
+        local_bgp_id: u32,
+        server_op_tx: mpsc::UnboundedSender<ServerOp>,
+    ) {
+        debug!("handling peer", "peer_ip" => &peer_ip);
+
+        // Create a placeholder Peer to send OPEN immediately (we don't know peer_asn yet)
+        let mut peer = Peer::new(peer_ip.clone(), writer, 0, SessionType::Ebgp);
+
+        // Send OPEN via FSM to avoid deadlock
+        if let Err(e) = peer.process_event(&BgpEvent::ManualStart).await {
+            error!("failed to start FSM", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        if let Err(e) = peer
+            .process_event(&BgpEvent::TcpConnectionConfirmed {
+                local_asn,
+                hold_time,
+                bgp_id: local_bgp_id,
+            })
+            .await
+        {
+            error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        // Wait for peer's OPEN message
+        let (peer_asn, peer_hold_time) = loop {
+            let result = read_bgp_message(&mut reader).await;
+
+            match result {
+                Ok(message) => match message {
+                    BgpMessage::Open(open_msg) => {
+                        info!("received OPEN from peer", "peer_ip" => &peer_ip, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time, "bgp_identifier" => open_msg.bgp_identifier);
+                        break (open_msg.asn, open_msg.hold_time);
+                    }
+                    _ => {
+                        error!("expected OPEN as first message", "peer_ip" => &peer_ip);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    error!("error reading first message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+                    return;
+                }
+            }
+        };
+
+        // Negotiate hold time: use minimum of our hold time and peer's hold time (RFC 4271)
+        let negotiated_hold_time = hold_time.min(peer_hold_time);
+
+        // Determine session type
+        let session_type = if peer_asn == local_asn {
+            SessionType::Ibgp
+        } else {
+            SessionType::Ebgp
+        };
+
+        // Update peer with correct ASN and session type
+        peer.asn = peer_asn;
+        peer.session_type = session_type;
+
+        // Track that we received OPEN (it was received before peer was fully created)
+        peer.statistics.open_received += 1;
+
+        // Process receiving peer's OPEN (sends KEEPALIVE)
+        if let Err(e) = peer
+            .process_event(&BgpEvent::BgpOpenReceived {
+                peer_asn,
+                peer_hold_time: negotiated_hold_time,
+            })
+            .await
+        {
+            error!("failed to complete connection", "peer_ip" => &peer_ip, "error" => e.to_string());
+            return;
+        }
+
+        // Create channel for receiving messages from the server (route updates to send)
+        let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+
+        // Track whether we've registered with the server yet
+        let mut peer_registered = false;
+
+        // Create keepalive interval timer (RFC 4271)
+        let mut keepalive_interval = if negotiated_hold_time > 0 {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // Skip first immediate tick
+            Some(interval)
+        } else {
+            None
+        };
+
+        // RFC 4271: Hold timer - track last KEEPALIVE or UPDATE received
+        let hold_timeout = tokio::time::Duration::from_secs(negotiated_hold_time as u64);
+        let mut last_keepalive_or_update = tokio::time::Instant::now();
+
+        // Check hold timer every 500ms
+        let mut hold_check_interval =
+            tokio::time::interval(tokio::time::Duration::from_millis(500));
+        hold_check_interval.tick().await; // Skip first immediate tick
+
+        // Main event loop for this peer
+        loop {
+            tokio::select! {
+                // Read messages from peer
+                result = read_bgp_message(&mut reader) => {
+                    match result {
+                        Ok(message) => {
+                            // RFC 4271: Only restart hold timer on KEEPALIVE or UPDATE
+                            let is_keepalive_or_update = matches!(&message, BgpMessage::KeepAlive(_) | BgpMessage::Update(_));
+                            let is_notification = matches!(&message, BgpMessage::Notification(_));
+
+                            // Process message with peer
+                            let delta = match peer.process_message(message).await {
+                                Ok(delta) => delta,
+                                Err(e) => {
+                                    error!("failed to process message", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                    None
+                                }
+                            };
+
+                            // RFC 4271: Restart hold timer on KEEPALIVE or UPDATE
+                            if is_keepalive_or_update {
+                                last_keepalive_or_update = tokio::time::Instant::now();
+                            }
+
+                            // Register with server once we reach Established state
+                            if !peer_registered && peer.state() == BgpState::Established {
+                                let handle = PeerHandle {
+                                    addr: peer_ip.clone(),
+                                    asn: peer_asn,
+                                    state: BgpState::Established,
+                                    statistics: peer.statistics.clone(),
+                                    message_tx: message_tx.clone(),
+                                };
+
+                                if let Err(e) = server_op_tx.send(ServerOp::PeerEstablished {
+                                    peer_ip: peer_ip.clone(),
+                                    asn: peer_asn,
+                                    handle,
+                                }) {
+                                    error!("failed to register peer with server", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                    break;
+                                }
+                                peer_registered = true;
+                            }
+
+                            // Send RIB update to server if we have route changes
+                            if let Some((withdrawn, announced)) = delta {
+                                if let Err(e) = server_op_tx.send(ServerOp::PeerUpdate {
+                                    peer_ip: peer_ip.clone(),
+                                    withdrawn,
+                                    announced,
+                                }) {
+                                    error!("failed to send RIB update to server", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                    break;
+                                }
+                            }
+
+                            // If notification received, break the loop
+                            if is_notification {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("error reading message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+                            break;
+                        }
+                    }
+                }
+
+                // Receive messages from server (route updates to send to peer)
+                Some(msg) = message_rx.recv() => {
+                    match msg {
+                        PeerMessage::SendUpdate(update_msg) => {
+                            if let Err(e) = peer.send_update(update_msg).await {
+                                error!("failed to send UPDATE to peer", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
+                _ = hold_check_interval.tick() => {
+                    if last_keepalive_or_update.elapsed() > hold_timeout {
+                        error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_ip" => &peer_ip);
+                        break;
+                    }
+                }
+
+                // Periodic KEEPALIVE check
+                _ = async {
+                    match &mut keepalive_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if peer.fsm.timers.keepalive_timer_expired() {
+                        if let Err(e) = peer.process_event(&BgpEvent::KeepaliveTimerExpires).await {
+                            error!("failed to send keepalive", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Notify server that peer disconnected
+        let _ = server_op_tx.send(ServerOp::PeerDisconnected {
+            peer_ip: peer_ip.clone(),
+        });
     }
 }
 

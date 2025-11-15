@@ -16,7 +16,7 @@ use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::rib::RouteSource;
-use crate::server::MgmtRequest;
+use crate::server::MgmtOp;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
@@ -45,11 +45,11 @@ fn to_proto_state(state: BgpState) -> i32 {
 
 #[derive(Clone)]
 pub struct BgpGrpcService {
-    mgmt_request_tx: mpsc::Sender<MgmtRequest>,
+    mgmt_request_tx: mpsc::Sender<MgmtOp>,
 }
 
 impl BgpGrpcService {
-    pub fn new(mgmt_request_tx: mpsc::Sender<MgmtRequest>) -> Self {
+    pub fn new(mgmt_request_tx: mpsc::Sender<MgmtOp>) -> Self {
         Self { mgmt_request_tx }
     }
 }
@@ -64,7 +64,7 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtRequest::AddPeer {
+        let req = MgmtOp::AddPeer {
             addr: addr.clone(),
             response: tx,
         };
@@ -101,7 +101,7 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtRequest::RemovePeer {
+        let req = MgmtOp::RemovePeer {
             addr: peer_ip.clone(),
             response: tx,
         };
@@ -131,7 +131,7 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetPeersResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtRequest::GetPeers { response: tx };
+        let req = MgmtOp::GetPeers { response: tx };
 
         self.mgmt_request_tx
             .send(req)
@@ -163,7 +163,7 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtRequest::GetPeer {
+        let req = MgmtOp::GetPeer {
             addr: addr.clone(),
             response: tx,
         };
@@ -250,7 +250,7 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let mgmt_req = MgmtRequest::AnnounceRoute {
+        let mgmt_req = MgmtOp::AnnounceRoute {
             prefix,
             next_hop,
             origin,
@@ -306,7 +306,7 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let mgmt_req = MgmtRequest::WithdrawRoute {
+        let mgmt_req = MgmtOp::WithdrawRoute {
             prefix,
             response: tx,
         };
@@ -336,7 +336,7 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetRoutesResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtRequest::GetRoutes { response: tx };
+        let req = MgmtOp::GetRoutes { response: tx };
 
         self.mgmt_request_tx
             .send(req)

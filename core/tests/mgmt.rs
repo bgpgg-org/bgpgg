@@ -21,19 +21,42 @@ use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
-async fn test_add_peer() {
+async fn test_add_peer_failure() {
     let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
 
     // Initially no peers
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
 
-    // Add peer via gRPC (won't connect, but request should succeed)
+    // Add peer via gRPC (should fail - no peer listening at that address)
     let result = server1
         .client
         .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000))
         .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_add_peer_success() {
+    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), None, "127.0.0.1").await;
+
+    // Add peer via gRPC (should succeed - server2 is listening)
+    let result = server1
+        .client
+        .add_peer(format!("127.0.0.1:{}", server2.bgp_port))
+        .await;
     assert!(result.is_ok());
+
+    // Wait for peering to establish
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
+        },
+        "Timeout waiting for peers to establish",
+    )
+    .await;
 }
 
 #[tokio::test]
