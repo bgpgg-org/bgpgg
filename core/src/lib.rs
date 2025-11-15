@@ -18,6 +18,7 @@ pub mod events;
 pub mod fsm;
 pub mod grpc;
 pub mod log;
+pub mod net;
 pub mod peer;
 pub mod rib;
 pub mod server;

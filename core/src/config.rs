@@ -55,7 +55,8 @@ impl Config {
 
     /// Get the local bind address for outgoing connections (IP with port 0)
     pub fn get_local_addr(&self) -> Result<SocketAddr, String> {
-        let local_ip = self.listen_addr
+        let local_ip = self
+            .listen_addr
             .split(':')
             .next()
             .ok_or_else(|| "invalid listen_addr format".to_string())?;

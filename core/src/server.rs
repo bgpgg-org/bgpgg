@@ -17,6 +17,7 @@ use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMes
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::{BgpEvent, BgpState};
+use crate::net::create_and_bind_tcp_socket;
 use crate::peer::Peer;
 use crate::rib::rib_loc::LocRib;
 use crate::{debug, error, info};
@@ -134,9 +135,18 @@ impl BgpServer {
             MgmtRequest::AddPeer { addr, response } => {
                 info!("adding peer via request", "peer_addr" => &addr);
 
+                // Parse peer address before spawning task
+                let peer_addr = match addr.parse::<SocketAddr>() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                        return;
+                    }
+                };
+
                 tokio::spawn(async move {
                     Self::connect_to_peer(
-                        &addr,
+                        peer_addr,
                         local_addr,
                         local_asn,
                         local_bgp_id,
@@ -249,7 +259,7 @@ impl BgpServer {
     }
 
     async fn connect_to_peer(
-        peer_addr: &str,
+        peer_addr: SocketAddr,
         local_addr: SocketAddr,
         local_asn: u16,
         local_bgp_id: u32,
@@ -257,36 +267,8 @@ impl BgpServer {
         peers: Arc<Mutex<HashMap<String, Peer>>>,
         loc_rib: Arc<Mutex<LocRib>>,
     ) {
-        info!("attempting to connect to peer", "peer_addr" => peer_addr);
-
-        // Parse the configured peer address
-        let configured_addr: SocketAddr = match peer_addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                error!("invalid peer address", "peer_addr" => peer_addr, "error" => e.to_string());
-                return;
-            }
-        };
-
-        // Extract just the IP address (no port) to use as peer identifier
-        let peer_ip = configured_addr.ip().to_string();
-
-        // Bind to local IP before connecting (so remote sees us from the correct IP)
-        use tokio::net::TcpSocket;
-        let socket = if configured_addr.is_ipv4() {
-            TcpSocket::new_v4()
-        } else {
-            TcpSocket::new_v6()
-        }
-        .unwrap();
-
-        if let Err(e) = socket.bind(local_addr) {
-            error!("failed to bind to local address", "local_addr" => local_addr.to_string(), "error" => e.to_string());
-            return;
-        }
-
-        // Connect to the peer
-        let stream = match socket.connect(configured_addr).await {
+        // Create socket, bind to local address, and connect to peer
+        let stream = match create_and_bind_tcp_socket(local_addr, peer_addr).await {
             Ok(s) => s,
             Err(e) => {
                 error!("failed to connect to peer", "peer_addr" => peer_addr, "error" => e.to_string());
@@ -294,15 +276,16 @@ impl BgpServer {
             }
         };
 
+        let peer_ip = peer_addr.ip().to_string();
         info!("connected to peer", "peer_ip" => &peer_ip);
 
         let (read_half, write_half) = stream.into_split();
 
         // Handle incoming messages from this peer (will create Peer after receiving OPEN)
         Self::handle_peer(
+            peer_ip,
             read_half,
             write_half,
-            peer_ip,
             local_asn,
             hold_time,
             local_bgp_id,
@@ -311,7 +294,6 @@ impl BgpServer {
         )
         .await;
     }
-
 
     async fn accept_peer(
         stream: TcpStream,
@@ -338,9 +320,9 @@ impl BgpServer {
 
         tokio::spawn(async move {
             Self::handle_peer(
+                peer_ip,
                 read_half,
                 write_half,
-                peer_ip,
                 local_asn,
                 hold_time,
                 local_bgp_id,
@@ -352,9 +334,9 @@ impl BgpServer {
     }
 
     async fn handle_peer(
-        mut read_half: tokio::net::tcp::OwnedReadHalf,
-        write_half: tokio::net::tcp::OwnedWriteHalf,
         peer_ip: String,
+        mut reader: tokio::net::tcp::OwnedReadHalf,
+        writer: tokio::net::tcp::OwnedWriteHalf,
         local_asn: u16,
         hold_time: u16,
         local_bgp_id: u32,
@@ -366,7 +348,7 @@ impl BgpServer {
         // Create a placeholder Peer to send OPEN immediately (we don't know peer_asn yet)
         let mut peer = Peer::new(
             peer_ip.clone(),
-            write_half,
+            writer,
             0,
             crate::peer::SessionType::Ebgp,
         );
@@ -391,7 +373,7 @@ impl BgpServer {
 
         // Wait for peer's OPEN message
         let (peer_asn, peer_hold_time) = loop {
-            let result = read_bgp_message(&mut read_half).await;
+            let result = read_bgp_message(&mut reader).await;
 
             match result {
                 Ok(message) => match message {
@@ -470,7 +452,7 @@ impl BgpServer {
         loop {
             tokio::select! {
                 // Read messages from peer
-                result = read_bgp_message(&mut read_half) => {
+                result = read_bgp_message(&mut reader) => {
                     let mut peer_map = peers.lock().await;
                     let Some(peer) = peer_map.get_mut(&peer_ip) else {
                         error!("peer not found in map", "peer_ip" => &peer_ip);

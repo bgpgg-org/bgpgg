@@ -20,9 +20,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
-    const _OPTIONAL: u8 = 1 << 7;  // RFC 4271 - kept for completeness
+    const _OPTIONAL: u8 = 1 << 7; // RFC 4271 - kept for completeness
     const TRANSITIVE: u8 = 1 << 6;
-    const _PARTIAL: u8 = 1 << 5;  // RFC 4271 - kept for completeness
+    const _PARTIAL: u8 = 1 << 5; // RFC 4271 - kept for completeness
     const EXTENDED_LENGTH: u8 = 1 << 4;
 
     fn extended_len(&self) -> bool {
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc() {
         let input: &[u8] = &[
-            PathAttrFlag::_OPTIONAL,        // Attribute flags
+            PathAttrFlag::_OPTIONAL,       // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x04,                          // Attribute length
             // Attribute value
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc_invalid_length() {
         let input: &[u8] = &[
-            PathAttrFlag::_OPTIONAL,        // Attribute flags
+            PathAttrFlag::_OPTIONAL,       // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x03,                          // Attribute length (invalid)
             // Attribute value

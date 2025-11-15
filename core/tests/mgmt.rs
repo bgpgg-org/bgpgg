@@ -54,10 +54,7 @@ async fn test_remove_peer_success() {
     assert_eq!(peers.len(), 1);
 
     // Remove peer
-    let result = server1
-        .client
-        .remove_peer(server2.address.clone())
-        .await;
+    let result = server1.client.remove_peer(server2.address.clone()).await;
     assert!(result.is_ok());
 
     // Verify peer is gone
@@ -96,7 +93,11 @@ async fn test_get_peer_not_found() {
 async fn test_get_peer_success() {
     let (server1, server2) = setup_two_peered_servers(None).await;
 
-    let (peer_opt, stats_opt) = server1.client.get_peer(server2.address.clone()).await.unwrap();
+    let (peer_opt, stats_opt) = server1
+        .client
+        .get_peer(server2.address.clone())
+        .await
+        .unwrap();
 
     let peer = peer_opt.unwrap();
     assert_eq!(peer.address, server2.address);
