@@ -113,7 +113,7 @@ enum ErrorCode {
     HoldTimerExpired = 4,
     FiniteStateMachineError = 5,
     Cease = 6,
-    Unknown(u8),
+    Unknown,
 }
 
 impl From<u8> for ErrorCode {
@@ -125,7 +125,7 @@ impl From<u8> for ErrorCode {
             4 => ErrorCode::HoldTimerExpired,
             5 => ErrorCode::FiniteStateMachineError,
             6 => ErrorCode::Cease,
-            val => ErrorCode::Unknown(val),
+            _ => ErrorCode::Unknown,
         }
     }
 }
