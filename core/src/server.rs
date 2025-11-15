@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+use crate::bgp::msg_update::{Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
 use crate::peer::Peer;
+use crate::propagate::{
+    send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
+};
 use crate::rib::rib_loc::LocRib;
 use crate::{error, info};
 use std::collections::HashMap;
@@ -434,60 +437,12 @@ impl BgpServer {
 
         // Send updates to all established peers (except the originating peer)
         for (peer_addr, handle) in self.peers.iter() {
-            // Skip the peer that sent us the original update (if any)
-            if let Some(ref orig_peer) = originating_peer {
-                if peer_addr == orig_peer {
-                    continue;
-                }
-            }
-
-            // Only send to established peers
-            if handle.state != BgpState::Established {
+            if !should_propagate_to_peer(peer_addr, handle, &originating_peer) {
                 continue;
             }
 
-            // Send withdrawals if any
-            if !to_withdraw.is_empty() {
-                let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.clone());
-                if let Err(e) = handle
-                    .message_tx
-                    .send(PeerMessage::SendUpdate(withdraw_msg))
-                {
-                    error!("failed to send WITHDRAW to peer", "peer_ip" => &handle.addr, "error" => e.to_string());
-                } else {
-                    info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => &handle.addr);
-                }
-            }
-
-            // Send announcements if any
-            for (prefix, path) in &to_announce {
-                // Build AS path for export
-                // For locally originated routes, AS_PATH already contains local ASN - don't prepend
-                // For routes learned from peers, prepend local ASN
-                let new_as_path = if matches!(path.source, crate::rib::RouteSource::Local) {
-                    path.as_path.clone()
-                } else {
-                    let mut as_path = vec![local_asn];
-                    as_path.extend_from_slice(&path.as_path);
-                    as_path
-                };
-
-                let as_path_segments = vec![AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: new_as_path.len() as u8,
-                    asn_list: new_as_path,
-                }];
-
-                // Create UPDATE message with the modified AS path
-                let update_msg =
-                    UpdateMessage::new(path.origin, as_path_segments, path.next_hop, vec![*prefix]);
-
-                if let Err(e) = handle.message_tx.send(PeerMessage::SendUpdate(update_msg)) {
-                    error!("failed to send UPDATE to peer", "peer_ip" => &handle.addr, "error" => e.to_string());
-                } else {
-                    info!("propagated route to peer", "prefix" => format!("{:?}", prefix), "peer_ip" => &handle.addr);
-                }
-            }
+            send_withdrawals_to_peer(handle, &to_withdraw);
+            send_announcements_to_peer(handle, &to_announce, local_asn);
         }
     }
 }

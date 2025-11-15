@@ -20,5 +20,6 @@ pub mod grpc;
 pub mod log;
 pub mod net;
 pub mod peer;
+pub mod propagate;
 pub mod rib;
 pub mod server;
