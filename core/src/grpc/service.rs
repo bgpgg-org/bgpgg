@@ -16,7 +16,7 @@ use crate::bgp::msg_update::Origin;
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::rib::RouteSource;
-use crate::server::BgpRequest;
+use crate::server::MgmtRequest;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
@@ -45,12 +45,12 @@ fn to_proto_state(state: BgpState) -> i32 {
 
 #[derive(Clone)]
 pub struct BgpGrpcService {
-    bgp_request_tx: mpsc::Sender<BgpRequest>,
+    mgmt_request_tx: mpsc::Sender<MgmtRequest>,
 }
 
 impl BgpGrpcService {
-    pub fn new(bgp_request_tx: mpsc::Sender<BgpRequest>) -> Self {
-        Self { bgp_request_tx }
+    pub fn new(mgmt_request_tx: mpsc::Sender<MgmtRequest>) -> Self {
+        Self { mgmt_request_tx }
     }
 }
 
@@ -64,12 +64,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::AddPeer {
+        let req = MgmtRequest::AddPeer {
             addr: addr.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -101,12 +101,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::RemovePeer {
+        let req = MgmtRequest::RemovePeer {
             addr: peer_ip.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -131,9 +131,9 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetPeersResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetPeers { response: tx };
+        let req = MgmtRequest::GetPeers { response: tx };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -163,12 +163,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetPeer {
+        let req = MgmtRequest::GetPeer {
             addr: addr.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -250,15 +250,15 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let bgp_req = BgpRequest::AnnounceRoute {
+        let mgmt_req = MgmtRequest::AnnounceRoute {
             prefix,
             next_hop,
             origin,
             response: tx,
         };
 
-        self.bgp_request_tx
-            .send(bgp_req)
+        self.mgmt_request_tx
+            .send(mgmt_req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
@@ -306,13 +306,13 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let bgp_req = BgpRequest::WithdrawRoute {
+        let mgmt_req = MgmtRequest::WithdrawRoute {
             prefix,
             response: tx,
         };
 
-        self.bgp_request_tx
-            .send(bgp_req)
+        self.mgmt_request_tx
+            .send(mgmt_req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
@@ -336,9 +336,9 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetRoutesResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetRoutes { response: tx };
+        let req = MgmtRequest::GetRoutes { response: tx };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;

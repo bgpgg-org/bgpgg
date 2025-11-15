@@ -188,14 +188,25 @@ impl LocRib {
     }
 
     /// Remove a locally originated route
-    pub fn remove_local_route(&mut self, prefix: IpNetwork) {
+    /// Returns true if a route was actually removed.
+    pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
         info!("removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
 
         if let Some(route) = self.routes.get_mut(&prefix) {
+            let original_len = route.paths.len();
             route.paths.retain(|p| p.source != RouteSource::Local);
+            let removed = route.paths.len() != original_len;
+
+            // Remove this specific route if no paths left
+            if route.paths.is_empty() {
+                self.routes.remove(&prefix);
+            }
+
+            self.run_best_path_selection(&[prefix]);
+            removed
+        } else {
+            false
         }
-        self.routes.retain(|_, route| !route.paths.is_empty());
-        self.run_best_path_selection(&[prefix]);
     }
 
     pub fn remove_routes_from_peer(&mut self, peer_ip: String) -> Vec<IpNetwork> {
@@ -389,5 +400,23 @@ mod tests {
 
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
+    }
+
+    #[test]
+    fn test_add_and_remove_local_route() {
+        let mut loc_rib = LocRib::new(65000);
+        let prefix = create_test_prefix();
+        let next_hop = Ipv4Addr::new(192, 0, 2, 1);
+
+        loc_rib.add_local_route(prefix, next_hop, crate::bgp::msg_update::Origin::IGP);
+        assert_eq!(loc_rib.routes_len(), 1);
+        assert!(loc_rib.has_prefix(&prefix));
+
+        assert!(loc_rib.remove_local_route(prefix));
+        assert_eq!(loc_rib.routes_len(), 0);
+        assert!(!loc_rib.has_prefix(&prefix));
+
+        // Removing again should return false
+        assert!(!loc_rib.remove_local_route(prefix));
     }
 }

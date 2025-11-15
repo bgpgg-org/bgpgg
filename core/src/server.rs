@@ -26,8 +26,8 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-// Requests that can be sent to the BGP server
-pub enum BgpRequest {
+// Management requests that can be sent to the BGP server
+pub enum MgmtRequest {
     AddPeer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
@@ -61,10 +61,10 @@ pub enum BgpRequest {
 pub struct BgpServer {
     pub peers: Arc<Mutex<HashMap<String, Peer>>>,
     pub loc_rib: Arc<Mutex<LocRib>>,
-    pub request_tx: mpsc::Sender<BgpRequest>,
+    pub request_tx: mpsc::Sender<MgmtRequest>,
     config: Config,
     local_bgp_id: u32,
-    request_rx: mpsc::Receiver<BgpRequest>,
+    request_rx: mpsc::Receiver<MgmtRequest>,
 }
 
 impl BgpServer {
@@ -86,9 +86,171 @@ impl BgpServer {
         }
     }
 
-    async fn initiate_peer_connection(
+    pub async fn run(self) {
+        let addr = self.config.listen_addr.clone();
+        info!("BGP server starting", "listen_addr" => addr);
+
+        let listener = TcpListener::bind(&addr).await.unwrap();
+
+        // Destructure to avoid partial move issues
+        let BgpServer {
+            peers,
+            loc_rib,
+            config,
+            local_bgp_id,
+            mut request_rx,
+            ..
+        } = self;
+
+        // Get local bind address for outgoing connections
+        let local_addr = config.get_local_addr().expect("invalid listen address");
+
+        // Unified event loop: handle both BGP connections and gRPC requests
+        loop {
+            tokio::select! {
+                // Handle incoming BGP connections
+                Ok((stream, _)) = listener.accept() => {
+                    Self::accept_peer(stream, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
+                }
+
+                // Handle management requests
+                Some(req) = request_rx.recv() => {
+                    Self::handle_mgmt_req(req, local_addr, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_mgmt_req(
+        req: MgmtRequest,
+        local_addr: SocketAddr,
+        peers: Arc<Mutex<HashMap<String, Peer>>>,
+        loc_rib: Arc<Mutex<LocRib>>,
+        local_asn: u16,
+        local_bgp_id: u32,
+        hold_time: u16,
+    ) {
+        match req {
+            MgmtRequest::AddPeer { addr, response } => {
+                info!("adding peer via request", "peer_addr" => &addr);
+
+                tokio::spawn(async move {
+                    Self::connect_to_peer(
+                        &addr,
+                        local_addr,
+                        local_asn,
+                        local_bgp_id,
+                        hold_time,
+                        peers,
+                        loc_rib,
+                    )
+                    .await;
+                });
+                let _ = response.send(Ok(()));
+            }
+            MgmtRequest::RemovePeer { addr, response } => {
+                info!("removing peer via request", "peer_ip" => &addr);
+
+                // Remove peer from map
+                let removed = {
+                    let mut peer_map = peers.lock().await;
+                    peer_map.remove(&addr).is_some()
+                };
+
+                if !removed {
+                    let _ = response.send(Err(format!("peer {} not found", addr)));
+                    return;
+                }
+
+                // Notify Loc-RIB to remove routes from this peer
+                let changed_prefixes = loc_rib.lock().await.remove_routes_from_peer(addr.clone());
+
+                // Propagate route changes (withdrawals or new best paths) to all remaining peers
+                Self::propagate_routes(
+                    changed_prefixes,
+                    None, // Don't exclude any peer since the removed peer is already gone
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
+
+                let _ = response.send(Ok(()));
+            }
+            MgmtRequest::AnnounceRoute {
+                prefix,
+                next_hop,
+                origin,
+                response,
+            } => {
+                info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+
+                // Add route to Loc-RIB as locally originated
+                loc_rib
+                    .lock()
+                    .await
+                    .add_local_route(prefix, next_hop, origin);
+
+                // Propagate to all peers using the common propagation logic
+                Self::propagate_routes(
+                    vec![prefix],
+                    None,
+                    peers.clone(),
+                    loc_rib.clone(),
+                    local_asn,
+                )
+                .await;
+
+                let _ = response.send(Ok(()));
+            }
+            MgmtRequest::WithdrawRoute { prefix, response } => {
+                info!("withdrawing route via request", "prefix" => format!("{:?}", prefix));
+
+                // Remove local route from Loc-RIB
+                let removed = loc_rib.lock().await.remove_local_route(prefix);
+
+                // Only propagate if something was actually removed
+                if removed {
+                    // Propagate to all peers using the common propagation logic
+                    // This will automatically send withdrawal if no alternate path exists,
+                    // or announce the new best path if an alternate path is available
+                    Self::propagate_routes(
+                        vec![prefix],
+                        None,
+                        peers.clone(),
+                        loc_rib.clone(),
+                        local_asn,
+                    )
+                    .await;
+                }
+
+                let _ = response.send(Ok(()));
+            }
+            MgmtRequest::GetPeers { response } => {
+                let peer_map = peers.lock().await;
+                let peer_info: Vec<(String, u16, BgpState)> = peer_map
+                    .values()
+                    .map(|p| (p.addr.clone(), p.asn, p.state()))
+                    .collect();
+                let _ = response.send(peer_info);
+            }
+            MgmtRequest::GetPeer { addr, response } => {
+                let peer_map = peers.lock().await;
+                let peer_info = peer_map
+                    .get(&addr)
+                    .map(|p| (p.addr.clone(), p.asn, p.state(), p.statistics.clone()));
+                let _ = response.send(peer_info);
+            }
+            MgmtRequest::GetRoutes { response } => {
+                let routes = loc_rib.lock().await.get_all_routes();
+                let _ = response.send(routes);
+            }
+        }
+    }
+
+    async fn connect_to_peer(
         peer_addr: &str,
-        local_bind_ip: &str,
+        local_addr: SocketAddr,
         local_asn: u16,
         local_bgp_id: u32,
         hold_time: u16,
@@ -118,9 +280,8 @@ impl BgpServer {
         }
         .unwrap();
 
-        let local_bind_addr: SocketAddr = format!("{}:0", local_bind_ip).parse().unwrap();
-        if let Err(e) = socket.bind(local_bind_addr) {
-            error!("failed to bind to local address", "local_addr" => local_bind_ip, "error" => e.to_string());
+        if let Err(e) = socket.bind(local_addr) {
+            error!("failed to bind to local address", "local_addr" => local_addr.to_string(), "error" => e.to_string());
             return;
         }
 
@@ -151,166 +312,6 @@ impl BgpServer {
         .await;
     }
 
-    pub async fn get_routes(&self) -> Vec<crate::rib::Route> {
-        self.loc_rib.lock().await.get_all_routes()
-    }
-
-    pub async fn run(self) {
-        let addr = self.config.listen_addr.clone();
-        info!("BGP server starting", "listen_addr" => addr);
-
-        let listener = TcpListener::bind(&addr).await.unwrap();
-
-        // Destructure to avoid partial move issues
-        let BgpServer {
-            peers,
-            loc_rib,
-            config,
-            local_bgp_id,
-            mut request_rx,
-            ..
-        } = self;
-
-        // Unified event loop: handle both BGP connections and gRPC requests
-        loop {
-            tokio::select! {
-                // Handle incoming BGP connections
-                Ok((stream, _)) = listener.accept() => {
-                    Self::accept_peer(stream, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
-                }
-
-                // Handle gRPC requests
-                Some(req) = request_rx.recv() => {
-                    // Extract local bind IP from listen address
-                    let local_bind_ip = config.listen_addr.split(':').next().unwrap_or("127.0.0.1");
-                    Self::handle_request(req, local_bind_ip, peers.clone(), loc_rib.clone(), config.asn, local_bgp_id, config.hold_time_secs as u16).await;
-                }
-            }
-        }
-    }
-
-    async fn handle_request(
-        req: BgpRequest,
-        local_bind_ip: &str,
-        peers: Arc<Mutex<HashMap<String, Peer>>>,
-        loc_rib: Arc<Mutex<LocRib>>,
-        local_asn: u16,
-        local_bgp_id: u32,
-        hold_time: u16,
-    ) {
-        match req {
-            BgpRequest::AddPeer { addr, response } => {
-                info!("adding peer via request", "peer_addr" => &addr);
-
-                let local_bind_ip = local_bind_ip.to_string();
-                tokio::spawn(async move {
-                    Self::initiate_peer_connection(
-                        &addr,
-                        &local_bind_ip,
-                        local_asn,
-                        local_bgp_id,
-                        hold_time,
-                        peers,
-                        loc_rib,
-                    )
-                    .await;
-                });
-                let _ = response.send(Ok(()));
-            }
-            BgpRequest::RemovePeer { addr, response } => {
-                info!("removing peer via request", "peer_ip" => &addr);
-
-                // Remove peer from map
-                let mut peer_map = peers.lock().await;
-                let removed = peer_map.remove(&addr).is_some();
-                drop(peer_map);
-
-                // Notify Loc-RIB to remove routes from this peer
-                let changed_prefixes = loc_rib.lock().await.remove_routes_from_peer(addr.clone());
-
-                // Propagate route changes (withdrawals or new best paths) to all remaining peers
-                Self::propagate_routes(
-                    changed_prefixes,
-                    None, // Don't exclude any peer since the removed peer is already gone
-                    peers.clone(),
-                    loc_rib.clone(),
-                    local_asn,
-                )
-                .await;
-
-                if removed {
-                    let _ = response.send(Ok(()));
-                } else {
-                    let _ = response.send(Err(format!("peer {} not found", addr)));
-                }
-            }
-            BgpRequest::AnnounceRoute {
-                prefix,
-                next_hop,
-                origin,
-                response,
-            } => {
-                info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
-
-                // Add route to Loc-RIB as locally originated
-                loc_rib
-                    .lock()
-                    .await
-                    .add_local_route(prefix, next_hop, origin);
-
-                // Propagate to all peers using the common propagation logic
-                Self::propagate_routes(
-                    vec![prefix],
-                    None,
-                    peers.clone(),
-                    loc_rib.clone(),
-                    local_asn,
-                )
-                .await;
-
-                let _ = response.send(Ok(()));
-            }
-            BgpRequest::WithdrawRoute { prefix, response } => {
-                info!("withdrawing route via request", "prefix" => format!("{:?}", prefix));
-
-                // Remove local route from Loc-RIB
-                loc_rib.lock().await.remove_local_route(prefix);
-
-                // Propagate to all peers using the common propagation logic
-                // This will automatically send withdrawal if no alternate path exists,
-                // or announce the new best path if an alternate path is available
-                Self::propagate_routes(
-                    vec![prefix],
-                    None,
-                    peers.clone(),
-                    loc_rib.clone(),
-                    local_asn,
-                )
-                .await;
-
-                let _ = response.send(Ok(()));
-            }
-            BgpRequest::GetPeers { response } => {
-                let peer_map = peers.lock().await;
-                let peer_info: Vec<(String, u16, BgpState)> = peer_map
-                    .values()
-                    .map(|p| (p.addr.clone(), p.asn, p.state()))
-                    .collect();
-                let _ = response.send(peer_info);
-            }
-            BgpRequest::GetPeer { addr, response } => {
-                let peer_map = peers.lock().await;
-                let peer_info = peer_map
-                    .get(&addr)
-                    .map(|p| (p.addr.clone(), p.asn, p.state(), p.statistics.clone()));
-                let _ = response.send(peer_info);
-            }
-            BgpRequest::GetRoutes { response } => {
-                let routes = loc_rib.lock().await.get_all_routes();
-                let _ = response.send(routes);
-            }
-        }
-    }
 
     async fn accept_peer(
         stream: TcpStream,
