@@ -17,7 +17,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
-use crate::peer::{perform_handshake, Peer, PeerOp, PeerStatistics};
+use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -49,11 +49,11 @@ pub enum MgmtOp {
         response: oneshot::Sender<Result<(), String>>,
     },
     GetPeers {
-        response: oneshot::Sender<Vec<(String, u16, BgpState)>>,
+        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState)>>,
     },
     GetPeer {
         addr: String,
-        response: oneshot::Sender<Option<(String, u16, BgpState, PeerStatistics)>>,
+        response: oneshot::Sender<Option<(String, Option<u16>, BgpState, PeerStatistics)>>,
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
@@ -65,6 +65,10 @@ pub enum ServerOp {
     PeerStateChanged {
         peer_ip: String,
         state: BgpState,
+    },
+    PeerHandshakeComplete {
+        peer_ip: String,
+        asn: u16,
     },
     PeerUpdate {
         peer_ip: String,
@@ -79,7 +83,7 @@ pub enum ServerOp {
 // Information about a peer
 pub struct PeerInfo {
     pub addr: String,
-    pub asn: u16,
+    pub asn: Option<u16>,
     pub state: BgpState,
     pub peer_tx: mpsc::UnboundedSender<PeerOp>,
 }
@@ -172,52 +176,24 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
-        let (mut tcp_rx, mut tcp_tx) = stream.into_split();
+        let (tcp_rx, tcp_tx) = stream.into_split();
 
-        // Perform BGP handshake to get peer information
-        let (peer_asn, peer_hold_time, session_type) = match perform_handshake(
-            &peer_ip,
-            &mut tcp_rx,
-            &mut tcp_tx,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                error!("handshake failed", "peer_ip" => &peer_ip, "error" => e.to_string());
-                return;
-            }
-        };
-
-        // Create peer with all channels
-        // Peer::new completes handshake internally (sends KEEPALIVE, transitions to OpenConfirm)
+        // Create peer in Connect state - it owns the handshake
         let server_tx = self.op_tx.clone();
-        let (peer, peer_tx) = match Peer::new(
+        let (peer, peer_tx) = Peer::new(
             peer_ip.clone(),
-            peer_asn,
-            session_type,
             tcp_tx,
             tcp_rx,
             server_tx,
-            peer_hold_time,
+            local_asn,
             local_hold_time,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                error!("failed to complete handshake", "peer_ip" => &peer_ip, "error" => e.to_string());
-                return;
-            }
-        };
+            local_bgp_id,
+        );
 
-        // Create peer info and add to peers HashMap immediately
+        // Add to HashMap IMMEDIATELY - asn is None until handshake completes
         let peer_info = PeerInfo {
             addr: peer_ip.clone(),
-            asn: peer_asn,
+            asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
         };
@@ -225,7 +201,7 @@ impl BgpServer {
         self.peers.insert(peer_ip.clone(), peer_info);
         info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", peer.state()), "total_peers" => self.peers.len());
 
-        // Spawn peer task
+        // Spawn peer task - handshake happens inside run()
         tokio::spawn(peer.run());
     }
 
@@ -268,6 +244,13 @@ impl BgpServer {
                 if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
                     peer_info.state = state;
                     info!("peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                }
+            }
+            ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
+                // Update peer ASN in the HashMap
+                if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+                    peer_info.asn = Some(asn);
+                    info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
             ServerOp::PeerUpdate {
@@ -331,59 +314,28 @@ impl BgpServer {
         let peer_ip = peer_addr.ip().to_string();
         info!("connected to peer", "peer_ip" => &peer_ip);
 
-        // Split the stream before handshake
-        let (mut tcp_rx, mut tcp_tx) = stream.into_split();
+        let (tcp_rx, tcp_tx) = stream.into_split();
 
         let local_asn = self.config.asn;
         let local_bgp_id = self.local_bgp_id;
         let local_hold_time = self.config.hold_time_secs as u16;
 
-        // Perform BGP handshake to get peer information
-        let (peer_asn, peer_hold_time, session_type) = match perform_handshake(
-            &peer_ip,
-            &mut tcp_rx,
-            &mut tcp_tx,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                error!("handshake failed", "peer_ip" => &peer_ip, "error" => e.to_string());
-                let _ = response.send(Err(format!("handshake failed: {}", e)));
-                return;
-            }
-        };
-
-        // Create peer with all channels
-        // Peer::new completes handshake internally (sends KEEPALIVE, transitions to OpenConfirm)
+        // Create peer in Connect state - it owns the handshake
         let server_tx = self.op_tx.clone();
-        let (peer, peer_tx) = match Peer::new(
+        let (peer, peer_tx) = Peer::new(
             peer_ip.clone(),
-            peer_asn,
-            session_type,
             tcp_tx,
             tcp_rx,
             server_tx,
-            peer_hold_time,
+            local_asn,
             local_hold_time,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                error!("failed to complete handshake", "peer_ip" => &peer_ip, "error" => e.to_string());
-                let _ = response.send(Err(format!("failed to complete handshake: {}", e)));
-                return;
-            }
-        };
+            local_bgp_id,
+        );
 
-        // Create peer info and add to peers HashMap immediately
+        // Add to HashMap IMMEDIATELY - asn is None until handshake completes
         let peer_info = PeerInfo {
             addr: peer_ip.clone(),
-            asn: peer_asn,
+            asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
         };
@@ -391,10 +343,10 @@ impl BgpServer {
         self.peers.insert(peer_ip.clone(), peer_info);
         info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", peer.state()), "total_peers" => self.peers.len());
 
-        // Connection and handshake successful, send response
+        // Connection successful, send response
         let _ = response.send(Ok(()));
 
-        // Spawn peer task to handle the connection
+        // Spawn peer task - handshake happens inside run()
         tokio::spawn(peer.run());
     }
 
@@ -465,8 +417,8 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn handle_get_peers(&self, response: oneshot::Sender<Vec<(String, u16, BgpState)>>) {
-        let peer_info: Vec<(String, u16, BgpState)> = self
+    fn handle_get_peers(&self, response: oneshot::Sender<Vec<(String, Option<u16>, BgpState)>>) {
+        let peer_info: Vec<(String, Option<u16>, BgpState)> = self
             .peers
             .values()
             .map(|p| (p.addr.clone(), p.asn, p.state))
@@ -477,7 +429,7 @@ impl BgpServer {
     async fn handle_get_peer(
         &self,
         addr: String,
-        response: oneshot::Sender<Option<(String, u16, BgpState, PeerStatistics)>>,
+        response: oneshot::Sender<Option<(String, Option<u16>, BgpState, PeerStatistics)>>,
     ) {
         // Get peer info from HashMap
         let peer_info = self.peers.get(&addr);

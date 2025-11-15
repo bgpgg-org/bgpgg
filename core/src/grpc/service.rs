@@ -147,7 +147,7 @@ impl BgpService for BgpGrpcService {
             .iter()
             .map(|(addr, asn, state)| ProtoPeer {
                 address: addr.to_string(),
-                asn: *asn as u32,
+                asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                 state: to_proto_state(*state),
             })
             .collect();
@@ -182,7 +182,7 @@ impl BgpService for BgpGrpcService {
             Some((addr, asn, state, statistics)) => {
                 let proto_peer = ProtoPeer {
                     address: addr,
-                    asn: asn as u32,
+                    asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                     state: to_proto_state(state),
                 };
 
