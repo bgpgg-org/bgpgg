@@ -17,11 +17,12 @@
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::BgpState;
+use crate::peer::PeerOp;
 use crate::rib::{Path, RouteSource};
-use crate::server::{PeerHandle, PeerMessage};
 use crate::{error, info};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use tokio::sync::mpsc;
 
 /// A batch of route announcements sharing the same path attributes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -33,7 +34,7 @@ pub struct AnnouncementBatch {
 /// Check if we should propagate routes to this peer
 pub fn should_propagate_to_peer(
     peer_addr: &str,
-    handle: &PeerHandle,
+    peer_state: BgpState,
     originating_peer: &Option<String>,
 ) -> bool {
     // Skip the peer that sent us the original update (if any)
@@ -44,7 +45,7 @@ pub fn should_propagate_to_peer(
     }
 
     // Only send to established peers
-    handle.state == BgpState::Established
+    peer_state == BgpState::Established
 }
 
 /// Build AS path for export to a peer
@@ -67,19 +68,20 @@ pub fn build_export_as_path(path: &Path, local_asn: u16) -> Vec<AsPathSegment> {
 }
 
 /// Send withdrawal messages to a peer
-pub fn send_withdrawals_to_peer(handle: &PeerHandle, to_withdraw: &[IpNetwork]) {
+pub fn send_withdrawals_to_peer(
+    peer_addr: &str,
+    message_tx: &mpsc::UnboundedSender<PeerOp>,
+    to_withdraw: &[IpNetwork],
+) {
     if to_withdraw.is_empty() {
         return;
     }
 
     let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
-    if let Err(e) = handle
-        .message_tx
-        .send(PeerMessage::SendUpdate(withdraw_msg))
-    {
-        error!("failed to send WITHDRAW to peer", "peer_ip" => &handle.addr, "error" => e.to_string());
+    if let Err(e) = message_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
+        error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr, "error" => e.to_string());
     } else {
-        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => &handle.addr);
+        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr);
     }
 }
 
@@ -103,7 +105,8 @@ fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<Announc
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
 pub fn send_announcements_to_peer(
-    handle: &PeerHandle,
+    peer_addr: &str,
+    message_tx: &mpsc::UnboundedSender<PeerOp>,
     to_announce: &[(IpNetwork, Path)],
     local_asn: u16,
 ) {
@@ -124,10 +127,10 @@ pub fn send_announcements_to_peer(
             batch.prefixes,
         );
 
-        if let Err(e) = handle.message_tx.send(PeerMessage::SendUpdate(update_msg)) {
-            error!("failed to send UPDATE to peer", "peer_ip" => &handle.addr, "error" => e.to_string());
+        if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
+            error!("failed to send UPDATE to peer", "peer_ip" => peer_addr, "error" => e.to_string());
         } else {
-            info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => &handle.addr);
+            info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => peer_addr);
         }
     }
 }
@@ -137,11 +140,9 @@ mod tests {
     use super::*;
     use crate::bgp::msg_update::Origin;
     use crate::bgp::utils::{IpNetwork, Ipv4Net};
-    use crate::peer::PeerStatistics;
     use crate::rib::RouteSource;
     use std::collections::HashSet;
     use std::net::Ipv4Addr;
-    use tokio::sync::mpsc;
 
     fn make_path(source: RouteSource, as_path: Vec<u16>, next_hop: Ipv4Addr) -> Path {
         Path {
@@ -156,43 +157,31 @@ mod tests {
 
     #[test]
     fn test_should_propagate_to_peer() {
-        let established = PeerHandle {
-            addr: "10.0.0.2".to_string(),
-            asn: 65001,
-            state: BgpState::Established,
-            statistics: PeerStatistics::default(),
-            message_tx: mpsc::unbounded_channel().0,
-        };
-
-        let not_established = PeerHandle {
-            addr: "10.0.0.3".to_string(),
-            asn: 65002,
-            state: BgpState::Connect,
-            statistics: PeerStatistics::default(),
-            message_tx: mpsc::unbounded_channel().0,
-        };
-
         // Should propagate to established peer when no originating peer
-        assert!(should_propagate_to_peer("10.0.0.2", &established, &None));
+        assert!(should_propagate_to_peer(
+            "10.0.0.2",
+            BgpState::Established,
+            &None
+        ));
 
         // Should propagate to established peer when different from originating peer
         assert!(should_propagate_to_peer(
             "10.0.0.2",
-            &established,
+            BgpState::Established,
             &Some("10.0.0.1".to_string())
         ));
 
         // Should NOT propagate to same peer that sent the route
         assert!(!should_propagate_to_peer(
             "10.0.0.2",
-            &established,
+            BgpState::Established,
             &Some("10.0.0.2".to_string())
         ));
 
         // Should NOT propagate to non-established peer
         assert!(!should_propagate_to_peer(
             "10.0.0.3",
-            &not_established,
+            BgpState::Connect,
             &Some("10.0.0.1".to_string())
         ));
     }

@@ -116,7 +116,7 @@ pub async fn start_test_server(
     let server = BgpServer::new(config);
 
     // Create gRPC service
-    let grpc_service = BgpGrpcService::new(server.request_tx.clone());
+    let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
     let runtime = tokio::runtime::Builder::new_multi_thread()

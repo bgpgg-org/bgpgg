@@ -28,6 +28,25 @@ pub struct Path {
     pub med: Option<u32>,
 }
 
+impl Path {
+    /// Create a Path from BGP UPDATE message attributes
+    pub fn from_attributes(
+        origin: Origin,
+        as_path: Vec<u16>,
+        next_hop: Ipv4Addr,
+        source: RouteSource,
+    ) -> Self {
+        Path {
+            origin,
+            as_path,
+            next_hop,
+            source,
+            local_pref: None,
+            med: None,
+        }
+    }
+}
+
 impl PartialOrd for Path {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
