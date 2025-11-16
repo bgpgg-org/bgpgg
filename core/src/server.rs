@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::Origin;
+use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
@@ -38,10 +38,11 @@ pub enum MgmtOp {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
-    AnnounceRoute {
+    AddRoute {
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
         origin: Origin,
+        as_path: Vec<AsPathSegment>,
         response: oneshot::Sender<Result<(), String>>,
     },
     WithdrawRoute {
@@ -213,13 +214,14 @@ impl BgpServer {
             MgmtOp::RemovePeer { addr, response } => {
                 self.handle_remove_peer(addr, response).await;
             }
-            MgmtOp::AnnounceRoute {
+            MgmtOp::AddRoute {
                 prefix,
                 next_hop,
                 origin,
+                as_path,
                 response,
             } => {
-                self.handle_announce_route(prefix, next_hop, origin, response)
+                self.handle_add_route(prefix, next_hop, origin, as_path, response)
                     .await;
             }
             MgmtOp::WithdrawRoute { prefix, response } => {
@@ -378,17 +380,19 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    async fn handle_announce_route(
+    async fn handle_add_route(
         &mut self,
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
         origin: Origin,
+        as_path: Vec<AsPathSegment>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!("announcing route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+        info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
-        // Add route to Loc-RIB as locally originated
-        self.loc_rib.add_local_route(prefix, next_hop, origin);
+        // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
+        self.loc_rib
+            .add_local_route(prefix, next_hop, origin, as_path);
 
         // Propagate to all peers using the common propagation logic
         self.propagate_routes(vec![prefix], None).await;

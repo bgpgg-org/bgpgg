@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_update::AsPathSegment;
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
@@ -130,10 +131,11 @@ impl LocRib {
         }
 
         // AS loop prevention (RFC 4271 Section 9.1.2.1)
-        // Count occurrences of local ASN in AS_PATH
+        // Count occurrences of local ASN in AS_PATH (across all segments)
         let local_asn_count = path
             .as_path
             .iter()
+            .flat_map(|segment| segment.asn_list.iter())
             .filter(|&&asn| asn == self.local_asn)
             .count();
 
@@ -194,13 +196,15 @@ impl LocRib {
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
         origin: crate::bgp::msg_update::Origin,
+        as_path: Vec<AsPathSegment>,
     ) {
-        // RFC 4271 Section 5.1.2: when originating a route,
-        // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers
-        // We store it empty and add local_asn during export based on peer type
+        // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
+        // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
+        // We store it as provided and add local_asn during export based on peer type.
+        // If as_path is not empty, it's used as-is (for testing or route injection).
         let path = Path {
             origin,
-            as_path: vec![],
+            as_path,
             next_hop,
             source: RouteSource::Local,
             local_pref: Some(100),
@@ -278,6 +282,7 @@ impl LocRib {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
     use crate::rib::test_helpers::*;
     use std::net::Ipv4Addr;
 
@@ -375,7 +380,11 @@ mod tests {
 
         let path1 = create_test_path(peer_ip.clone());
         let mut path2 = create_test_path(peer_ip.clone());
-        path2.as_path = vec![300, 400];
+        path2.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![300, 400],
+        }];
 
         loc_rib.add_route(prefix, path1);
         loc_rib.add_route(prefix, path2.clone());
@@ -433,7 +442,12 @@ mod tests {
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
-        loc_rib.add_local_route(prefix, next_hop, crate::bgp::msg_update::Origin::IGP);
+        loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            crate::bgp::msg_update::Origin::IGP,
+            vec![],
+        );
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
 

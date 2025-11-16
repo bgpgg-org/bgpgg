@@ -25,7 +25,12 @@ async fn test_peer_down() {
     // Server2 announces a route to Server1 via gRPC
     server2
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route");
 
@@ -38,7 +43,11 @@ async fn test_peer_down() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "192.168.1.1",
+                peer_addr.clone(),
+            )],
         }],
     )])
     .await;
@@ -70,7 +79,12 @@ async fn test_peer_down_four_node_mesh() {
     // Server1 announces a route
     server1
         .client
-        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
@@ -81,7 +95,7 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -92,7 +106,7 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -103,7 +117,7 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -128,7 +142,7 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -139,7 +153,7 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -190,7 +204,12 @@ async fn test_remove_peer() {
     // Server2 announces a route to Server1 via gRPC
     server2
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route");
 
@@ -203,7 +222,11 @@ async fn test_remove_peer() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "192.168.1.1",
+                peer_addr.clone(),
+            )],
         }],
     )])
     .await;
@@ -230,7 +253,12 @@ async fn test_remove_peer_withdraw_routes() {
     // Server2 announces a route
     server2
         .client
-        .announce_route("10.2.0.0/24".to_string(), "192.168.2.1".to_string(), 0)
+        .add_route(
+            "10.2.0.0/24".to_string(),
+            "192.168.2.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 2");
 
@@ -243,7 +271,11 @@ async fn test_remove_peer_withdraw_routes() {
         &server1,
         vec![Route {
             prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.2.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "192.168.2.1",
+                peer_addr.clone(),
+            )],
         }],
     )])
     .await;
@@ -271,7 +303,12 @@ async fn test_remove_peer_four_node_mesh() {
     // Server4 announces a route
     server4
         .client
-        .announce_route("10.4.0.0/24".to_string(), "192.168.4.1".to_string(), 0)
+        .add_route(
+            "10.4.0.0/24".to_string(),
+            "192.168.4.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 4");
 
@@ -282,7 +319,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
+                    vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
                 )],
@@ -293,7 +330,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
+                    vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
                 )],
@@ -304,7 +341,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
+                    vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
                 )],
@@ -329,7 +366,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65002, 65004],
+                    vec![as_sequence(vec![65002, 65004])],
                     "192.168.4.1",
                     server2.address.clone(),
                 )], // Via server2 (127.0.0.2 < 127.0.0.3)
@@ -340,7 +377,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
+                    vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
                 )],
@@ -351,7 +388,7 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
+                    vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
                 )],

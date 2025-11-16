@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeerRequest,
-    GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest, Route,
-    WithdrawRouteRequest,
+    bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
+    GetPeerRequest, GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest,
+    Route, WithdrawRouteRequest,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -113,19 +113,21 @@ impl BgpClient {
         }
     }
 
-    /// Announce a route to all established peers
-    pub async fn announce_route(
+    /// Add a route to the global RIB
+    pub async fn add_route(
         &mut self,
         prefix: String,
         next_hop: String,
         origin: i32,
+        as_path: Vec<AsPathSegment>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .announce_route(AnnounceRouteRequest {
+            .add_route(AddRouteRequest {
                 prefix,
                 next_hop,
                 origin,
+                as_path,
             })
             .await?
             .into_inner();

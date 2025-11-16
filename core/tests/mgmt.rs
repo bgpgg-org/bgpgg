@@ -148,7 +148,12 @@ async fn test_announce_withdraw_route() {
     // Announce route first
     server1
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .unwrap();
 

@@ -71,7 +71,12 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     // S1 originates a route (starts with empty AS_PATH)
     server1
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
@@ -86,7 +91,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001], // eBGP: S1 created AS_SEQUENCE with its AS
+                    vec![as_sequence(vec![65001])], // eBGP: S1 created AS_SEQUENCE with its AS
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -97,7 +102,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001], // iBGP: S2 did NOT modify AS_PATH
+                    vec![as_sequence(vec![65001])], // iBGP: S2 did NOT modify AS_PATH
                     "192.168.1.1",
                     server2.address.clone(),
                 )],
@@ -108,7 +113,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65002, 65001], // eBGP: S3 prepended its AS
+                    vec![as_sequence(vec![65002, 65001])], // eBGP: S3 prepended its AS
                     "192.168.1.1",
                     server3.address.clone(),
                 )],
@@ -158,7 +163,12 @@ async fn test_originating_speaker_as_path() {
     // S1 originates a route
     server1
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
@@ -183,12 +193,78 @@ async fn test_originating_speaker_as_path() {
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001], // eBGP: S2 prepended AS65001
+                    vec![as_sequence(vec![65001])], // eBGP: S2 prepended AS65001
                     "192.168.1.1",
                     server2.address.clone(),
                 )],
             }],
         ),
     ])
+    .await;
+}
+
+#[tokio::test]
+async fn test_ebgp_prepend_as_before_as_set() {
+    // RFC 4271 Section 5.1.2: AS_PATH handling with AS_SET
+    //
+    // Topology: S1(AS65001) -> S2(AS65002)
+    //                          eBGP
+    //
+    // S1 injects a route with AS_SET[65003, 65004] as the first segment.
+    // S2 should receive it with AS_SEQUENCE[65001] prepended by S1.
+
+    let mut servers = [
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65002,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+    ];
+
+    chain_servers(&mut servers).await;
+
+    let [server1, server2] = &mut servers;
+
+    // S1 adds a route with AS_SET as the first segment
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![
+                as_set(vec![65003, 65004]), // AS_SET as first segment
+                as_sequence(vec![65005]),   // AS_SEQUENCE after
+            ],
+        )
+        .await
+        .expect("Failed to add route from server 1");
+
+    // Verify S2 receives the route with AS_SEQUENCE[65001] prepended
+    // Result: AS_SEQUENCE[65001], AS_SET[65003, 65004], AS_SEQUENCE[65005]
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![
+                    as_sequence(vec![65001]),   // Prepended by S1 (eBGP)
+                    as_set(vec![65003, 65004]), // Original AS_SET
+                    as_sequence(vec![65005]),   // Original AS_SEQUENCE
+                ],
+                "192.168.1.1",
+                server1.address.clone(),
+            )],
+        }],
+    )])
     .await;
 }

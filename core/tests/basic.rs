@@ -24,7 +24,12 @@ async fn test_announce_withdraw() {
     // Server2 announces a route to Server1 via gRPC
     server2
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route");
 
@@ -37,7 +42,11 @@ async fn test_announce_withdraw() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "192.168.1.1",
+                peer_addr.clone(),
+            )],
         }],
     )])
     .await;
@@ -62,7 +71,12 @@ async fn test_announce_withdraw_mesh() {
     // Server1 announces a route
     server1
         .client
-        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
@@ -74,7 +88,7 @@ async fn test_announce_withdraw_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -85,7 +99,7 @@ async fn test_announce_withdraw_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -142,7 +156,12 @@ async fn test_announce_withdraw_four_node_mesh() {
     // Server1 announces a route
     server1
         .client
-        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
@@ -154,7 +173,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -165,7 +184,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],
@@ -176,7 +195,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
+                    vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
                 )],

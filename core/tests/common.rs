@@ -16,7 +16,7 @@
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
-use bgpgg::grpc::proto::{BgpState, Origin, Path, Peer, Route};
+use bgpgg::grpc::proto::{AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
@@ -66,8 +66,24 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
     peer.state == state as i32
 }
 
-/// Helper to build a Path with common default values
-pub fn build_path(as_path: Vec<u32>, next_hop: &str, peer_address: String) -> Path {
+/// Helper to convert a flat AS list to AS_SEQUENCE segment
+pub fn as_sequence(asns: Vec<u32>) -> AsPathSegment {
+    AsPathSegment {
+        segment_type: AsPathSegmentType::AsSequence.into(),
+        asns,
+    }
+}
+
+/// Helper to create an AS_SET segment
+pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
+    AsPathSegment {
+        segment_type: AsPathSegmentType::AsSet.into(),
+        asns,
+    }
+}
+
+/// Helper to build a Path with AS_PATH segments
+pub fn build_path(as_path: Vec<AsPathSegment>, next_hop: &str, peer_address: String) -> Path {
     Path {
         origin: Origin::Igp.into(),
         as_path,
