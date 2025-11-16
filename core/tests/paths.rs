@@ -23,6 +23,9 @@
 //! - Originating routes: empty AS_PATH to iBGP peers, [local_AS] to eBGP peers
 //! - eBGP: prepend local AS to AS_PATH when advertising to external peers
 //! - iBGP: do NOT modify AS_PATH when advertising to internal peers
+//!
+//! NEXT_HOP handling:
+//! - iBGP: Locally-originated routes with unspecified NEXT_HOP (0.0.0.0) are rewritten to router ID
 
 mod common;
 pub use common::*;
@@ -348,6 +351,70 @@ async fn test_ebgp_prepend_as_before_as_set() {
                     as_sequence(vec![65005]),   // Original AS_SEQUENCE
                 ],
                 "192.168.1.1",
+                server1.address.clone(),
+                Origin::Igp,
+            )],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_next_hop_locally_originated_to_ibgp() {
+    // RFC 4271 Section 5.1.3: NEXT_HOP for locally-originated routes
+    //
+    // "When announcing a locally-originated route to an internal peer, the BGP speaker
+    // SHOULD use the interface address of the router through which the announced network
+    // is reachable for the speaker as the NEXT_HOP."
+    //
+    // Topology: S1(AS65001, router_id=1.1.1.1) -> S2(AS65001, router_id=2.2.2.2)
+    //                                    iBGP
+    //
+    // When S1 originates a route with NEXT_HOP unspecified (0.0.0.0),
+    // the BGP speaker SHOULD set it to S1's local address (1.1.1.1)
+    // when sending to iBGP peer S2.
+    //
+    // Note: Per GoBGP implementation, NEXT_HOP is only auto-set when it's unspecified.
+    // If explicitly set to a non-zero value, it's preserved.
+    let [server1, server2] = &mut chain_servers([
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+    ])
+    .await;
+
+    // S1 originates a route with NEXT_HOP unspecified (0.0.0.0)
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "0.0.0.0".to_string(), // Unspecified NEXT_HOP
+            0,
+            vec![],
+        )
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // RFC expectation: S2 should receive the route with NEXT_HOP set to 1.1.1.1
+    // (S1's local address for the peering session)
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![],    // iBGP: empty AS_PATH for locally-originated route
+                "1.1.1.1", // NEXT_HOP should be set to S1's local address
                 server1.address.clone(),
                 Origin::Igp,
             )],

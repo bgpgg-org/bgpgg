@@ -150,6 +150,17 @@ fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<Announc
     batches.into_values().collect()
 }
 
+/// Build the NEXT_HOP for export to a peer
+/// RFC 4271 Section 5.1.3: For locally-originated routes with unspecified next_hop (0.0.0.0),
+/// set NEXT_HOP to the local router's address when advertising to any peer.
+fn build_export_next_hop(path: &Path, local_router_id: Ipv4Addr) -> Ipv4Addr {
+    if path.is_local() && path.next_hop.is_unspecified() {
+        local_router_id
+    } else {
+        path.next_hop
+    }
+}
+
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
 pub fn send_announcements_to_peer(
@@ -158,6 +169,7 @@ pub fn send_announcements_to_peer(
     to_announce: &[(IpNetwork, Path)],
     local_asn: u16,
     peer_asn: u16,
+    local_router_id: Ipv4Addr,
 ) {
     if to_announce.is_empty() {
         return;
@@ -169,10 +181,12 @@ pub fn send_announcements_to_peer(
     for batch in batches {
         let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
+        let next_hop = build_export_next_hop(&batch.path, local_router_id);
+
         let update_msg = UpdateMessage::new(
             batch.path.origin,
             as_path_segments,
-            batch.path.next_hop,
+            next_hop,
             batch.prefixes,
         );
 
@@ -426,5 +440,32 @@ mod tests {
         assert_eq!(result[0].asn_list, vec![65001, 65002]);
         assert_eq!(result[1].segment_type, AsPathSegmentType::AsSet);
         assert_eq!(result[1].asn_list, vec![65003, 65004, 65005]);
+    }
+
+    #[test]
+    fn test_build_export_next_hop() {
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+
+        // Local route with 0.0.0.0 -> rewrite to router ID
+        let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::UNSPECIFIED);
+        assert_eq!(build_export_next_hop(&local_path, router_id), router_id);
+
+        // Local route with explicit next hop -> preserve
+        let local_explicit = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(
+            build_export_next_hop(&local_explicit, router_id),
+            Ipv4Addr::new(192, 168, 1, 1)
+        );
+
+        // eBGP route with 0.0.0.0 -> preserve (don't rewrite)
+        let ebgp_path = make_path(
+            RouteSource::Ebgp("10.0.0.1".to_string()),
+            vec![],
+            Ipv4Addr::UNSPECIFIED,
+        );
+        assert_eq!(
+            build_export_next_hop(&ebgp_path, router_id),
+            Ipv4Addr::UNSPECIFIED
+        );
     }
 }

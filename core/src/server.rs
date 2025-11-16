@@ -499,6 +499,7 @@ impl BgpServer {
                 &to_announce,
                 local_asn,
                 peer_asn,
+                self.config.router_id,
             );
         }
     }
