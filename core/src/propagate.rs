@@ -49,15 +49,31 @@ pub fn should_propagate_to_peer(
 }
 
 /// Build AS path for export to a peer
-/// For locally originated routes, use the existing AS path (which already contains local ASN)
-/// For routes learned from peers, prepend local ASN
-pub fn build_export_as_path(path: &Path, local_asn: u16) -> Vec<AsPathSegment> {
+/// RFC 4271 Section 5.1.2:
+/// - Local routes to eBGP: [local_asn]
+/// - Local routes to iBGP: [] (empty)
+/// - Learned routes to eBGP: prepend local_asn
+/// - Learned routes to iBGP: unchanged
+pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<AsPathSegment> {
+    let is_ebgp = peer_asn != local_asn;
+
     let new_as_path = if matches!(path.source, RouteSource::Local) {
-        path.as_path.clone()
-    } else {
+        // Local originated routes
+        if is_ebgp {
+            // eBGP: AS_PATH = [local_asn]
+            vec![local_asn]
+        } else {
+            // iBGP: AS_PATH = [] (empty)
+            vec![]
+        }
+    } else if is_ebgp {
+        // Learned routes to eBGP: prepend local ASN
         let mut as_path = vec![local_asn];
         as_path.extend_from_slice(&path.as_path);
         as_path
+    } else {
+        // Learned routes to iBGP: do not modify AS_PATH
+        path.as_path.clone()
     };
 
     vec![AsPathSegment {
@@ -109,6 +125,7 @@ pub fn send_announcements_to_peer(
     message_tx: &mpsc::UnboundedSender<PeerOp>,
     to_announce: &[(IpNetwork, Path)],
     local_asn: u16,
+    peer_asn: u16,
 ) {
     if to_announce.is_empty() {
         return;
@@ -119,7 +136,7 @@ pub fn send_announcements_to_peer(
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
         let prefix_count = batch.prefixes.len();
-        let as_path_segments = build_export_as_path(&batch.path, local_asn);
+        let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let update_msg = UpdateMessage::new(
             batch.path.origin,
             as_path_segments,
@@ -188,11 +205,8 @@ mod tests {
 
     #[test]
     fn test_build_export_as_path() {
-        let local_path = make_path(
-            RouteSource::Local,
-            vec![65000],
-            Ipv4Addr::new(192, 168, 1, 1),
-        );
+        // Local routes are stored with empty AS_PATH
+        let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
 
         let ebgp_path = make_path(
             RouteSource::Ebgp("10.0.0.1".to_string()),
@@ -200,17 +214,35 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 2),
         );
 
-        // Local route: keep existing AS path (already contains local ASN)
-        let result = build_export_as_path(&local_path, 65000);
+        let ibgp_path = make_path(
+            RouteSource::Ibgp("10.0.0.2".to_string()),
+            vec![65003],
+            Ipv4Addr::new(192, 168, 1, 3),
+        );
+
+        // Local route to eBGP peer: AS_PATH = [local_asn]
+        let result = build_export_as_path(&local_path, 65000, 65001);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000]);
 
-        // Learned route: prepend local ASN
-        let result = build_export_as_path(&ebgp_path, 65000);
+        // Local route to iBGP peer: AS_PATH = [] (empty)
+        let result = build_export_as_path(&local_path, 65000, 65000);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
+        assert_eq!(result[0].asn_list, Vec::<u16>::new());
+
+        // Learned route to eBGP peer: prepend local ASN
+        let result = build_export_as_path(&ebgp_path, 65000, 65001);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000, 65001, 65002]);
+
+        // Learned route to iBGP peer: do NOT modify AS_PATH
+        let result = build_export_as_path(&ibgp_path, 65000, 65000);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
+        assert_eq!(result[0].asn_list, vec![65003]);
     }
 
     #[test]
