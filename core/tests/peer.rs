@@ -15,7 +15,7 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::{BgpState, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Route};
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -47,6 +47,7 @@ async fn test_peer_down() {
                 vec![as_sequence(vec![65002])],
                 "192.168.1.1",
                 peer_addr.clone(),
+                Origin::Igp,
             )],
         }],
     )])
@@ -98,6 +99,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -109,6 +111,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -120,6 +123,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -145,6 +149,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -156,6 +161,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -226,6 +232,7 @@ async fn test_remove_peer() {
                 vec![as_sequence(vec![65002])],
                 "192.168.1.1",
                 peer_addr.clone(),
+                Origin::Igp,
             )],
         }],
     )])
@@ -275,6 +282,7 @@ async fn test_remove_peer_withdraw_routes() {
                 vec![as_sequence(vec![65002])],
                 "192.168.2.1",
                 peer_addr.clone(),
+                Origin::Igp,
             )],
         }],
     )])
@@ -322,6 +330,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -333,6 +342,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -344,6 +354,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -369,6 +380,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65002, 65004])],
                     "192.168.4.1",
                     server2.address.clone(),
+                    Origin::Igp,
                 )], // Via server2 (127.0.0.2 < 127.0.0.3)
             }],
         ),
@@ -380,6 +392,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -391,6 +404,7 @@ async fn test_remove_peer_four_node_mesh() {
                     vec![as_sequence(vec![65004])],
                     "192.168.4.1",
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),

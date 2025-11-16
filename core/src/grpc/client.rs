@@ -15,7 +15,7 @@
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
     GetPeerRequest, GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest,
-    Route, WithdrawRouteRequest,
+    RemoveRouteRequest, Route,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -139,11 +139,11 @@ impl BgpClient {
         }
     }
 
-    /// Withdraw a route from all established peers
-    pub async fn withdraw_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
+    /// Remove a route from all established peers
+    pub async fn remove_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .withdraw_route(WithdrawRouteRequest { prefix })
+            .remove_route(RemoveRouteRequest { prefix })
             .await?
             .into_inner();
 

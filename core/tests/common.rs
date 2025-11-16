@@ -83,9 +83,14 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
 }
 
 /// Helper to build a Path with AS_PATH segments
-pub fn build_path(as_path: Vec<AsPathSegment>, next_hop: &str, peer_address: String) -> Path {
+pub fn build_path(
+    as_path: Vec<AsPathSegment>,
+    next_hop: &str,
+    peer_address: String,
+    origin: Origin,
+) -> Path {
     Path {
-        origin: Origin::Igp.into(),
+        origin: origin.into(),
         as_path,
         next_hop: next_hop.to_string(),
         peer_address,
@@ -670,6 +675,8 @@ pub async fn setup_two_ases_with_ebgp(
 /// # Arguments
 /// * `expectations` - Slice of tuples containing (TestServer, expected routes)
 pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) {
+    use std::collections::HashMap;
+
     poll_until(
         || async {
             for (server, expected_routes) in expectations {
@@ -677,7 +684,16 @@ pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) 
                     return false;
                 };
 
-                if routes != *expected_routes {
+                // Convert to HashMaps keyed by prefix for order-independent comparison
+                // (routes come from HashMap in RIB, so order is not guaranteed)
+                let routes_map: HashMap<_, _> =
+                    routes.into_iter().map(|r| (r.prefix.clone(), r)).collect();
+                let expected_map: HashMap<_, _> = expected_routes
+                    .iter()
+                    .map(|r| (r.prefix.clone(), r.clone()))
+                    .collect();
+
+                if routes_map != expected_map {
                     return false;
                 }
             }

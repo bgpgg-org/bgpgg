@@ -15,7 +15,7 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::{BgpState, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Route};
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -46,6 +46,7 @@ async fn test_announce_withdraw() {
                 vec![as_sequence(vec![65002])],
                 "192.168.1.1",
                 peer_addr.clone(),
+                Origin::Igp,
             )],
         }],
     )])
@@ -54,7 +55,7 @@ async fn test_announce_withdraw() {
     // Server2 withdraws the route
     server2
         .client
-        .withdraw_route("10.0.0.0/24".to_string())
+        .remove_route("10.0.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route");
 
@@ -91,6 +92,7 @@ async fn test_announce_withdraw_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -102,6 +104,7 @@ async fn test_announce_withdraw_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -111,7 +114,7 @@ async fn test_announce_withdraw_mesh() {
     // Server1 withdraws the route
     server1
         .client
-        .withdraw_route("10.1.0.0/24".to_string())
+        .remove_route("10.1.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route from server 1");
 
@@ -176,6 +179,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -187,6 +191,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -198,6 +203,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     vec![as_sequence(vec![65001])],
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -207,7 +213,7 @@ async fn test_announce_withdraw_four_node_mesh() {
     // Server1 withdraws the route
     server1
         .client
-        .withdraw_route("10.1.0.0/24".to_string())
+        .remove_route("10.1.0.0/24".to_string())
         .await
         .expect("Failed to withdraw route from server 1");
 

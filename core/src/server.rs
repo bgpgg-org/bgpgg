@@ -45,7 +45,7 @@ pub enum MgmtOp {
         as_path: Vec<AsPathSegment>,
         response: oneshot::Sender<Result<(), String>>,
     },
-    WithdrawRoute {
+    RemoveRoute {
         prefix: IpNetwork,
         response: oneshot::Sender<Result<(), String>>,
     },
@@ -224,8 +224,8 @@ impl BgpServer {
                 self.handle_add_route(prefix, next_hop, origin, as_path, response)
                     .await;
             }
-            MgmtOp::WithdrawRoute { prefix, response } => {
-                self.handle_withdraw_route(prefix, response).await;
+            MgmtOp::RemoveRoute { prefix, response } => {
+                self.handle_remove_route(prefix, response).await;
             }
             MgmtOp::GetPeers { response } => {
                 self.handle_get_peers(response);
@@ -400,12 +400,12 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    async fn handle_withdraw_route(
+    async fn handle_remove_route(
         &mut self,
         prefix: IpNetwork,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!("withdrawing route via request", "prefix" => format!("{:?}", prefix));
+        info!("removing route via request", "prefix" => format!("{:?}", prefix));
 
         // Remove local route from Loc-RIB
         let removed = self.loc_rib.remove_local_route(prefix);

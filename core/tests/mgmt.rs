@@ -162,10 +162,7 @@ async fn test_announce_withdraw_route() {
     assert_eq!(routes.len(), 1);
 
     // Withdraw route
-    let result = server1
-        .client
-        .withdraw_route("10.0.0.0/24".to_string())
-        .await;
+    let result = server1.client.remove_route("10.0.0.0/24".to_string()).await;
     assert!(result.is_ok());
 
     // Route should be gone
@@ -178,10 +175,7 @@ async fn test_withdraw_nonexistent_route() {
     let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
 
     // Withdraw route that was never announced (should succeed - idempotent)
-    let result = server1
-        .client
-        .withdraw_route("10.0.0.0/24".to_string())
-        .await;
+    let result = server1.client.remove_route("10.0.0.0/24".to_string()).await;
     assert!(result.is_ok());
 
     // Routes should still be empty

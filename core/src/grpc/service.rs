@@ -26,7 +26,7 @@ use super::proto::{
     AddRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse, GetPeersRequest,
     GetPeersResponse, GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
     PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
-    Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
+    RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -292,16 +292,16 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn withdraw_route(
+    async fn remove_route(
         &self,
-        request: Request<WithdrawRouteRequest>,
-    ) -> Result<Response<WithdrawRouteResponse>, Status> {
+        request: Request<RemoveRouteRequest>,
+    ) -> Result<Response<RemoveRouteResponse>, Status> {
         let req = request.into_inner();
 
         // Parse prefix (CIDR format like "10.0.0.0/24")
         let parts: Vec<&str> = req.prefix.split('/').collect();
         if parts.len() != 2 {
-            return Ok(Response::new(WithdrawRouteResponse {
+            return Ok(Response::new(RemoveRouteResponse {
                 success: false,
                 message: "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24)".to_string(),
             }));
@@ -322,7 +322,7 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let mgmt_req = MgmtOp::WithdrawRoute {
+        let mgmt_req = MgmtOp::RemoveRoute {
             prefix,
             response: tx,
         };
@@ -334,11 +334,11 @@ impl BgpService for BgpGrpcService {
 
         // Wait for response
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(WithdrawRouteResponse {
+            Ok(Ok(())) => Ok(Response::new(RemoveRouteResponse {
                 success: true,
-                message: format!("Route {} withdrawn", prefix_str),
+                message: format!("Route {} removed", prefix_str),
             })),
-            Ok(Err(e)) => Ok(Response::new(WithdrawRouteResponse {
+            Ok(Err(e)) => Ok(Response::new(RemoveRouteResponse {
                 success: false,
                 message: e,
             })),

@@ -14,7 +14,12 @@
 
 //! Tests for RFC 4271 Section 5: Path Attributes
 //!
-//! This module tests AS_PATH manipulation:
+//! This module tests path attribute handling:
+//!
+//! ORIGIN preservation:
+//! - ORIGIN attribute (IGP, EGP, INCOMPLETE) MUST NOT be changed by intermediate speakers
+//!
+//! AS_PATH manipulation:
 //! - Originating routes: empty AS_PATH to iBGP peers, [local_AS] to eBGP peers
 //! - eBGP: prepend local AS to AS_PATH when advertising to external peers
 //! - iBGP: do NOT modify AS_PATH when advertising to internal peers
@@ -22,7 +27,92 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::Route;
+use bgpgg::grpc::proto::{AsPathSegment, Origin, Route};
+
+#[tokio::test]
+async fn test_origin_preservation() {
+    // RFC 4271 Section 5.1.1: ORIGIN attribute
+    // "Its value SHOULD NOT be changed by any other speaker."
+    //
+    // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65003)
+    //                          eBGP           eBGP
+    let [server1, server2, server3] = &mut chain_servers([
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65002,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65003,
+            std::net::Ipv4Addr::new(3, 3, 3, 3),
+            None,
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    // S1 originates routes with different ORIGIN values
+    let test_routes = [
+        ("10.1.0.0/24", "192.168.1.1", Origin::Igp),
+        ("10.2.0.0/24", "192.168.2.1", Origin::Egp),
+        ("10.3.0.0/24", "192.168.3.1", Origin::Incomplete),
+    ];
+
+    for (prefix, next_hop, origin) in test_routes {
+        server1
+            .client
+            .add_route(
+                prefix.to_string(),
+                next_hop.to_string(),
+                origin.into(),
+                vec![],
+            )
+            .await
+            .expect("Failed to announce route");
+    }
+
+    // Helper to build expected routes with different AS_PATH and peer_address
+    let build_expected_routes = |as_path: Vec<AsPathSegment>, peer_address: String| {
+        test_routes
+            .iter()
+            .map(|(prefix, next_hop, origin)| Route {
+                prefix: prefix.to_string(),
+                paths: vec![build_path(
+                    as_path.clone(),
+                    next_hop,
+                    peer_address.clone(),
+                    *origin,
+                )],
+            })
+            .collect()
+    };
+
+    // Verify ORIGIN is preserved at each hop
+    poll_route_propagation(&[
+        (
+            &server2,
+            build_expected_routes(vec![as_sequence(vec![65001])], server1.address.clone()),
+        ),
+        (
+            &server3,
+            build_expected_routes(
+                vec![as_sequence(vec![65002, 65001])],
+                server2.address.clone(),
+            ),
+        ),
+    ])
+    .await;
+}
 
 #[tokio::test]
 async fn test_as_path_prepending_ebgp_vs_ibgp() {
@@ -91,6 +181,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     vec![as_sequence(vec![65001])], // eBGP: S1 created AS_SEQUENCE with its AS
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -102,6 +193,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     vec![as_sequence(vec![65001])], // iBGP: S2 did NOT modify AS_PATH
                     "192.168.1.1",
                     server2.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -113,6 +205,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     vec![as_sequence(vec![65002, 65001])], // eBGP: S3 prepended its AS
                     "192.168.1.1",
                     server3.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -179,6 +272,7 @@ async fn test_originating_speaker_as_path() {
                     vec![], // iBGP: originating speaker sends empty AS_PATH
                     "192.168.1.1",
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -190,6 +284,7 @@ async fn test_originating_speaker_as_path() {
                     vec![as_sequence(vec![65001])], // eBGP: S2 prepended AS65001
                     "192.168.1.1",
                     server2.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -254,6 +349,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 ],
                 "192.168.1.1",
                 server1.address.clone(),
+                Origin::Igp,
             )],
         }],
     )])
