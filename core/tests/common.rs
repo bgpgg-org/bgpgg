@@ -190,37 +190,22 @@ pub async fn start_test_server(
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
 pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServer, TestServer) {
-    // Start both servers on different loopback IPs - OS allocates ports automatically
-    let server1 = start_test_server(
-        65001,
-        Ipv4Addr::new(1, 1, 1, 1),
-        hold_timer_secs,
-        "127.0.0.1",
-    )
-    .await;
-    let mut server2 = start_test_server(
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        hold_timer_secs,
-        "127.0.0.2",
-    )
-    .await;
-
-    // Server2 connects to Server1 via gRPC
-    server2
-        .client
-        .add_peer(format!("127.0.0.1:{}", server1.bgp_port))
-        .await
-        .expect("Failed to add peer");
-
-    // Wait for peering to establish by polling via gRPC
-    poll_until(
-        || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
-        },
-        "Timeout waiting for peers to establish",
-    )
+    let [server1, server2] = chain_servers([
+        start_test_server(
+            65001,
+            Ipv4Addr::new(1, 1, 1, 1),
+            hold_timer_secs,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65002,
+            Ipv4Addr::new(2, 2, 2, 2),
+            hold_timer_secs,
+            "127.0.0.2",
+        )
+        .await,
+    ])
     .await;
 
     (server1, server2)
@@ -802,16 +787,20 @@ pub async fn verify_peer_statistics(
 /// Waits for all peerings to establish before returning.
 ///
 /// # Arguments
-/// * `servers` - Slice of mutable server references to chain together
+/// * `servers` - Array of servers to chain together
+///
+/// # Returns
+/// The same array of servers after chaining is complete
 ///
 /// # Example
 /// ```
-/// let mut s1 = start_test_server(65001, ...).await;
-/// let mut s2 = start_test_server(65002, ...).await;
-/// let mut s3 = start_test_server(65002, ...).await;
-/// chain_servers(&mut [s1, s2, s3]).await;
+/// let [s1, s2, s3] = chain_servers([
+///     start_test_server(65001, ...).await,
+///     start_test_server(65002, ...).await,
+///     start_test_server(65002, ...).await,
+/// ]).await;
 /// ```
-pub async fn chain_servers(servers: &mut [TestServer]) {
+pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [TestServer; N] {
     // Connect each server to the previous one
     for i in 1..servers.len() {
         let prev_port = servers[i - 1].bgp_port;
@@ -850,6 +839,8 @@ pub async fn chain_servers(servers: &mut [TestServer]) {
         "Timeout waiting for chain topology to establish",
     )
     .await;
+
+    servers
 }
 
 /// Helper to check if server has expected peers (returns bool, suitable for poll_until)

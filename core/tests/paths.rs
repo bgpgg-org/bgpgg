@@ -33,7 +33,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     //
     // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65002) -> S4(AS65003)
     //                          eBGP           iBGP           eBGP
-    let mut servers = [
+    let [server1, server2, server3, server4] = &mut chain_servers([
         start_test_server(
             65001,
             std::net::Ipv4Addr::new(1, 1, 1, 1),
@@ -62,11 +62,8 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             "127.0.0.4",
         )
         .await,
-    ];
-
-    chain_servers(&mut servers).await;
-
-    let [server1, server2, server3, server4] = &mut servers;
+    ])
+    .await;
 
     // S1 originates a route (starts with empty AS_PATH)
     server1
@@ -132,7 +129,7 @@ async fn test_originating_speaker_as_path() {
     //
     // Topology: S1(AS65001) -> S2(AS65001) -> S3(AS65002)
     //                          iBGP           eBGP
-    let mut servers = [
+    let [server1, server2, server3] = &mut chain_servers([
         start_test_server(
             65001,
             std::net::Ipv4Addr::new(1, 1, 1, 1),
@@ -154,11 +151,8 @@ async fn test_originating_speaker_as_path() {
             "127.0.0.3",
         )
         .await,
-    ];
-
-    chain_servers(&mut servers).await;
-
-    let [server1, server2, server3] = &mut servers;
+    ])
+    .await;
 
     // S1 originates a route
     server1
@@ -213,7 +207,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // S1 injects a route with AS_SET[65003, 65004] as the first segment.
     // S2 should receive it with AS_SEQUENCE[65001] prepended by S1.
 
-    let mut servers = [
+    let [server1, server2] = &mut chain_servers([
         start_test_server(
             65001,
             std::net::Ipv4Addr::new(1, 1, 1, 1),
@@ -228,11 +222,8 @@ async fn test_ebgp_prepend_as_before_as_set() {
             "127.0.0.2",
         )
         .await,
-    ];
-
-    chain_servers(&mut servers).await;
-
-    let [server1, server2] = &mut servers;
+    ])
+    .await;
 
     // S1 adds a route with AS_SET as the first segment
     server1
