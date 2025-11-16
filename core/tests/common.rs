@@ -714,12 +714,13 @@ pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
 /// # Arguments
 /// * `check` - Async function that returns true when condition is met
 /// * `timeout_message` - Message to display if timeout occurs
-pub async fn poll_until<F, Fut>(check: F, timeout_message: &str)
+/// * `max_iterations` - Maximum number of polling attempts (default: 100)
+pub async fn poll_until_with_timeout<F, Fut>(check: F, timeout_message: &str, max_iterations: usize)
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..100 {
+    for _ in 0..max_iterations {
         if check().await {
             return;
         }
@@ -727,6 +728,15 @@ where
     }
 
     panic!("{}", timeout_message);
+}
+
+/// Generic polling helper that retries until a condition is met (default 10s timeout)
+pub async fn poll_until<F, Fut>(check: F, timeout_message: &str)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    poll_until_with_timeout(check, timeout_message, 100).await;
 }
 
 /// Verify peer statistics
@@ -768,6 +778,62 @@ pub async fn verify_peer_statistics(
         "Peer {} should send UPDATE {} time(s), got {}",
         peer_addr, expected_update_sent, stats.update_sent
     );
+}
+
+/// Chains BGP servers together in a linear topology
+///
+/// Connects each server to the previous one in the chain (server[i] connects to server[i-1]).
+/// Waits for all peerings to establish before returning.
+///
+/// # Arguments
+/// * `servers` - Slice of mutable server references to chain together
+///
+/// # Example
+/// ```
+/// let mut s1 = start_test_server(65001, ...).await;
+/// let mut s2 = start_test_server(65002, ...).await;
+/// let mut s3 = start_test_server(65002, ...).await;
+/// chain_servers(&mut [s1, s2, s3]).await;
+/// ```
+pub async fn chain_servers(servers: &mut [TestServer]) {
+    // Connect each server to the previous one
+    for i in 1..servers.len() {
+        let prev_port = servers[i - 1].bgp_port;
+        let prev_address = servers[i - 1].address.clone();
+
+        servers[i]
+            .client
+            .add_peer(format!("{}:{}", prev_address, prev_port))
+            .await
+            .expect(&format!("Failed to add peer {} to server {}", i - 1, i));
+    }
+
+    // Build expected peer states for verification
+    // For each server, determine which peers it should have
+    poll_until(
+        || async {
+            for (i, server) in servers.iter().enumerate() {
+                let mut expected_peers = Vec::new();
+
+                // Previous server (if exists)
+                if i > 0 {
+                    expected_peers.push(servers[i - 1].to_peer(BgpState::Established));
+                }
+
+                // Next server (if exists)
+                if i < servers.len() - 1 {
+                    expected_peers.push(servers[i + 1].to_peer(BgpState::Established));
+                }
+
+                if !verify_peers(server, expected_peers).await {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for chain topology to establish",
+    )
+    .await;
 }
 
 /// Helper to check if server has expected peers (returns bool, suitable for poll_until)

@@ -129,10 +129,32 @@ impl LocRib {
             path.local_pref = Some(100);
         }
 
-        // Reject routes with our own ASN (loop prevention)
-        if path.as_path.contains(&self.local_asn) {
-            debug!("rejecting route due to AS loop", "local_asn" => self.local_asn);
-            return false;
+        // AS loop prevention (RFC 4271 Section 9.1.2.1)
+        // Count occurrences of local ASN in AS_PATH
+        let local_asn_count = path
+            .as_path
+            .iter()
+            .filter(|&&asn| asn == self.local_asn)
+            .count();
+
+        match path.source {
+            RouteSource::Ebgp(_) => {
+                // eBGP: local AS should not appear in AS_PATH at all
+                if local_asn_count > 0 {
+                    debug!("rejecting eBGP route due to AS loop", "local_asn" => self.local_asn);
+                    return false;
+                }
+            }
+            RouteSource::Ibgp(_) => {
+                // iBGP: local AS can appear once (normal), but more than once is a loop
+                if local_asn_count > 1 {
+                    debug!("rejecting iBGP route due to AS loop", "local_asn" => self.local_asn, "count" => local_asn_count);
+                    return false;
+                }
+            }
+            RouteSource::Local => {
+                // Local routes are trusted
+            }
         }
 
         // Accept by default
@@ -173,9 +195,12 @@ impl LocRib {
         next_hop: Ipv4Addr,
         origin: crate::bgp::msg_update::Origin,
     ) {
+        // RFC 4271 Section 5.1.2: when originating a route,
+        // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers
+        // We store it empty and add local_asn during export based on peer type
         let path = Path {
             origin,
-            as_path: vec![self.local_asn],
+            as_path: vec![],
             next_hop,
             source: RouteSource::Local,
             local_pref: Some(100),

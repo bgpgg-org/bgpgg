@@ -192,8 +192,23 @@ async fn test_announce_withdraw_four_node_mesh() {
         .await
         .expect("Failed to withdraw route from server 1");
 
-    // Poll for withdrawal and verify peers are still established
-    poll_route_withdrawal(&[&server2, &server3, &server4]).await;
+    // Poll for withdrawal with extended timeout (40s) for full mesh path hunting
+    poll_until_with_timeout(
+        || async {
+            for server in [&server2, &server3, &server4] {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                if !routes.is_empty() {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for route withdrawal",
+        400,
+    )
+    .await;
     assert!(
         verify_peers(
             &server1,

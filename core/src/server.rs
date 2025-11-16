@@ -485,8 +485,17 @@ impl BgpServer {
                 continue;
             }
 
+            // Get peer ASN, default to local ASN if not yet known (shouldn't happen in Established state)
+            let peer_asn = peer_info.asn.unwrap_or(local_asn);
+
             send_withdrawals_to_peer(peer_addr, &peer_info.peer_tx, &to_withdraw);
-            send_announcements_to_peer(peer_addr, &peer_info.peer_tx, &to_announce, local_asn);
+            send_announcements_to_peer(
+                peer_addr,
+                &peer_info.peer_tx,
+                &to_announce,
+                local_asn,
+                peer_asn,
+            );
         }
     }
 }
