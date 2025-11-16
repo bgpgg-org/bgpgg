@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::ExportPolicyChain;
+use crate::policy::{ExportPolicyChain, ImportPolicyChain, PolicyContext};
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -74,6 +74,7 @@ pub enum ServerOp {
     },
     PeerUpdate {
         peer_ip: String,
+        peer_asn: u16,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, crate::rib::Path)>,
     },
@@ -88,6 +89,7 @@ pub struct PeerInfo {
     pub asn: Option<u16>,
     pub state: BgpState,
     pub peer_tx: mpsc::UnboundedSender<PeerOp>,
+    pub import_policy: ImportPolicyChain,
     pub export_policy: ExportPolicyChain,
 }
 
@@ -110,7 +112,7 @@ impl BgpServer {
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         let peers = HashMap::new();
-        let loc_rib = LocRib::new(config.asn);
+        let loc_rib = LocRib::new();
 
         BgpServer {
             peers,
@@ -199,6 +201,7 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
+            import_policy: ImportPolicyChain::default(),
             export_policy: ExportPolicyChain::default(),
         };
 
@@ -260,12 +263,17 @@ impl BgpServer {
             }
             ServerOp::PeerUpdate {
                 peer_ip,
+                peer_asn,
                 withdrawn,
                 announced,
             } => {
+                let peer_info = self.peers.get(&peer_ip).expect("peer should exist");
+                let context = PolicyContext::new(peer_asn, self.config.asn);
                 let changed_prefixes =
                     self.loc_rib
-                        .update_from_peer(peer_ip.clone(), withdrawn, announced);
+                        .update_from_peer(peer_ip.clone(), withdrawn, announced, |path| {
+                            peer_info.import_policy.accept(path, &context)
+                        });
                 info!("UPDATE processing complete", "peer_ip" => &peer_ip);
 
                 // Propagate changed routes to other peers
@@ -343,6 +351,7 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
+            import_policy: ImportPolicyChain::default(),
             export_policy: ExportPolicyChain::default(),
         };
 

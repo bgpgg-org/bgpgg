@@ -332,6 +332,7 @@ impl Peer {
                 if let Some((withdrawn, announced)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
                         peer_ip: peer_ip.to_string(),
+                        peer_asn: self.asn.expect("ASN should be known after handshake"),
                         withdrawn,
                         announced,
                     });

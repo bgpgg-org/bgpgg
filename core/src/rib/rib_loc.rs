@@ -26,7 +26,6 @@ use std::net::Ipv4Addr;
 pub struct LocRib {
     // Map from prefix to best route(s)
     routes: HashMap<IpNetwork, Route>,
-    local_asn: u16,
 }
 
 impl LocRib {
@@ -82,13 +81,18 @@ impl LocRib {
     }
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
+    /// Applies import policy (via closure) before adding routes
     /// Returns the set of prefixes that changed for propagation to other peers
-    pub fn update_from_peer(
+    pub fn update_from_peer<F>(
         &mut self,
         peer_ip: String,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, Path)>,
-    ) -> Vec<IpNetwork> {
+        import_policy: F,
+    ) -> Vec<IpNetwork>
+    where
+        F: Fn(&mut Path) -> bool,
+    {
         let mut changed_prefixes = Vec::new();
 
         // Process withdrawals
@@ -102,7 +106,7 @@ impl LocRib {
 
         // Process announcements - apply import policy and add to Loc-RIB
         for (prefix, mut path) in announced {
-            if self.apply_import_policy(&mut path) {
+            if import_policy(&mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
                 self.add_route(prefix, path);
                 changed_prefixes.push(prefix);
@@ -121,46 +125,6 @@ impl LocRib {
 
         // Return changed prefixes for propagation
         changed_prefixes
-    }
-
-    fn apply_import_policy(&self, path: &mut Path) -> bool {
-        // Set default local preference if not set
-        // TODO: only do this for iBGP
-        if path.local_pref.is_none() {
-            path.local_pref = Some(100);
-        }
-
-        // AS loop prevention (RFC 4271 Section 9.1.2.1)
-        // Count occurrences of local ASN in AS_PATH (across all segments)
-        let local_asn_count = path
-            .as_path
-            .iter()
-            .flat_map(|segment| segment.asn_list.iter())
-            .filter(|&&asn| asn == self.local_asn)
-            .count();
-
-        match path.source {
-            RouteSource::Ebgp(_) => {
-                // eBGP: local AS should not appear in AS_PATH at all
-                if local_asn_count > 0 {
-                    debug!("rejecting eBGP route due to AS loop", "local_asn" => self.local_asn);
-                    return false;
-                }
-            }
-            RouteSource::Ibgp(_) => {
-                // iBGP: local AS can appear once (normal), but more than once is a loop
-                if local_asn_count > 1 {
-                    debug!("rejecting iBGP route due to AS loop", "local_asn" => self.local_asn, "count" => local_asn_count);
-                    return false;
-                }
-            }
-            RouteSource::Local => {
-                // Local routes are trusted
-            }
-        }
-
-        // Accept by default
-        true
     }
 
     fn run_best_path_selection(&mut self, changed_prefixes: &[IpNetwork]) {
@@ -183,10 +147,9 @@ impl LocRib {
 }
 
 impl LocRib {
-    pub fn new(local_asn: u16) -> Self {
+    pub fn new() -> Self {
         LocRib {
             routes: HashMap::new(),
-            local_asn,
         }
     }
 
@@ -288,14 +251,14 @@ mod tests {
 
     #[test]
     fn test_new_loc_rib() {
-        let loc_rib = LocRib::new(65000);
+        let loc_rib = LocRib::new();
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
     }
 
     #[test]
     fn test_add_route() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip.clone());
@@ -313,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_routes_different_prefixes() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
 
         let prefix1 = create_test_prefix();
@@ -348,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_paths_same_prefix_different_peers() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer1 = "192.0.2.1".to_string();
         let peer2 = "192.0.2.2".to_string();
         let prefix = create_test_prefix();
@@ -374,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_add_route_same_peer_updates_path() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
 
@@ -400,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer1 = "192.0.2.1".to_string();
         let peer2 = "192.0.2.2".to_string();
         let prefix = create_test_prefix();
@@ -424,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_removes_empty_routes() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip.clone());
@@ -438,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_add_and_remove_local_route() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
