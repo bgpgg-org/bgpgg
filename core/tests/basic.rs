@@ -332,7 +332,7 @@ async fn test_ibgp_split_horizon() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![], // Empty AS_PATH for locally originated route in iBGP
+                    vec![],        // Empty AS_PATH for locally originated route in iBGP
                     "192.168.1.1", // iBGP: NEXT_HOP preserved
                     server1.address.clone(),
                     Origin::Igp,

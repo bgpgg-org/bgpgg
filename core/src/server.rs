@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
+use crate::policy::ExportPolicyChain;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -87,6 +88,7 @@ pub struct PeerInfo {
     pub asn: Option<u16>,
     pub state: BgpState,
     pub peer_tx: mpsc::UnboundedSender<PeerOp>,
+    pub export_policy: ExportPolicyChain,
 }
 
 pub struct BgpServer {
@@ -197,6 +199,7 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
+            export_policy: ExportPolicyChain::default(),
         };
 
         self.peers.insert(peer_ip.clone(), peer_info);
@@ -340,6 +343,7 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
+            export_policy: ExportPolicyChain::default(),
         };
 
         self.peers.insert(peer_ip.clone(), peer_info);
@@ -500,6 +504,7 @@ impl BgpServer {
                 local_asn,
                 peer_asn,
                 self.config.router_id,
+                &peer_info.export_policy,
             );
         }
     }

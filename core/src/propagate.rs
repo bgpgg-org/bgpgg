@@ -18,6 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMes
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::BgpState;
 use crate::peer::PeerOp;
+use crate::policy::{ExportContext, ExportPolicyChain};
 use crate::rib::{Path, RouteSource};
 use crate::{error, info};
 use std::collections::HashMap;
@@ -187,18 +188,19 @@ pub fn send_announcements_to_peer(
     local_asn: u16,
     peer_asn: u16,
     local_router_id: Ipv4Addr,
+    export_policy: &ExportPolicyChain,
 ) {
     if to_announce.is_empty() {
         return;
     }
 
-    let is_ibgp = peer_asn == local_asn;
+    let export_context = ExportContext::new(peer_asn, local_asn);
     let batches = batch_announcements_by_path(to_announce);
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
-        // iBGP split horizon: skip routes learned via iBGP when sending to iBGP peers
-        if is_ibgp && batch.path.source.is_ibgp() {
+        // Evaluate export policy
+        if !export_policy.accept(&batch.path, &export_context) {
             continue;
         }
         let prefix_count = batch.prefixes.len();
