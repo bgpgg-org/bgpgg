@@ -38,13 +38,14 @@ async fn test_announce_withdraw() {
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
+    // eBGP: NEXT_HOP rewritten to router ID
     poll_route_propagation(&[(
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                "192.168.1.1",
+                "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                 peer_addr.clone(),
                 Origin::Igp,
             )],
@@ -82,7 +83,7 @@ async fn test_announce_withdraw_mesh() {
         .expect("Failed to announce route from server 1");
 
     // Poll for route propagation with expected AS paths
-    // After best path selection, only the best path (shortest AS_PATH) should remain
+    // eBGP: NEXT_HOP rewritten to router ID
     poll_route_propagation(&[
         (
             &server2,
@@ -90,7 +91,7 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "192.168.1.1",
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -102,7 +103,7 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "192.168.1.1",
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -169,7 +170,7 @@ async fn test_announce_withdraw_four_node_mesh() {
         .expect("Failed to announce route from server 1");
 
     // Poll for route propagation with expected AS paths
-    // After best path selection, only the best path (shortest AS_PATH) should remain
+    // eBGP: NEXT_HOP rewritten to router IDs
     poll_route_propagation(&[
         (
             &server2,
@@ -177,7 +178,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "192.168.1.1",
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -189,7 +190,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "192.168.1.1",
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -201,7 +202,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "192.168.1.1",
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],

@@ -151,13 +151,30 @@ fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<Announc
 }
 
 /// Build the NEXT_HOP for export to a peer
-/// RFC 4271 Section 5.1.3: For locally-originated routes with unspecified next_hop (0.0.0.0),
-/// set NEXT_HOP to the local router's address when advertising to any peer.
-fn build_export_next_hop(path: &Path, local_router_id: Ipv4Addr) -> Ipv4Addr {
-    if path.is_local() && path.next_hop.is_unspecified() {
+/// RFC 4271 Section 5.1.3:
+/// - eBGP: "By default, the BGP speaker SHOULD use the IP address of the interface
+///   that the speaker uses to establish the BGP connection to peer X in the NEXT_HOP attribute."
+///   -> Always rewrite NEXT_HOP to self
+/// - iBGP: Preserve NEXT_HOP from received routes; set to router ID for locally-originated
+///   routes with unspecified NEXT_HOP
+fn build_export_next_hop(
+    path: &Path,
+    local_router_id: Ipv4Addr,
+    local_asn: u16,
+    peer_asn: u16,
+) -> Ipv4Addr {
+    let is_ebgp = peer_asn != local_asn;
+
+    if is_ebgp {
+        // eBGP: always rewrite NEXT_HOP to self
         local_router_id
     } else {
-        path.next_hop
+        // iBGP: only rewrite locally-originated routes with unspecified NEXT_HOP
+        if path.is_local() && path.next_hop.is_unspecified() {
+            local_router_id
+        } else {
+            path.next_hop
+        }
     }
 }
 
@@ -181,7 +198,7 @@ pub fn send_announcements_to_peer(
     for batch in batches {
         let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
-        let next_hop = build_export_next_hop(&batch.path, local_router_id);
+        let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
@@ -445,27 +462,56 @@ mod tests {
     #[test]
     fn test_build_export_next_hop() {
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let local_asn = 65000;
+        let peer_asn_ebgp = 65001;
+        let peer_asn_ibgp = 65000;
 
-        // Local route with 0.0.0.0 -> rewrite to router ID
+        // iBGP: Local route with 0.0.0.0 -> rewrite to router ID
         let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::UNSPECIFIED);
-        assert_eq!(build_export_next_hop(&local_path, router_id), router_id);
+        assert_eq!(
+            build_export_next_hop(&local_path, router_id, local_asn, peer_asn_ibgp),
+            router_id
+        );
 
-        // Local route with explicit next hop -> preserve
+        // iBGP: Local route with explicit next hop -> preserve
         let local_explicit = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(
-            build_export_next_hop(&local_explicit, router_id),
+            build_export_next_hop(&local_explicit, router_id, local_asn, peer_asn_ibgp),
             Ipv4Addr::new(192, 168, 1, 1)
         );
 
-        // eBGP route with 0.0.0.0 -> preserve (don't rewrite)
+        // iBGP: Learned route -> preserve NEXT_HOP
+        let ibgp_path = make_path(
+            RouteSource::Ibgp("10.0.0.1".to_string()),
+            vec![],
+            Ipv4Addr::new(192, 168, 2, 1),
+        );
+        assert_eq!(
+            build_export_next_hop(&ibgp_path, router_id, local_asn, peer_asn_ibgp),
+            Ipv4Addr::new(192, 168, 2, 1)
+        );
+
+        // eBGP: Learned route -> rewrite to self
         let ebgp_path = make_path(
             RouteSource::Ebgp("10.0.0.1".to_string()),
             vec![],
-            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::new(192, 168, 3, 1),
         );
         assert_eq!(
-            build_export_next_hop(&ebgp_path, router_id),
-            Ipv4Addr::UNSPECIFIED
+            build_export_next_hop(&ebgp_path, router_id, local_asn, peer_asn_ebgp),
+            router_id
+        );
+
+        // eBGP: Local route with 0.0.0.0 -> rewrite to router ID
+        assert_eq!(
+            build_export_next_hop(&local_path, router_id, local_asn, peer_asn_ebgp),
+            router_id
+        );
+
+        // eBGP: Local route with explicit next hop -> rewrite to router ID
+        assert_eq!(
+            build_export_next_hop(&local_explicit, router_id, local_asn, peer_asn_ebgp),
+            router_id
         );
     }
 }

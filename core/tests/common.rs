@@ -187,7 +187,7 @@ pub async fn start_test_server(
 
 /// Sets up two BGP servers with peering established
 ///
-/// Server1 (AS65001) <-----> Server2 (AS65002)
+/// Server1 (AS65001) <-----> Server2 (AS65001)
 ///
 /// # Arguments
 /// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)

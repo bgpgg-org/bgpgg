@@ -84,32 +84,39 @@ async fn test_origin_preservation() {
             .expect("Failed to announce route");
     }
 
-    // Helper to build expected routes with different AS_PATH and peer_address
-    let build_expected_routes = |as_path: Vec<AsPathSegment>, peer_address: String| {
-        test_routes
-            .iter()
-            .map(|(prefix, next_hop, origin)| Route {
-                prefix: prefix.to_string(),
-                paths: vec![build_path(
-                    as_path.clone(),
-                    next_hop,
-                    peer_address.clone(),
-                    *origin,
-                )],
-            })
-            .collect()
-    };
+    // Helper to build expected routes with different AS_PATH, next_hop, and peer_address
+    let build_expected_routes =
+        |as_path: Vec<AsPathSegment>, next_hop: &str, peer_address: String| {
+            test_routes
+                .iter()
+                .map(|(prefix, _, origin)| Route {
+                    prefix: prefix.to_string(),
+                    paths: vec![build_path(
+                        as_path.clone(),
+                        next_hop,
+                        peer_address.clone(),
+                        *origin,
+                    )],
+                })
+                .collect()
+        };
 
     // Verify ORIGIN is preserved at each hop
+    // eBGP rewrites NEXT_HOP to router ID of the sending speaker
     poll_route_propagation(&[
         (
             &server2,
-            build_expected_routes(vec![as_sequence(vec![65001])], server1.address.clone()),
+            build_expected_routes(
+                vec![as_sequence(vec![65001])],
+                "1.1.1.1",
+                server1.address.clone(),
+            ),
         ),
         (
             &server3,
             build_expected_routes(
                 vec![as_sequence(vec![65002, 65001])],
+                "2.2.2.2",
                 server2.address.clone(),
             ),
         ),
@@ -170,11 +177,11 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
         .await
         .expect("Failed to announce route from server 1");
 
-    // Verify AS_PATH at each hop:
+    // Verify AS_PATH and NEXT_HOP at each hop:
     //
-    // S1 -> S2 (eBGP): S1 creates AS_PATH=[65001]
-    // S2 -> S3 (iBGP): S2 preserves AS_PATH=[65001] (does NOT prepend)
-    // S3 -> S4 (eBGP): S3 prepends AS_PATH=[65002, 65001]
+    // S1 -> S2 (eBGP): S1 creates AS_PATH=[65001], NEXT_HOP=1.1.1.1
+    // S2 -> S3 (iBGP): S2 preserves AS_PATH=[65001] (does NOT prepend), NEXT_HOP=1.1.1.1 (preserved)
+    // S3 -> S4 (eBGP): S3 prepends AS_PATH=[65002, 65001], NEXT_HOP=3.3.3.3 (rewritten to S3's router ID)
     poll_route_propagation(&[
         (
             &server2,
@@ -182,7 +189,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // eBGP: S1 created AS_SEQUENCE with its AS
-                    "192.168.1.1",
+                    "1.1.1.1",                      // eBGP: NEXT_HOP rewritten to S1's router ID
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -194,7 +201,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // iBGP: S2 did NOT modify AS_PATH
-                    "192.168.1.1",
+                    "1.1.1.1",                      // iBGP: NEXT_HOP preserved from S2
                     server2.address.clone(),
                     Origin::Igp,
                 )],
@@ -206,7 +213,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65002, 65001])], // eBGP: S3 prepended its AS
-                    "192.168.1.1",
+                    "3.3.3.3", // eBGP: NEXT_HOP rewritten to S3's router ID
                     server3.address.clone(),
                     Origin::Igp,
                 )],
@@ -262,18 +269,18 @@ async fn test_originating_speaker_as_path() {
         .await
         .expect("Failed to announce route from server 1");
 
-    // Verify AS_PATH at each hop:
+    // Verify AS_PATH and NEXT_HOP at each hop:
     //
-    // S1 -> S2 (iBGP): S1 sends empty AS_PATH (case b)
-    // S2 -> S3 (eBGP): S2 creates AS_PATH=[65001] (prepends its AS)
+    // S1 -> S2 (iBGP): S1 sends empty AS_PATH (case b), NEXT_HOP=192.168.1.1 (preserved explicit value)
+    // S2 -> S3 (eBGP): S2 creates AS_PATH=[65001] (prepends its AS), NEXT_HOP=2.2.2.2 (rewritten to S2's router ID)
     poll_route_propagation(&[
         (
             &server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![], // iBGP: originating speaker sends empty AS_PATH
-                    "192.168.1.1",
+                    vec![],        // iBGP: originating speaker sends empty AS_PATH
+                    "192.168.1.1", // iBGP: NEXT_HOP preserved (explicit value, not 0.0.0.0)
                     server1.address.clone(),
                     Origin::Igp,
                 )],
@@ -285,7 +292,7 @@ async fn test_originating_speaker_as_path() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // eBGP: S2 prepended AS65001
-                    "192.168.1.1",
+                    "2.2.2.2",                      // eBGP: NEXT_HOP rewritten to S2's router ID
                     server2.address.clone(),
                     Origin::Igp,
                 )],
@@ -340,6 +347,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
 
     // Verify S2 receives the route with AS_SEQUENCE[65001] prepended
     // Result: AS_SEQUENCE[65001], AS_SET[65003, 65004], AS_SEQUENCE[65005]
+    // eBGP: NEXT_HOP rewritten to S1's router ID
     poll_route_propagation(&[(
         &server2,
         vec![Route {
@@ -350,7 +358,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                     as_set(vec![65003, 65004]), // Original AS_SET
                     as_sequence(vec![65005]),   // Original AS_SEQUENCE
                 ],
-                "192.168.1.1",
+                "1.1.1.1", // eBGP: NEXT_HOP rewritten to S1's router ID
                 server1.address.clone(),
                 Origin::Igp,
             )],
@@ -420,5 +428,87 @@ async fn test_next_hop_locally_originated_to_ibgp() {
             )],
         }],
     )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_next_hop_rewrite_to_ebgp() {
+    // RFC 4271 Section 5.1.3: NEXT_HOP handling when advertising to eBGP
+    //
+    // "By default, the BGP speaker SHOULD use the IP address of the interface
+    // that the speaker uses to establish the BGP connection to peer X in the
+    // NEXT_HOP attribute."
+    //
+    // Topology: S1(AS65001) -> S2(AS65001) -> S3(AS65002)
+    //                          iBGP           eBGP
+    //
+    // When S1 sends a route to S2 via iBGP, S2 preserves NEXT_HOP.
+    // When S2 advertises to S3 via eBGP, S2 SHOULD rewrite NEXT_HOP to self.
+    let [server1, server2, server3] = &mut chain_servers([
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65002,
+            std::net::Ipv4Addr::new(3, 3, 3, 3),
+            None,
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    // S1 originates a route with explicit NEXT_HOP
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.100".to_string(), // Arbitrary NEXT_HOP
+            0,
+            vec![],
+        )
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Verify NEXT_HOP handling:
+    // S1 -> S2 (iBGP): NEXT_HOP preserved as 192.168.1.100
+    // S2 -> S3 (eBGP): NEXT_HOP rewritten to S2's local address (2.2.2.2)
+    poll_route_propagation(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(
+                    vec![],          // iBGP: empty AS_PATH
+                    "192.168.1.100", // iBGP: NEXT_HOP preserved
+                    server1.address.clone(),
+                    Origin::Igp,
+                )],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(
+                    vec![as_sequence(vec![65001])], // eBGP: AS prepended
+                    "2.2.2.2",                      // eBGP: NEXT_HOP rewritten to S2's address
+                    server2.address.clone(),
+                    Origin::Igp,
+                )],
+            }],
+        ),
+    ])
     .await;
 }
