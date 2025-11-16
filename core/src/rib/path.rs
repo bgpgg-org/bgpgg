@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::Origin;
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -21,11 +21,47 @@ use std::net::Ipv4Addr;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub origin: Origin,
-    pub as_path: Vec<u16>,
+    pub as_path: Vec<AsPathSegment>,
     pub next_hop: Ipv4Addr,
     pub source: RouteSource,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
+}
+
+impl Path {
+    /// Create a Path from BGP UPDATE message attributes
+    pub fn from_attributes(
+        origin: Origin,
+        as_path: Vec<AsPathSegment>,
+        next_hop: Ipv4Addr,
+        source: RouteSource,
+    ) -> Self {
+        Path {
+            origin,
+            as_path,
+            next_hop,
+            source,
+            local_pref: None,
+            med: None,
+        }
+    }
+
+    /// Check if this path is locally originated
+    pub fn is_local(&self) -> bool {
+        self.source == RouteSource::Local
+    }
+
+    /// Calculate AS_PATH length for best path selection per RFC 4271
+    /// AS_SEQUENCE counts each ASN, AS_SET counts as 1 regardless of size
+    fn as_path_length(&self) -> usize {
+        self.as_path
+            .iter()
+            .map(|segment| match segment.segment_type {
+                AsPathSegmentType::AsSequence => segment.asn_list.len(),
+                AsPathSegmentType::AsSet => 1,
+            })
+            .sum()
+    }
 }
 
 impl PartialOrd for Path {
@@ -48,7 +84,8 @@ impl Ord for Path {
         }
 
         // Step 2: Prefer the route with the shortest AS_PATH
-        match other.as_path.len().cmp(&self.as_path.len()) {
+        // AS_SEQUENCE counts each ASN, AS_SET counts as 1
+        match other.as_path_length().cmp(&self.as_path_length()) {
             Ordering::Greater => return Ordering::Greater,
             Ordering::Less => return Ordering::Less,
             Ordering::Equal => {}
@@ -108,7 +145,11 @@ mod tests {
     fn make_base_path() -> Path {
         Path {
             origin: Origin::IGP,
-            as_path: vec![65001],
+            as_path: vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![65001],
+            }],
             next_hop: Ipv4Addr::new(192, 168, 1, 1),
             source: RouteSource::Ebgp("10.0.0.1".to_string()),
             local_pref: Some(100),
@@ -130,9 +171,38 @@ mod tests {
     fn test_as_path_length_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.as_path = vec![65001];
-        path2.as_path = vec![65001, 65002];
+        path1.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![65001],
+        }];
+        path2.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![65001, 65002],
+        }];
 
+        assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_as_set_length_ordering() {
+        let mut path1 = make_base_path();
+        let mut path2 = make_base_path();
+        // path1: AS_SET with 3 ASNs (counts as length 1)
+        path1.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSet,
+            segment_len: 3,
+            asn_list: vec![65001, 65002, 65003],
+        }];
+        // path2: AS_SEQUENCE with 2 ASNs (counts as length 2)
+        path2.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![65001, 65002],
+        }];
+
+        // path1 (AS_SET, length=1) should be preferred over path2 (AS_SEQUENCE, length=2)
         assert!(path1 > path2);
     }
 
@@ -206,5 +276,19 @@ mod tests {
 
         // Lower peer address should win
         assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_is_local() {
+        let mut path = make_base_path();
+
+        path.source = RouteSource::Local;
+        assert!(path.is_local());
+
+        path.source = RouteSource::Ebgp("10.0.0.1".to_string());
+        assert!(!path.is_local());
+
+        path.source = RouteSource::Ibgp("10.0.0.2".to_string());
+        assert!(!path.is_local());
     }
 }

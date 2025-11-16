@@ -15,7 +15,7 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::{BgpState, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Route};
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -25,7 +25,12 @@ async fn test_peer_down() {
     // Server2 announces a route to Server1 via gRPC
     server2
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route");
 
@@ -34,11 +39,17 @@ async fn test_peer_down() {
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
+    // eBGP: NEXT_HOP rewritten to router ID
     poll_route_propagation(&[(
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
+                peer_addr.clone(),
+                Origin::Igp,
+            )],
         }],
     )])
     .await;
@@ -70,20 +81,27 @@ async fn test_peer_down_four_node_mesh() {
     // Server1 announces a route
     server1
         .client
-        .announce_route("10.1.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 1");
 
     // Poll for route to propagate to all peers
+    // eBGP: NEXT_HOP rewritten to router IDs
     poll_route_propagation(&[
         (
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
-                    "192.168.1.1",
+                    vec![as_sequence(vec![65001])],
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -92,9 +110,10 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
-                    "192.168.1.1",
+                    vec![as_sequence(vec![65001])],
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -103,9 +122,10 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
-                    "192.168.1.1",
+                    vec![as_sequence(vec![65001])],
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -122,15 +142,17 @@ async fn test_peer_down_four_node_mesh() {
     .await;
 
     // Verify Server2 and Server3 still have the route (learned from Server1, not Server4)
+    // eBGP: NEXT_HOP rewritten to router IDs
     poll_route_propagation(&[
         (
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
-                    "192.168.1.1",
+                    vec![as_sequence(vec![65001])],
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -139,9 +161,10 @@ async fn test_peer_down_four_node_mesh() {
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65001],
-                    "192.168.1.1",
+                    vec![as_sequence(vec![65001])],
+                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -190,7 +213,12 @@ async fn test_remove_peer() {
     // Server2 announces a route to Server1 via gRPC
     server2
         .client
-        .announce_route("10.0.0.0/24".to_string(), "192.168.1.1".to_string(), 0)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route");
 
@@ -199,11 +227,17 @@ async fn test_remove_peer() {
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
+    // eBGP: NEXT_HOP rewritten to router ID
     poll_route_propagation(&[(
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.1.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
+                peer_addr.clone(),
+                Origin::Igp,
+            )],
         }],
     )])
     .await;
@@ -230,7 +264,12 @@ async fn test_remove_peer_withdraw_routes() {
     // Server2 announces a route
     server2
         .client
-        .announce_route("10.2.0.0/24".to_string(), "192.168.2.1".to_string(), 0)
+        .add_route(
+            "10.2.0.0/24".to_string(),
+            "192.168.2.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 2");
 
@@ -239,11 +278,17 @@ async fn test_remove_peer_withdraw_routes() {
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
+    // eBGP: NEXT_HOP rewritten to router ID
     poll_route_propagation(&[(
         &server1,
         vec![Route {
             prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(vec![65002], "192.168.2.1", peer_addr.clone())],
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
+                peer_addr.clone(),
+                Origin::Igp,
+            )],
         }],
     )])
     .await;
@@ -271,20 +316,27 @@ async fn test_remove_peer_four_node_mesh() {
     // Server4 announces a route
     server4
         .client
-        .announce_route("10.4.0.0/24".to_string(), "192.168.4.1".to_string(), 0)
+        .add_route(
+            "10.4.0.0/24".to_string(),
+            "192.168.4.1".to_string(),
+            0,
+            vec![],
+        )
         .await
         .expect("Failed to announce route from server 4");
 
     // Poll for route to propagate to all peers
+    // eBGP: NEXT_HOP rewritten to router IDs
     poll_route_propagation(&[
         (
             &server1,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65004])],
+                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -293,9 +345,10 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65004])],
+                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -304,9 +357,10 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65004])],
+                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -323,15 +377,17 @@ async fn test_remove_peer_four_node_mesh() {
     // Verify all servers still have the route
     // Server1 now learns via server2 (deterministically chosen due to lower peer IP)
     // Server2 and Server3 still learn directly from Server4
+    // eBGP: NEXT_HOP rewritten to router IDs
     poll_route_propagation(&[
         (
             &server1,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65002, 65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65002, 65004])],
+                    "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                     server2.address.clone(),
+                    Origin::Igp,
                 )], // Via server2 (127.0.0.2 < 127.0.0.3)
             }],
         ),
@@ -340,9 +396,10 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65004])],
+                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),
@@ -351,9 +408,10 @@ async fn test_remove_peer_four_node_mesh() {
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
-                    vec![65004],
-                    "192.168.4.1",
+                    vec![as_sequence(vec![65004])],
+                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
+                    Origin::Igp,
                 )],
             }],
         ),

@@ -12,18 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message};
+use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
-use crate::fsm::{BgpEvent, BgpState, Fsm};
+use crate::fsm::{BgpState, Fsm, FsmEvent};
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::Path;
-use crate::{debug, info, warn};
+use crate::rib::{Path, RouteSource};
+use crate::server::ServerOp;
+use crate::{debug, error, info, warn};
 use std::io;
 use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::{mpsc, oneshot};
+
+// Operations that can be sent to a peer task
+pub enum PeerOp {
+    SendUpdate(UpdateMessage),
+    GetStatistics(oneshot::Sender<PeerStatistics>),
+}
 
 /// Type of BGP session based on AS relationship
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,34 +58,135 @@ pub struct PeerStatistics {
 pub struct Peer {
     pub addr: String,
     pub fsm: Fsm,
-    pub tcp_tx: OwnedWriteHalf,
-    pub asn: u16,
+    pub asn: Option<u16>,
     pub rib_in: AdjRibIn,
-    pub session_type: SessionType,
+    pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
+    pub tcp_tx: OwnedWriteHalf,
+    tcp_rx: OwnedReadHalf,
+    peer_rx: mpsc::UnboundedReceiver<PeerOp>,
+    server_tx: mpsc::UnboundedSender<ServerOp>,
 }
 
 impl Peer {
-    /// Create a new Peer with complete information
-    pub fn new(addr: String, tcp_tx: OwnedWriteHalf, asn: u16, session_type: SessionType) -> Self {
-        Peer {
+    /// Create a new Peer in Connect state
+    /// Returns (Peer, sender) where sender is used to send operations to this peer
+    pub fn new(
+        addr: String,
+        tcp_tx: OwnedWriteHalf,
+        tcp_rx: OwnedReadHalf,
+        server_tx: mpsc::UnboundedSender<ServerOp>,
+        local_asn: u16,
+        local_hold_time: u16,
+        local_bgp_id: u32,
+    ) -> (Self, mpsc::UnboundedSender<PeerOp>) {
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+
+        let peer = Peer {
             addr: addr.clone(),
-            fsm: Fsm::new(),
+            fsm: Fsm::new(local_asn, local_hold_time, local_bgp_id),
             tcp_tx,
-            asn,
+            tcp_rx,
+            asn: None,
             rib_in: AdjRibIn::new(addr),
-            session_type,
+            session_type: None,
             statistics: PeerStatistics::default(),
-        }
+            peer_rx,
+            server_tx,
+        };
+
+        (peer, peer_tx)
     }
 
-    /// Update session type based on peer ASN
-    pub fn update_session_type(&mut self, peer_asn: u16, local_asn: u16) {
-        self.session_type = if peer_asn == local_asn {
-            SessionType::Ibgp
-        } else {
-            SessionType::Ebgp
-        };
+    /// Main peer task - handles the full lifecycle of a BGP peer connection after handshake
+    pub async fn run(mut self) {
+        let peer_ip = self.addr.clone();
+
+        debug!("starting peer event loop", "peer_ip" => &peer_ip);
+
+        // Fire TcpConnectionConfirmed to start handshake (Connect → OpenSent, sends OPEN)
+        if let Err(e) = self
+            .handle_fsm_event(&FsmEvent::TcpConnectionConfirmed)
+            .await
+        {
+            error!("failed to start handshake", "peer_ip" => &peer_ip, "error" => e.to_string());
+            let _ = self.server_tx.send(ServerOp::PeerDisconnected {
+                peer_ip: peer_ip.clone(),
+            });
+            return;
+        }
+
+        // Interval for periodic timer checks (hold timer and keepalive timer)
+        // Initialized lazily when hold_timeout is set (i.e., when entering OpenConfirm)
+        let mut keepalive_check_interval: Option<tokio::time::Interval> = None;
+
+        // Main event loop for this peer
+        loop {
+            tokio::select! {
+                // Read messages from peer
+                result = read_bgp_message(&mut self.tcp_rx) => {
+                    match result {
+                        Ok(message) => {
+                            if let Err(e) = self.handle_received_message(message, &peer_ip).await {
+                                error!("error processing message", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                break;
+                            }
+
+                            // Initialize interval when entering OpenConfirm (handshake complete)
+                            if keepalive_check_interval.is_none() && self.state() == BgpState::OpenConfirm {
+                                keepalive_check_interval = Some(tokio::time::interval(std::time::Duration::from_millis(500)));
+                            }
+                        }
+                        Err(e) => {
+                            error!("error reading message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+                            break;
+                        }
+                    }
+                }
+
+                // Receive messages from server (route updates to send to peer)
+                Some(msg) = self.peer_rx.recv() => {
+                    match msg {
+                        PeerOp::SendUpdate(update_msg) => {
+                            if let Err(e) = self.send_update(update_msg).await {
+                                error!("failed to send UPDATE to peer", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                break;
+                            }
+                        }
+                        PeerOp::GetStatistics(response) => {
+                            let _ = response.send(self.statistics.clone());
+                        }
+                    }
+                }
+
+                // Periodic timer checks (both hold timer and keepalive timer)
+                _ = async {
+                    match &mut keepalive_check_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
+                    if self.fsm.timers.hold_timer_expired() {
+                        error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_ip" => &peer_ip);
+                        break;
+                    }
+
+                    // Check if keepalive timer expired and needs to send KEEPALIVE
+                    if self.fsm.timers.keepalive_timer_expired() {
+                        if let Err(e) = self.handle_fsm_event(&FsmEvent::KeepaliveTimerExpires).await {
+                            error!("failed to send keepalive", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Notify server that peer disconnected
+        let _ = self.server_tx.send(ServerOp::PeerDisconnected {
+            peer_ip: peer_ip.clone(),
+        });
     }
 
     /// Get current BGP state
@@ -85,22 +194,174 @@ impl Peer {
         self.fsm.state()
     }
 
-    /// Check if peer is established
-    pub fn is_established(&self) -> bool {
-        self.fsm.is_established()
+    /// Handle an FSM event and perform state transitions
+    async fn handle_fsm_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
+        let old_state = self.fsm.state();
+        let new_state = self.fsm.handle_event(event);
+
+        // Handle state-specific actions based on transitions
+        match (old_state, new_state, event) {
+            // Entering OpenSent - send OPEN message
+            (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
+                self.enter_open_sent().await?;
+            }
+
+            // Entering OpenConfirm - send KEEPALIVE
+            (
+                BgpState::OpenSent,
+                BgpState::OpenConfirm,
+                &FsmEvent::BgpOpenReceived {
+                    peer_asn,
+                    peer_hold_time,
+                    local_asn,
+                    local_hold_time,
+                },
+            ) => {
+                self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
+                    .await?;
+            }
+
+            // In OpenConfirm or Established - handle keepalive timer expiry
+            (_, BgpState::OpenConfirm, FsmEvent::KeepaliveTimerExpires)
+            | (_, BgpState::Established, FsmEvent::KeepaliveTimerExpires) => {
+                self.send_keepalive().await?;
+            }
+
+            // Received keepalive in OpenConfirm - entering Established
+            (BgpState::OpenConfirm, BgpState::Established, FsmEvent::BgpKeepaliveReceived) => {
+                self.fsm.timers.reset_hold_timer();
+            }
+
+            // In Established - reset hold timer on keepalive/update
+            (BgpState::Established, BgpState::Established, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Established, BgpState::Established, FsmEvent::BgpUpdateReceived) => {
+                self.fsm.timers.reset_hold_timer();
+            }
+
+            _ => {}
+        }
+
+        // Notify server of state change whenever state transitions occur
+        if old_state != new_state {
+            let _ = self.server_tx.send(ServerOp::PeerStateChanged {
+                peer_ip: self.addr.clone(),
+                state: new_state,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Handle entering OpenSent state - send OPEN message
+    async fn enter_open_sent(&mut self) -> Result<(), io::Error> {
+        let open_msg = OpenMessage::new(
+            self.fsm.local_asn(),
+            self.fsm.local_hold_time(),
+            self.fsm.local_bgp_id(),
+        );
+        self.tcp_tx.write_all(&open_msg.serialize()).await?;
+        self.statistics.open_sent += 1;
+        info!("sent OPEN message", "peer_ip" => &self.addr);
+        Ok(())
+    }
+
+    /// Handle entering OpenConfirm state - negotiate timers, send KEEPALIVE, notify server
+    async fn enter_open_confirm(
+        &mut self,
+        peer_asn: u16,
+        peer_hold_time: u16,
+        local_asn: u16,
+        local_hold_time: u16,
+    ) -> Result<(), io::Error> {
+        // Set peer ASN and determine session type
+        self.asn = Some(peer_asn);
+        self.session_type = Some(if peer_asn == local_asn {
+            SessionType::Ibgp
+        } else {
+            SessionType::Ebgp
+        });
+
+        // Negotiate hold time: use minimum (RFC 4271).
+        let hold_time = local_hold_time.min(peer_hold_time);
+        self.fsm.timers.reset_hold_timer();
+        self.fsm.timers.set_negotiated_hold_time(hold_time);
+
+        // Send KEEPALIVE
+        self.send_keepalive().await?;
+
+        info!("timers initialized", "peer_ip" => &self.addr, "hold_time" => hold_time);
+
+        // Notify server that handshake is complete
+        let _ = self.server_tx.send(ServerOp::PeerHandshakeComplete {
+            peer_ip: self.addr.clone(),
+            asn: peer_asn,
+        });
+
+        Ok(())
+    }
+
+    /// Send KEEPALIVE message and restart keepalive timer
+    async fn send_keepalive(&mut self) -> Result<(), io::Error> {
+        let keepalive_msg = KeepAliveMessage {};
+        self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
+        self.statistics.keepalive_sent += 1;
+        debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
+        self.fsm.timers.start_keepalive_timer();
+        Ok(())
+    }
+
+    /// Process a received BGP message from the TCP stream
+    /// Returns Err if should disconnect (notification or processing error)
+    async fn handle_received_message(
+        &mut self,
+        message: BgpMessage,
+        peer_ip: &str,
+    ) -> Result<(), io::Error> {
+        match &message {
+            BgpMessage::Notification(_) => {
+                let _ = self.handle_message(message).await;
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "notification received",
+                ))
+            }
+            BgpMessage::Update(_) => {
+                let delta = self.handle_message(message).await?;
+                self.fsm.timers.reset_hold_timer();
+
+                if let Some((withdrawn, announced)) = delta {
+                    let _ = self.server_tx.send(ServerOp::PeerUpdate {
+                        peer_ip: peer_ip.to_string(),
+                        peer_asn: self.asn.expect("ASN should be known after handshake"),
+                        withdrawn,
+                        announced,
+                    });
+                }
+                Ok(())
+            }
+            BgpMessage::KeepAlive(_) => {
+                let _ = self.handle_message(message).await;
+                self.fsm.timers.reset_hold_timer();
+                Ok(())
+            }
+            BgpMessage::Open(_) => {
+                let _ = self.handle_message(message).await;
+                Ok(())
+            }
+        }
     }
 
     /// Process a BGP message and return route changes for Loc-RIB update if applicable
     /// Returns (withdrawn_prefixes, announced_routes) or None if not an UPDATE
-    pub async fn process_message(
+    async fn handle_message(
         &mut self,
         message: BgpMessage,
     ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
         // Track received messages
         match &message {
-            BgpMessage::Open(_) => {
+            BgpMessage::Open(open_msg) => {
                 self.statistics.open_received += 1;
-                warn!("received duplicate OPEN, ignoring", "peer_ip" => &self.addr);
+                info!("received OPEN from peer", "peer_ip" => &self.addr, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
             }
             BgpMessage::Update(_) => {
                 self.statistics.update_received += 1;
@@ -116,110 +377,57 @@ impl Peer {
             }
         }
 
-        // Determine FSM event and process it
+        // Determine FSM event and process it - FSM will ignore if state doesn't match
         let event = match &message {
-            BgpMessage::Open(_) => None,
-            BgpMessage::Update(_) => Some(BgpEvent::BgpUpdateReceived),
-            BgpMessage::KeepAlive(_) => Some(BgpEvent::BgpKeepaliveReceived),
-            BgpMessage::Notification(_) => Some(BgpEvent::NotificationReceived),
+            BgpMessage::Open(open_msg) => Some(FsmEvent::BgpOpenReceived {
+                peer_asn: open_msg.asn,
+                peer_hold_time: open_msg.hold_time,
+                local_asn: self.fsm.local_asn(),
+                local_hold_time: self.fsm.local_hold_time(),
+            }),
+            BgpMessage::Update(_) => Some(FsmEvent::BgpUpdateReceived),
+            BgpMessage::KeepAlive(_) => Some(FsmEvent::BgpKeepaliveReceived),
+            BgpMessage::Notification(_) => Some(FsmEvent::NotificationReceived),
         };
 
         // Process FSM event if present
         if let Some(event) = event {
-            self.process_event(&event).await?;
+            self.handle_fsm_event(&event).await?;
         }
 
         // Process UPDATE message content
         if let BgpMessage::Update(update_msg) = message {
-            Ok(Some(self.process_update(update_msg)))
+            Ok(Some(self.handle_update(update_msg)))
         } else {
             Ok(None)
         }
     }
 
-    /// Process a BGP event and handle state transitions
-    pub async fn process_event(&mut self, event: &BgpEvent) -> Result<(), io::Error> {
-        let old_state = self.fsm.state();
-        let new_state = self.fsm.process_event(event);
-
-        // Handle state-specific actions based on transitions
-        match (old_state, new_state, event) {
-            // Entering OpenSent - send OPEN message
-            (
-                BgpState::Connect,
-                BgpState::OpenSent,
-                BgpEvent::TcpConnectionConfirmed {
-                    local_asn,
-                    hold_time,
-                    bgp_id,
-                },
-            ) => {
-                let open_msg = OpenMessage::new(*local_asn, *hold_time, *bgp_id);
-                self.tcp_tx.write_all(&open_msg.serialize()).await?;
-                self.statistics.open_sent += 1;
-                info!("sent OPEN message", "peer_ip" => &self.addr);
-            }
-
-            // Entering OpenConfirm - send KEEPALIVE
-            (
-                BgpState::OpenSent,
-                BgpState::OpenConfirm,
-                BgpEvent::BgpOpenReceived {
-                    peer_asn: _,
-                    peer_hold_time,
-                },
-            ) => {
-                self.fsm.timers.reset_hold_timer();
-                self.fsm.timers.set_negotiated_hold_time(*peer_hold_time);
-                let keepalive_msg = KeepAliveMessage {};
-                self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
-                self.statistics.keepalive_sent += 1;
-                debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
-                self.fsm.timers.start_keepalive_timer();
-            }
-
-            // In OpenConfirm or Established - handle keepalive timer expiry
-            (_, BgpState::OpenConfirm, BgpEvent::KeepaliveTimerExpires)
-            | (_, BgpState::Established, BgpEvent::KeepaliveTimerExpires) => {
-                let keepalive_msg = KeepAliveMessage {};
-                self.tcp_tx.write_all(&keepalive_msg.serialize()).await?;
-                self.statistics.keepalive_sent += 1;
-                debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
-                self.fsm.timers.start_keepalive_timer();
-            }
-
-            // Received keepalive in OpenConfirm - entering Established
-            (BgpState::OpenConfirm, BgpState::Established, BgpEvent::BgpKeepaliveReceived) => {
-                self.fsm.timers.reset_hold_timer();
-            }
-
-            // In Established - reset hold timer on keepalive/update
-            (BgpState::Established, BgpState::Established, BgpEvent::BgpKeepaliveReceived)
-            | (BgpState::Established, BgpState::Established, BgpEvent::BgpUpdateReceived) => {
-                self.fsm.timers.reset_hold_timer();
-            }
-
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    /// Process a BGP UPDATE message
+    /// Handle a BGP UPDATE message
     /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
-    pub fn process_update(
+    fn handle_update(
         &mut self,
         update_msg: UpdateMessage,
     ) -> (Vec<IpNetwork>, Vec<(IpNetwork, Path)>) {
-        let mut withdrawn = Vec::new();
-        let mut announced = Vec::new();
+        let withdrawn = self.process_withdrawals(&update_msg);
+        let announced = self.process_announcements(&update_msg);
+        (withdrawn, announced)
+    }
 
-        // Process withdrawn routes
+    /// Process withdrawn routes from an UPDATE message
+    fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
+        let mut withdrawn = Vec::new();
         for prefix in update_msg.withdrawn_routes() {
             info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr);
             self.rib_in.remove_route(*prefix);
             withdrawn.push(*prefix);
         }
+        withdrawn
+    }
+
+    /// Process announced routes (NLRI) from an UPDATE message
+    fn process_announcements(&mut self, update_msg: &UpdateMessage) -> Vec<(IpNetwork, Path)> {
+        let mut announced = Vec::new();
 
         // Extract path attributes for announced routes
         let origin = update_msg.get_origin();
@@ -228,20 +436,15 @@ impl Peer {
 
         // Only process announcements if we have required attributes
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
+            let source = RouteSource::from_session(
+                self.session_type
+                    .expect("session_type must be set in Established state"),
+                self.addr.clone(),
+            );
+
             // Process announced routes (NLRI)
             for prefix in update_msg.nlri_list() {
-                let source = match self.session_type {
-                    SessionType::Ebgp => crate::rib::RouteSource::Ebgp(self.addr.clone()),
-                    SessionType::Ibgp => crate::rib::RouteSource::Ibgp(self.addr.clone()),
-                };
-                let path = Path {
-                    origin,
-                    as_path: as_path.clone(),
-                    next_hop,
-                    source,
-                    local_pref: None,
-                    med: None,
-                };
+                let path = Path::from_attributes(origin, as_path.clone(), next_hop, source.clone());
                 info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr);
                 self.rib_in.add_route(*prefix, path.clone());
                 announced.push((*prefix, path));
@@ -250,24 +453,17 @@ impl Peer {
             warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => &self.addr);
         }
 
-        // Return only what changed in this UPDATE
-        (withdrawn, announced)
+        announced
     }
 
     /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
-    pub async fn send_update(&mut self, update_msg: UpdateMessage) -> Result<(), io::Error> {
+    async fn send_update(&mut self, update_msg: UpdateMessage) -> Result<(), io::Error> {
         self.tcp_tx.write_all(&update_msg.serialize()).await?;
         self.statistics.update_sent += 1;
         // RFC 4271: "Each time the local system sends a KEEPALIVE or UPDATE message,
         // it restarts its KeepaliveTimer"
         self.fsm.timers.reset_keepalive_timer();
         Ok(())
-    }
-
-    /// Set negotiated hold time from received OPEN message
-    pub fn set_negotiated_hold_time(&mut self, hold_time: u16) {
-        self.fsm.timers.set_negotiated_hold_time(hold_time);
-        info!("negotiated hold time", "peer_ip" => &self.addr, "hold_time_seconds" => hold_time);
     }
 }
 
@@ -282,11 +478,25 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (_, tcp_tx) = client.into_split();
+        let (tcp_rx, tcp_tx) = client.into_split();
 
-        let mut peer = Peer::new(addr.ip().to_string(), tcp_tx, 65001, SessionType::Ebgp);
-        peer.fsm = Fsm::with_state(state);
-        peer
+        // Create dummy channels for testing
+        let (server_tx, _server_rx) = mpsc::unbounded_channel();
+        let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
+
+        // Create peer directly for testing (bypass Peer::new which does handshake)
+        Peer {
+            addr: addr.ip().to_string(),
+            fsm: Fsm::with_state(state, 65000, 180, 0x01010101),
+            tcp_tx,
+            tcp_rx,
+            asn: Some(65001),
+            rib_in: AdjRibIn::new(addr.ip().to_string()),
+            session_type: Some(SessionType::Ebgp),
+            statistics: PeerStatistics::default(),
+            peer_rx,
+            server_tx,
+        }
     }
 
     #[tokio::test]
@@ -299,20 +509,5 @@ mod tests {
 
         let peer = create_test_peer_with_state(BgpState::Established).await;
         assert_eq!(peer.state(), BgpState::Established);
-    }
-
-    #[tokio::test]
-    async fn test_is_established() {
-        let peer = create_test_peer_with_state(BgpState::Idle).await;
-        assert!(!peer.is_established());
-
-        let peer = create_test_peer_with_state(BgpState::Connect).await;
-        assert!(!peer.is_established());
-
-        let peer = create_test_peer_with_state(BgpState::OpenSent).await;
-        assert!(!peer.is_established());
-
-        let peer = create_test_peer_with_state(BgpState::Established).await;
-        assert!(peer.is_established());
     }
 }

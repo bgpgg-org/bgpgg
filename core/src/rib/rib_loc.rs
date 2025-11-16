@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_update::AsPathSegment;
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
@@ -25,7 +26,6 @@ use std::net::Ipv4Addr;
 pub struct LocRib {
     // Map from prefix to best route(s)
     routes: HashMap<IpNetwork, Route>,
-    local_asn: u16,
 }
 
 impl LocRib {
@@ -81,13 +81,18 @@ impl LocRib {
     }
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
+    /// Applies import policy (via closure) before adding routes
     /// Returns the set of prefixes that changed for propagation to other peers
-    pub fn update_from_peer(
+    pub fn update_from_peer<F>(
         &mut self,
         peer_ip: String,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, Path)>,
-    ) -> Vec<IpNetwork> {
+        import_policy: F,
+    ) -> Vec<IpNetwork>
+    where
+        F: Fn(&mut Path) -> bool,
+    {
         let mut changed_prefixes = Vec::new();
 
         // Process withdrawals
@@ -101,7 +106,7 @@ impl LocRib {
 
         // Process announcements - apply import policy and add to Loc-RIB
         for (prefix, mut path) in announced {
-            if self.apply_import_policy(&mut path) {
+            if import_policy(&mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
                 self.add_route(prefix, path);
                 changed_prefixes.push(prefix);
@@ -120,23 +125,6 @@ impl LocRib {
 
         // Return changed prefixes for propagation
         changed_prefixes
-    }
-
-    fn apply_import_policy(&self, path: &mut Path) -> bool {
-        // Set default local preference if not set
-        // TODO: only do this for iBGP
-        if path.local_pref.is_none() {
-            path.local_pref = Some(100);
-        }
-
-        // Reject routes with our own ASN (loop prevention)
-        if path.as_path.contains(&self.local_asn) {
-            debug!("rejecting route due to AS loop", "local_asn" => self.local_asn);
-            return false;
-        }
-
-        // Accept by default
-        true
     }
 
     fn run_best_path_selection(&mut self, changed_prefixes: &[IpNetwork]) {
@@ -159,10 +147,9 @@ impl LocRib {
 }
 
 impl LocRib {
-    pub fn new(local_asn: u16) -> Self {
+    pub fn new() -> Self {
         LocRib {
             routes: HashMap::new(),
-            local_asn,
         }
     }
 
@@ -172,10 +159,15 @@ impl LocRib {
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
         origin: crate::bgp::msg_update::Origin,
+        as_path: Vec<AsPathSegment>,
     ) {
+        // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
+        // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
+        // We store it as provided and add local_asn during export based on peer type.
+        // If as_path is not empty, it's used as-is (for testing or route injection).
         let path = Path {
             origin,
-            as_path: vec![self.local_asn],
+            as_path,
             next_hop,
             source: RouteSource::Local,
             local_pref: Some(100),
@@ -188,14 +180,25 @@ impl LocRib {
     }
 
     /// Remove a locally originated route
-    pub fn remove_local_route(&mut self, prefix: IpNetwork) {
+    /// Returns true if a route was actually removed.
+    pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
         info!("removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
 
         if let Some(route) = self.routes.get_mut(&prefix) {
+            let original_len = route.paths.len();
             route.paths.retain(|p| p.source != RouteSource::Local);
+            let removed = route.paths.len() != original_len;
+
+            // Remove this specific route if no paths left
+            if route.paths.is_empty() {
+                self.routes.remove(&prefix);
+            }
+
+            self.run_best_path_selection(&[prefix]);
+            removed
+        } else {
+            false
         }
-        self.routes.retain(|_, route| !route.paths.is_empty());
-        self.run_best_path_selection(&[prefix]);
     }
 
     pub fn remove_routes_from_peer(&mut self, peer_ip: String) -> Vec<IpNetwork> {
@@ -242,19 +245,20 @@ impl LocRib {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
     use crate::rib::test_helpers::*;
     use std::net::Ipv4Addr;
 
     #[test]
     fn test_new_loc_rib() {
-        let loc_rib = LocRib::new(65000);
+        let loc_rib = LocRib::new();
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
     }
 
     #[test]
     fn test_add_route() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip.clone());
@@ -272,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_routes_different_prefixes() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
 
         let prefix1 = create_test_prefix();
@@ -307,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_paths_same_prefix_different_peers() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer1 = "192.0.2.1".to_string();
         let peer2 = "192.0.2.2".to_string();
         let prefix = create_test_prefix();
@@ -333,13 +337,17 @@ mod tests {
 
     #[test]
     fn test_add_route_same_peer_updates_path() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
 
         let path1 = create_test_path(peer_ip.clone());
         let mut path2 = create_test_path(peer_ip.clone());
-        path2.as_path = vec![300, 400];
+        path2.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![300, 400],
+        }];
 
         loc_rib.add_route(prefix, path1);
         loc_rib.add_route(prefix, path2.clone());
@@ -355,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer1 = "192.0.2.1".to_string();
         let peer2 = "192.0.2.2".to_string();
         let prefix = create_test_prefix();
@@ -379,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_removes_empty_routes() {
-        let mut loc_rib = LocRib::new(65000);
+        let mut loc_rib = LocRib::new();
         let peer_ip = "192.0.2.1".to_string();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip.clone());
@@ -389,5 +397,28 @@ mod tests {
 
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
+    }
+
+    #[test]
+    fn test_add_and_remove_local_route() {
+        let mut loc_rib = LocRib::new();
+        let prefix = create_test_prefix();
+        let next_hop = Ipv4Addr::new(192, 0, 2, 1);
+
+        loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            crate::bgp::msg_update::Origin::IGP,
+            vec![],
+        );
+        assert_eq!(loc_rib.routes_len(), 1);
+        assert!(loc_rib.has_prefix(&prefix));
+
+        assert!(loc_rib.remove_local_route(prefix));
+        assert_eq!(loc_rib.routes_len(), 0);
+        assert!(!loc_rib.has_prefix(&prefix));
+
+        // Removing again should return false
+        assert!(!loc_rib.remove_local_route(prefix));
     }
 }

@@ -10,8 +10,8 @@ service BgpService {
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
-    rpc AnnounceRoute(AnnounceRouteRequest) returns (AnnounceRouteResponse);
-    rpc WithdrawRoute(WithdrawRouteRequest) returns (WithdrawRouteResponse);
+    rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
+    rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
 }
 
@@ -81,24 +81,25 @@ message Peer {
     BgpState state = 3;
 }
 
-// Announce route request/response
-message AnnounceRouteRequest {
+// Add route request/response
+message AddRouteRequest {
     string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
     string next_hop = 2;    // IPv4 address (e.g., "192.168.1.1")
     Origin origin = 3;      // Route origin
+    repeated AsPathSegment as_path = 4; // Optional AS_PATH (empty = locally originated)
 }
 
-message AnnounceRouteResponse {
+message AddRouteResponse {
     bool success = 1;
     string message = 2;
 }
 
-// Withdraw route request/response
-message WithdrawRouteRequest {
+// Remove route request/response
+message RemoveRouteRequest {
     string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
 }
 
-message WithdrawRouteResponse {
+message RemoveRouteResponse {
     bool success = 1;
     string message = 2;
 }
@@ -108,6 +109,18 @@ enum Origin {
     IGP = 0;
     EGP = 1;
     INCOMPLETE = 2;
+}
+
+// AS_PATH segment type
+enum AsPathSegmentType {
+    AS_SET = 0;
+    AS_SEQUENCE = 1;
+}
+
+// AS_PATH segment
+message AsPathSegment {
+    AsPathSegmentType segment_type = 1;
+    repeated uint32 asns = 2;
 }
 
 // Get routes request/response
@@ -126,7 +139,7 @@ message Route {
 // Path information
 message Path {
     Origin origin = 1;
-    repeated uint32 as_path = 2;
+    repeated AsPathSegment as_path = 2;
     string next_hop = 3;
     string peer_address = 4;
     optional uint32 local_pref = 5;

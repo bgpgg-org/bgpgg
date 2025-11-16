@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = BgpServer::new(config);
 
     // Create gRPC service with cloned components
-    let grpc_service = BgpGrpcService::new(server.request_tx.clone());
+    let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Run both servers concurrently
     tokio::select! {

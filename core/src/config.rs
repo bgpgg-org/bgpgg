@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -51,6 +51,19 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&contents)?)
+    }
+
+    /// Get the local bind address for outgoing connections (IP with port 0)
+    pub fn get_local_addr(&self) -> Result<SocketAddr, String> {
+        let local_ip = self
+            .listen_addr
+            .split(':')
+            .next()
+            .ok_or_else(|| "invalid listen_addr format".to_string())?;
+
+        format!("{}:0", local_ip)
+            .parse()
+            .map_err(|e| format!("failed to parse local bind address: {}", e))
     }
 }
 

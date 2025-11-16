@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddPeerRequest, AnnounceRouteRequest, GetPeerRequest,
-    GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest, Route,
-    WithdrawRouteRequest,
+    bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
+    GetPeerRequest, GetPeersRequest, GetRoutesRequest, Peer, PeerStatistics, RemovePeerRequest,
+    RemoveRouteRequest, Route,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -113,19 +113,21 @@ impl BgpClient {
         }
     }
 
-    /// Announce a route to all established peers
-    pub async fn announce_route(
+    /// Add a route to the global RIB
+    pub async fn add_route(
         &mut self,
         prefix: String,
         next_hop: String,
         origin: i32,
+        as_path: Vec<AsPathSegment>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .announce_route(AnnounceRouteRequest {
+            .add_route(AddRouteRequest {
                 prefix,
                 next_hop,
                 origin,
+                as_path,
             })
             .await?
             .into_inner();
@@ -137,11 +139,11 @@ impl BgpClient {
         }
     }
 
-    /// Withdraw a route from all established peers
-    pub async fn withdraw_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
+    /// Remove a route from all established peers
+    pub async fn remove_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .withdraw_route(WithdrawRouteRequest { prefix })
+            .remove_route(RemoveRouteRequest { prefix })
             .await?
             .into_inner();
 

@@ -61,6 +61,7 @@ impl AdjRibIn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
     use crate::rib::test_helpers::*;
     use std::net::Ipv4Addr;
 
@@ -130,14 +131,25 @@ mod tests {
 
         let path1 = create_test_path(peer_ip.clone());
         let mut path2 = create_test_path(peer_ip.clone());
-        path2.as_path = vec![300, 400];
+        path2.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![300, 400],
+        }];
 
         rib_in.add_route(prefix, path1);
         rib_in.add_route(prefix, path2.clone());
 
         let routes = rib_in.get_all_routes();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].paths[0].as_path, vec![300, 400]);
+        assert_eq!(
+            routes[0].paths[0].as_path,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![300, 400],
+            }]
+        );
     }
 
     #[test]

@@ -20,9 +20,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
-    const OPTIONAL: u8 = 1 << 7;
+    const _OPTIONAL: u8 = 1 << 7; // RFC 4271 - kept for completeness
     const TRANSITIVE: u8 = 1 << 6;
-    const PARTIAL: u8 = 1 << 5;
+    const _PARTIAL: u8 = 1 << 5; // RFC 4271 - kept for completeness
     const EXTENDED_LENGTH: u8 = 1 << 4;
 
     fn extended_len(&self) -> bool {
@@ -95,14 +95,14 @@ impl TryFrom<u8> for Origin {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct AsPathSegment {
     pub segment_type: AsPathSegmentType,
     pub segment_len: u8,
     pub asn_list: Vec<u16>,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum AsPathSegmentType {
     AsSet = 1,
     AsSequence = 2,
@@ -437,14 +437,10 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_as_path(&self) -> Option<Vec<u16>> {
+    pub fn get_as_path(&self) -> Option<Vec<AsPathSegment>> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
-                let mut asns = Vec::new();
-                for segment in &as_path.segments {
-                    asns.extend_from_slice(&segment.asn_list);
-                }
-                Some(asns)
+                Some(as_path.segments.clone())
             } else {
                 None
             }
@@ -678,7 +674,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc() {
         let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL,        // Attribute flags
+            PathAttrFlag::_OPTIONAL,       // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x04,                          // Attribute length
             // Attribute value
@@ -692,7 +688,7 @@ mod tests {
         assert_eq!(
             as_path,
             PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                flags: PathAttrFlag(PathAttrFlag::_OPTIONAL),
                 value: PathAttrValue::MultiExtiDisc(65537),
             }
         );
@@ -702,7 +698,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc_invalid_length() {
         let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL,        // Attribute flags
+            PathAttrFlag::_OPTIONAL,       // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x03,                          // Attribute length (invalid)
             // Attribute value

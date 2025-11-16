@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::Origin;
+use crate::bgp::msg_update::{AsPathSegmentType, Origin};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::rib::RouteSource;
-use crate::server::BgpRequest;
+use crate::server::MgmtOp;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
-    bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AnnounceRouteRequest,
-    AnnounceRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse,
-    GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse, Path as ProtoPath,
-    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemovePeerRequest,
-    RemovePeerResponse, Route as ProtoRoute, WithdrawRouteRequest, WithdrawRouteResponse,
+    self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
+    AddRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse, GetPeersRequest,
+    GetPeersResponse, GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
+    PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
+    RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -45,12 +45,12 @@ fn to_proto_state(state: BgpState) -> i32 {
 
 #[derive(Clone)]
 pub struct BgpGrpcService {
-    bgp_request_tx: mpsc::Sender<BgpRequest>,
+    mgmt_request_tx: mpsc::Sender<MgmtOp>,
 }
 
 impl BgpGrpcService {
-    pub fn new(bgp_request_tx: mpsc::Sender<BgpRequest>) -> Self {
-        Self { bgp_request_tx }
+    pub fn new(mgmt_request_tx: mpsc::Sender<MgmtOp>) -> Self {
+        Self { mgmt_request_tx }
     }
 }
 
@@ -64,12 +64,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::AddPeer {
+        let req = MgmtOp::AddPeer {
             addr: addr.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -101,12 +101,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::RemovePeer {
+        let req = MgmtOp::RemovePeer {
             addr: peer_ip.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -131,9 +131,9 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetPeersResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetPeers { response: tx };
+        let req = MgmtOp::GetPeers { response: tx };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -147,7 +147,7 @@ impl BgpService for BgpGrpcService {
             .iter()
             .map(|(addr, asn, state)| ProtoPeer {
                 address: addr.to_string(),
-                asn: *asn as u32,
+                asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                 state: to_proto_state(*state),
             })
             .collect();
@@ -163,12 +163,12 @@ impl BgpService for BgpGrpcService {
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetPeer {
+        let req = MgmtOp::GetPeer {
             addr: addr.clone(),
             response: tx,
         };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -182,7 +182,7 @@ impl BgpService for BgpGrpcService {
             Some((addr, asn, state, statistics)) => {
                 let proto_peer = ProtoPeer {
                     address: addr,
-                    asn: asn as u32,
+                    asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                     state: to_proto_state(state),
                 };
 
@@ -206,16 +206,16 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn announce_route(
+    async fn add_route(
         &self,
-        request: Request<AnnounceRouteRequest>,
-    ) -> Result<Response<AnnounceRouteResponse>, Status> {
+        request: Request<AddRouteRequest>,
+    ) -> Result<Response<AddRouteResponse>, Status> {
         let req = request.into_inner();
 
         // Parse prefix (CIDR format like "10.0.0.0/24")
         let parts: Vec<&str> = req.prefix.split('/').collect();
         if parts.len() != 2 {
-            return Ok(Response::new(AnnounceRouteResponse {
+            return Ok(Response::new(AddRouteResponse {
                 success: false,
                 message: "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24)".to_string(),
             }));
@@ -247,28 +247,44 @@ impl BgpService for BgpGrpcService {
             _ => return Err(Status::invalid_argument("Invalid origin value")),
         };
 
+        // Convert proto AS_PATH segments to internal format
+        let as_path: Vec<crate::bgp::msg_update::AsPathSegment> = req
+            .as_path
+            .into_iter()
+            .map(|seg| crate::bgp::msg_update::AsPathSegment {
+                segment_type: match seg.segment_type {
+                    0 => AsPathSegmentType::AsSet,
+                    1 => AsPathSegmentType::AsSequence,
+                    _ => AsPathSegmentType::AsSequence, // Default to AS_SEQUENCE
+                },
+                segment_len: seg.asns.len() as u8,
+                asn_list: seg.asns.into_iter().map(|asn| asn as u16).collect(),
+            })
+            .collect();
+
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let bgp_req = BgpRequest::AnnounceRoute {
+        let mgmt_req = MgmtOp::AddRoute {
             prefix,
             next_hop,
             origin,
+            as_path,
             response: tx,
         };
 
-        self.bgp_request_tx
-            .send(bgp_req)
+        self.mgmt_request_tx
+            .send(mgmt_req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(AnnounceRouteResponse {
+            Ok(Ok(())) => Ok(Response::new(AddRouteResponse {
                 success: true,
-                message: format!("Route {} announced", prefix_str),
+                message: format!("Route {} added", prefix_str),
             })),
-            Ok(Err(e)) => Ok(Response::new(AnnounceRouteResponse {
+            Ok(Err(e)) => Ok(Response::new(AddRouteResponse {
                 success: false,
                 message: e,
             })),
@@ -276,16 +292,16 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn withdraw_route(
+    async fn remove_route(
         &self,
-        request: Request<WithdrawRouteRequest>,
-    ) -> Result<Response<WithdrawRouteResponse>, Status> {
+        request: Request<RemoveRouteRequest>,
+    ) -> Result<Response<RemoveRouteResponse>, Status> {
         let req = request.into_inner();
 
         // Parse prefix (CIDR format like "10.0.0.0/24")
         let parts: Vec<&str> = req.prefix.split('/').collect();
         if parts.len() != 2 {
-            return Ok(Response::new(WithdrawRouteResponse {
+            return Ok(Response::new(RemoveRouteResponse {
                 success: false,
                 message: "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24)".to_string(),
             }));
@@ -306,23 +322,23 @@ impl BgpService for BgpGrpcService {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let prefix_str = req.prefix.clone();
-        let bgp_req = BgpRequest::WithdrawRoute {
+        let mgmt_req = MgmtOp::RemoveRoute {
             prefix,
             response: tx,
         };
 
-        self.bgp_request_tx
-            .send(bgp_req)
+        self.mgmt_request_tx
+            .send(mgmt_req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(WithdrawRouteResponse {
+            Ok(Ok(())) => Ok(Response::new(RemoveRouteResponse {
                 success: true,
-                message: format!("Route {} withdrawn", prefix_str),
+                message: format!("Route {} removed", prefix_str),
             })),
-            Ok(Err(e)) => Ok(Response::new(WithdrawRouteResponse {
+            Ok(Err(e)) => Ok(Response::new(RemoveRouteResponse {
                 success: false,
                 message: e,
             })),
@@ -336,9 +352,9 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<GetRoutesResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = BgpRequest::GetRoutes { response: tx };
+        let req = MgmtOp::GetRoutes { response: tx };
 
-        self.bgp_request_tx
+        self.mgmt_request_tx
             .send(req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
@@ -371,7 +387,21 @@ impl BgpService for BgpGrpcService {
                             Origin::EGP => 1,
                             Origin::INCOMPLETE => 2,
                         },
-                        as_path: path.as_path.into_iter().map(|asn| asn as u32).collect(),
+                        as_path: path
+                            .as_path
+                            .into_iter()
+                            .map(|segment| proto::AsPathSegment {
+                                segment_type: match segment.segment_type {
+                                    AsPathSegmentType::AsSet => {
+                                        proto::AsPathSegmentType::AsSet as i32
+                                    }
+                                    AsPathSegmentType::AsSequence => {
+                                        proto::AsPathSegmentType::AsSequence as i32
+                                    }
+                                },
+                                asns: segment.asn_list.into_iter().map(|asn| asn as u32).collect(),
+                            })
+                            .collect(),
                         next_hop: path.next_hop.to_string(),
                         peer_address: match path.source {
                             RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr.to_string(),
