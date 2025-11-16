@@ -192,10 +192,15 @@ pub fn send_announcements_to_peer(
         return;
     }
 
+    let is_ibgp = peer_asn == local_asn;
     let batches = batch_announcements_by_path(to_announce);
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
+        // iBGP split horizon: skip routes learned via iBGP when sending to iBGP peers
+        if is_ibgp && batch.path.source.is_ibgp() {
+            continue;
+        }
         let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);

@@ -16,6 +16,7 @@ mod common;
 pub use common::*;
 
 use bgpgg::grpc::proto::{BgpState, Origin, Route};
+use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -279,4 +280,80 @@ async fn test_announce_withdraw_four_node_mesh() {
         )
         .await
     );
+}
+
+#[tokio::test]
+async fn test_ibgp_split_horizon() {
+    // Linear topology: A--B--C (all same ASN for iBGP)
+    // Tests that routes learned via iBGP are not advertised to other iBGP peers
+    let [mut server1, server2, server3] = chain_servers([
+        start_test_server(
+            65001, // Same ASN
+            Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65001, // Same ASN (iBGP)
+            Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65001, // Same ASN (iBGP)
+            Ipv4Addr::new(3, 3, 3, 3),
+            None,
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    // Server1 announces a route
+    server1
+        .client
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+        )
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Server2 should receive the route from Server1
+    // Server3 should NOT receive the route (iBGP split horizon)
+    // iBGP: NEXT_HOP preserved (not rewritten)
+    poll_route_propagation(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![build_path(
+                    vec![], // Empty AS_PATH for locally originated route in iBGP
+                    "192.168.1.1", // iBGP: NEXT_HOP preserved
+                    server1.address.clone(),
+                    Origin::Igp,
+                )],
+            }],
+        ),
+        (&server3, vec![]), // Server3 should have no routes due to split horizon
+    ])
+    .await;
+
+    // Verify all peers are still established
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(
+        verify_peers(
+            &server2,
+            vec![
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+            ],
+        )
+        .await
+    );
+    assert!(verify_peers(&server3, vec![server2.to_peer(BgpState::Established)],).await);
 }

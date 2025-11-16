@@ -35,6 +35,11 @@ impl RouteSource {
             SessionType::Ibgp => RouteSource::Ibgp(peer_addr),
         }
     }
+
+    /// Check if this route was learned via iBGP
+    pub fn is_ibgp(&self) -> bool {
+        matches!(self, RouteSource::Ibgp(_))
+    }
 }
 
 /// Represents a route with one or more paths to a prefix
@@ -58,5 +63,12 @@ mod tests {
             RouteSource::from_session(SessionType::Ibgp, "10.0.0.2".to_string()),
             RouteSource::Ibgp("10.0.0.2".to_string())
         );
+    }
+
+    #[test]
+    fn test_is_ibgp() {
+        assert!(RouteSource::Ibgp("10.0.0.1".to_string()).is_ibgp());
+        assert!(!RouteSource::Ebgp("10.0.0.2".to_string()).is_ibgp());
+        assert!(!RouteSource::Local.is_ibgp());
     }
 }

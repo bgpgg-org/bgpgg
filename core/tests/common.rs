@@ -232,79 +232,29 @@ pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServ
 pub async fn setup_three_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer) {
-    // Start all three servers on different loopback IPs - OS allocates ports automatically
-    let mut server1 = start_test_server(
-        65001,
-        Ipv4Addr::new(1, 1, 1, 1),
-        hold_timer_secs,
-        "127.0.0.1",
-    )
-    .await;
-    let mut server2 = start_test_server(
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        hold_timer_secs,
-        "127.0.0.2",
-    )
-    .await;
-    let server3 = start_test_server(
-        65003,
-        Ipv4Addr::new(3, 3, 3, 3),
-        hold_timer_secs,
-        "127.0.0.3",
-    )
-    .await;
-
-    // Create full mesh: each server peers with the other two
-    // Server1 connects to Server2 and Server3
-    server1
-        .client
-        .add_peer(format!("127.0.0.2:{}", server2.bgp_port))
-        .await
-        .expect("Failed to add peer 2 to server 1");
-    server1
-        .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
-        .await
-        .expect("Failed to add peer 3 to server 1");
-
-    // Server2 connects to Server3 (already connected to Server1)
-    server2
-        .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
-        .await
-        .expect("Failed to add peer 3 to server 2");
-
-    // Wait for all peerings to establish
-    poll_until(
-        || async {
-            verify_peers(
-                &server1,
-                vec![
-                    server2.to_peer(BgpState::Established),
-                    server3.to_peer(BgpState::Established),
-                ],
-            )
-            .await
-                && verify_peers(
-                    &server2,
-                    vec![
-                        server1.to_peer(BgpState::Established),
-                        server3.to_peer(BgpState::Established),
-                    ],
-                )
-                .await
-                && verify_peers(
-                    &server3,
-                    vec![
-                        server1.to_peer(BgpState::Established),
-                        server2.to_peer(BgpState::Established),
-                    ],
-                )
-                .await
-        },
-        "Timeout waiting for mesh peers to establish",
-    )
+    let [server1, server2, server3] = mesh_servers([
+        start_test_server(
+            65001,
+            Ipv4Addr::new(1, 1, 1, 1),
+            hold_timer_secs,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65002,
+            Ipv4Addr::new(2, 2, 2, 2),
+            hold_timer_secs,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65003,
+            Ipv4Addr::new(3, 3, 3, 3),
+            hold_timer_secs,
+            "127.0.0.3",
+        )
+        .await,
+    ])
     .await;
 
     (server1, server2, server3)
@@ -329,115 +279,36 @@ pub async fn setup_three_meshed_servers(
 pub async fn setup_four_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer, TestServer) {
-    // Start all four servers on different loopback IPs - OS allocates ports automatically
-    let mut server1 = start_test_server(
-        65001,
-        Ipv4Addr::new(1, 1, 1, 1),
-        hold_timer_secs,
-        "127.0.0.1",
-    )
-    .await;
-    let mut server2 = start_test_server(
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        hold_timer_secs,
-        "127.0.0.2",
-    )
-    .await;
-    let mut server3 = start_test_server(
-        65003,
-        Ipv4Addr::new(3, 3, 3, 3),
-        hold_timer_secs,
-        "127.0.0.3",
-    )
-    .await;
-    let server4 = start_test_server(
-        65004,
-        Ipv4Addr::new(4, 4, 4, 4),
-        hold_timer_secs,
-        "127.0.0.4",
-    )
-    .await;
-
-    // Create full mesh: each server peers with the other three
-    // Server1 connects to Server2, Server3, and Server4
-    server1
-        .client
-        .add_peer(format!("127.0.0.2:{}", server2.bgp_port))
-        .await
-        .expect("Failed to add peer 2 to server 1");
-    server1
-        .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
-        .await
-        .expect("Failed to add peer 3 to server 1");
-    server1
-        .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
-        .await
-        .expect("Failed to add peer 4 to server 1");
-
-    // Server2 connects to Server3 and Server4 (already connected to Server1)
-    server2
-        .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
-        .await
-        .expect("Failed to add peer 3 to server 2");
-    server2
-        .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
-        .await
-        .expect("Failed to add peer 4 to server 2");
-
-    // Server3 connects to Server4 (already connected to Server1 and Server2)
-    server3
-        .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
-        .await
-        .expect("Failed to add peer 4 to server 3");
-
-    // Wait for all peerings to establish
-    poll_until(
-        || async {
-            verify_peers(
-                &server1,
-                vec![
-                    server2.to_peer(BgpState::Established),
-                    server3.to_peer(BgpState::Established),
-                    server4.to_peer(BgpState::Established),
-                ],
-            )
-            .await
-                && verify_peers(
-                    &server2,
-                    vec![
-                        server1.to_peer(BgpState::Established),
-                        server3.to_peer(BgpState::Established),
-                        server4.to_peer(BgpState::Established),
-                    ],
-                )
-                .await
-                && verify_peers(
-                    &server3,
-                    vec![
-                        server1.to_peer(BgpState::Established),
-                        server2.to_peer(BgpState::Established),
-                        server4.to_peer(BgpState::Established),
-                    ],
-                )
-                .await
-                && verify_peers(
-                    &server4,
-                    vec![
-                        server1.to_peer(BgpState::Established),
-                        server2.to_peer(BgpState::Established),
-                        server3.to_peer(BgpState::Established),
-                    ],
-                )
-                .await
-        },
-        "Timeout waiting for mesh peers to establish",
-    )
+    let [server1, server2, server3, server4] = mesh_servers([
+        start_test_server(
+            65001,
+            Ipv4Addr::new(1, 1, 1, 1),
+            hold_timer_secs,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65002,
+            Ipv4Addr::new(2, 2, 2, 2),
+            hold_timer_secs,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65003,
+            Ipv4Addr::new(3, 3, 3, 3),
+            hold_timer_secs,
+            "127.0.0.3",
+        )
+        .await,
+        start_test_server(
+            65004,
+            Ipv4Addr::new(4, 4, 4, 4),
+            hold_timer_secs,
+            "127.0.0.4",
+        )
+        .await,
+    ])
     .await;
 
     (server1, server2, server3, server4)
@@ -853,6 +724,69 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
             true
         },
         "Timeout waiting for chain topology to establish",
+    )
+    .await;
+
+    servers
+}
+
+/// Meshes BGP servers together in a full mesh topology
+///
+/// Connects each server to all other servers in the mesh.
+/// Waits for all peerings to establish before returning.
+///
+/// # Arguments
+/// * `servers` - Array of servers to mesh together
+///
+/// # Returns
+/// The same array of servers after meshing is complete
+///
+/// # Example
+/// ```
+/// let [s1, s2, s3] = mesh_servers([
+///     start_test_server(65001, ...).await,
+///     start_test_server(65002, ...).await,
+///     start_test_server(65003, ...).await,
+/// ]).await;
+/// // All three servers are now connected to each other
+/// ```
+pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [TestServer; N] {
+    // Create full mesh: each server connects to all others with higher index
+    // This avoids duplicate connections while creating a full mesh
+    for i in 0..servers.len() {
+        for j in (i + 1)..servers.len() {
+            let peer_port = servers[j].bgp_port;
+            let peer_address = servers[j].address.clone();
+
+            servers[i]
+                .client
+                .add_peer(format!("{}:{}", peer_address, peer_port))
+                .await
+                .expect(&format!("Failed to add peer {} to server {}", j, i));
+        }
+    }
+
+    // Build expected peer states for verification
+    // Each server should have N-1 peers (all other servers)
+    poll_until(
+        || async {
+            for (i, server) in servers.iter().enumerate() {
+                let mut expected_peers = Vec::new();
+
+                // Add all other servers as expected peers
+                for (j, other_server) in servers.iter().enumerate() {
+                    if i != j {
+                        expected_peers.push(other_server.to_peer(BgpState::Established));
+                    }
+                }
+
+                if !verify_peers(server, expected_peers).await {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for mesh topology to establish",
     )
     .await;
 
