@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::{ExportPolicyChain, ImportPolicyChain};
+use crate::policy::Policy;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -90,16 +90,16 @@ pub struct PeerInfo {
     pub asn: Option<u16>,
     pub state: BgpState,
     pub peer_tx: mpsc::UnboundedSender<PeerOp>,
-    pub import_policy: Option<ImportPolicyChain>,
-    pub export_policy: Option<ExportPolicyChain>,
+    pub import_policy: Option<Policy>,
+    pub export_policy: Option<Policy>,
 }
 
 impl PeerInfo {
-    pub fn policy_in(&self) -> Option<&ImportPolicyChain> {
+    pub fn policy_in(&self) -> Option<&Policy> {
         self.import_policy.as_ref()
     }
 
-    pub fn policy_out(&self) -> Option<&ExportPolicyChain> {
+    pub fn policy_out(&self) -> Option<&Policy> {
         self.export_policy.as_ref()
     }
 }
@@ -271,8 +271,8 @@ impl BgpServer {
                 // Update peer ASN and initialize policies in the HashMap
                 if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
                     peer_info.asn = Some(asn);
-                    peer_info.import_policy = Some(ImportPolicyChain::new(self.config.asn));
-                    peer_info.export_policy = Some(ExportPolicyChain::new(self.config.asn, asn));
+                    peer_info.import_policy = Some(Policy::default_in(self.config.asn));
+                    peer_info.export_policy = Some(Policy::default_out(self.config.asn, asn));
                     info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }

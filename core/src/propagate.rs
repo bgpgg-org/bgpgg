@@ -18,7 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMes
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::BgpState;
 use crate::peer::PeerOp;
-use crate::policy::ExportPolicyChain;
+use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
 use crate::{error, info};
 use std::collections::HashMap;
@@ -219,7 +219,7 @@ pub fn send_announcements_to_peer(
     local_asn: u16,
     peer_asn: u16,
     local_router_id: Ipv4Addr,
-    export_policy: &ExportPolicyChain,
+    export_policy: &Policy,
 ) {
     if to_announce.is_empty() {
         return;
@@ -228,8 +228,14 @@ pub fn send_announcements_to_peer(
     // Apply export policy per-prefix BEFORE batching
     let filtered: Vec<(IpNetwork, Path)> = to_announce
         .iter()
-        .filter(|(prefix, path)| export_policy.accept(prefix, path))
-        .cloned()
+        .filter_map(|(prefix, path)| {
+            let mut path_mut = path.clone();
+            if export_policy.accept(prefix, &mut path_mut) {
+                Some((*prefix, path_mut))
+            } else {
+                None
+            }
+        })
         .collect();
 
     if filtered.is_empty() {
