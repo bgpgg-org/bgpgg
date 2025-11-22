@@ -74,39 +74,22 @@ impl ImportPolicy for DefaultLocalPref {
 /// Prevent AS loops by rejecting routes with our ASN in the AS_PATH
 ///
 /// RFC 4271 Section 9.1.2.1: AS loop detection
-/// - eBGP: Local AS should not appear in AS_PATH at all
-/// - iBGP: Local AS can appear once (normal), but more than once indicates a loop
+/// If the local AS appears in the AS_PATH, reject the route (loop detected)
 #[derive(Debug, Clone)]
 pub struct AsLoopPrevention;
 
 impl ImportPolicy for AsLoopPrevention {
     fn accept(&self, path: &mut Path, context: &PolicyContext) -> bool {
-        // Count occurrences of local ASN in AS_PATH (across all segments)
-        let local_asn_count = path
+        // Check if local ASN appears in AS_PATH (across all segments)
+        let has_local_asn = path
             .as_path
             .iter()
             .flat_map(|segment| segment.asn_list.iter())
-            .filter(|&&asn| asn == context.local_asn)
-            .count();
+            .any(|&asn| asn == context.local_asn);
 
-        match &path.source {
-            crate::rib::RouteSource::Ebgp(_) => {
-                // eBGP: local AS should not appear in AS_PATH at all
-                if local_asn_count > 0 {
-                    debug!("rejecting eBGP route due to AS loop", "local_asn" => context.local_asn);
-                    return false;
-                }
-            }
-            crate::rib::RouteSource::Ibgp(_) => {
-                // iBGP: local AS can appear once (normal), but more than once is a loop
-                if local_asn_count > 1 {
-                    debug!("rejecting iBGP route due to AS loop", "local_asn" => context.local_asn, "count" => local_asn_count);
-                    return false;
-                }
-            }
-            crate::rib::RouteSource::Local => {
-                // Local routes are trusted
-            }
+        if has_local_asn {
+            debug!("rejecting route due to AS loop", "local_asn" => context.local_asn);
+            return false;
         }
 
         true
