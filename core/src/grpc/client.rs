@@ -120,6 +120,7 @@ impl BgpClient {
         next_hop: String,
         origin: i32,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
@@ -128,6 +129,7 @@ impl BgpClient {
                 next_hop,
                 origin,
                 as_path,
+                local_pref,
             })
             .await?
             .into_inner();

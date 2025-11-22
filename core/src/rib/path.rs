@@ -35,13 +35,14 @@ impl Path {
         as_path: Vec<AsPathSegment>,
         next_hop: Ipv4Addr,
         source: RouteSource,
+        local_pref: Option<u32>,
     ) -> Self {
         Path {
             origin,
             as_path,
             next_hop,
             source,
-            local_pref: None,
+            local_pref,
             med: None,
         }
     }

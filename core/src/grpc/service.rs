@@ -270,6 +270,7 @@ impl BgpService for BgpGrpcService {
             next_hop,
             origin,
             as_path,
+            local_pref: req.local_pref,
             response: tx,
         };
 

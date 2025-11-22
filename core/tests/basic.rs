@@ -29,7 +29,7 @@ async fn test_announce_withdraw() {
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![],
+            vec![], None,
         )
         .await
         .expect("Failed to announce route");
@@ -49,6 +49,7 @@ async fn test_announce_withdraw() {
                 "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                 peer_addr.clone(),
                 Origin::Igp,
+                Some(100),
             )],
         }],
     )])
@@ -78,7 +79,7 @@ async fn test_announce_withdraw_mesh() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![],
+            vec![], None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -95,6 +96,7 @@ async fn test_announce_withdraw_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -107,6 +109,7 @@ async fn test_announce_withdraw_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -165,7 +168,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![],
+            vec![], None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -182,6 +185,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -194,6 +198,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -206,6 +211,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -318,7 +324,7 @@ async fn test_ibgp_split_horizon() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![],
+            vec![], None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -336,6 +342,7 @@ async fn test_ibgp_split_horizon() {
                     "192.168.1.1", // iBGP: NEXT_HOP preserved
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
                 )],
             }],
         ),
@@ -395,7 +402,7 @@ async fn test_as_loop_prevention() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![],
+            vec![], None,
         )
         .await
         .expect("Failed to announce route from server 1_A");
@@ -413,6 +420,7 @@ async fn test_as_loop_prevention() {
                 "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1_a's router ID
                 server1_a.address.clone(),
                 Origin::Igp,
+                Some(100),
             )],
         }],
     )])

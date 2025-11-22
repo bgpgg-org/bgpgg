@@ -44,6 +44,7 @@ pub enum MgmtOp {
         next_hop: Ipv4Addr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
@@ -225,9 +226,10 @@ impl BgpServer {
                 next_hop,
                 origin,
                 as_path,
+                local_pref,
                 response,
             } => {
-                self.handle_add_route(prefix, next_hop, origin, as_path, response)
+                self.handle_add_route(prefix, next_hop, origin, as_path, local_pref, response)
                     .await;
             }
             MgmtOp::RemoveRoute { prefix, response } => {
@@ -399,13 +401,14 @@ impl BgpServer {
         next_hop: Ipv4Addr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
         self.loc_rib
-            .add_local_route(prefix, next_hop, origin, as_path);
+            .add_local_route(prefix, next_hop, origin, as_path, local_pref);
 
         // Propagate to all peers using the common propagation logic
         self.propagate_routes(vec![prefix], None).await;

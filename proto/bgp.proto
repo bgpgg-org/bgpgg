@@ -87,6 +87,7 @@ message AddRouteRequest {
     string next_hop = 2;    // IPv4 address (e.g., "192.168.1.1")
     Origin origin = 3;      // Route origin
     repeated AsPathSegment as_path = 4; // Optional AS_PATH (empty = locally originated)
+    optional uint32 local_pref = 5;     // Optional LOCAL_PREF (defaults to 100)
 }
 
 message AddRouteResponse {

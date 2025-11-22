@@ -88,13 +88,14 @@ pub fn build_path(
     next_hop: &str,
     peer_address: String,
     origin: Origin,
+    local_pref: Option<u32>,
 ) -> Path {
     Path {
         origin: origin.into(),
         as_path,
         next_hop: next_hop.to_string(),
         peer_address,
-        local_pref: Some(100),
+        local_pref,
         med: None,
     }
 }

@@ -378,8 +378,9 @@ impl UpdateMessage {
         as_path_segments: Vec<AsPathSegment>,
         next_hop: Ipv4Addr,
         nlri_list: Vec<IpNetwork>,
+        local_pref: Option<u32>,
     ) -> Self {
-        let path_attributes = vec![
+        let mut path_attributes = vec![
             PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::Origin(origin),
@@ -395,6 +396,13 @@ impl UpdateMessage {
                 value: PathAttrValue::NextHop(NextHopAddr::Ipv4(next_hop)),
             },
         ];
+
+        if let Some(pref) = local_pref {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::LocalPref(pref),
+            });
+        }
 
         let path_attributes_bytes = write_path_attributes(&path_attributes);
 
@@ -454,6 +462,16 @@ impl UpdateMessage {
                     NextHopAddr::Ipv4(addr) => Some(*addr),
                     NextHopAddr::Ipv6(_) => None, // For now, only support IPv4
                 }
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_local_pref(&self) -> Option<u32> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::LocalPref(pref) = attr.value {
+                Some(pref)
             } else {
                 None
             }
@@ -1143,5 +1161,26 @@ mod tests {
 
         // No NLRI
         assert_eq!(body.len(), 8);
+    }
+
+    #[test]
+    fn test_get_local_pref() {
+        let msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            Some(200),
+        );
+        assert_eq!(msg.get_local_pref(), Some(200));
+
+        let msg_no_pref = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+        );
+        assert_eq!(msg_no_pref.get_local_pref(), None);
     }
 }

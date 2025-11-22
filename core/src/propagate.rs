@@ -115,6 +115,19 @@ pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<A
     }
 }
 
+/// Determine LOCAL_PREF to include in UPDATE message
+/// RFC 4271 Section 5.1.5:
+/// - iBGP: LOCAL_PREF SHALL be included
+/// - eBGP: LOCAL_PREF MUST NOT be included
+pub fn build_export_local_pref(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u32> {
+    let is_ibgp = local_asn == peer_asn;
+    if is_ibgp {
+        path.local_pref
+    } else {
+        None
+    }
+}
+
 /// Send withdrawal messages to a peer
 pub fn send_withdrawals_to_peer(
     peer_addr: &str,
@@ -206,12 +219,15 @@ pub fn send_announcements_to_peer(
         let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
+        let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
+        info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref));
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
             as_path_segments,
             next_hop,
             batch.prefixes,
+            local_pref,
         );
 
         if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
@@ -520,5 +536,23 @@ mod tests {
             build_export_next_hop(&local_explicit, router_id, local_asn, peer_asn_ebgp),
             router_id
         );
+    }
+
+    #[test]
+    fn test_build_export_local_pref() {
+        let path = Path {
+            origin: Origin::IGP,
+            as_path: vec![],
+            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            source: RouteSource::Local,
+            local_pref: Some(200),
+            med: None,
+        };
+
+        // iBGP: include LOCAL_PREF
+        assert_eq!(build_export_local_pref(&path, 65001, 65001), Some(200));
+
+        // eBGP: MUST NOT include LOCAL_PREF
+        assert_eq!(build_export_local_pref(&path, 65001, 65002), None);
     }
 }
