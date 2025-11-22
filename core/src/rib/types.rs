@@ -45,6 +45,11 @@ impl RouteSource {
     pub fn is_ebgp(&self) -> bool {
         matches!(self, RouteSource::Ebgp(_))
     }
+
+    /// Check if this route was originated locally
+    pub fn is_local(&self) -> bool {
+        matches!(self, RouteSource::Local)
+    }
 }
 
 /// Represents a route with one or more paths to a prefix
@@ -82,5 +87,12 @@ mod tests {
         assert!(RouteSource::Ebgp("10.0.0.1".to_string()).is_ebgp());
         assert!(!RouteSource::Ibgp("10.0.0.2".to_string()).is_ebgp());
         assert!(!RouteSource::Local.is_ebgp());
+    }
+
+    #[test]
+    fn test_is_local() {
+        assert!(RouteSource::Local.is_local());
+        assert!(!RouteSource::Ebgp("10.0.0.1".to_string()).is_local());
+        assert!(!RouteSource::Ibgp("10.0.0.2".to_string()).is_local());
     }
 }

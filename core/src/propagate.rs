@@ -18,7 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMes
 use crate::bgp::utils::IpNetwork;
 use crate::fsm::BgpState;
 use crate::peer::PeerOp;
-use crate::policy::{ExportPolicyChain, PolicyContext};
+use crate::policy::ExportPolicyChain;
 use crate::rib::{Path, RouteSource};
 use crate::{error, info};
 use std::collections::HashMap;
@@ -202,7 +202,7 @@ fn build_export_next_hop(
         local_router_id
     } else {
         // iBGP: only rewrite locally-originated routes with unspecified NEXT_HOP
-        if path.is_local() && path.next_hop.is_unspecified() {
+        if path.source.is_local() && path.next_hop.is_unspecified() {
             local_router_id
         } else {
             path.next_hop
@@ -225,13 +225,12 @@ pub fn send_announcements_to_peer(
         return;
     }
 
-    let export_context = PolicyContext::new(peer_asn, local_asn);
     let batches = batch_announcements_by_path(to_announce);
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
         // Evaluate export policy
-        if !export_policy.accept(&batch.path, &export_context) {
+        if !export_policy.accept(&batch.path) {
             continue;
         }
         let prefix_count = batch.prefixes.len();

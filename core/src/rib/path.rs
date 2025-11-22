@@ -48,11 +48,6 @@ impl Path {
         }
     }
 
-    /// Check if this path is locally originated
-    pub fn is_local(&self) -> bool {
-        self.source == RouteSource::Local
-    }
-
     /// Calculate AS_PATH length for best path selection per RFC 4271
     /// AS_SEQUENCE counts each ASN, AS_SET counts as 1 regardless of size
     fn as_path_length(&self) -> usize {
@@ -278,19 +273,5 @@ mod tests {
 
         // Lower peer address should win
         assert!(path1 > path2);
-    }
-
-    #[test]
-    fn test_is_local() {
-        let mut path = make_base_path();
-
-        path.source = RouteSource::Local;
-        assert!(path.is_local());
-
-        path.source = RouteSource::Ebgp("10.0.0.1".to_string());
-        assert!(!path.is_local());
-
-        path.source = RouteSource::Ibgp("10.0.0.2".to_string());
-        assert!(!path.is_local());
     }
 }
