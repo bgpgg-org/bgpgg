@@ -36,6 +36,7 @@ impl Path {
         next_hop: Ipv4Addr,
         source: RouteSource,
         local_pref: Option<u32>,
+        med: Option<u32>,
     ) -> Self {
         Path {
             origin,
@@ -43,7 +44,7 @@ impl Path {
             next_hop,
             source,
             local_pref,
-            med: None,
+            med,
         }
     }
 

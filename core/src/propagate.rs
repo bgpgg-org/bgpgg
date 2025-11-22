@@ -128,6 +128,24 @@ pub fn build_export_local_pref(path: &Path, local_asn: u16, peer_asn: u16) -> Op
     }
 }
 
+/// Determine MULTI_EXIT_DISC (MED) to include in UPDATE message
+/// RFC 4271 Section 5.1.4:
+/// - iBGP: MED MAY be propagated to other BGP speakers within the same AS
+/// - eBGP: MED MUST NOT be propagated to other neighboring ASes
+pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u32> {
+    let is_ibgp = local_asn == peer_asn;
+    if is_ibgp {
+        // Propagate MED over iBGP
+        path.med
+    } else if path.source.is_ebgp() {
+        // Strip MED when re-advertising to eBGP a route learned from eBGP
+        None
+    } else {
+        // Send MED when route is local or from iBGP
+        path.med
+    }
+}
+
 /// Send withdrawal messages to a peer
 pub fn send_withdrawals_to_peer(
     peer_addr: &str,
@@ -220,7 +238,8 @@ pub fn send_announcements_to_peer(
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
         let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
-        info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref));
+        let med = build_export_med(&batch.path, local_asn, peer_asn);
+        info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
@@ -228,6 +247,7 @@ pub fn send_announcements_to_peer(
             next_hop,
             batch.prefixes,
             local_pref,
+            med,
         );
 
         if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
@@ -554,5 +574,37 @@ mod tests {
 
         // eBGP: MUST NOT include LOCAL_PREF
         assert_eq!(build_export_local_pref(&path, 65001, 65002), None);
+    }
+
+    #[test]
+    fn test_build_export_med() {
+        // Route from eBGP with MED
+        let ebgp_path = Path {
+            origin: Origin::IGP,
+            as_path: vec![],
+            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            source: RouteSource::Ebgp("10.0.0.1".to_string()),
+            local_pref: Some(100),
+            med: Some(50),
+        };
+
+        // iBGP: propagate MED
+        assert_eq!(build_export_med(&ebgp_path, 65001, 65001), Some(50));
+
+        // eBGP: strip MED (route from eBGP must not be sent to other AS)
+        assert_eq!(build_export_med(&ebgp_path, 65001, 65002), None);
+
+        // Local route with MED
+        let local_path = Path {
+            origin: Origin::IGP,
+            as_path: vec![],
+            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            source: RouteSource::Local,
+            local_pref: Some(100),
+            med: Some(50),
+        };
+
+        // eBGP: send MED for local route
+        assert_eq!(build_export_med(&local_path, 65001, 65002), Some(50));
     }
 }

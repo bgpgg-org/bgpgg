@@ -80,6 +80,7 @@ async fn test_origin_preservation() {
                 origin.into(),
                 vec![],
                 None,
+                None,
             )
             .await
             .expect("Failed to announce route");
@@ -98,6 +99,7 @@ async fn test_origin_preservation() {
                         peer_address.clone(),
                         *origin,
                         Some(100),
+                        None,
                     )],
                 })
                 .collect()
@@ -176,6 +178,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             0,
             vec![],
             None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -196,6 +199,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -209,6 +213,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -222,6 +227,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     server3.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -272,6 +278,7 @@ async fn test_originating_speaker_as_path() {
             0,
             vec![],
             None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -291,6 +298,7 @@ async fn test_originating_speaker_as_path() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -304,6 +312,7 @@ async fn test_originating_speaker_as_path() {
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -351,6 +360,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 as_sequence(vec![65005]),   // AS_SEQUENCE after
             ],
             None,
+            None,
         )
         .await
         .expect("Failed to add route from server 1");
@@ -372,6 +382,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100),
+                None,
             )],
         }],
     )])
@@ -422,6 +433,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
             0,
             vec![],
             None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -438,6 +450,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100),
+                None,
             )],
         }],
     )])
@@ -491,6 +504,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
             0,
             vec![],
             None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -509,6 +523,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -522,6 +537,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -577,6 +593,7 @@ async fn test_local_pref_send_to_ibgp() {
             0,
             vec![],
             None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -595,6 +612,7 @@ async fn test_local_pref_send_to_ibgp() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF set by DefaultLocalPref policy
+                    None,
                 )],
             }],
         ),
@@ -608,6 +626,7 @@ async fn test_local_pref_send_to_ibgp() {
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF preserved from S2's UPDATE (proves it was included)
+                    None,
                 )],
             }],
         ),
@@ -666,6 +685,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
             0,
             vec![],
             Some(200), // Explicitly set LOCAL_PREF to 200
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -676,11 +696,12 @@ async fn test_local_pref_not_sent_to_ebgp() {
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
-                vec![],          // iBGP: empty AS_PATH
-                "192.168.1.1",   // iBGP: NEXT_HOP preserved
+                vec![],        // iBGP: empty AS_PATH
+                "192.168.1.1", // iBGP: NEXT_HOP preserved
                 server1.address.clone(),
                 Origin::Igp,
-                Some(200), // LOCAL_PREF=200 preserved via iBGP
+                Some(200),
+                None, // LOCAL_PREF=200 preserved via iBGP
             )],
         }],
     )])
@@ -698,6 +719,185 @@ async fn test_local_pref_not_sent_to_ebgp() {
                 server2.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF=100 (set by policy, NOT 200 from S2!)
+                None,
+            )],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_med_propagation_over_ibgp() {
+    // RFC 4271 Section 5.1.4: MULTI_EXIT_DISC handling
+    //
+    // "If received over EBGP, the MULTI_EXIT_DISC attribute MAY be propagated
+    //  over IBGP to other BGP speakers within the same AS."
+    //
+    // Topology: S1(AS65000) -> S2(AS65001) -> S3(AS65001)
+    //                          eBGP           iBGP
+    //
+    // Verify MED is propagated through iBGP:
+    // - S1 originates route with MED=50 (external AS)
+    // - S2 receives via eBGP with MED=50
+    // - S3 receives via iBGP with MED=50 (proves it was propagated)
+    let [server1, server2, server3] = &mut chain_servers([
+        start_test_server(
+            65000,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(3, 3, 3, 3),
+            None,
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    // S1 originates a route with MED=50
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+            None,
+            Some(50), // Set MED=50
+        )
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Verify:
+    // S2 (eBGP): receives route with MED=50
+    // S3 (iBGP): receives route with MED=50 (proves MED was propagated over iBGP)
+    poll_route_propagation(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(
+                    vec![as_sequence(vec![65000])],
+                    "1.1.1.1",
+                    server1.address.clone(),
+                    Origin::Igp,
+                    Some(100), // LOCAL_PREF set by DefaultLocalPref policy
+                    Some(50),  // MED=50 received from S1
+                )],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(
+                    vec![as_sequence(vec![65000])], // iBGP preserves AS_PATH
+                    "1.1.1.1",                      // iBGP preserves NEXT_HOP
+                    server2.address.clone(),
+                    Origin::Igp,
+                    Some(100), // LOCAL_PREF preserved from S2
+                    Some(50),  // MED=50 propagated over iBGP (proves propagation)
+                )],
+            }],
+        ),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn test_med_not_propagated_to_other_as() {
+    // RFC 4271 Section 5.1.4: MULTI_EXIT_DISC must not cross AS boundaries
+    //
+    // "The MULTI_EXIT_DISC attribute received from a neighboring AS MUST NOT
+    //  be propagated to other neighboring ASes."
+    //
+    // Topology: S1(AS65000) -> S2(AS65001) -> S3(AS65002)
+    //                          eBGP           eBGP
+    //
+    // Verify MED is NOT propagated to other neighboring ASes:
+    // - S1 originates route with MED=50
+    // - S2 receives via eBGP with MED=50
+    // - S3 receives via eBGP with MED=None (MED was NOT propagated to different AS)
+    let [server1, server2, server3] = &mut chain_servers([
+        start_test_server(
+            65000,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            "127.0.0.1",
+        )
+        .await,
+        start_test_server(
+            65001,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            None,
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65002,
+            std::net::Ipv4Addr::new(3, 3, 3, 3),
+            None,
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    // S1 originates a route with MED=50
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            0,
+            vec![],
+            None,
+            Some(50), // Set MED=50
+        )
+        .await
+        .expect("Failed to announce route from server 1");
+
+    // Verify S2 first (eBGP): receives route with MED=50
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![as_sequence(vec![65000])],
+                "1.1.1.1",
+                server1.address.clone(),
+                Origin::Igp,
+                Some(100), // LOCAL_PREF set by policy
+                Some(50),  // MED=50 received from S1
+            )],
+        }],
+    )])
+    .await;
+
+    // Verify S3 (eBGP to different AS): receives route with MED=None
+    // This proves MED was NOT propagated to other neighboring AS (AS65002)
+    poll_route_propagation(&[(
+        &server3,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![as_sequence(vec![65001, 65000])], // eBGP: S2 prepended AS65001
+                "2.2.2.2",                             // eBGP: NEXT_HOP rewritten
+                server2.address.clone(),
+                Origin::Igp,
+                Some(100), // LOCAL_PREF set by policy
+                None,      // MED=None (NOT 50 from S1 - proves MED not propagated to other AS)
             )],
         }],
     )])

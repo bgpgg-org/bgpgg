@@ -29,7 +29,9 @@ async fn test_announce_withdraw() {
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .expect("Failed to announce route");
@@ -50,6 +52,7 @@ async fn test_announce_withdraw() {
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
+                None,
             )],
         }],
     )])
@@ -79,7 +82,9 @@ async fn test_announce_withdraw_mesh() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -97,6 +102,7 @@ async fn test_announce_withdraw_mesh() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -110,6 +116,7 @@ async fn test_announce_withdraw_mesh() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -168,7 +175,9 @@ async fn test_announce_withdraw_four_node_mesh() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -186,6 +195,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -199,6 +209,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -212,6 +223,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -324,7 +336,9 @@ async fn test_ibgp_split_horizon() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -343,6 +357,7 @@ async fn test_ibgp_split_horizon() {
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
+                    None,
                 )],
             }],
         ),
@@ -371,20 +386,8 @@ async fn test_as_loop_prevention() {
     // Test that when AS1_A announces a route, it propagates to AS2,
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
     let [mut server1_a, server2, server1_b] = chain_servers([
-        start_test_server(
-            65001,
-            Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
-        .await,
-        start_test_server(
-            65002,
-            Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
-        .await,
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await,
+        start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), None, "127.0.0.2").await,
         start_test_server(
             65001, // Same AS as server1_a
             Ipv4Addr::new(3, 3, 3, 3),
@@ -402,7 +405,9 @@ async fn test_as_loop_prevention() {
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .expect("Failed to announce route from server 1_A");
@@ -421,6 +426,7 @@ async fn test_as_loop_prevention() {
                 server1_a.address.clone(),
                 Origin::Igp,
                 Some(100),
+                None,
             )],
         }],
     )])

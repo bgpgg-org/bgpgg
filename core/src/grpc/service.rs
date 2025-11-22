@@ -271,6 +271,7 @@ impl BgpService for BgpGrpcService {
             origin,
             as_path,
             local_pref: req.local_pref,
+            med: req.med,
             response: tx,
         };
 

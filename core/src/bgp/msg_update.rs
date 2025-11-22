@@ -20,7 +20,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
-    const _OPTIONAL: u8 = 1 << 7; // RFC 4271 - kept for completeness
+    const OPTIONAL: u8 = 1 << 7;
     const TRANSITIVE: u8 = 1 << 6;
     const _PARTIAL: u8 = 1 << 5; // RFC 4271 - kept for completeness
     const EXTENDED_LENGTH: u8 = 1 << 4;
@@ -379,6 +379,7 @@ impl UpdateMessage {
         next_hop: Ipv4Addr,
         nlri_list: Vec<IpNetwork>,
         local_pref: Option<u32>,
+        med: Option<u32>,
     ) -> Self {
         let mut path_attributes = vec![
             PathAttribute {
@@ -401,6 +402,13 @@ impl UpdateMessage {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::LocalPref(pref),
+            });
+        }
+
+        if let Some(metric) = med {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                value: PathAttrValue::MultiExtiDisc(metric),
             });
         }
 
@@ -472,6 +480,16 @@ impl UpdateMessage {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::LocalPref(pref) = attr.value {
                 Some(pref)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_med(&self) -> Option<u32> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::MultiExtiDisc(med) = attr.value {
+                Some(med)
             } else {
                 None
             }
@@ -692,7 +710,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc() {
         let input: &[u8] = &[
-            PathAttrFlag::_OPTIONAL,       // Attribute flags
+            PathAttrFlag::OPTIONAL,        // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x04,                          // Attribute length
             // Attribute value
@@ -706,7 +724,7 @@ mod tests {
         assert_eq!(
             as_path,
             PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::_OPTIONAL),
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::MultiExtiDisc(65537),
             }
         );
@@ -716,7 +734,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_multi_exit_disc_invalid_length() {
         let input: &[u8] = &[
-            PathAttrFlag::_OPTIONAL,       // Attribute flags
+            PathAttrFlag::OPTIONAL,        // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
             0x03,                          // Attribute length (invalid)
             // Attribute value
@@ -1171,6 +1189,7 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 1),
             vec![],
             Some(200),
+            None,
         );
         assert_eq!(msg.get_local_pref(), Some(200));
 
@@ -1180,7 +1199,31 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 1),
             vec![],
             None,
+            None,
         );
         assert_eq!(msg_no_pref.get_local_pref(), None);
+    }
+
+    #[test]
+    fn test_get_med() {
+        let msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            Some(50),
+        );
+        assert_eq!(msg.get_med(), Some(50));
+
+        let msg_no_med = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+        );
+        assert_eq!(msg_no_med.get_med(), None);
     }
 }

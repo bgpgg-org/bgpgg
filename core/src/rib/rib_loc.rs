@@ -161,6 +161,7 @@ impl LocRib {
         origin: crate::bgp::msg_update::Origin,
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
+        med: Option<u32>,
     ) {
         // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
         // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
@@ -172,7 +173,7 @@ impl LocRib {
             next_hop,
             source: RouteSource::Local,
             local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
-            med: None,
+            med,
         };
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
@@ -412,6 +413,7 @@ mod tests {
             crate::bgp::msg_update::Origin::IGP,
             vec![],
             None,
+            None,
         );
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
@@ -436,6 +438,7 @@ mod tests {
             crate::bgp::msg_update::Origin::IGP,
             vec![],
             Some(200), // Custom LOCAL_PREF
+            None,
         );
 
         let path = loc_rib.get_best_path(&prefix).unwrap();

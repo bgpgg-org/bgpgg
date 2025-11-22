@@ -152,7 +152,9 @@ async fn test_announce_withdraw_route() {
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
             0,
-            vec![], None,
+            vec![],
+            None,
+            None,
         )
         .await
         .unwrap();
