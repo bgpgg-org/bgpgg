@@ -28,10 +28,11 @@ async fn test_announce_withdraw() {
         .add_route(
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to announce route");
@@ -53,6 +54,7 @@ async fn test_announce_withdraw() {
                 Origin::Igp,
                 Some(100),
                 None,
+                false,
             )],
         }],
     )])
@@ -81,10 +83,11 @@ async fn test_announce_withdraw_mesh() {
         .add_route(
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -103,6 +106,7 @@ async fn test_announce_withdraw_mesh() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -117,6 +121,7 @@ async fn test_announce_withdraw_mesh() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -174,10 +179,11 @@ async fn test_announce_withdraw_four_node_mesh() {
         .add_route(
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -196,6 +202,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -210,6 +217,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -224,6 +232,7 @@ async fn test_announce_withdraw_four_node_mesh() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -335,10 +344,11 @@ async fn test_ibgp_split_horizon() {
         .add_route(
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -358,6 +368,7 @@ async fn test_ibgp_split_horizon() {
                     Origin::Igp,
                     Some(100),
                     None,
+                    false,
                 )],
             }],
         ),
@@ -404,10 +415,11 @@ async fn test_as_loop_prevention() {
         .add_route(
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 1_A");
@@ -427,6 +439,7 @@ async fn test_as_loop_prevention() {
                 Origin::Igp,
                 Some(100),
                 None,
+                false,
             )],
         }],
     )])

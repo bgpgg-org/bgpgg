@@ -162,6 +162,7 @@ impl LocRib {
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
         med: Option<u32>,
+        atomic_aggregate: bool,
     ) {
         // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
         // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
@@ -174,6 +175,7 @@ impl LocRib {
             source: RouteSource::Local,
             local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
             med,
+            atomic_aggregate,
         };
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
@@ -414,6 +416,7 @@ mod tests {
             vec![],
             None,
             None,
+            false,
         );
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
@@ -439,6 +442,7 @@ mod tests {
             vec![],
             Some(200), // Custom LOCAL_PREF
             None,
+            false,
         );
 
         let path = loc_rib.get_best_path(&prefix).unwrap();

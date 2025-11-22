@@ -89,6 +89,7 @@ message AddRouteRequest {
     repeated AsPathSegment as_path = 4; // Optional AS_PATH (empty = locally originated)
     optional uint32 local_pref = 5;     // Optional LOCAL_PREF (defaults to 100)
     optional uint32 med = 6;            // Optional MULTI_EXIT_DISC
+    bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
 }
 
 message AddRouteResponse {
@@ -146,4 +147,5 @@ message Path {
     string peer_address = 4;
     optional uint32 local_pref = 5;
     optional uint32 med = 6;
+    bool atomic_aggregate = 7;
 }

@@ -26,6 +26,7 @@ pub struct Path {
     pub source: RouteSource,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
+    pub atomic_aggregate: bool,
 }
 
 impl Path {
@@ -37,6 +38,7 @@ impl Path {
         source: RouteSource,
         local_pref: Option<u32>,
         med: Option<u32>,
+        atomic_aggregate: bool,
     ) -> Self {
         Path {
             origin,
@@ -45,6 +47,7 @@ impl Path {
             source,
             local_pref,
             med,
+            atomic_aggregate,
         }
     }
 
@@ -151,6 +154,7 @@ mod tests {
             source: RouteSource::Ebgp("10.0.0.1".to_string()),
             local_pref: Some(100),
             med: None,
+            atomic_aggregate: false,
         }
     }
 

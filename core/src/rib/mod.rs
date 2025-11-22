@@ -47,6 +47,7 @@ mod test_helpers {
             source: RouteSource::Ebgp(peer_ip),
             local_pref: Some(100),
             med: Some(0),
+            atomic_aggregate: false,
         }
     }
 

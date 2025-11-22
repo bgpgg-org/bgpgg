@@ -90,6 +90,7 @@ pub fn build_path(
     origin: Origin,
     local_pref: Option<u32>,
     med: Option<u32>,
+    atomic_aggregate: bool,
 ) -> Path {
     Path {
         origin: origin.into(),
@@ -98,6 +99,7 @@ pub fn build_path(
         peer_address,
         local_pref,
         med,
+        atomic_aggregate,
     }
 }
 

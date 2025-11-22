@@ -70,7 +70,9 @@ impl TryFrom<u8> for AttrType {
             5 => Ok(AttrType::LocalPref),
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
-            _ => Err(ParserError::ParseError(String::from("Invalid Origin"))),
+            _ => Err(ParserError::ParseError(String::from(
+                "Invalid attribute type",
+            ))),
         }
     }
 }
@@ -380,6 +382,7 @@ impl UpdateMessage {
         nlri_list: Vec<IpNetwork>,
         local_pref: Option<u32>,
         med: Option<u32>,
+        atomic_aggregate: bool,
     ) -> Self {
         let mut path_attributes = vec![
             PathAttribute {
@@ -409,6 +412,13 @@ impl UpdateMessage {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::MultiExtiDisc(metric),
+            });
+        }
+
+        if atomic_aggregate {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AtomicAggregate,
             });
         }
 
@@ -494,6 +504,12 @@ impl UpdateMessage {
                 None
             }
         })
+    }
+
+    pub fn get_atomic_aggregate(&self) -> bool {
+        self.path_attributes
+            .iter()
+            .any(|attr| attr.value == PathAttrValue::AtomicAggregate)
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
@@ -1190,6 +1206,7 @@ mod tests {
             vec![],
             Some(200),
             None,
+            false,
         );
         assert_eq!(msg.get_local_pref(), Some(200));
 
@@ -1200,6 +1217,7 @@ mod tests {
             vec![],
             None,
             None,
+            false,
         );
         assert_eq!(msg_no_pref.get_local_pref(), None);
     }
@@ -1213,6 +1231,7 @@ mod tests {
             vec![],
             None,
             Some(50),
+            false,
         );
         assert_eq!(msg.get_med(), Some(50));
 
@@ -1223,7 +1242,41 @@ mod tests {
             vec![],
             None,
             None,
+            false,
         );
         assert_eq!(msg_no_med.get_med(), None);
+    }
+
+    #[test]
+    fn test_update_message_new_encode_decode() {
+        let test_cases = vec![
+            (Origin::IGP, None, None, false),
+            (Origin::IGP, Some(200), None, false),
+            (Origin::INCOMPLETE, None, Some(50), false),
+            (Origin::IGP, None, None, true),
+            (Origin::EGP, Some(150), Some(100), true),
+        ];
+
+        for (origin, local_pref, med, atomic_aggregate) in test_cases {
+            let msg = UpdateMessage::new(
+                origin,
+                vec![],
+                Ipv4Addr::new(10, 0, 0, 1),
+                vec![],
+                local_pref,
+                med,
+                atomic_aggregate,
+            );
+
+            let bytes = msg.to_bytes();
+            let parsed = UpdateMessage::from_bytes(bytes).unwrap();
+
+            assert_eq!(parsed.get_origin(), Some(origin));
+            assert_eq!(parsed.get_as_path(), Some(vec![]));
+            assert_eq!(parsed.get_next_hop(), Some(Ipv4Addr::new(10, 0, 0, 1)));
+            assert_eq!(parsed.get_local_pref(), local_pref);
+            assert_eq!(parsed.get_med(), med);
+            assert_eq!(parsed.get_atomic_aggregate(), atomic_aggregate);
+        }
     }
 }

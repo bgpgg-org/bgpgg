@@ -272,6 +272,7 @@ impl BgpService for BgpGrpcService {
             as_path,
             local_pref: req.local_pref,
             med: req.med,
+            atomic_aggregate: req.atomic_aggregate,
             response: tx,
         };
 
@@ -411,6 +412,7 @@ impl BgpService for BgpGrpcService {
                         },
                         local_pref: path.local_pref,
                         med: path.med,
+                        atomic_aggregate: path.atomic_aggregate,
                     })
                     .collect();
 

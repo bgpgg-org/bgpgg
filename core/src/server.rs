@@ -46,6 +46,7 @@ pub enum MgmtOp {
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
         med: Option<u32>,
+        atomic_aggregate: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
@@ -238,10 +239,20 @@ impl BgpServer {
                 as_path,
                 local_pref,
                 med,
+                atomic_aggregate,
                 response,
             } => {
-                self.handle_add_route(prefix, next_hop, origin, as_path, local_pref, med, response)
-                    .await;
+                self.handle_add_route(
+                    prefix,
+                    next_hop,
+                    origin,
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    response,
+                )
+                .await;
             }
             MgmtOp::RemoveRoute { prefix, response } => {
                 self.handle_remove_route(prefix, response).await;
@@ -420,13 +431,21 @@ impl BgpServer {
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
         med: Option<u32>,
+        atomic_aggregate: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
-        self.loc_rib
-            .add_local_route(prefix, next_hop, origin, as_path, local_pref, med);
+        self.loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            origin,
+            as_path,
+            local_pref,
+            med,
+            atomic_aggregate,
+        );
 
         // Propagate to all peers using the common propagation logic
         self.propagate_routes(vec![prefix], None).await;

@@ -27,6 +27,7 @@ pub(crate) mod test_helpers {
             source,
             local_pref: None,
             med: None,
+            atomic_aggregate: false,
         }
     }
 

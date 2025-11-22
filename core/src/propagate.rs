@@ -167,11 +167,16 @@ pub fn send_withdrawals_to_peer(
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
 fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<AnnouncementBatch> {
-    let mut batches: HashMap<(Origin, Vec<AsPathSegment>, Ipv4Addr), AnnouncementBatch> =
+    let mut batches: HashMap<(Origin, Vec<AsPathSegment>, Ipv4Addr, bool), AnnouncementBatch> =
         HashMap::new();
 
     for (prefix, path) in to_announce {
-        let key = (path.origin, path.as_path.clone(), path.next_hop);
+        let key = (
+            path.origin,
+            path.as_path.clone(),
+            path.next_hop,
+            path.atomic_aggregate,
+        );
         let batch = batches.entry(key).or_insert_with(|| AnnouncementBatch {
             path: path.clone(),
             prefixes: Vec::new(),
@@ -251,6 +256,7 @@ pub fn send_announcements_to_peer(
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
         let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
         let med = build_export_med(&batch.path, local_asn, peer_asn);
+        let atomic_aggregate = batch.path.atomic_aggregate;
         info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
@@ -260,6 +266,7 @@ pub fn send_announcements_to_peer(
             batch.prefixes,
             local_pref,
             med,
+            atomic_aggregate,
         );
 
         if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
@@ -287,6 +294,7 @@ mod tests {
             source,
             local_pref: Some(100),
             med: None,
+            atomic_aggregate: false,
         }
     }
 
@@ -579,6 +587,7 @@ mod tests {
             source: RouteSource::Local,
             local_pref: Some(200),
             med: None,
+            atomic_aggregate: false,
         };
 
         // iBGP: include LOCAL_PREF
@@ -598,6 +607,7 @@ mod tests {
             source: RouteSource::Ebgp("10.0.0.1".to_string()),
             local_pref: Some(100),
             med: Some(50),
+            atomic_aggregate: false,
         };
 
         // iBGP: propagate MED
@@ -614,6 +624,7 @@ mod tests {
             source: RouteSource::Local,
             local_pref: Some(100),
             med: Some(50),
+            atomic_aggregate: false,
         };
 
         // eBGP: send MED for local route
