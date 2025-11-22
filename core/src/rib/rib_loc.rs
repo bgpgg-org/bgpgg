@@ -91,7 +91,7 @@ impl LocRib {
         import_policy: F,
     ) -> Vec<IpNetwork>
     where
-        F: Fn(&mut Path) -> bool,
+        F: Fn(&IpNetwork, &mut Path) -> bool,
     {
         let mut changed_prefixes = Vec::new();
 
@@ -106,7 +106,7 @@ impl LocRib {
 
         // Process announcements - apply import policy and add to Loc-RIB
         for (prefix, mut path) in announced {
-            if import_policy(&mut path) {
+            if import_policy(&prefix, &mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
                 self.add_route(prefix, path);
                 changed_prefixes.push(prefix);

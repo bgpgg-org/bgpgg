@@ -225,14 +225,21 @@ pub fn send_announcements_to_peer(
         return;
     }
 
-    let batches = batch_announcements_by_path(to_announce);
+    // Apply export policy per-prefix BEFORE batching
+    let filtered: Vec<(IpNetwork, Path)> = to_announce
+        .iter()
+        .filter(|(prefix, path)| export_policy.accept(prefix, path))
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() {
+        return;
+    }
+
+    let batches = batch_announcements_by_path(&filtered);
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
-        // Evaluate export policy
-        if !export_policy.accept(&batch.path) {
-            continue;
-        }
         let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);

@@ -288,7 +288,7 @@ impl BgpServer {
                         peer_ip.clone(),
                         withdrawn,
                         announced,
-                        |path| policy.accept(path),
+                        |prefix, path| policy.accept(prefix, path),
                     );
                     info!("UPDATE processing complete", "peer_ip" => &peer_ip);
 
