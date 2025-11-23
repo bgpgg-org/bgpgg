@@ -125,6 +125,43 @@ impl AttrType {
     }
 }
 
+/// Parse attribute type and handle unrecognized attributes per RFC 4271 Section 6.3.
+fn parse_attr_type(
+    bytes: &[u8],
+    flags: u8,
+    attr_type_code: u8,
+    attr_len: u16,
+) -> Result<AttrType, ParserError> {
+    match AttrType::try_from(attr_type_code) {
+        Ok(attr_type) => Ok(attr_type),
+        Err(_) => {
+            // Unrecognized well-known attribute (OPTIONAL=0)
+            // RFC 4271 Section 6.3: return error with full attribute data
+            if flags & PathAttrFlag::OPTIONAL == 0 {
+                let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
+                let header_len = if extended_len { 4 } else { 3 };
+                let total_attr_len = header_len + attr_len as usize;
+                let attr_data = bytes[..total_attr_len.min(bytes.len())].to_vec();
+
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(
+                        UpdateMessageError::UnrecognizedWellKnownAttribute,
+                    ),
+                    data: attr_data,
+                });
+            } else {
+                // RFC 4271 Section 6.3: optional non-transitive -> ignore,
+                // optional transitive -> set Partial bit and retain
+                // TODO: Implement optional transitive handling
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+                    data: Vec::new(),
+                });
+            }
+        }
+    }
+}
+
 fn validate_attribute_flags(
     flags: u8,
     attr_type: &AttrType,
@@ -328,14 +365,16 @@ fn validate_attribute_length(
 
 fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
-    let attr_type = AttrType::try_from(bytes[1])?;
+    let attr_type_code = bytes[1];
 
     let attr_len = match attribute_flag.extended_len() {
         true => u16::from_be_bytes([bytes[2], bytes[3]]),
         false => bytes[2] as u16,
     };
 
-    validate_attribute_flags(bytes[0], &attr_type, bytes[1], attr_len)?;
+    let attr_type = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
+
+    validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
 
     let mut offset = if attribute_flag.extended_len() { 4 } else { 3 };
 
@@ -1926,5 +1965,32 @@ mod tests {
 
         let result = UpdateMessage::from_bytes(input);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unrecognized_well_known_attribute() {
+        // Well-known attribute (OPTIONAL=0) with unrecognized type code 8
+        let flags = PathAttrFlag::TRANSITIVE;
+        let attr_type = 8u8;
+        let attr_len = 2u8;
+        let attr_value = vec![0xaa, 0xbb];
+
+        let mut input = vec![flags, attr_type, attr_len];
+        input.extend_from_slice(&attr_value);
+
+        let result = read_path_attribute(&input);
+
+        match result {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(
+                        UpdateMessageError::UnrecognizedWellKnownAttribute
+                    )
+                );
+                assert_eq!(data, input);
+            }
+            _ => panic!("Expected UnrecognizedWellKnownAttribute error"),
+        }
     }
 }
