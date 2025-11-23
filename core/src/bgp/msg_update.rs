@@ -219,6 +219,8 @@ impl TryFrom<u8> for AsPathSegmentType {
 #[derive(Debug, PartialEq)]
 enum NextHopAddr {
     Ipv4(Ipv4Addr),
+    // TODO: support IPv6
+    #[allow(dead_code)]
     Ipv6(Ipv6Addr),
 }
 
