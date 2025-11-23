@@ -17,15 +17,72 @@
 mod common;
 pub use common::*;
 
-use bgpgg::bgp::msg::Message;
+use bgpgg::bgp::msg::{Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_notification::{
     BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
 };
 use bgpgg::bgp::msg_open::OpenMessage;
-use bgpgg::bgp::msg_update::UpdateMessage;
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use std::net::Ipv4Addr;
+
+// Helper to build raw attribute bytes with intentionally wrong length
+fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![flags, attr_type, length];
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+// Internal helper that both functions use
+fn build_update_internal(
+    withdrawn: &[u8],
+    attrs: &[&[u8]],
+    nlri: &[u8],
+    total_attr_len_override: Option<u16>,
+) -> Vec<u8> {
+    let mut msg = BGP_MARKER.to_vec();
+    msg.extend_from_slice(&[0x00, 0x00]); // Placeholder for length
+    msg.push(MessageType::UPDATE.as_u8());
+
+    // Withdrawn routes
+    msg.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    msg.extend_from_slice(withdrawn);
+
+    // Total path attributes length - use override if provided, else calculate correctly
+    let total_attr_len = total_attr_len_override
+        .unwrap_or_else(|| attrs.iter().map(|a| a.len()).sum::<usize>() as u16);
+    msg.extend_from_slice(&total_attr_len.to_be_bytes());
+
+    // Path attributes
+    for attr in attrs {
+        msg.extend_from_slice(attr);
+    }
+
+    // NLRI
+    msg.extend_from_slice(nlri);
+
+    // Fix the length field
+    let len = msg.len() as u16;
+    msg[16] = (len >> 8) as u8;
+    msg[17] = (len & 0xff) as u8;
+
+    msg
+}
+
+// Build UPDATE message from raw attribute bytes (correct length)
+fn build_update_from_raw_attrs(withdrawn: &[u8], attrs: &[&[u8]], nlri: &[u8]) -> Vec<u8> {
+    build_update_internal(withdrawn, attrs, nlri, None)
+}
+
+// Build UPDATE with intentionally wrong total attribute length
+fn build_update_with_wrong_attr_length(
+    withdrawn: &[u8],
+    attrs: &[&[u8]],
+    nlri: &[u8],
+    wrong_total_attr_len: u16,
+) -> Vec<u8> {
+    build_update_internal(withdrawn, attrs, nlri, Some(wrong_total_attr_len))
+}
 
 #[tokio::test]
 async fn test_invalid_marker() {
@@ -226,17 +283,12 @@ async fn test_update_malformed_attribute_list() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-    let withdrawn_routes = vec![IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 11, 12, 0),
-        prefix_length: 24,
-    })];
-    let update = UpdateMessage::new_withdraw(withdrawn_routes);
-    let mut msg = update.serialize();
+    // Withdrawn route: 10.11.12.0/24 (prefix length byte followed by prefix bytes)
+    let withdrawn_data = &[24, 10, 11, 12];
 
-    // Corrupt Total Path Attribute Length field (bytes 25-26) to 100
-    // Withdrawn Routes Length (4) + Total Attribute Length (100) + 23 = 127 > 27 (message length)
-    msg[25] = 0x00;
-    msg[26] = 0x64;
+    // Build UPDATE claiming 100 bytes of attributes but provide none
+    // Withdrawn Routes Length (4) + Total Attribute Length (100) + 4 exceeds actual message length
+    let msg = build_update_with_wrong_attr_length(withdrawn_data, &[], &[], 100);
 
     peer.send_raw(&msg).await;
 
@@ -253,22 +305,10 @@ async fn test_update_attribute_flags_error_origin_wrong_optional_bit() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-    use bgpgg::bgp::msg_update::Origin;
-
-    let update = UpdateMessage::new(
-        Origin::IGP,
-        vec![],
-        Ipv4Addr::new(10, 0, 0, 1),
-        vec![],
-        None,
-        None,
-        false,
-    );
-    let mut msg = update.serialize();
-
-    // Corrupt ORIGIN attribute flags byte (first path attribute after total attr length)
-    // Position: 19 (header) + 2 (withdrawn len) + 2 (total attr len) = 23
-    msg[23] = 0xC0; // Optional + Transitive (WRONG for ORIGIN)
+    // Build ORIGIN attribute with WRONG flags (Optional + Transitive instead of just Transitive)
+    let wrong_flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+    let malformed_attr = build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[0]);
+    let msg = build_update_from_raw_attrs(&[], &[&malformed_attr], &[]);
 
     peer.send_raw(&msg).await;
 
@@ -277,7 +317,10 @@ async fn test_update_attribute_flags_error_origin_wrong_optional_bit() {
         notif.error(),
         &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
     );
-    assert_eq!(&notif.data()[0..3], &[0xC0, 1, 1]);
+    assert_eq!(
+        &notif.data()[0..3],
+        &[wrong_flags, attr_type_code::ORIGIN, 1]
+    );
 }
 
 #[tokio::test]
@@ -285,20 +328,10 @@ async fn test_update_attribute_flags_error_origin_partial_bit() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-    use bgpgg::bgp::msg_update::Origin;
-
-    let update = UpdateMessage::new(
-        Origin::IGP,
-        vec![],
-        Ipv4Addr::new(10, 0, 0, 1),
-        vec![],
-        None,
-        None,
-        false,
-    );
-    let mut msg = update.serialize();
-
-    msg[23] = 0x60; // Transitive + Partial (WRONG for ORIGIN)
+    // Build ORIGIN attribute with WRONG flags (Transitive + Partial)
+    let wrong_flags = attr_flags::TRANSITIVE | attr_flags::PARTIAL;
+    let malformed_attr = build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[0]);
+    let msg = build_update_from_raw_attrs(&[], &[&malformed_attr], &[]);
 
     peer.send_raw(&msg).await;
 
@@ -307,7 +340,10 @@ async fn test_update_attribute_flags_error_origin_partial_bit() {
         notif.error(),
         &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
     );
-    assert_eq!(&notif.data()[0..3], &[0x60, 1, 1]);
+    assert_eq!(
+        &notif.data()[0..3],
+        &[wrong_flags, attr_type_code::ORIGIN, 1]
+    );
 }
 
 #[tokio::test]
@@ -315,25 +351,15 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-    use bgpgg::bgp::msg_update::Origin;
-
-    let update = UpdateMessage::new(
-        Origin::IGP,
-        vec![],
-        Ipv4Addr::new(10, 0, 0, 1),
-        vec![],
-        None,
-        Some(100),
-        false,
+    // Build MED attribute with WRONG flags (missing OPTIONAL bit)
+    let wrong_flags = attr_flags::TRANSITIVE; // Should have OPTIONAL too
+    let malformed_attr = build_attr_bytes(
+        wrong_flags,
+        attr_type_code::MULTI_EXIT_DISC,
+        4,
+        &[0, 0, 0, 100],
     );
-    let mut msg = update.serialize();
-
-    // MED is the 4th attribute (after ORIGIN, AS_PATH, NEXT_HOP)
-    // ORIGIN: flags(1) + type(1) + len(1) + value(1) = 4 bytes
-    // AS_PATH: flags(1) + type(1) + len(1) + value(0) = 3 bytes
-    // NEXT_HOP: flags(1) + type(1) + len(1) + value(4) = 7 bytes
-    // MED starts at: 23 + 4 + 3 + 7 = 37
-    msg[37] = 0x40; // Transitive only (WRONG for MED)
+    let msg = build_update_from_raw_attrs(&[], &[&malformed_attr], &[]);
 
     peer.send_raw(&msg).await;
 
@@ -342,5 +368,98 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
         notif.error(),
         &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
     );
-    assert_eq!(&notif.data()[0..3], &[0x40, 4, 4]);
+    assert_eq!(
+        &notif.data()[0..3],
+        &[wrong_flags, attr_type_code::MULTI_EXIT_DISC, 4]
+    );
+}
+
+#[tokio::test]
+async fn test_update_attribute_length_error() {
+    let test_cases = vec![
+        (
+            "origin_wrong_length",
+            build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0]), // WRONG: length=2, should be 1
+            vec![attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2],
+        ),
+        (
+            "next_hop_wrong_length",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::NEXT_HOP,
+                5,
+                &[10, 0, 0, 1, 0],
+            ), // WRONG: length=5, should be 4
+            vec![attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 5],
+        ),
+        (
+            "med_wrong_length",
+            build_attr_bytes(
+                attr_flags::OPTIONAL,
+                attr_type_code::MULTI_EXIT_DISC,
+                5,
+                &[0, 0, 0, 0, 0],
+            ), // WRONG: length=5, should be 4
+            vec![attr_flags::OPTIONAL, attr_type_code::MULTI_EXIT_DISC, 5],
+        ),
+        (
+            "local_pref_wrong_length",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::LOCAL_PREF,
+                3,
+                &[0, 0, 0],
+            ), // WRONG: length=3, should be 4
+            vec![attr_flags::TRANSITIVE, attr_type_code::LOCAL_PREF, 3],
+        ),
+        (
+            "atomic_aggregate_wrong_length",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::ATOMIC_AGGREGATE,
+                1,
+                &[0],
+            ), // WRONG: length=1, should be 0
+            vec![attr_flags::TRANSITIVE, attr_type_code::ATOMIC_AGGREGATE, 1],
+        ),
+        (
+            "aggregator_wrong_length",
+            build_attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type_code::AGGREGATOR,
+                5,
+                &[0, 10, 10, 0, 0],
+            ), // WRONG: length=5, should be 6
+            vec![
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type_code::AGGREGATOR,
+                5,
+            ],
+        ),
+    ];
+
+    for (name, malformed_attr, expected_data_prefix) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        // Build UPDATE with single malformed attribute (no alignment issues!)
+        let msg = build_update_from_raw_attrs(&[], &[&malformed_attr], &[]);
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            "Test case: {}",
+            name
+        );
+        assert_eq!(
+            &notif.data()[0..expected_data_prefix.len()],
+            &expected_data_prefix[..],
+            "Test case: {}",
+            name
+        );
+    }
 }

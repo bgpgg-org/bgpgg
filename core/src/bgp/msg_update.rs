@@ -24,14 +24,32 @@ const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
-    const OPTIONAL: u8 = 1 << 7;
-    const TRANSITIVE: u8 = 1 << 6;
-    const PARTIAL: u8 = 1 << 5;
-    const EXTENDED_LENGTH: u8 = 1 << 4;
+    pub const OPTIONAL: u8 = 1 << 7;
+    pub const TRANSITIVE: u8 = 1 << 6;
+    pub const PARTIAL: u8 = 1 << 5;
+    pub const EXTENDED_LENGTH: u8 = 1 << 4;
 
     fn extended_len(&self) -> bool {
         self.0 & Self::EXTENDED_LENGTH != 0
     }
+}
+
+// Public constants for use in tests
+pub mod attr_flags {
+    pub const OPTIONAL: u8 = 1 << 7;
+    pub const TRANSITIVE: u8 = 1 << 6;
+    pub const PARTIAL: u8 = 1 << 5;
+    pub const EXTENDED_LENGTH: u8 = 1 << 4;
+}
+
+pub mod attr_type_code {
+    pub const ORIGIN: u8 = 1;
+    pub const AS_PATH: u8 = 2;
+    pub const NEXT_HOP: u8 = 3;
+    pub const MULTI_EXIT_DISC: u8 = 4;
+    pub const LOCAL_PREF: u8 = 5;
+    pub const ATOMIC_AGGREGATE: u8 = 6;
+    pub const AGGREGATOR: u8 = 7;
 }
 
 #[derive(Debug, PartialEq)]
@@ -221,49 +239,50 @@ fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
     let mut cursor = 0;
 
     while cursor < bytes.len() {
-        let segment_type = AsPathSegmentType::try_from(bytes[cursor])?;
-        let segment_len = bytes[cursor + 1];
-        let mut asn_list = vec![];
+        // Calculate total bytes needed for this segment (header + ASN data)
+        let segment_size = 2 + (bytes.get(cursor + 1).copied().unwrap_or(0) as usize * 2);
 
-        cursor = cursor + 2;
-
-        for _ in 0..segment_len {
-            let asn = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
-            asn_list.push(asn);
-
-            cursor = cursor + 2;
+        if cursor + segment_size > bytes.len() {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+                data: Vec::new(),
+            });
         }
 
-        let segment = AsPathSegment {
+        let segment_type = AsPathSegmentType::try_from(bytes[cursor])?;
+        let segment_len = bytes[cursor + 1];
+
+        let asn_list = (0..segment_len)
+            .map(|i| {
+                let pos = cursor + 2 + (i as usize * 2);
+                u16::from_be_bytes([bytes[pos], bytes[pos + 1]])
+            })
+            .collect();
+
+        segments.push(AsPathSegment {
             segment_type,
             segment_len,
             asn_list,
-        };
+        });
 
-        segments.push(segment);
+        cursor += segment_size;
     }
 
-    return Ok(AsPath { segments });
+    Ok(AsPath { segments })
 }
 
 fn read_attr_next_hop(bytes: &[u8]) -> Result<NextHopAddr, ParserError> {
-    match bytes.len() {
-        4 => {
-            let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-            Ok(NextHopAddr::Ipv4(ip))
-        }
-        16 => {
-            let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(bytes);
-
-            let ip = Ipv6Addr::from(ip_bytes);
-            Ok(NextHopAddr::Ipv6(ip))
-        }
-        _ => Err(ParserError::BgpError {
+    // RFC 4271: NEXT_HOP must be exactly 4 bytes (IPv4 address)
+    // This should already be validated by validate_attribute_length, but check defensively
+    if bytes.len() != 4 {
+        return Err(ParserError::BgpError {
             error: BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop),
             data: Vec::new(),
-        }),
+        });
     }
+
+    let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+    Ok(NextHopAddr::Ipv4(ip))
 }
 
 fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
@@ -280,6 +299,31 @@ fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
     Ok(Aggregator { asn, ip_addr })
 }
 
+fn validate_attribute_length(
+    attr_type: &AttrType,
+    attr_len: u16,
+    attr_bytes: &[u8],
+) -> Result<(), ParserError> {
+    let valid = match attr_type {
+        AttrType::Origin => attr_len == 1,
+        AttrType::NextHop => attr_len == 4, // Only IPv4 per RFC 4271
+        AttrType::MultiExtiDisc => attr_len == 4,
+        AttrType::LocalPref => attr_len == 4,
+        AttrType::AtomicAggregate => attr_len == 0,
+        AttrType::Aggregator => attr_len == 6,
+        AttrType::AsPath => true, // Variable length
+    };
+
+    if !valid {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            data: attr_bytes.to_vec(),
+        });
+    }
+
+    Ok(())
+}
+
 fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type = AttrType::try_from(bytes[1])?;
@@ -291,7 +335,14 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
 
     validate_attribute_flags(bytes[0], &attr_type, bytes[1], attr_len)?;
 
-    let mut offset = 3;
+    let mut offset = if attribute_flag.extended_len() { 4 } else { 3 };
+
+    // Calculate the total attribute size for error reporting
+    let attr_total_len = offset + attr_len as usize;
+    let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
+
+    validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
+
     let attr_data = &bytes[offset..offset + attr_len as usize];
 
     let attr_val = match attr_type {
@@ -762,6 +813,113 @@ mod tests {
     }
 
     #[test]
+    fn test_read_path_attribute_as_path_truncated_header() {
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath as u8,
+            0x01, // Attribute length: only 1 byte
+            AsPathSegmentType::AsSet as u8,
+            // Missing segment_len byte
+        ];
+
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected MalformedASPath error"),
+        }
+    }
+
+    #[test]
+    fn test_read_path_attribute_as_path_truncated_asn_data() {
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath as u8,
+            0x04, // Attribute length: 4 bytes
+            AsPathSegmentType::AsSequence as u8,
+            0x02, // segment_len: claims 2 ASNs (needs 4 bytes)
+            0x00,
+            0x10, // Only 1 ASN provided
+        ];
+
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected MalformedASPath error"),
+        }
+    }
+
+    #[test]
+    fn test_read_path_attribute_as_path_empty() {
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath as u8,
+            0x00, // Attribute length: 0
+        ];
+
+        let (as_path, offset) = read_path_attribute(input).unwrap();
+        assert_eq!(
+            as_path,
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AsPath(AsPath { segments: vec![] }),
+            }
+        );
+        assert_eq!(offset, 3);
+    }
+
+    #[test]
+    fn test_read_path_attribute_as_path_multiple_segments() {
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath as u8,
+            0x0a, // Attribute length: 10 bytes
+            AsPathSegmentType::AsSequence as u8,
+            0x02, // 2 ASNs
+            0x00,
+            0x0a, // ASN 10
+            0x00,
+            0x14, // ASN 20
+            AsPathSegmentType::AsSet as u8,
+            0x01, // 1 ASN
+            0x00,
+            0x1e, // ASN 30
+        ];
+
+        let (as_path, offset) = read_path_attribute(input).unwrap();
+        assert_eq!(
+            as_path,
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AsPath(AsPath {
+                    segments: vec![
+                        AsPathSegment {
+                            segment_type: AsPathSegmentType::AsSequence,
+                            segment_len: 2,
+                            asn_list: vec![10, 20],
+                        },
+                        AsPathSegment {
+                            segment_type: AsPathSegmentType::AsSet,
+                            segment_len: 1,
+                            asn_list: vec![30],
+                        }
+                    ]
+                }),
+            }
+        );
+        assert_eq!(offset, 13);
+    }
+
+    #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
         let (as_path, offset) = read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4).unwrap();
         assert_eq!(
@@ -775,50 +933,11 @@ mod tests {
     }
 
     #[test]
-    fn test_read_path_attribute_next_hop_ipv6() {
+    fn test_read_path_attribute_next_hop_invalid_length() {
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE, // Attribute flags
             AttrType::NextHop as u8,  // Attribute type
-            0x10,                     // Attribute length
-            // IPv6
-            0x20,
-            0x01,
-            0x0d,
-            0xb8,
-            0x85,
-            0xa3,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-            0x8a,
-            0x2e,
-            0x03,
-            0x70,
-            0x73,
-            0x34,
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::NextHop(NextHopAddr::Ipv6(
-                    Ipv6Addr::from_str("2001:0db8:85a3:0000:0000:8a2e:0370:7334").unwrap()
-                )),
-            }
-        );
-        assert_eq!(offset, 19);
-    }
-
-    #[test]
-    fn test_read_path_attribute_next_hop_invalid_next_hop() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::NextHop as u8,  // Attribute type
-            0x05,                     // Attribute length (invalid)
-            // IPv4
+            0x05,                     // Attribute length (invalid - should be 4)
             0x0a,
             0x0b,
             0x0c,
@@ -830,11 +949,11 @@ mod tests {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop)
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
                 );
-                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(data, input.to_vec());
             }
-            _ => panic!("Expected MalformedNextHop error"),
+            _ => panic!("Expected AttributeLengthError"),
         }
     }
 
@@ -867,8 +986,7 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL,        // Attribute flags
             AttrType::MultiExtiDisc as u8, // Attribute type
-            0x03,                          // Attribute length (invalid)
-            // Attribute value
+            0x03,                          // Attribute length (invalid - should be 4)
             0x00,
             0x00,
             0x01,
@@ -880,7 +998,7 @@ mod tests {
                     error,
                     BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
                 );
-                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(data, input.to_vec());
             }
             _ => panic!("Expected AttributeLengthError"),
         }
@@ -915,8 +1033,7 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,  // Attribute flags
             AttrType::LocalPref as u8, // Attribute type
-            0x03,                      // Attribute length
-            // Attribute value
+            0x03,                      // Attribute length (invalid - should be 4)
             0x00,
             0x00,
             0x0f,
@@ -928,7 +1045,7 @@ mod tests {
                     error,
                     BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
                 );
-                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(data, input.to_vec());
             }
             _ => panic!("Expected AttributeLengthError"),
         }
@@ -958,8 +1075,8 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,        // Attribute flags
             AttrType::AtomicAggregate as u8, // Attribute type
-            0x01,                            // Attribute length
-            0x00,                            // Attribute value
+            0x01,                            // Attribute length (invalid - should be 0)
+            0x00,
         ];
 
         match read_path_attribute(input) {
@@ -968,7 +1085,7 @@ mod tests {
                     error,
                     BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
                 );
-                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(data, input.to_vec());
             }
             _ => panic!("Expected AttributeLengthError"),
         }
@@ -1008,14 +1125,10 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
             AttrType::Aggregator as u8,                        // Attribute type
-            0x03,                                              // Attribute length
-            // Attribute value
+            0x03, // Attribute length (invalid - should be 6)
             0x00, // ASN
             0x10,
-            0x0a, // IPv4
-            0x0b,
-            0x0c,
-            0x0d,
+            0x0a,
         ];
 
         match read_path_attribute(input) {
@@ -1024,7 +1137,7 @@ mod tests {
                     error,
                     BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
                 );
-                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(data, input.to_vec());
             }
             _ => panic!("Expected AttributeLengthError"),
         }
@@ -1448,9 +1561,21 @@ mod tests {
         let test_cases = vec![
             ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
             ("as_path", AttrType::AsPath as u8, vec![0x00]),
-            ("next_hop", AttrType::NextHop as u8, vec![0x04, 0x0a, 0x00, 0x00, 0x01]),
-            ("local_pref", AttrType::LocalPref as u8, vec![0x04, 0x00, 0x00, 0x00, 0x64]),
-            ("atomic_aggregate", AttrType::AtomicAggregate as u8, vec![0x00]),
+            (
+                "next_hop",
+                AttrType::NextHop as u8,
+                vec![0x04, 0x0a, 0x00, 0x00, 0x01],
+            ),
+            (
+                "local_pref",
+                AttrType::LocalPref as u8,
+                vec![0x04, 0x00, 0x00, 0x00, 0x64],
+            ),
+            (
+                "atomic_aggregate",
+                AttrType::AtomicAggregate as u8,
+                vec![0x00],
+            ),
         ];
 
         for (name, attr_type, attr_data) in test_cases {
@@ -1467,7 +1592,11 @@ mod tests {
                     );
                     assert_eq!(
                         data,
-                        vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type, attr_data[0]],
+                        vec![
+                            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                            attr_type,
+                            attr_data[0]
+                        ],
                         "Failed for {}",
                         name
                     );
@@ -1482,9 +1611,21 @@ mod tests {
         let test_cases = vec![
             ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
             ("as_path", AttrType::AsPath as u8, vec![0x00]),
-            ("next_hop", AttrType::NextHop as u8, vec![0x04, 0x0a, 0x00, 0x00, 0x01]),
-            ("local_pref", AttrType::LocalPref as u8, vec![0x04, 0x00, 0x00, 0x00, 0x64]),
-            ("atomic_aggregate", AttrType::AtomicAggregate as u8, vec![0x00]),
+            (
+                "next_hop",
+                AttrType::NextHop as u8,
+                vec![0x04, 0x0a, 0x00, 0x00, 0x01],
+            ),
+            (
+                "local_pref",
+                AttrType::LocalPref as u8,
+                vec![0x04, 0x00, 0x00, 0x00, 0x64],
+            ),
+            (
+                "atomic_aggregate",
+                AttrType::AtomicAggregate as u8,
+                vec![0x00],
+            ),
         ];
 
         for (name, attr_type, attr_data) in test_cases {
@@ -1501,7 +1642,11 @@ mod tests {
                     );
                     assert_eq!(
                         data,
-                        vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type, attr_data[0]],
+                        vec![
+                            PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
+                            attr_type,
+                            attr_data[0]
+                        ],
                         "Failed for {}",
                         name
                     );
@@ -1514,8 +1659,18 @@ mod tests {
     #[test]
     fn test_attribute_flags_optional_wrong_flags() {
         let test_cases = vec![
-            ("med_missing_optional", AttrType::MultiExtiDisc as u8, PathAttrFlag::TRANSITIVE, vec![0x04, 0x00, 0x00, 0x00, 0x01]),
-            ("aggregator_missing_optional", AttrType::Aggregator as u8, PathAttrFlag::TRANSITIVE, vec![0x06, 0x00, 0x10, 0x0a, 0x0b, 0x0c, 0x0d]),
+            (
+                "med_missing_optional",
+                AttrType::MultiExtiDisc as u8,
+                PathAttrFlag::TRANSITIVE,
+                vec![0x04, 0x00, 0x00, 0x00, 0x01],
+            ),
+            (
+                "aggregator_missing_optional",
+                AttrType::Aggregator as u8,
+                PathAttrFlag::TRANSITIVE,
+                vec![0x06, 0x00, 0x10, 0x0a, 0x0b, 0x0c, 0x0d],
+            ),
         ];
 
         for (name, attr_type, wrong_flags, attr_data) in test_cases {
@@ -1607,10 +1762,7 @@ mod tests {
         ];
 
         let (attr, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            attr.flags.0,
-            PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL
-        );
+        assert_eq!(attr.flags.0, PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL);
         assert_eq!(offset, 7);
     }
 }

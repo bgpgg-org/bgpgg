@@ -19,11 +19,11 @@ use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
 use tokio::io::AsyncReadExt;
 
-const BGP_HEADER_SIZE_BYTES: usize = 19;
-const MAX_MESSAGE_SIZE: u16 = 4096;
+pub const BGP_HEADER_SIZE_BYTES: usize = 19;
+pub const MAX_MESSAGE_SIZE: u16 = 4096;
 
 // BGP header marker (16 bytes of 0xFF)
-const BGP_MARKER: [u8; 16] = [0xff; 16];
+pub const BGP_MARKER: [u8; 16] = [0xff; 16];
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
