@@ -528,6 +528,50 @@ fn validate_update_message_lengths(
     Ok(())
 }
 
+fn validate_well_known_mandatory_attributes(
+    path_attributes: &[PathAttribute],
+    has_nlri: bool,
+) -> Result<(), ParserError> {
+    // RFC 4271 Section 5: well-known mandatory attributes MUST be included
+    // in every UPDATE message that contains NLRI
+    if !has_nlri {
+        return Ok(());
+    }
+
+    let has_origin = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::Origin(_)));
+    let has_as_path = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::AsPath(_)));
+    let has_next_hop = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
+
+    if !has_origin {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::ORIGIN],
+        });
+    }
+
+    if !has_as_path {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::AS_PATH],
+        });
+    }
+
+    if !has_next_hop {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::NEXT_HOP],
+        });
+    }
+
+    Ok(())
+}
+
 impl UpdateMessage {
     pub fn new(
         origin: Origin,
@@ -694,6 +738,8 @@ impl UpdateMessage {
             _ => parse_nlri_list(&data),
         };
 
+        validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
+
         Ok(UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_len as u16,
             withdrawn_routes,
@@ -780,6 +826,55 @@ mod tests {
         0x18, 0x0a, 0x0b, 0x0d, // Withdrawn route #2: /24 prefix
         0x18, 0x0a, 0x0b, 0x0e, // Withdrawn route #3: /24 prefix
     ];
+
+    const PATH_ATTR_ORIGIN_IGP: &[u8] =
+        &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x00];
+
+    const PATH_ATTR_AS_PATH_EMPTY: &[u8] =
+        &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
+
+    const PATH_ATTR_NEXT_HOP: &[u8] = &[
+        PathAttrFlag::TRANSITIVE,
+        AttrType::NextHop as u8,
+        0x04,
+        0x0a,
+        0x00,
+        0x00,
+        0x01,
+    ];
+
+    const PATH_ATTR_LOCAL_PREF: &[u8] = &[
+        PathAttrFlag::TRANSITIVE,
+        AttrType::LocalPref as u8,
+        0x04,
+        0x00,
+        0x00,
+        0x00,
+        0x64,
+    ];
+
+    const NLRI_SINGLE: &[u8] = &[0x18, 0x0a, 0x0b, 0x0c];
+
+    fn build_update_body(attrs: &[&[u8]], nlri: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        // Withdrawn routes length
+        body.extend_from_slice(&[0x00, 0x00]);
+
+        // Total path attributes length
+        let total_attr_len: usize = attrs.iter().map(|a| a.len()).sum();
+        body.extend_from_slice(&(total_attr_len as u16).to_be_bytes());
+
+        // Path attributes
+        for attr in attrs {
+            body.extend_from_slice(attr);
+        }
+
+        // NLRI
+        body.extend_from_slice(nlri);
+
+        body
+    }
 
     #[test]
     fn test_read_path_attribute_origin() {
@@ -1766,5 +1861,70 @@ mod tests {
         let (attr, offset) = read_path_attribute(input).unwrap();
         assert_eq!(attr.flags.0, PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL);
         assert_eq!(offset, 7);
+    }
+
+    #[test]
+    fn test_missing_well_known_attribute() {
+        let test_cases = vec![
+            (
+                "origin",
+                build_update_body(
+                    &[
+                        PATH_ATTR_AS_PATH_EMPTY,
+                        PATH_ATTR_NEXT_HOP,
+                        PATH_ATTR_LOCAL_PREF,
+                    ],
+                    NLRI_SINGLE,
+                ),
+                attr_type_code::ORIGIN,
+            ),
+            (
+                "as_path",
+                build_update_body(
+                    &[
+                        PATH_ATTR_ORIGIN_IGP,
+                        PATH_ATTR_NEXT_HOP,
+                        PATH_ATTR_LOCAL_PREF,
+                    ],
+                    NLRI_SINGLE,
+                ),
+                attr_type_code::AS_PATH,
+            ),
+            (
+                "next_hop",
+                build_update_body(
+                    &[
+                        PATH_ATTR_ORIGIN_IGP,
+                        PATH_ATTR_AS_PATH_EMPTY,
+                        PATH_ATTR_LOCAL_PREF,
+                    ],
+                    NLRI_SINGLE,
+                ),
+                attr_type_code::NEXT_HOP,
+            ),
+        ];
+
+        for (name, input, expected_missing_type) in test_cases {
+            match UpdateMessage::from_bytes(input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(data, vec![expected_missing_type], "Failed for {}", name);
+                }
+                _ => panic!("Expected MissingWellKnownAttribute error for {}", name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_missing_well_known_attribute_without_nlri() {
+        let input = build_update_body(&[], &[]);
+
+        let result = UpdateMessage::from_bytes(input);
+        assert!(result.is_ok());
     }
 }

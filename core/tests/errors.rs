@@ -355,6 +355,76 @@ async fn test_open_bad_bgp_identifier() {
 // UPDATE Message Error Tests (RFC 4271 Section 6.3)
 
 #[tokio::test]
+async fn test_update_missing_well_known_attribute() {
+    let test_cases = vec![
+        (
+            "origin",
+            vec![
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::NEXT_HOP,
+                    4,
+                    &[10, 0, 0, 1],
+                ),
+            ],
+            attr_type_code::ORIGIN,
+        ),
+        (
+            "as_path",
+            vec![
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::NEXT_HOP,
+                    4,
+                    &[10, 0, 0, 1],
+                ),
+            ],
+            attr_type_code::AS_PATH,
+        ),
+        (
+            "next_hop",
+            vec![
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
+            ],
+            attr_type_code::NEXT_HOP,
+        ),
+    ];
+
+    for (name, attrs, expected_missing_type) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
+        let msg = build_raw_update(
+            &[],
+            &attrs.iter().map(|a| a.as_slice()).collect::<Vec<_>>(),
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            "Test case: {}",
+            name
+        );
+        assert_eq!(
+            notif.data(),
+            &[expected_missing_type],
+            "Test case: {}",
+            name
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_update_malformed_attribute_list() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
