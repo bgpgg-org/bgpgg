@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
+use super::msg_notification::{BgpError, OpenMessageError};
 use super::utils::ParserError;
+
+const BGP_VERSION: u8 = 4;
 
 #[derive(Debug)]
 pub struct OpenMessage {
@@ -172,6 +175,49 @@ fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
     return params;
 }
 
+/// Validate BGP version (RFC 4271 Section 6.2)
+fn validate_version(version: u8) -> Result<(), ParserError> {
+    if version != BGP_VERSION {
+        // RFC 4271: Data field is a 2-octet unsigned integer indicating the largest
+        // locally-supported version number (which is 4)
+        return Err(ParserError::BgpError {
+            error: BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            data: (BGP_VERSION as u16).to_be_bytes().to_vec(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate Hold Time (RFC 4271 Section 6.2)
+/// MUST reject Hold Time values of one or two seconds
+fn validate_hold_time(hold_time: u16) -> Result<(), ParserError> {
+    if hold_time == 1 || hold_time == 2 {
+        // RFC 4271: No specific data field requirement for UnacceptableHoldTime
+        return Err(ParserError::BgpError {
+            error: BgpError::OpenMessageError(OpenMessageError::UnacceptedHoldTime),
+            data: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate BGP Identifier (RFC 4271 Section 6.2)
+/// Must be a valid unicast IP host address
+/// Cannot be 0.0.0.0, 255.255.255.255, or multicast (224.0.0.0/4)
+fn validate_bgp_identifier(bgp_identifier: u32) -> Result<(), ParserError> {
+    if bgp_identifier == 0
+        || bgp_identifier == 0xFFFFFFFF
+        || (bgp_identifier & 0xF0000000) == 0xE0000000
+    {
+        // RFC 4271: No specific data field requirement for BadBgpIdentifier
+        return Err(ParserError::BgpError {
+            error: BgpError::OpenMessageError(OpenMessageError::BadBgpIdentifier),
+            data: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
 impl OpenMessage {
     /// Creates a new OpenMessage with the specified parameters
     ///
@@ -184,7 +230,7 @@ impl OpenMessage {
     /// A new OpenMessage with version 4 and no optional parameters
     pub fn new(asn: u16, hold_time: u16, bgp_identifier: u32) -> Self {
         OpenMessage {
-            version: 4,
+            version: BGP_VERSION,
             asn,
             hold_time,
             bgp_identifier,
@@ -195,9 +241,11 @@ impl OpenMessage {
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         if bytes.len() < 10 {
-            return Err(ParserError::InvalidLength(
-                "Invalid OpenMessage length".to_string(),
-            ));
+            // Malformed OPEN message - use Unspecific subcode (0)
+            return Err(ParserError::BgpError {
+                error: BgpError::OpenMessageError(OpenMessageError::Unknown(0)),
+                data: Vec::new(),
+            });
         }
 
         let version = bytes[0];
@@ -208,10 +256,17 @@ impl OpenMessage {
         let optional_params_len = bytes[9];
         let remaining_bytes_len = (bytes.len() - 10) as u8;
         if optional_params_len != remaining_bytes_len {
-            return Err(ParserError::InvalidLength(
-                "Invalid optional params length".to_string(),
-            ));
+            // Malformed optional parameters - use Unspecific subcode (0)
+            return Err(ParserError::BgpError {
+                error: BgpError::OpenMessageError(OpenMessageError::Unknown(0)),
+                data: Vec::new(),
+            });
         }
+
+        // RFC 4271 Section 6.2: Validate OPEN message fields
+        validate_version(version)?;
+        validate_hold_time(hold_time)?;
+        validate_bgp_identifier(bgp_identifier)?;
 
         let optional_params = match optional_params_len {
             0 => {
@@ -302,7 +357,7 @@ mod tests {
         ];
 
         let open_message = OpenMessage::from_bytes(message.to_vec()).unwrap();
-        assert_eq!(open_message.version, 4);
+        assert_eq!(open_message.version, BGP_VERSION);
         assert_eq!(open_message.asn, 1234);
         assert_eq!(open_message.hold_time, 10);
         assert_eq!(open_message.bgp_identifier, 168430090);
@@ -324,7 +379,7 @@ mod tests {
         .concat();
 
         let open_message = OpenMessage::from_bytes(message.to_vec()).unwrap();
-        assert_eq!(open_message.version, 4);
+        assert_eq!(open_message.version, BGP_VERSION);
         assert_eq!(open_message.asn, 1234);
         assert_eq!(open_message.hold_time, 10);
         assert_eq!(open_message.bgp_identifier, 168430090);
@@ -358,7 +413,7 @@ mod tests {
         .concat();
 
         let open_message = OpenMessage::from_bytes(message.to_vec()).unwrap();
-        assert_eq!(open_message.version, 4);
+        assert_eq!(open_message.version, BGP_VERSION);
         assert_eq!(open_message.asn, 1234);
         assert_eq!(open_message.hold_time, 10);
         assert_eq!(open_message.bgp_identifier, 168430090);
@@ -391,7 +446,7 @@ mod tests {
         .concat();
 
         let open_message = OpenMessage::from_bytes(message.to_vec()).unwrap();
-        assert_eq!(open_message.version, 4);
+        assert_eq!(open_message.version, BGP_VERSION);
         assert_eq!(open_message.asn, 9999);
         assert_eq!(open_message.hold_time, 16);
         assert_eq!(open_message.bgp_identifier, 168430090);
@@ -433,10 +488,16 @@ mod tests {
             0x00, 0x0a, // Hold time
         ];
 
-        assert!(matches!(
-            OpenMessage::from_bytes(message.to_vec()),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match OpenMessage::from_bytes(message.to_vec()) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::OpenMessageError(OpenMessageError::Unknown(0))
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected OPEN message error"),
+        }
     }
 
     #[test]
@@ -470,10 +531,16 @@ mod tests {
         ];
 
         for test_case in test_cases.iter() {
-            assert!(matches!(
-                OpenMessage::from_bytes(test_case.to_vec()),
-                Err(ParserError::InvalidLength(_))
-            ))
+            match OpenMessage::from_bytes(test_case.to_vec()) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::OpenMessageError(OpenMessageError::Unknown(0))
+                    );
+                    assert_eq!(data, Vec::<u8>::new());
+                }
+                _ => panic!("Expected OPEN message error"),
+            }
         }
     }
 
@@ -544,7 +611,7 @@ mod tests {
 
         // Decode: parse the bytes back
         let parsed = OpenMessage::from_bytes(bytes).unwrap();
-        assert_eq!(parsed.version, 4);
+        assert_eq!(parsed.version, BGP_VERSION);
         assert_eq!(parsed.asn, 65001);
         assert_eq!(parsed.hold_time, 180);
         assert_eq!(parsed.bgp_identifier, 0x01010101);
@@ -573,5 +640,79 @@ mod tests {
 
         assert_eq!(message, expected);
         assert_eq!(message.len(), 19 + TEST_OPEN_MESSAGE_BODY.len());
+    }
+
+    #[test]
+    fn test_from_bytes_unsupported_version() {
+        let mut msg = TEST_OPEN_MESSAGE_BODY.to_vec();
+        msg[0] = 0x03; // Version 3 (unsupported)
+
+        match OpenMessage::from_bytes(msg) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber)
+                );
+                assert_eq!(data, vec![0x00, 0x04]); // Largest supported version
+            }
+            _ => panic!("Expected UnsupportedVersionNumber error"),
+        }
+    }
+
+    #[test]
+    fn test_from_bytes_unacceptable_hold_time() {
+        let test_cases = vec![1, 2];
+
+        for hold_time in test_cases {
+            let mut msg = TEST_OPEN_MESSAGE_BODY.to_vec();
+            msg[3] = 0x00;
+            msg[4] = hold_time;
+
+            match OpenMessage::from_bytes(msg) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::OpenMessageError(OpenMessageError::UnacceptedHoldTime),
+                        "Failed for hold_time={}",
+                        hold_time
+                    );
+                    assert_eq!(data, Vec::<u8>::new(), "Failed for hold_time={}", hold_time);
+                }
+                _ => panic!(
+                    "Expected UnacceptedHoldTime error for hold_time={}",
+                    hold_time
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_from_bytes_bad_bgp_identifier() {
+        let test_cases = vec![
+            ("zero", [0x00, 0x00, 0x00, 0x00]),      // 0.0.0.0
+            ("broadcast", [0xff, 0xff, 0xff, 0xff]), // 255.255.255.255
+            ("multicast", [0xe0, 0x00, 0x00, 0x01]), // 224.0.0.1
+        ];
+
+        for (name, bgp_id) in test_cases {
+            let mut msg = TEST_OPEN_MESSAGE_BODY.to_vec();
+            msg[5] = bgp_id[0];
+            msg[6] = bgp_id[1];
+            msg[7] = bgp_id[2];
+            msg[8] = bgp_id[3];
+
+            match OpenMessage::from_bytes(msg) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::OpenMessageError(OpenMessageError::BadBgpIdentifier),
+                        "Failed for case: {}",
+                        name
+                    );
+                    assert_eq!(data, Vec::<u8>::new(), "Failed for case: {}", name);
+                }
+                _ => panic!("Expected BadBgpIdentifier error for case: {}", name),
+            }
+        }
     }
 }

@@ -87,6 +87,9 @@ message AddRouteRequest {
     string next_hop = 2;    // IPv4 address (e.g., "192.168.1.1")
     Origin origin = 3;      // Route origin
     repeated AsPathSegment as_path = 4; // Optional AS_PATH (empty = locally originated)
+    optional uint32 local_pref = 5;     // Optional LOCAL_PREF (defaults to 100)
+    optional uint32 med = 6;            // Optional MULTI_EXIT_DISC
+    bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
 }
 
 message AddRouteResponse {
@@ -144,4 +147,13 @@ message Path {
     string peer_address = 4;
     optional uint32 local_pref = 5;
     optional uint32 med = 6;
+    bool atomic_aggregate = 7;
+    repeated UnknownAttribute unknown_attributes = 8;
+}
+
+// Unknown attribute
+message UnknownAttribute {
+    uint32 attr_type = 1;
+    uint32 flags = 2;
+    bytes value = 3;
 }

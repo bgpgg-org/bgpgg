@@ -28,8 +28,11 @@ async fn test_peer_down() {
         .add_route(
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .expect("Failed to announce route");
@@ -49,6 +52,10 @@ async fn test_peer_down() {
                 "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                 peer_addr.clone(),
                 Origin::Igp,
+                Some(100),
+                None,
+                false,
+                vec![],
             )],
         }],
     )])
@@ -84,8 +91,11 @@ async fn test_peer_down_four_node_mesh() {
         .add_route(
             "10.1.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -102,6 +112,10 @@ async fn test_peer_down_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -114,6 +128,10 @@ async fn test_peer_down_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -126,6 +144,10 @@ async fn test_peer_down_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -153,6 +175,10 @@ async fn test_peer_down_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -165,6 +191,10 @@ async fn test_peer_down_four_node_mesh() {
                     "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
                     server1.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -216,8 +246,11 @@ async fn test_remove_peer() {
         .add_route(
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .expect("Failed to announce route");
@@ -237,6 +270,10 @@ async fn test_remove_peer() {
                 "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                 peer_addr.clone(),
                 Origin::Igp,
+                Some(100),
+                None,
+                false,
+                vec![],
             )],
         }],
     )])
@@ -267,8 +304,11 @@ async fn test_remove_peer_withdraw_routes() {
         .add_route(
             "10.2.0.0/24".to_string(),
             "192.168.2.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 2");
@@ -288,6 +328,10 @@ async fn test_remove_peer_withdraw_routes() {
                 "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                 peer_addr.clone(),
                 Origin::Igp,
+                Some(100),
+                None,
+                false,
+                vec![],
             )],
         }],
     )])
@@ -319,8 +363,11 @@ async fn test_remove_peer_four_node_mesh() {
         .add_route(
             "10.4.0.0/24".to_string(),
             "192.168.4.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .expect("Failed to announce route from server 4");
@@ -337,6 +384,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -349,6 +400,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -361,6 +416,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -388,6 +447,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
                     server2.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )], // Via server2 (127.0.0.2 < 127.0.0.3)
             }],
         ),
@@ -400,6 +463,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),
@@ -412,6 +479,10 @@ async fn test_remove_peer_four_node_mesh() {
                     "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
                     server4.address.clone(),
                     Origin::Igp,
+                    Some(100),
+                    None,
+                    false,
+                    vec![],
                 )],
             }],
         ),

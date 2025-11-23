@@ -270,6 +270,9 @@ impl BgpService for BgpGrpcService {
             next_hop,
             origin,
             as_path,
+            local_pref: req.local_pref,
+            med: req.med,
+            atomic_aggregate: req.atomic_aggregate,
             response: tx,
         };
 
@@ -409,6 +412,27 @@ impl BgpService for BgpGrpcService {
                         },
                         local_pref: path.local_pref,
                         med: path.med,
+                        atomic_aggregate: path.atomic_aggregate,
+                        unknown_attributes: path
+                            .unknown_attrs
+                            .into_iter()
+                            .filter_map(|attr| {
+                                if let crate::bgp::msg_update::PathAttrValue::Unknown {
+                                    type_code,
+                                    flags,
+                                    data,
+                                } = attr.value
+                                {
+                                    Some(proto::UnknownAttribute {
+                                        attr_type: type_code as u32,
+                                        flags: flags as u32,
+                                        value: data,
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
                     })
                     .collect();
 

@@ -14,6 +14,7 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
+use crate::bgp::msg_notification::NotifcationMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -139,6 +140,11 @@ impl Peer {
                         }
                         Err(e) => {
                             error!("error reading message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+
+                            if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                                let _ = self.send_notification(notif).await;
+                            }
+
                             break;
                         }
                     }
@@ -310,6 +316,14 @@ impl Peer {
         Ok(())
     }
 
+    /// Send NOTIFICATION message (RFC 4271 Section 6.1)
+    async fn send_notification(&mut self, notif_msg: NotifcationMessage) -> Result<(), io::Error> {
+        self.tcp_tx.write_all(&notif_msg.serialize()).await?;
+        self.statistics.notification_sent += 1;
+        warn!("sent NOTIFICATION", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));
+        Ok(())
+    }
+
     /// Process a received BGP message from the TCP stream
     /// Returns Err if should disconnect (notification or processing error)
     async fn handle_received_message(
@@ -332,7 +346,6 @@ impl Peer {
                 if let Some((withdrawn, announced)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
                         peer_ip: peer_ip.to_string(),
-                        peer_asn: self.asn.expect("ASN should be known after handshake"),
                         withdrawn,
                         announced,
                     });
@@ -433,6 +446,10 @@ impl Peer {
         let origin = update_msg.get_origin();
         let as_path = update_msg.get_as_path();
         let next_hop = update_msg.get_next_hop();
+        let local_pref = update_msg.get_local_pref();
+        let med = update_msg.get_med();
+        let atomic_aggregate = update_msg.get_atomic_aggregate();
+        let unknown_attrs = update_msg.get_unknown_attrs();
 
         // Only process announcements if we have required attributes
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
@@ -444,8 +461,17 @@ impl Peer {
 
             // Process announced routes (NLRI)
             for prefix in update_msg.nlri_list() {
-                let path = Path::from_attributes(origin, as_path.clone(), next_hop, source.clone());
-                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr);
+                let path = Path::from_attributes(
+                    origin,
+                    as_path.clone(),
+                    next_hop,
+                    source.clone(),
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    unknown_attrs.clone(),
+                );
+                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr, "med" => format!("{:?}", med));
                 self.rib_in.add_route(*prefix, path.clone());
                 announced.push((*prefix, path));
             }

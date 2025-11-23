@@ -17,7 +17,7 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::BgpState;
+use bgpgg::grpc::proto::{BgpState, Origin};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -151,8 +151,11 @@ async fn test_announce_withdraw_route() {
         .add_route(
             "10.0.0.0/24".to_string(),
             "192.168.1.1".to_string(),
-            0,
+            Origin::Igp,
             vec![],
+            None,
+            None,
+            false,
         )
         .await
         .unwrap();

@@ -91,7 +91,7 @@ impl LocRib {
         import_policy: F,
     ) -> Vec<IpNetwork>
     where
-        F: Fn(&mut Path) -> bool,
+        F: Fn(&IpNetwork, &mut Path) -> bool,
     {
         let mut changed_prefixes = Vec::new();
 
@@ -106,7 +106,7 @@ impl LocRib {
 
         // Process announcements - apply import policy and add to Loc-RIB
         for (prefix, mut path) in announced {
-            if import_policy(&mut path) {
+            if import_policy(&prefix, &mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
                 self.add_route(prefix, path);
                 changed_prefixes.push(prefix);
@@ -160,6 +160,9 @@ impl LocRib {
         next_hop: Ipv4Addr,
         origin: crate::bgp::msg_update::Origin,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
+        med: Option<u32>,
+        atomic_aggregate: bool,
     ) {
         // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
         // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
@@ -170,8 +173,10 @@ impl LocRib {
             as_path,
             next_hop,
             source: RouteSource::Local,
-            local_pref: Some(100),
-            med: None,
+            local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
+            med,
+            atomic_aggregate,
+            unknown_attrs: vec![],
         };
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
@@ -410,6 +415,9 @@ mod tests {
             next_hop,
             crate::bgp::msg_update::Origin::IGP,
             vec![],
+            None,
+            None,
+            false,
         );
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
@@ -420,5 +428,25 @@ mod tests {
 
         // Removing again should return false
         assert!(!loc_rib.remove_local_route(prefix));
+    }
+
+    #[test]
+    fn test_add_local_route_with_custom_local_pref() {
+        let mut loc_rib = LocRib::new();
+        let prefix = create_test_prefix();
+        let next_hop = Ipv4Addr::new(192, 0, 2, 1);
+
+        loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            crate::bgp::msg_update::Origin::IGP,
+            vec![],
+            Some(200), // Custom LOCAL_PREF
+            None,
+            false,
+        );
+
+        let path = loc_rib.get_best_path(&prefix).unwrap();
+        assert_eq!(path.local_pref, Some(200));
     }
 }

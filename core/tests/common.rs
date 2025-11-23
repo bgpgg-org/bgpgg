@@ -14,12 +14,18 @@
 
 //! Common test utilities for BGP server testing
 
+use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
+use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
+use bgpgg::bgp::msg_notification::NotifcationMessage;
+use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 
 /// Test server handle that includes runtime for killing the server
@@ -88,14 +94,20 @@ pub fn build_path(
     next_hop: &str,
     peer_address: String,
     origin: Origin,
+    local_pref: Option<u32>,
+    med: Option<u32>,
+    atomic_aggregate: bool,
+    unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
 ) -> Path {
     Path {
         origin: origin.into(),
         as_path,
         next_hop: next_hop.to_string(),
         peer_address,
-        local_pref: Some(100),
-        med: None,
+        local_pref,
+        med,
+        atomic_aggregate,
+        unknown_attributes,
     }
 }
 
@@ -804,4 +816,142 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
 
     peers == expected_peers
+}
+
+/// Fake BGP peer for testing error handling
+///
+/// This allows sending raw/malformed BGP messages to test error handling.
+/// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
+pub struct FakePeer {
+    stream: TcpStream,
+}
+
+impl FakePeer {
+    /// Create a new FakePeer, connect to the given peer via TCP, and complete BGP handshake
+    pub async fn new(
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+        peer: &TestServer,
+    ) -> Self {
+        let mut stream = TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port))
+            .await
+            .expect("Failed to connect to BGP peer");
+
+        // 1. Send our OPEN
+        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+        let open_bytes = open.serialize();
+        stream
+            .write_all(&open_bytes)
+            .await
+            .expect("Failed to send OPEN");
+
+        // 2. Read their OPEN
+        let msg = read_bgp_message(&mut stream)
+            .await
+            .expect("Failed to read OPEN");
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message during handshake"),
+        }
+
+        // 3. Send KEEPALIVE
+        let keepalive = KeepAliveMessage {};
+        let keepalive_bytes = keepalive.serialize();
+        stream
+            .write_all(&keepalive_bytes)
+            .await
+            .expect("Failed to send KEEPALIVE");
+
+        // 4. Read their KEEPALIVE
+        let msg = read_bgp_message(&mut stream)
+            .await
+            .expect("Failed to read KEEPALIVE");
+        match msg {
+            BgpMessage::KeepAlive(_) => {}
+            _ => panic!("Expected KEEPALIVE message during handshake"),
+        }
+
+        // Now in Established state (no background KEEPALIVEs needed with long hold_time)
+        FakePeer { stream }
+    }
+
+    /// Send raw bytes to the peer
+    pub async fn send_raw(&mut self, bytes: &[u8]) {
+        self.stream
+            .write_all(bytes)
+            .await
+            .expect("Failed to send raw bytes");
+    }
+
+    /// Read a NOTIFICATION message (skips any KEEPALIVEs)
+    pub async fn read_notification(&mut self) -> NotifcationMessage {
+        loop {
+            let msg = read_bgp_message(&mut self.stream)
+                .await
+                .expect("Failed to read message");
+
+            match msg {
+                BgpMessage::Notification(notif) => return notif,
+                BgpMessage::KeepAlive(_) => continue, // Skip KEEPALIVEs sent by peer
+                _ => panic!("Expected NOTIFICATION, got unexpected message type"),
+            }
+        }
+    }
+}
+
+// Build raw BGP message from components
+pub fn build_raw_message(
+    marker: [u8; 16],
+    length_override: Option<u16>,
+    msg_type: u8,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut msg = marker.to_vec();
+    msg.extend_from_slice(&[0x00, 0x00]); // Placeholder for length
+    msg.push(msg_type);
+    msg.extend_from_slice(body);
+
+    // Fix the length field (unless overridden)
+    let len = length_override.unwrap_or(msg.len() as u16);
+    msg[16] = (len >> 8) as u8;
+    msg[17] = (len & 0xff) as u8;
+
+    msg
+}
+
+// Build a raw update message.
+pub fn build_raw_update(
+    withdrawn: &[u8],
+    attrs: &[&[u8]],
+    nlri: &[u8],
+    total_attr_len_override: Option<u16>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    // Withdrawn routes
+    body.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    body.extend_from_slice(withdrawn);
+
+    // Total path attributes length - use override if provided, else calculate correctly
+    let total_attr_len = total_attr_len_override
+        .unwrap_or_else(|| attrs.iter().map(|a| a.len()).sum::<usize>() as u16);
+    body.extend_from_slice(&total_attr_len.to_be_bytes());
+
+    // Path attributes
+    for attr in attrs {
+        body.extend_from_slice(attr);
+    }
+
+    // NLRI
+    body.extend_from_slice(nlri);
+
+    build_raw_message(BGP_MARKER, None, MessageType::UPDATE.as_u8(), &body)
+}
+
+// Build raw attribute bytes
+pub fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![flags, attr_type, length];
+    bytes.extend_from_slice(value);
+    bytes
 }

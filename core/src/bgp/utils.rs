@@ -19,16 +19,17 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 #[derive(Debug, PartialEq)]
 pub enum ParserError {
     IoError(String),
-    ParseError(String),
-    InvalidLength(String),
+    BgpError {
+        error: super::msg_notification::BgpError,
+        data: Vec<u8>,
+    },
 }
 
 impl Display for ParserError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         match self {
-            ParserError::IoError(s) => write!(f, "Parse error: {}", s),
-            ParserError::ParseError(s) => write!(f, "Parse error: {}", s),
-            ParserError::InvalidLength(s) => write!(f, "Parse error: {}", s),
+            ParserError::IoError(s) => write!(f, "IO error: {}", s),
+            ParserError::BgpError { error, .. } => write!(f, "BGP error: {:?}", error),
         }
     }
 }
@@ -85,9 +86,12 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Vec<IpNetwork> {
 pub fn read_u32(bytes: &[u8]) -> Result<u32, ParserError> {
     match bytes.len() {
         4 => Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
-        _ => Err(ParserError::InvalidLength(String::from(
-            "Invalid length for u32",
-        ))),
+        _ => Err(ParserError::BgpError {
+            error: super::msg_notification::BgpError::UpdateMessageError(
+                super::msg_notification::UpdateMessageError::AttributeLengthError,
+            ),
+            data: Vec::new(),
+        }),
     }
 }
 

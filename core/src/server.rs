@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::create_and_bind_tcp_socket;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::{ExportPolicyChain, ImportPolicyChain, PolicyContext};
+use crate::policy::Policy;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -44,6 +44,9 @@ pub enum MgmtOp {
         next_hop: Ipv4Addr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
+        med: Option<u32>,
+        atomic_aggregate: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
@@ -74,7 +77,6 @@ pub enum ServerOp {
     },
     PeerUpdate {
         peer_ip: String,
-        peer_asn: u16,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, crate::rib::Path)>,
     },
@@ -89,8 +91,18 @@ pub struct PeerInfo {
     pub asn: Option<u16>,
     pub state: BgpState,
     pub peer_tx: mpsc::UnboundedSender<PeerOp>,
-    pub import_policy: ImportPolicyChain,
-    pub export_policy: ExportPolicyChain,
+    pub import_policy: Option<Policy>,
+    pub export_policy: Option<Policy>,
+}
+
+impl PeerInfo {
+    pub fn policy_in(&self) -> Option<&Policy> {
+        self.import_policy.as_ref()
+    }
+
+    pub fn policy_out(&self) -> Option<&Policy> {
+        self.export_policy.as_ref()
+    }
 }
 
 pub struct BgpServer {
@@ -201,8 +213,8 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
-            import_policy: ImportPolicyChain::default(),
-            export_policy: ExportPolicyChain::default(),
+            import_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
+            export_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
         };
 
         self.peers.insert(peer_ip.clone(), peer_info);
@@ -225,10 +237,22 @@ impl BgpServer {
                 next_hop,
                 origin,
                 as_path,
+                local_pref,
+                med,
+                atomic_aggregate,
                 response,
             } => {
-                self.handle_add_route(prefix, next_hop, origin, as_path, response)
-                    .await;
+                self.handle_add_route(
+                    prefix,
+                    next_hop,
+                    origin,
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    response,
+                )
+                .await;
             }
             MgmtOp::RemoveRoute { prefix, response } => {
                 self.handle_remove_route(prefix, response).await;
@@ -255,30 +279,36 @@ impl BgpServer {
                 }
             }
             ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
-                // Update peer ASN in the HashMap
+                // Update peer ASN and initialize policies in the HashMap
                 if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
                     peer_info.asn = Some(asn);
+                    peer_info.import_policy = Some(Policy::default_in(self.config.asn));
+                    peer_info.export_policy = Some(Policy::default_out(self.config.asn, asn));
                     info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
             ServerOp::PeerUpdate {
                 peer_ip,
-                peer_asn,
                 withdrawn,
                 announced,
             } => {
                 let peer_info = self.peers.get(&peer_ip).expect("peer should exist");
-                let context = PolicyContext::new(peer_asn, self.config.asn);
-                let changed_prefixes =
-                    self.loc_rib
-                        .update_from_peer(peer_ip.clone(), withdrawn, announced, |path| {
-                            peer_info.import_policy.accept(path, &context)
-                        });
-                info!("UPDATE processing complete", "peer_ip" => &peer_ip);
 
-                // Propagate changed routes to other peers
-                if !changed_prefixes.is_empty() {
-                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                if let Some(policy) = peer_info.policy_in() {
+                    let changed_prefixes = self.loc_rib.update_from_peer(
+                        peer_ip.clone(),
+                        withdrawn,
+                        announced,
+                        |prefix, path| policy.accept(prefix, path),
+                    );
+                    info!("UPDATE processing complete", "peer_ip" => &peer_ip);
+
+                    // Propagate changed routes to other peers
+                    if !changed_prefixes.is_empty() {
+                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
+                } else {
+                    error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
                 }
             }
             ServerOp::PeerDisconnected { peer_ip } => {
@@ -351,8 +381,8 @@ impl BgpServer {
             asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
             state: peer.state(),
             peer_tx: peer_tx.clone(),
-            import_policy: ImportPolicyChain::default(),
-            export_policy: ExportPolicyChain::default(),
+            import_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
+            export_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
         };
 
         self.peers.insert(peer_ip.clone(), peer_info);
@@ -399,13 +429,23 @@ impl BgpServer {
         next_hop: Ipv4Addr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
+        med: Option<u32>,
+        atomic_aggregate: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
-        self.loc_rib
-            .add_local_route(prefix, next_hop, origin, as_path);
+        self.loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            origin,
+            as_path,
+            local_pref,
+            med,
+            atomic_aggregate,
+        );
 
         // Propagate to all peers using the common propagation logic
         self.propagate_routes(vec![prefix], None).await;
@@ -505,16 +545,21 @@ impl BgpServer {
             // Get peer ASN, default to local ASN if not yet known (shouldn't happen in Established state)
             let peer_asn = peer_info.asn.unwrap_or(local_asn);
 
-            send_withdrawals_to_peer(peer_addr, &peer_info.peer_tx, &to_withdraw);
-            send_announcements_to_peer(
-                peer_addr,
-                &peer_info.peer_tx,
-                &to_announce,
-                local_asn,
-                peer_asn,
-                self.config.router_id,
-                &peer_info.export_policy,
-            );
+            // Export policy should always be Some for Established peers
+            if let Some(export_policy) = peer_info.policy_out() {
+                send_withdrawals_to_peer(peer_addr, &peer_info.peer_tx, &to_withdraw);
+                send_announcements_to_peer(
+                    peer_addr,
+                    &peer_info.peer_tx,
+                    &to_announce,
+                    local_asn,
+                    peer_asn,
+                    self.config.router_id,
+                    export_policy,
+                );
+            } else {
+                error!("export policy not set for established peer", "peer_ip" => peer_addr);
+            }
         }
     }
 }

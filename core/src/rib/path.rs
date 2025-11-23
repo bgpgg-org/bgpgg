@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttribute};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -26,6 +26,8 @@ pub struct Path {
     pub source: RouteSource,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
+    pub atomic_aggregate: bool,
+    pub unknown_attrs: Vec<PathAttribute>,
 }
 
 impl Path {
@@ -35,20 +37,21 @@ impl Path {
         as_path: Vec<AsPathSegment>,
         next_hop: Ipv4Addr,
         source: RouteSource,
+        local_pref: Option<u32>,
+        med: Option<u32>,
+        atomic_aggregate: bool,
+        unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         Path {
             origin,
             as_path,
             next_hop,
             source,
-            local_pref: None,
-            med: None,
+            local_pref,
+            med,
+            atomic_aggregate,
+            unknown_attrs,
         }
-    }
-
-    /// Check if this path is locally originated
-    pub fn is_local(&self) -> bool {
-        self.source == RouteSource::Local
     }
 
     /// Calculate AS_PATH length for best path selection per RFC 4271
@@ -154,6 +157,8 @@ mod tests {
             source: RouteSource::Ebgp("10.0.0.1".to_string()),
             local_pref: Some(100),
             med: None,
+            atomic_aggregate: false,
+            unknown_attrs: vec![],
         }
     }
 
@@ -276,19 +281,5 @@ mod tests {
 
         // Lower peer address should win
         assert!(path1 > path2);
-    }
-
-    #[test]
-    fn test_is_local() {
-        let mut path = make_base_path();
-
-        path.source = RouteSource::Local;
-        assert!(path.is_local());
-
-        path.source = RouteSource::Ebgp("10.0.0.1".to_string());
-        assert!(!path.is_local());
-
-        path.source = RouteSource::Ibgp("10.0.0.2".to_string());
-        assert!(!path.is_local());
     }
 }
