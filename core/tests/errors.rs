@@ -565,3 +565,39 @@ async fn test_update_unrecognized_well_known_attribute() {
     );
     assert_eq!(notif.data(), &[attr_flags::TRANSITIVE, 8, 2, 0xaa, 0xbb]);
 }
+
+#[tokio::test]
+async fn test_update_invalid_origin_attribute() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    let invalid_origin_attr =
+        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]);
+    let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);
+    let next_hop_attr = build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::NEXT_HOP,
+        4,
+        &[10, 0, 0, 1],
+    );
+
+    let nlri = &[24, 10, 11, 12];
+    let msg = build_raw_update(
+        &[],
+        &[&invalid_origin_attr, &as_path_attr, &next_hop_attr],
+        nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute)
+    );
+    assert_eq!(
+        notif.data(),
+        &[attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, 3]
+    );
+}

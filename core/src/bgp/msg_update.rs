@@ -402,7 +402,20 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
 
             match attr_type {
                 AttrType::Origin => {
-                    let origin = Origin::try_from(bytes[offset])?;
+                    let value = bytes[offset];
+                    let origin = match value {
+                        0 => Origin::IGP,
+                        1 => Origin::EGP,
+                        2 => Origin::INCOMPLETE,
+                        _ => {
+                            return Err(ParserError::BgpError {
+                                error: BgpError::UpdateMessageError(
+                                    UpdateMessageError::InvalidOriginAttribute,
+                                ),
+                                data: attr_bytes.to_vec(),
+                            });
+                        }
+                    };
                     PathAttrValue::Origin(origin)
                 }
                 AttrType::AsPath => {
@@ -986,6 +999,27 @@ mod tests {
             }
         );
         assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_read_path_attribute_origin_invalid_value() {
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::Origin as u8,
+            0x01,
+            0x03, // Invalid value (must be 0, 1, or 2)
+        ];
+
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute)
+                );
+                assert_eq!(data, input);
+            }
+            _ => panic!("Expected InvalidOriginAttribute error"),
+        }
     }
 
     #[test]
