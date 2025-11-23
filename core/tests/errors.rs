@@ -19,7 +19,7 @@ pub use common::*;
 
 use bgpgg::bgp::msg::Message;
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
-use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError};
+use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
 use bgpgg::bgp::msg_open::OpenMessage;
 use std::net::Ipv4Addr;
 
@@ -134,4 +134,83 @@ async fn test_invalid_message_type() {
     );
     // RFC requires the erroneous Type field in data
     assert_eq!(notif.data(), &[99]);
+}
+
+// OPEN Message Error Tests (RFC 4271 Section 6.2)
+
+#[tokio::test]
+async fn test_open_unsupported_version() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    let mut msg = OpenMessage::new(65002, 300, u32::from(Ipv4Addr::new(2, 2, 2, 2))).serialize();
+    msg[19] = 0x03; // Version 3 (body starts at byte 19)
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber)
+    );
+    // RFC 4271: Data field contains largest locally-supported version
+    assert_eq!(notif.data(), &[0x00, 0x04]);
+}
+
+#[tokio::test]
+async fn test_open_unacceptable_hold_time() {
+    let test_cases = vec![1, 2];
+
+    for hold_time in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let msg =
+            OpenMessage::new(65002, hold_time, u32::from(Ipv4Addr::new(2, 2, 2, 2))).serialize();
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::OpenMessageError(OpenMessageError::UnacceptedHoldTime),
+            "Failed for hold_time={}",
+            hold_time
+        );
+        assert_eq!(
+            notif.data(),
+            &[] as &[u8],
+            "Failed for hold_time={}",
+            hold_time
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_open_bad_bgp_identifier() {
+    let test_cases = vec![
+        ("zero", 0x00000000),      // 0.0.0.0
+        ("broadcast", 0xFFFFFFFF), // 255.255.255.255
+        ("multicast", 0xE0000001), // 224.0.0.1
+    ];
+
+    for (name, bgp_id) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let msg = OpenMessage::new(65002, 300, bgp_id).serialize();
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::OpenMessageError(OpenMessageError::BadBgpIdentifier),
+            "Failed for case: {}",
+            name
+        );
+        assert_eq!(notif.data(), &[] as &[u8], "Failed for case: {}", name);
+    }
 }

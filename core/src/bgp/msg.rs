@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg_keepalive::KeepAliveMessage;
-use super::msg_notification::NotifcationMessage;
+use super::msg_notification::{BgpError, MessageHeaderError, NotifcationMessage};
 use super::msg_open::OpenMessage;
 use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
@@ -82,7 +82,10 @@ impl TryFrom<u8> for MessageType {
             2 => Ok(MessageType::UPDATE),
             3 => Ok(MessageType::NOTIFICATION),
             4 => Ok(MessageType::KEEPALIVE),
-            _ => Err(ParserError::ParseError("Invalid message type".to_string())),
+            _ => Err(ParserError::BgpError {
+                error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
+                data: vec![value],
+            }),
         }
     }
 }
@@ -149,23 +152,26 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
 
 fn validate_marker(header: &[u8]) -> Result<(), ParserError> {
     if &header[0..16] != &BGP_MARKER {
-        return Err(ParserError::InvalidMarker);
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
+            data: Vec::new(),
+        });
     }
     Ok(())
 }
 
 fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserError> {
     if message_length < BGP_HEADER_SIZE_BYTES as u16 {
-        return Err(ParserError::InvalidLengthField {
-            length: message_length,
-            reason: "less than minimum".to_string(),
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: message_length.to_be_bytes().to_vec(),
         });
     }
 
     if message_length > MAX_MESSAGE_SIZE {
-        return Err(ParserError::InvalidLengthField {
-            length: message_length,
-            reason: "greater than maximum".to_string(),
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: message_length.to_be_bytes().to_vec(),
         });
     }
 
@@ -173,17 +179,17 @@ fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserEr
     if message_type == MessageType::KEEPALIVE.as_u8()
         && message_length != BGP_HEADER_SIZE_BYTES as u16
     {
-        return Err(ParserError::InvalidLengthField {
-            length: message_length,
-            reason: "KEEPALIVE must be exactly 19 bytes".to_string(),
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: message_length.to_be_bytes().to_vec(),
         });
     }
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
     if message_type == MessageType::NOTIFICATION.as_u8() && message_length < 21 {
-        return Err(ParserError::InvalidLengthField {
-            length: message_length,
-            reason: "NOTIFICATION must be at least 21 bytes".to_string(),
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: message_length.to_be_bytes().to_vec(),
         });
     }
 
@@ -193,7 +199,10 @@ fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserEr
 fn validate_message_type(message_type: u8) -> Result<(), ParserError> {
     MessageType::try_from(message_type)
         .map(|_| ())
-        .map_err(|_| ParserError::InvalidMessageType(message_type))
+        .map_err(|_| ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
+            data: vec![message_type],
+        })
 }
 
 #[cfg(test)]
@@ -234,10 +243,16 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[0] = 0x00;
         let stream = Cursor::new(msg);
-        assert!(matches!(
-            read_bgp_message(stream).await,
-            Err(ParserError::InvalidMarker)
-        ));
+        match read_bgp_message(stream).await {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected InvalidMarker error"),
+        }
     }
 
     #[tokio::test]
@@ -246,10 +261,16 @@ mod tests {
         msg[16] = 0x00;
         msg[17] = 0x12; // 18
         let stream = Cursor::new(msg);
-        assert!(matches!(
-            read_bgp_message(stream).await,
-            Err(ParserError::InvalidLengthField { length: 18, .. })
-        ));
+        match read_bgp_message(stream).await {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength)
+                );
+                assert_eq!(data, vec![0x00, 0x12]); // Erroneous length field
+            }
+            _ => panic!("Expected BadMessageLength error"),
+        }
     }
 
     #[tokio::test]
@@ -258,10 +279,16 @@ mod tests {
         msg[16] = 0x10;
         msg[17] = 0x01; // 4097
         let stream = Cursor::new(msg);
-        assert!(matches!(
-            read_bgp_message(stream).await,
-            Err(ParserError::InvalidLengthField { length: 4097, .. })
-        ));
+        match read_bgp_message(stream).await {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength)
+                );
+                assert_eq!(data, vec![0x10, 0x01]); // Erroneous length field
+            }
+            _ => panic!("Expected BadMessageLength error"),
+        }
     }
 
     #[tokio::test]
@@ -269,9 +296,15 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[18] = 99;
         let stream = Cursor::new(msg);
-        assert!(matches!(
-            read_bgp_message(stream).await,
-            Err(ParserError::InvalidMessageType(99))
-        ));
+        match read_bgp_message(stream).await {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::MessageHeaderError(MessageHeaderError::BadMessageType)
+                );
+                assert_eq!(data, vec![99]); // Erroneous type field
+            }
+            _ => panic!("Expected BadMessageType error"),
+        }
     }
 }

@@ -16,7 +16,7 @@ use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum MessageHeaderError {
     ConnectionNotSynchronized = 1,
     BadMessageLength = 2,
@@ -36,7 +36,7 @@ impl From<u8> for MessageHeaderError {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum OpenMessageError {
     UnsupportedVersionNumber = 1,
     BadPeerAs = 2,
@@ -60,7 +60,7 @@ impl From<u8> for OpenMessageError {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum UpdateMessageError {
     MalformedAttributeList = 1,
     UnrecognizedWellKnownAttribute = 2,
@@ -95,7 +95,7 @@ impl From<u8> for UpdateMessageError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum BgpError {
     MessageHeaderError(MessageHeaderError),
     OpenMessageError(OpenMessageError),
@@ -210,18 +210,9 @@ impl NotifcationMessage {
 
     pub fn from_parser_error(error: &ParserError) -> Option<Self> {
         match error {
-            ParserError::InvalidMarker => Some(NotifcationMessage::new(
-                BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
-                Vec::new(),
-            )),
-            ParserError::InvalidLengthField { length, .. } => Some(NotifcationMessage::new(
-                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
-                length.to_be_bytes().to_vec(),
-            )),
-            ParserError::InvalidMessageType(msg_type) => Some(NotifcationMessage::new(
-                BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
-                vec![*msg_type],
-            )),
+            ParserError::BgpError { error, data } => {
+                Some(NotifcationMessage::new(error.clone(), data.clone()))
+            }
             _ => None,
         }
     }
@@ -364,8 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn test_from_parser_error_invalid_marker() {
-        let parser_error = ParserError::InvalidMarker;
+    fn test_from_parser_error_connection_not_synchronized() {
+        let parser_error = ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
+            data: Vec::new(),
+        };
         let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
 
         assert_eq!(
@@ -376,10 +370,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_parser_error_invalid_length_field() {
-        let parser_error = ParserError::InvalidLengthField {
-            length: 4097,
-            reason: "too large".to_string(),
+    fn test_from_parser_error_bad_message_length() {
+        let parser_error = ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: vec![0x10, 0x01],
         };
         let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
 
@@ -391,8 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn test_from_parser_error_invalid_message_type() {
-        let parser_error = ParserError::InvalidMessageType(99);
+    fn test_from_parser_error_bad_message_type() {
+        let parser_error = ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
+            data: vec![99],
+        };
         let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
 
         assert_eq!(

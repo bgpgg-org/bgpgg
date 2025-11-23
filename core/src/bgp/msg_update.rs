@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
+use super::msg_notification::{BgpError, UpdateMessageError};
 use super::utils::{parse_nlri_list, read_u32, IpNetwork, ParserError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -70,9 +71,10 @@ impl TryFrom<u8> for AttrType {
             5 => Ok(AttrType::LocalPref),
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
-            _ => Err(ParserError::ParseError(String::from(
-                "Invalid attribute type",
-            ))),
+            _ => Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
+                data: Vec::new(),
+            }),
         }
     }
 }
@@ -92,7 +94,10 @@ impl TryFrom<u8> for Origin {
             0 => Ok(Origin::IGP),
             1 => Ok(Origin::EGP),
             2 => Ok(Origin::INCOMPLETE),
-            _ => Err(ParserError::ParseError(String::from("Invalid Origin"))),
+            _ => Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute),
+                data: Vec::new(),
+            }),
         }
     }
 }
@@ -117,9 +122,10 @@ impl TryFrom<u8> for AsPathSegmentType {
         match value {
             1 => Ok(AsPathSegmentType::AsSet),
             2 => Ok(AsPathSegmentType::AsSequence),
-            _ => Err(ParserError::ParseError(String::from(
-                "Invalid AS path segment type",
-            ))),
+            _ => Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+                data: Vec::new(),
+            }),
         }
     }
 }
@@ -185,17 +191,19 @@ fn read_attr_next_hop(bytes: &[u8]) -> Result<NextHopAddr, ParserError> {
             let ip = Ipv6Addr::from(ip_bytes);
             Ok(NextHopAddr::Ipv6(ip))
         }
-        _ => Err(ParserError::InvalidLength(String::from(
-            "Invalid next hop length",
-        ))),
+        _ => Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop),
+            data: Vec::new(),
+        }),
     }
 }
 
 fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
     if bytes.len() != 6 {
-        return Err(ParserError::InvalidLength(
-            "Invalid length for aggregator".to_string(),
-        ));
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            data: Vec::new(),
+        });
     }
 
     let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
@@ -244,9 +252,10 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
         }
         AttrType::AtomicAggregate => {
             if attr_len > 0 {
-                return Err(ParserError::InvalidLength(String::from(
-                    "Atomic aggreagte should have no value.",
-                )));
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+                    data: Vec::new(),
+                });
             }
 
             PathAttrValue::AtomicAggregate
@@ -717,10 +726,16 @@ mod tests {
             0x0e,
         ];
 
-        assert!(matches!(
-            read_path_attribute(input),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected MalformedNextHop error"),
+        }
     }
 
     #[test]
@@ -759,10 +774,16 @@ mod tests {
             0x01,
         ];
 
-        assert!(matches!(
-            read_path_attribute(input),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected AttributeLengthError"),
+        }
     }
 
     #[test]
@@ -801,10 +822,16 @@ mod tests {
             0x0f,
         ];
 
-        assert!(matches!(
-            read_path_attribute(input),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected AttributeLengthError"),
+        }
     }
 
     #[test]
@@ -835,10 +862,16 @@ mod tests {
             0x00,                            // Attribute value
         ];
 
-        assert!(matches!(
-            read_path_attribute(input),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected AttributeLengthError"),
+        }
     }
 
     #[test]
@@ -885,10 +918,16 @@ mod tests {
             0x0d,
         ];
 
-        assert!(matches!(
-            read_path_attribute(input),
-            Err(ParserError::InvalidLength(_))
-        ))
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected AttributeLengthError"),
+        }
     }
 
     macro_rules! test_message_from_bytes {
