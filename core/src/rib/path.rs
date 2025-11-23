@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttribute};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -27,6 +27,7 @@ pub struct Path {
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
     pub atomic_aggregate: bool,
+    pub unknown_attrs: Vec<PathAttribute>,
 }
 
 impl Path {
@@ -39,6 +40,7 @@ impl Path {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         Path {
             origin,
@@ -48,6 +50,7 @@ impl Path {
             local_pref,
             med,
             atomic_aggregate,
+            unknown_attrs,
         }
     }
 
@@ -155,6 +158,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         }
     }
 

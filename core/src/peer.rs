@@ -449,6 +449,7 @@ impl Peer {
         let local_pref = update_msg.get_local_pref();
         let med = update_msg.get_med();
         let atomic_aggregate = update_msg.get_atomic_aggregate();
+        let unknown_attrs = update_msg.get_unknown_attrs();
 
         // Only process announcements if we have required attributes
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
@@ -468,6 +469,7 @@ impl Peer {
                     local_pref,
                     med,
                     atomic_aggregate,
+                    unknown_attrs.clone(),
                 );
                 info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr, "med" => format!("{:?}", med));
                 self.rib_in.add_route(*prefix, path.clone());

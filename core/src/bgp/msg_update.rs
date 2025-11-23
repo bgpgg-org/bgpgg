@@ -20,7 +20,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
 const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
@@ -52,7 +52,7 @@ pub mod attr_type_code {
     pub const AGGREGATOR: u8 = 7;
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 enum PathAttrValue {
     Origin(Origin),
     AsPath(AsPath),
@@ -61,12 +61,27 @@ enum PathAttrValue {
     LocalPref(u32),
     AtomicAggregate,
     Aggregator(Aggregator),
+    Unknown {
+        type_code: u8,
+        flags: u8,
+        data: Vec<u8>,
+    },
 }
 
-#[derive(Debug, PartialEq)]
-struct PathAttribute {
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+pub struct PathAttribute {
     flags: PathAttrFlag,
     value: PathAttrValue,
+}
+
+impl PathAttribute {
+    pub fn is_unknown_transitive(&self) -> bool {
+        if let PathAttrValue::Unknown { flags, .. } = &self.value {
+            flags & attr_flags::TRANSITIVE != 0
+        } else {
+            false
+        }
+    }
 }
 
 #[repr(u8)]
@@ -126,14 +141,16 @@ impl AttrType {
 }
 
 /// Parse attribute type and handle unrecognized attributes per RFC 4271 Section 6.3.
+/// Returns Ok(Some(AttrType)) for known attributes, Ok(None) for unknown optional attributes,
+/// and Err for unknown well-known attributes.
 fn parse_attr_type(
     bytes: &[u8],
     flags: u8,
     attr_type_code: u8,
     attr_len: u16,
-) -> Result<AttrType, ParserError> {
+) -> Result<Option<AttrType>, ParserError> {
     match AttrType::try_from(attr_type_code) {
-        Ok(attr_type) => Ok(attr_type),
+        Ok(attr_type) => Ok(Some(attr_type)),
         Err(_) => {
             // Unrecognized well-known attribute (OPTIONAL=0)
             // RFC 4271 Section 6.3: return error with full attribute data
@@ -150,13 +167,9 @@ fn parse_attr_type(
                     data: attr_data,
                 });
             } else {
-                // RFC 4271 Section 6.3: optional non-transitive -> ignore,
-                // optional transitive -> set Partial bit and retain
-                // TODO: Implement optional transitive handling
-                return Err(ParserError::BgpError {
-                    error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
-                    data: Vec::new(),
-                });
+                // RFC 4271 Section 6.3: optional attributes (transitive or non-transitive)
+                // Return None to signal this should be stored as Unknown variant
+                Ok(None)
             }
         }
     }
@@ -253,7 +266,7 @@ impl TryFrom<u8> for AsPathSegmentType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 enum NextHopAddr {
     Ipv4(Ipv4Addr),
     // TODO: support IPv6
@@ -261,12 +274,12 @@ enum NextHopAddr {
     Ipv6(Ipv6Addr),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 struct AsPath {
     segments: Vec<AsPathSegment>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 struct Aggregator {
     asn: u16,
     // TODO: support IPv6?
@@ -372,71 +385,91 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
         false => bytes[2] as u16,
     };
 
-    let attr_type = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
+    let attr_type_opt = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
 
-    validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
+    let attr_val = match attr_type_opt {
+        Some(attr_type) => {
+            // Known attribute - validate and parse normally
+            validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
 
-    let mut offset = if attribute_flag.extended_len() { 4 } else { 3 };
+            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+            let attr_total_len = offset + attr_len as usize;
+            let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
 
-    // Calculate the total attribute size for error reporting
-    let attr_total_len = offset + attr_len as usize;
-    let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
+            validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
 
-    validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
+            let attr_data = &bytes[offset..offset + attr_len as usize];
 
-    let attr_data = &bytes[offset..offset + attr_len as usize];
-
-    let attr_val = match attr_type {
-        AttrType::Origin => {
-            let origin = Origin::try_from(bytes[offset])?;
-
-            PathAttrValue::Origin(origin)
+            match attr_type {
+                AttrType::Origin => {
+                    let origin = Origin::try_from(bytes[offset])?;
+                    PathAttrValue::Origin(origin)
+                }
+                AttrType::AsPath => {
+                    let as_path = read_attr_as_path(&attr_data)?;
+                    PathAttrValue::AsPath(as_path)
+                }
+                AttrType::NextHop => {
+                    let next_hop = read_attr_next_hop(&attr_data)?;
+                    PathAttrValue::NextHop(next_hop)
+                }
+                AttrType::MultiExtiDisc => {
+                    let multi_exit_disc = read_u32(&attr_data)?;
+                    PathAttrValue::MultiExtiDisc(multi_exit_disc)
+                }
+                AttrType::LocalPref => {
+                    let local_pref = read_u32(&attr_data)?;
+                    PathAttrValue::LocalPref(local_pref)
+                }
+                AttrType::AtomicAggregate => {
+                    if attr_len > 0 {
+                        return Err(ParserError::BgpError {
+                            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+                            data: Vec::new(),
+                        });
+                    }
+                    PathAttrValue::AtomicAggregate
+                }
+                AttrType::Aggregator => {
+                    let aggregator = read_attr_aggregator(&attr_data)?;
+                    PathAttrValue::Aggregator(aggregator)
+                }
+            }
         }
-        AttrType::AsPath => {
-            let as_path = read_attr_as_path(&attr_data)?;
+        None => {
+            // Unknown optional attribute
+            // RFC 4271 Section 6.3: set PARTIAL bit for transitive, store raw data
+            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+            let data = bytes[offset..offset + attr_len as usize].to_vec();
 
-            PathAttrValue::AsPath(as_path)
-        }
-        AttrType::NextHop => {
-            let next_hop = read_attr_next_hop(&attr_data)?;
-
-            PathAttrValue::NextHop(next_hop)
-        }
-        AttrType::MultiExtiDisc => {
-            let multi_exit_disc = read_u32(&attr_data)?;
-
-            PathAttrValue::MultiExtiDisc(multi_exit_disc)
-        }
-        AttrType::LocalPref => {
-            let local_pref = read_u32(&attr_data)?;
-
-            PathAttrValue::LocalPref(local_pref)
-        }
-        AttrType::AtomicAggregate => {
-            if attr_len > 0 {
-                return Err(ParserError::BgpError {
-                    error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
-                    data: Vec::new(),
-                });
+            let mut flags = attribute_flag.0;
+            if flags & PathAttrFlag::TRANSITIVE != 0 {
+                flags |= PathAttrFlag::PARTIAL;
             }
 
-            PathAttrValue::AtomicAggregate
-        }
-        AttrType::Aggregator => {
-            let aggregator = read_attr_aggregator(&attr_data)?;
-
-            PathAttrValue::Aggregator(aggregator)
+            PathAttrValue::Unknown {
+                type_code: attr_type_code,
+                flags,
+                data,
+            }
         }
     };
 
-    offset = offset + attr_len as usize;
+    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+    let total_offset = offset + attr_len as usize;
+
+    // Update PathAttribute flags if PARTIAL bit was set for unknown transitive
+    let final_flags = match &attr_val {
+        PathAttrValue::Unknown { flags, .. } => PathAttrFlag(*flags),
+        _ => attribute_flag,
+    };
 
     let attribute = PathAttribute {
-        flags: attribute_flag,
+        flags: final_flags,
         value: attr_val,
     };
 
-    Ok((attribute, offset as u8))
+    Ok((attribute, total_offset as u8))
 }
 
 fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
@@ -506,12 +539,17 @@ fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             agg_bytes.extend_from_slice(&agg.ip_addr.octets());
             agg_bytes
         }
+        PathAttrValue::Unknown { data, .. } => data.clone(),
     };
 
-    // Write flags
-    bytes.push(attr.flags.0);
+    // Write flags (Unknown stores its own flags)
+    let flags = match &attr.value {
+        PathAttrValue::Unknown { flags, .. } => *flags,
+        _ => attr.flags.0,
+    };
+    bytes.push(flags);
 
-    // Write attribute type
+    // Write attribute type (Unknown stores its own type)
     let attr_type = match &attr.value {
         PathAttrValue::Origin(_) => AttrType::Origin as u8,
         PathAttrValue::AsPath(_) => AttrType::AsPath as u8,
@@ -520,12 +558,14 @@ fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::LocalPref(_) => AttrType::LocalPref as u8,
         PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
         PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
+        PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
     bytes.push(attr_type);
 
-    // Write length
+    // Write length (use extended_len from Unknown's flags if applicable)
     let attr_len = attr_value_bytes.len();
-    if attr.flags.extended_len() {
+    let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
+    if extended_len {
         bytes.extend_from_slice(&(attr_len as u16).to_be_bytes());
     } else {
         bytes.push(attr_len as u8);
@@ -620,6 +660,7 @@ impl UpdateMessage {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         let mut path_attributes = vec![
             PathAttribute {
@@ -658,6 +699,9 @@ impl UpdateMessage {
                 value: PathAttrValue::AtomicAggregate,
             });
         }
+
+        // Append unknown attributes
+        path_attributes.extend(unknown_attrs);
 
         let path_attributes_bytes = write_path_attributes(&path_attributes);
 
@@ -747,6 +791,19 @@ impl UpdateMessage {
         self.path_attributes
             .iter()
             .any(|attr| attr.value == PathAttrValue::AtomicAggregate)
+    }
+
+    pub fn get_unknown_attrs(&self) -> Vec<PathAttribute> {
+        self.path_attributes
+            .iter()
+            .filter_map(|attr| {
+                if matches!(attr.value, PathAttrValue::Unknown { .. }) {
+                    Some(attr.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
@@ -1595,6 +1652,7 @@ mod tests {
             Some(200),
             None,
             false,
+            vec![],
         );
         assert_eq!(msg.get_local_pref(), Some(200));
 
@@ -1606,6 +1664,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
         );
         assert_eq!(msg_no_pref.get_local_pref(), None);
     }
@@ -1620,6 +1679,7 @@ mod tests {
             None,
             Some(50),
             false,
+            vec![],
         );
         assert_eq!(msg.get_med(), Some(50));
 
@@ -1631,6 +1691,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
         );
         assert_eq!(msg_no_med.get_med(), None);
     }
@@ -1654,6 +1715,7 @@ mod tests {
                 local_pref,
                 med,
                 atomic_aggregate,
+                vec![],
             );
 
             let bytes = msg.to_bytes();
@@ -1991,6 +2053,49 @@ mod tests {
                 assert_eq!(data, input);
             }
             _ => panic!("Expected UnrecognizedWellKnownAttribute error"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_optional_attributes() {
+        let test_cases = vec![
+            (
+                PathAttrFlag::OPTIONAL,
+                200u8,
+                vec![0x01, 0x02, 0x03],
+                PathAttrFlag::OPTIONAL, // Non-transitive: PARTIAL bit NOT set
+            ),
+            (
+                PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                201u8,
+                vec![0xde, 0xad, 0xbe, 0xef],
+                PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, // Transitive: PARTIAL bit set
+            ),
+        ];
+
+        for (input_flags, attr_type, attr_value, expected_flags) in test_cases {
+            let mut input = vec![input_flags, attr_type, attr_value.len() as u8];
+            input.extend_from_slice(&attr_value);
+
+            let (attr, offset) = read_path_attribute(&input).unwrap();
+
+            assert_eq!(
+                attr,
+                PathAttribute {
+                    flags: PathAttrFlag(expected_flags),
+                    value: PathAttrValue::Unknown {
+                        type_code: attr_type,
+                        flags: expected_flags,
+                        data: attr_value.clone(),
+                    },
+                }
+            );
+            assert_eq!(offset as usize, input.len());
+
+            // Roundtrip test
+            let output = write_path_attribute(&attr);
+            let (parsed_attr, _) = read_path_attribute(&output).unwrap();
+            assert_eq!(parsed_attr, attr);
         }
     }
 }

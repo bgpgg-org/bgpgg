@@ -28,6 +28,7 @@ pub(crate) mod test_helpers {
             local_pref: None,
             med: None,
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         }
     }
 

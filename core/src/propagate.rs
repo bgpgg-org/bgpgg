@@ -257,6 +257,14 @@ pub fn send_announcements_to_peer(
         let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
         let med = build_export_med(&batch.path, local_asn, peer_asn);
         let atomic_aggregate = batch.path.atomic_aggregate;
+
+        // RFC 4271 Section 6.3: only propagate transitive unknown attributes
+        let unknown_attrs: Vec<_> = batch.path.unknown_attrs
+            .iter()
+            .filter(|attr| attr.is_unknown_transitive())
+            .cloned()
+            .collect();
+
         info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
@@ -267,6 +275,7 @@ pub fn send_announcements_to_peer(
             local_pref,
             med,
             atomic_aggregate,
+            unknown_attrs,
         );
 
         if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
@@ -295,6 +304,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         }
     }
 
@@ -588,6 +598,7 @@ mod tests {
             local_pref: Some(200),
             med: None,
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         };
 
         // iBGP: include LOCAL_PREF
@@ -608,6 +619,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         };
 
         // iBGP: propagate MED
@@ -625,6 +637,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            unknown_attrs: vec![],
         };
 
         // eBGP: send MED for local route

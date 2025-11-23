@@ -176,6 +176,7 @@ impl LocRib {
             local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
             med,
             atomic_aggregate,
+            unknown_attrs: vec![],
         };
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
