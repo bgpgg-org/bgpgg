@@ -17,13 +17,16 @@ use super::msg_notification::{BgpError, UpdateMessageError};
 use super::utils::{parse_nlri_list, read_u32, IpNetwork, ParserError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
+const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
+
 #[derive(Debug, PartialEq)]
 struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
     const OPTIONAL: u8 = 1 << 7;
     const TRANSITIVE: u8 = 1 << 6;
-    const _PARTIAL: u8 = 1 << 5; // RFC 4271 - kept for completeness
+    const PARTIAL: u8 = 1 << 5;
     const EXTENDED_LENGTH: u8 = 1 << 4;
 
     fn extended_len(&self) -> bool {
@@ -77,6 +80,71 @@ impl TryFrom<u8> for AttrType {
             }),
         }
     }
+}
+
+impl AttrType {
+    fn expected_flags(&self) -> u8 {
+        match self {
+            AttrType::Origin => PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath => PathAttrFlag::TRANSITIVE,
+            AttrType::NextHop => PathAttrFlag::TRANSITIVE,
+            AttrType::MultiExtiDisc => PathAttrFlag::OPTIONAL,
+            AttrType::LocalPref => PathAttrFlag::TRANSITIVE,
+            AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
+            AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+        }
+    }
+
+    fn is_well_known(&self) -> bool {
+        matches!(
+            self,
+            AttrType::Origin
+                | AttrType::AsPath
+                | AttrType::NextHop
+                | AttrType::LocalPref
+                | AttrType::AtomicAggregate
+        )
+    }
+}
+
+fn validate_attribute_flags(
+    flags: u8,
+    attr_type: &AttrType,
+    attr_type_code: u8,
+    attr_len: u16,
+) -> Result<(), ParserError> {
+    let expected = attr_type.expected_flags();
+    let mask = PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE;
+
+    // Validate Optional and Transitive bits match the attribute type
+    if (flags & mask) != expected {
+        let mut data = vec![flags, attr_type_code];
+        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
+            data.extend_from_slice(&attr_len.to_be_bytes());
+        } else {
+            data.push(attr_len as u8);
+        }
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+            data,
+        });
+    }
+
+    // Partial bit must be 0 for well-known attributes
+    if attr_type.is_well_known() && (flags & PathAttrFlag::PARTIAL != 0) {
+        let mut data = vec![flags, attr_type_code];
+        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
+            data.extend_from_slice(&attr_len.to_be_bytes());
+        } else {
+            data.push(attr_len as u8);
+        }
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+            data,
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -220,6 +288,8 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
         true => u16::from_be_bytes([bytes[2], bytes[3]]),
         false => bytes[2] as u16,
     };
+
+    validate_attribute_flags(bytes[0], &attr_type, bytes[1], attr_len)?;
 
     let mut offset = 3;
     let attr_data = &bytes[offset..offset + attr_len as usize];
@@ -383,6 +453,28 @@ fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
     bytes
 }
 
+fn validate_update_message_lengths(
+    withdrawn_routes_len: usize,
+    total_path_attributes_len: usize,
+    body_length: usize,
+) -> Result<(), ParserError> {
+    // RFC 4271 Section 6.3: If Withdrawn Routes Length + Total Attribute Length + 23
+    // exceeds the message Length, then Error Subcode MUST be set to Malformed Attribute List.
+    // Since we work with body (message_length - 19), check becomes:
+    // withdrawn_routes_len + total_path_attributes_len + 4 > body_length
+    let length_fields_size = WITHDRAWN_ROUTES_LENGTH_SIZE + TOTAL_ATTR_LENGTH_SIZE;
+    let claimed_size = withdrawn_routes_len + total_path_attributes_len + length_fields_size;
+
+    if claimed_size > body_length {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+            data: Vec::new(),
+        });
+    }
+
+    Ok(())
+}
+
 impl UpdateMessage {
     pub fn new(
         origin: Origin,
@@ -522,16 +614,24 @@ impl UpdateMessage {
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
+        let body_length = bytes.len();
         let mut data = bytes;
 
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-        data = data[2..].to_vec();
+        data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
         let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len]);
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-        data = data[2..].to_vec();
+
+        validate_update_message_lengths(
+            withdrawn_routes_len,
+            total_path_attributes_len,
+            body_length,
+        )?;
+
+        data = data[TOTAL_ATTR_LENGTH_SIZE..].to_vec();
 
         let path_attributes = read_path_attributes(&data[..total_path_attributes_len])?;
         data = data[total_path_attributes_len..].to_vec();
@@ -877,9 +977,9 @@ mod tests {
     #[test]
     fn test_read_path_attribute_aggregator_ipv4() {
         let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,   // Attribute flags
-            AttrType::Aggregator as u8, // Attribute type
-            0x06,                       // Attribute length
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
+            AttrType::Aggregator as u8,                        // Attribute type
+            0x06,                                              // Attribute length
             // Attribute value
             0x00, // ASN
             0x10,
@@ -893,7 +993,7 @@ mod tests {
         assert_eq!(
             as_path,
             PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::Aggregator(Aggregator {
                     asn: 16,
                     ip_addr: Ipv4Addr::from_str("10.11.12.13").unwrap(),
@@ -906,9 +1006,9 @@ mod tests {
     #[test]
     fn test_read_path_attribute_aggregator_invalid_length() {
         let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,   // Attribute flags
-            AttrType::Aggregator as u8, // Attribute type
-            0x03,                       // Attribute length
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
+            AttrType::Aggregator as u8,                        // Attribute type
+            0x03,                                              // Attribute length
             // Attribute value
             0x00, // ASN
             0x10,
@@ -1317,5 +1417,200 @@ mod tests {
             assert_eq!(parsed.get_med(), med);
             assert_eq!(parsed.get_atomic_aggregate(), atomic_aggregate);
         }
+    }
+
+    #[test]
+    fn test_malformed_attribute_list_lengths_too_large() {
+        // Create a message with Withdrawn Routes Length + Total Attribute Length + 4 > body_length
+        let input: &[u8] = &[
+            0x00, 0x04, // Withdrawn routes length = 4
+            0x18, 0x0a, 0x0b, 0x0c, // Withdrawn route data (4 bytes: /24 prefix)
+            0x00,
+            0x64, // Total path attribute length = 100
+                  // Body ends here (8 bytes total), but we claim 100 bytes of attributes
+                  // Check: 4 + 100 + 4 = 108 > 8, should error
+        ];
+
+        match UpdateMessage::from_bytes(input.to_vec()) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+                );
+                assert_eq!(data, Vec::<u8>::new());
+            }
+            _ => panic!("Expected MalformedAttributeList error"),
+        }
+    }
+
+    #[test]
+    fn test_attribute_flags_well_known_wrong_optional_bit() {
+        let test_cases = vec![
+            ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
+            ("as_path", AttrType::AsPath as u8, vec![0x00]),
+            ("next_hop", AttrType::NextHop as u8, vec![0x04, 0x0a, 0x00, 0x00, 0x01]),
+            ("local_pref", AttrType::LocalPref as u8, vec![0x04, 0x00, 0x00, 0x00, 0x64]),
+            ("atomic_aggregate", AttrType::AtomicAggregate as u8, vec![0x00]),
+        ];
+
+        for (name, attr_type, attr_data) in test_cases {
+            let mut input = vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type];
+            input.extend_from_slice(&attr_data);
+
+            match read_path_attribute(&input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(
+                        data,
+                        vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type, attr_data[0]],
+                        "Failed for {}",
+                        name
+                    );
+                }
+                _ => panic!("Expected AttributeFlagsError for {}", name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_attribute_flags_well_known_partial_bit_set() {
+        let test_cases = vec![
+            ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
+            ("as_path", AttrType::AsPath as u8, vec![0x00]),
+            ("next_hop", AttrType::NextHop as u8, vec![0x04, 0x0a, 0x00, 0x00, 0x01]),
+            ("local_pref", AttrType::LocalPref as u8, vec![0x04, 0x00, 0x00, 0x00, 0x64]),
+            ("atomic_aggregate", AttrType::AtomicAggregate as u8, vec![0x00]),
+        ];
+
+        for (name, attr_type, attr_data) in test_cases {
+            let mut input = vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type];
+            input.extend_from_slice(&attr_data);
+
+            match read_path_attribute(&input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(
+                        data,
+                        vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type, attr_data[0]],
+                        "Failed for {}",
+                        name
+                    );
+                }
+                _ => panic!("Expected AttributeFlagsError for {}", name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_attribute_flags_optional_wrong_flags() {
+        let test_cases = vec![
+            ("med_missing_optional", AttrType::MultiExtiDisc as u8, PathAttrFlag::TRANSITIVE, vec![0x04, 0x00, 0x00, 0x00, 0x01]),
+            ("aggregator_missing_optional", AttrType::Aggregator as u8, PathAttrFlag::TRANSITIVE, vec![0x06, 0x00, 0x10, 0x0a, 0x0b, 0x0c, 0x0d]),
+        ];
+
+        for (name, attr_type, wrong_flags, attr_data) in test_cases {
+            let mut input = vec![wrong_flags, attr_type];
+            input.extend_from_slice(&attr_data);
+
+            match read_path_attribute(&input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(
+                        data,
+                        vec![wrong_flags, attr_type, attr_data[0]],
+                        "Failed for {}",
+                        name
+                    );
+                }
+                _ => panic!("Expected AttributeFlagsError for {}", name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_attribute_flags_extended_length_data() {
+        let input: &[u8] = &[
+            PathAttrFlag::OPTIONAL | PathAttrFlag::EXTENDED_LENGTH,
+            AttrType::Origin as u8,
+            0x00,
+            0x01,
+            0x00,
+        ];
+
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, data }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
+                );
+                assert_eq!(
+                    data,
+                    vec![
+                        PathAttrFlag::OPTIONAL | PathAttrFlag::EXTENDED_LENGTH,
+                        AttrType::Origin as u8,
+                        0x00,
+                        0x01
+                    ]
+                );
+            }
+            _ => panic!("Expected AttributeFlagsError"),
+        }
+    }
+
+    #[test]
+    fn test_attribute_flags_aggregator_partial_bit_allowed() {
+        let input: &[u8] = &[
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
+            AttrType::Aggregator as u8,
+            0x06,
+            0x00,
+            0x10,
+            0x0a,
+            0x0b,
+            0x0c,
+            0x0d,
+        ];
+
+        let (attr, offset) = read_path_attribute(input).unwrap();
+        assert_eq!(
+            attr.flags.0,
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL
+        );
+        assert_eq!(offset, 9);
+    }
+
+    #[test]
+    fn test_attribute_flags_med_partial_bit_allowed() {
+        let input: &[u8] = &[
+            PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL,
+            AttrType::MultiExtiDisc as u8,
+            0x04,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+        ];
+
+        let (attr, offset) = read_path_attribute(input).unwrap();
+        assert_eq!(
+            attr.flags.0,
+            PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL
+        );
+        assert_eq!(offset, 7);
     }
 }

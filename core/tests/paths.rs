@@ -1023,3 +1023,5 @@ async fn test_atomic_aggregate_propagation() {
     )])
     .await;
 }
+
+// TODO: might need to test partial bit propagation?

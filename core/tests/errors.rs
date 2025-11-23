@@ -19,8 +19,12 @@ pub use common::*;
 
 use bgpgg::bgp::msg::Message;
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
-use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
+use bgpgg::bgp::msg_notification::{
+    BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
+};
 use bgpgg::bgp::msg_open::OpenMessage;
+use bgpgg::bgp::msg_update::UpdateMessage;
+use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -213,4 +217,130 @@ async fn test_open_bad_bgp_identifier() {
         );
         assert_eq!(notif.data(), &[] as &[u8], "Failed for case: {}", name);
     }
+}
+
+// UPDATE Message Error Tests (RFC 4271 Section 6.3)
+
+#[tokio::test]
+async fn test_update_malformed_attribute_list() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    let withdrawn_routes = vec![IpNetwork::V4(Ipv4Net {
+        address: Ipv4Addr::new(10, 11, 12, 0),
+        prefix_length: 24,
+    })];
+    let update = UpdateMessage::new_withdraw(withdrawn_routes);
+    let mut msg = update.serialize();
+
+    // Corrupt Total Path Attribute Length field (bytes 25-26) to 100
+    // Withdrawn Routes Length (4) + Total Attribute Length (100) + 23 = 127 > 27 (message length)
+    msg[25] = 0x00;
+    msg[26] = 0x64;
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+    );
+    assert_eq!(notif.data(), &[] as &[u8]);
+}
+
+#[tokio::test]
+async fn test_update_attribute_flags_error_origin_wrong_optional_bit() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    use bgpgg::bgp::msg_update::Origin;
+
+    let update = UpdateMessage::new(
+        Origin::IGP,
+        vec![],
+        Ipv4Addr::new(10, 0, 0, 1),
+        vec![],
+        None,
+        None,
+        false,
+    );
+    let mut msg = update.serialize();
+
+    // Corrupt ORIGIN attribute flags byte (first path attribute after total attr length)
+    // Position: 19 (header) + 2 (withdrawn len) + 2 (total attr len) = 23
+    msg[23] = 0xC0; // Optional + Transitive (WRONG for ORIGIN)
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
+    );
+    assert_eq!(&notif.data()[0..3], &[0xC0, 1, 1]);
+}
+
+#[tokio::test]
+async fn test_update_attribute_flags_error_origin_partial_bit() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    use bgpgg::bgp::msg_update::Origin;
+
+    let update = UpdateMessage::new(
+        Origin::IGP,
+        vec![],
+        Ipv4Addr::new(10, 0, 0, 1),
+        vec![],
+        None,
+        None,
+        false,
+    );
+    let mut msg = update.serialize();
+
+    msg[23] = 0x60; // Transitive + Partial (WRONG for ORIGIN)
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
+    );
+    assert_eq!(&notif.data()[0..3], &[0x60, 1, 1]);
+}
+
+#[tokio::test]
+async fn test_update_attribute_flags_error_med_missing_optional_bit() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    use bgpgg::bgp::msg_update::Origin;
+
+    let update = UpdateMessage::new(
+        Origin::IGP,
+        vec![],
+        Ipv4Addr::new(10, 0, 0, 1),
+        vec![],
+        None,
+        Some(100),
+        false,
+    );
+    let mut msg = update.serialize();
+
+    // MED is the 4th attribute (after ORIGIN, AS_PATH, NEXT_HOP)
+    // ORIGIN: flags(1) + type(1) + len(1) + value(1) = 4 bytes
+    // AS_PATH: flags(1) + type(1) + len(1) + value(0) = 3 bytes
+    // NEXT_HOP: flags(1) + type(1) + len(1) + value(4) = 7 bytes
+    // MED starts at: 23 + 4 + 3 + 7 = 37
+    msg[37] = 0x40; // Transitive only (WRONG for MED)
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
+    );
+    assert_eq!(&notif.data()[0..3], &[0x40, 4, 4]);
 }
