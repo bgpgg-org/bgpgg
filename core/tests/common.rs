@@ -14,7 +14,7 @@
 
 //! Common test utilities for BGP server testing
 
-use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message};
+use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_notification::NotifcationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
@@ -97,6 +97,7 @@ pub fn build_path(
     local_pref: Option<u32>,
     med: Option<u32>,
     atomic_aggregate: bool,
+    unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
 ) -> Path {
     Path {
         origin: origin.into(),
@@ -106,6 +107,7 @@ pub fn build_path(
         local_pref,
         med,
         atomic_aggregate,
+        unknown_attributes,
     }
 }
 
@@ -832,7 +834,7 @@ impl FakePeer {
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", peer.bgp_port))
+        let mut stream = TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port))
             .await
             .expect("Failed to connect to BGP peer");
 
@@ -896,4 +898,60 @@ impl FakePeer {
             }
         }
     }
+}
+
+// Build raw BGP message from components
+pub fn build_raw_message(
+    marker: [u8; 16],
+    length_override: Option<u16>,
+    msg_type: u8,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut msg = marker.to_vec();
+    msg.extend_from_slice(&[0x00, 0x00]); // Placeholder for length
+    msg.push(msg_type);
+    msg.extend_from_slice(body);
+
+    // Fix the length field (unless overridden)
+    let len = length_override.unwrap_or(msg.len() as u16);
+    msg[16] = (len >> 8) as u8;
+    msg[17] = (len & 0xff) as u8;
+
+    msg
+}
+
+// Build a raw update message.
+pub fn build_raw_update(
+    withdrawn: &[u8],
+    attrs: &[&[u8]],
+    nlri: &[u8],
+    total_attr_len_override: Option<u16>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    // Withdrawn routes
+    body.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    body.extend_from_slice(withdrawn);
+
+    // Total path attributes length - use override if provided, else calculate correctly
+    let total_attr_len = total_attr_len_override
+        .unwrap_or_else(|| attrs.iter().map(|a| a.len()).sum::<usize>() as u16);
+    body.extend_from_slice(&total_attr_len.to_be_bytes());
+
+    // Path attributes
+    for attr in attrs {
+        body.extend_from_slice(attr);
+    }
+
+    // NLRI
+    body.extend_from_slice(nlri);
+
+    build_raw_message(BGP_MARKER, None, MessageType::UPDATE.as_u8(), &body)
+}
+
+// Build raw attribute bytes
+pub fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![flags, attr_type, length];
+    bytes.extend_from_slice(value);
+    bytes
 }

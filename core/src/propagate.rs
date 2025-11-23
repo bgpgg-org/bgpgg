@@ -259,7 +259,9 @@ pub fn send_announcements_to_peer(
         let atomic_aggregate = batch.path.atomic_aggregate;
 
         // RFC 4271 Section 6.3: only propagate transitive unknown attributes
-        let unknown_attrs: Vec<_> = batch.path.unknown_attrs
+        let unknown_attrs: Vec<_> = batch
+            .path
+            .unknown_attrs
             .iter()
             .filter(|attr| attr.is_unknown_transitive())
             .cloned()

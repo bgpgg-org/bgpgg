@@ -25,55 +25,6 @@ use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use std::net::Ipv4Addr;
 
-// Build raw BGP message from components
-fn build_raw_message(
-    marker: [u8; 16],
-    length_override: Option<u16>,
-    msg_type: u8,
-    body: &[u8],
-) -> Vec<u8> {
-    let mut msg = marker.to_vec();
-    msg.extend_from_slice(&[0x00, 0x00]); // Placeholder for length
-    msg.push(msg_type);
-    msg.extend_from_slice(body);
-
-    // Fix the length field (unless overridden)
-    let len = length_override.unwrap_or(msg.len() as u16);
-    msg[16] = (len >> 8) as u8;
-    msg[17] = (len & 0xff) as u8;
-
-    msg
-}
-
-// Build a raw update message.
-fn build_raw_update(
-    withdrawn: &[u8],
-    attrs: &[&[u8]],
-    nlri: &[u8],
-    total_attr_len_override: Option<u16>,
-) -> Vec<u8> {
-    let mut body = Vec::new();
-
-    // Withdrawn routes
-    body.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
-    body.extend_from_slice(withdrawn);
-
-    // Total path attributes length - use override if provided, else calculate correctly
-    let total_attr_len = total_attr_len_override
-        .unwrap_or_else(|| attrs.iter().map(|a| a.len()).sum::<usize>() as u16);
-    body.extend_from_slice(&total_attr_len.to_be_bytes());
-
-    // Path attributes
-    for attr in attrs {
-        body.extend_from_slice(attr);
-    }
-
-    // NLRI
-    body.extend_from_slice(nlri);
-
-    build_raw_message(BGP_MARKER, None, MessageType::UPDATE.as_u8(), &body)
-}
-
 // Build raw OPEN message with optional custom version, marker, length, and message type
 fn build_raw_open(
     asn: u16,
@@ -127,13 +78,6 @@ fn build_raw_notification(
         MessageType::NOTIFICATION.as_u8(),
         &body,
     )
-}
-
-// Build raw attribute bytes with intentionally wrong length
-fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![flags, attr_type, length];
-    bytes.extend_from_slice(value);
-    bytes
 }
 
 #[tokio::test]

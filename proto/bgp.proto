@@ -148,4 +148,12 @@ message Path {
     optional uint32 local_pref = 5;
     optional uint32 med = 6;
     bool atomic_aggregate = 7;
+    repeated UnknownAttribute unknown_attributes = 8;
+}
+
+// Unknown attribute
+message UnknownAttribute {
+    uint32 attr_type = 1;
+    uint32 flags = 2;
+    bytes value = 3;
 }

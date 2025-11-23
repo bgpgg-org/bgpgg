@@ -30,7 +30,8 @@
 mod common;
 pub use common::*;
 
-use bgpgg::grpc::proto::{AsPathSegment, Origin, Route};
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::grpc::proto::{AsPathSegment, Origin, Route, UnknownAttribute};
 
 #[tokio::test]
 async fn test_origin_preservation() {
@@ -102,6 +103,7 @@ async fn test_origin_preservation() {
                         Some(100),
                         None,
                         false,
+                        vec![],
                     )],
                 })
                 .collect()
@@ -204,6 +206,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -219,6 +222,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -234,6 +238,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -307,6 +312,7 @@ async fn test_originating_speaker_as_path() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -322,6 +328,7 @@ async fn test_originating_speaker_as_path() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -394,6 +401,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 Some(100),
                 None,
                 false,
+                vec![],
             )],
         }],
     )])
@@ -464,6 +472,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
                 Some(100),
                 None,
                 false,
+                vec![],
             )],
         }],
     )])
@@ -539,6 +548,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -554,6 +564,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -631,6 +642,7 @@ async fn test_local_pref_send_to_ibgp() {
                     Some(100), // LOCAL_PREF set by DefaultLocalPref policy
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -646,6 +658,7 @@ async fn test_local_pref_send_to_ibgp() {
                     Some(100), // LOCAL_PREF preserved from S2's UPDATE (proves it was included)
                     None,
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -723,6 +736,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
                 Some(200),
                 None, // LOCAL_PREF=200 preserved via iBGP
                 false,
+                vec![],
             )],
         }],
     )])
@@ -742,6 +756,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
                 Some(100), // LOCAL_PREF=100 (set by policy, NOT 200 from S2!)
                 None,
                 false,
+                vec![],
             )],
         }],
     )])
@@ -818,6 +833,7 @@ async fn test_med_propagation_over_ibgp() {
                     Some(100), // LOCAL_PREF set by DefaultLocalPref policy
                     Some(50),  // MED=50 received from S1
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -833,6 +849,7 @@ async fn test_med_propagation_over_ibgp() {
                     Some(100), // LOCAL_PREF preserved from S2
                     Some(50),  // MED=50 propagated over iBGP (proves propagation)
                     false,
+                    vec![],
                 )],
             }],
         ),
@@ -907,6 +924,7 @@ async fn test_med_not_propagated_to_other_as() {
                 Some(100), // LOCAL_PREF set by policy
                 Some(50),  // MED=50 received from S1
                 false,
+                vec![],
             )],
         }],
     )])
@@ -926,6 +944,7 @@ async fn test_med_not_propagated_to_other_as() {
                 Some(100), // LOCAL_PREF set by policy
                 None,      // MED=None (NOT 50 from S1 - proves MED not propagated to other AS)
                 false,
+                vec![],
             )],
         }],
     )])
@@ -999,6 +1018,7 @@ async fn test_atomic_aggregate_propagation() {
                 Some(100), // LOCAL_PREF set by DefaultLocalPref policy
                 None,
                 true, // ATOMIC_AGGREGATE=true (received from S1)
+                vec![],
             )],
         }],
     )])
@@ -1018,10 +1038,93 @@ async fn test_atomic_aggregate_propagation() {
                 Some(100), // LOCAL_PREF preserved from S2
                 None,
                 true, // ATOMIC_AGGREGATE=true (propagated from S1 -> S2 -> S3)
+                vec![],
             )],
         }],
     )])
     .await;
 }
 
-// TODO: might need to test partial bit propagation?
+#[tokio::test]
+async fn test_unknown_optional_attribute_handling_transitive() {
+    test_unknown_optional_attribute_handling(
+        attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        vec![UnknownAttribute {
+            attr_type: 200,
+            flags: (attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL) as u32,
+            value: vec![0xde, 0xad, 0xbe, 0xef],
+        }],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_unknown_optional_attribute_handling_non_transitive() {
+    test_unknown_optional_attribute_handling(attr_flags::OPTIONAL, vec![]).await;
+}
+
+async fn test_unknown_optional_attribute_handling(
+    attr_flags: u8,
+    expected_unknown_attrs: Vec<UnknownAttribute>,
+) {
+    // Topology: FakePeer(S1) -> S2(AS65002) -> S3(AS65003)
+    //                            iBGP            eBGP
+    let [server2, server3] = &mut chain_servers([
+        start_test_server(
+            65002,
+            std::net::Ipv4Addr::new(2, 2, 2, 2),
+            Some(300),
+            "127.0.0.2",
+        )
+        .await,
+        start_test_server(
+            65003,
+            std::net::Ipv4Addr::new(3, 3, 3, 3),
+            Some(300),
+            "127.0.0.3",
+        )
+        .await,
+    ])
+    .await;
+
+    let mut server1 =
+        FakePeer::new(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300, &server2).await;
+
+    let origin_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]);
+    let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);
+    let next_hop_attr = build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::NEXT_HOP,
+        4,
+        &[10, 0, 0, 1],
+    );
+    let unknown_attr = build_attr_bytes(attr_flags, 200, 4, &[0xde, 0xad, 0xbe, 0xef]);
+
+    let nlri = vec![24, 192, 168, 1];
+    let msg = build_raw_update(
+        &[],
+        &[&origin_attr, &as_path_attr, &next_hop_attr, &unknown_attr],
+        &nlri,
+        None,
+    );
+
+    server1.send_raw(&msg).await;
+
+    poll_route_propagation(&[(
+        &server3,
+        vec![Route {
+            prefix: "192.168.1.0/24".to_string(),
+            paths: vec![build_path(
+                vec![as_sequence(vec![65002])],
+                "2.2.2.2",
+                server2.address.clone(),
+                Origin::Igp,
+                Some(100),
+                None,
+                false,
+                expected_unknown_attrs,
+            )],
+        }],
+    )])
+    .await;
+}

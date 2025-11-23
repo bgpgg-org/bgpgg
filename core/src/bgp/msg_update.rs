@@ -21,7 +21,7 @@ const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
 const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
-struct PathAttrFlag(u8);
+pub struct PathAttrFlag(u8);
 
 impl PathAttrFlag {
     pub const OPTIONAL: u8 = 1 << 7;
@@ -53,7 +53,7 @@ pub mod attr_type_code {
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
-enum PathAttrValue {
+pub enum PathAttrValue {
     Origin(Origin),
     AsPath(AsPath),
     NextHop(NextHopAddr),
@@ -71,7 +71,7 @@ enum PathAttrValue {
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct PathAttribute {
     flags: PathAttrFlag,
-    value: PathAttrValue,
+    pub value: PathAttrValue,
 }
 
 impl PathAttribute {
@@ -267,7 +267,7 @@ impl TryFrom<u8> for AsPathSegmentType {
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
-enum NextHopAddr {
+pub enum NextHopAddr {
     Ipv4(Ipv4Addr),
     // TODO: support IPv6
     #[allow(dead_code)]
@@ -275,12 +275,12 @@ enum NextHopAddr {
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
-struct AsPath {
+pub struct AsPath {
     segments: Vec<AsPathSegment>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
-struct Aggregator {
+pub struct Aggregator {
     asn: u16,
     // TODO: support IPv6?
     ip_addr: Ipv4Addr,
@@ -424,7 +424,9 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                 AttrType::AtomicAggregate => {
                     if attr_len > 0 {
                         return Err(ParserError::BgpError {
-                            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+                            error: BgpError::UpdateMessageError(
+                                UpdateMessageError::AttributeLengthError,
+                            ),
                             data: Vec::new(),
                         });
                     }
