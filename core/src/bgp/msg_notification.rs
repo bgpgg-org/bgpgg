@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
+use super::utils::ParserError;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
-enum MessageHeaderError {
+pub enum MessageHeaderError {
     ConnectionNotSynchronized = 1,
     BadMessageLength = 2,
     BadMessageType = 3,
@@ -36,7 +37,7 @@ impl From<u8> for MessageHeaderError {
 
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
-enum OpenMessageError {
+pub enum OpenMessageError {
     UnsupportedVersionNumber = 1,
     BadPeerAs = 2,
     BadBgpIdentifier = 3,
@@ -60,7 +61,7 @@ impl From<u8> for OpenMessageError {
 
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
-enum UpdateMessageError {
+pub enum UpdateMessageError {
     MalformedAttributeList = 1,
     UnrecognizedWellKnownAttribute = 2,
     MissingWellKnownAttribute = 3,
@@ -95,7 +96,7 @@ impl From<u8> for UpdateMessageError {
 }
 
 #[derive(Debug, PartialEq)]
-enum BgpError {
+pub enum BgpError {
     MessageHeaderError(MessageHeaderError),
     OpenMessageError(OpenMessageError),
     UpdateMessageError(UpdateMessageError),
@@ -203,6 +204,28 @@ pub struct NotifcationMessage {
 }
 
 impl NotifcationMessage {
+    pub fn new(error: BgpError, data: Vec<u8>) -> Self {
+        NotifcationMessage { error, data }
+    }
+
+    pub fn from_parser_error(error: &ParserError) -> Option<Self> {
+        match error {
+            ParserError::InvalidMarker => Some(NotifcationMessage::new(
+                BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
+                Vec::new(),
+            )),
+            ParserError::InvalidLengthField { length, .. } => Some(NotifcationMessage::new(
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+                length.to_be_bytes().to_vec(),
+            )),
+            ParserError::InvalidMessageType(msg_type) => Some(NotifcationMessage::new(
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
+                vec![*msg_type],
+            )),
+            _ => None,
+        }
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         let err_code = bytes[0];
         let err_sub_code = bytes[1];
@@ -214,6 +237,14 @@ impl NotifcationMessage {
             error: bgp_error,
             data: data.to_vec(),
         }
+    }
+
+    pub fn error(&self) -> &BgpError {
+        &self.error
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
     }
 }
 
@@ -313,5 +344,67 @@ mod tests {
                 data: vec![],
             }
         )
+    }
+
+    #[test]
+    fn test_notification_message_new_encode_decode() {
+        let error = BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength);
+        let data = vec![0x00, 0x12];
+
+        let notif = NotifcationMessage::new(error, data.clone());
+        assert_eq!(notif.data(), &data);
+
+        let bytes = notif.to_bytes();
+        assert_eq!(bytes[0], 1);
+        assert_eq!(bytes[1], 2);
+        assert_eq!(&bytes[2..], &data);
+
+        let decoded = NotifcationMessage::from_bytes(bytes);
+        assert_eq!(decoded, notif);
+    }
+
+    #[test]
+    fn test_from_parser_error_invalid_marker() {
+        let parser_error = ParserError::InvalidMarker;
+        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+
+        assert_eq!(
+            notif.error(),
+            &BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized)
+        );
+        assert_eq!(notif.data(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn test_from_parser_error_invalid_length_field() {
+        let parser_error = ParserError::InvalidLengthField {
+            length: 4097,
+            reason: "too large".to_string(),
+        };
+        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+
+        assert_eq!(
+            notif.error(),
+            &BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength)
+        );
+        assert_eq!(notif.data(), &[0x10, 0x01]);
+    }
+
+    #[test]
+    fn test_from_parser_error_invalid_message_type() {
+        let parser_error = ParserError::InvalidMessageType(99);
+        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+
+        assert_eq!(
+            notif.error(),
+            &BgpError::MessageHeaderError(MessageHeaderError::BadMessageType)
+        );
+        assert_eq!(notif.data(), &[99]);
+    }
+
+    #[test]
+    fn test_from_parser_error_none() {
+        let parser_error = ParserError::IoError("connection reset".to_string());
+        assert!(NotifcationMessage::from_parser_error(&parser_error).is_none());
     }
 }

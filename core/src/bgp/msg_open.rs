@@ -196,7 +196,7 @@ impl OpenMessage {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         if bytes.len() < 10 {
             return Err(ParserError::InvalidLength(
-                "Invalid OpenMessage length".to_string(),
+                "OPEN message body too short".to_string(),
             ));
         }
 
@@ -209,7 +209,7 @@ impl OpenMessage {
         let remaining_bytes_len = (bytes.len() - 10) as u8;
         if optional_params_len != remaining_bytes_len {
             return Err(ParserError::InvalidLength(
-                "Invalid optional params length".to_string(),
+                "Optional params length mismatch".to_string(),
             ));
         }
 

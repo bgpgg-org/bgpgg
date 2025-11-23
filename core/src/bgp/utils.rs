@@ -21,14 +21,22 @@ pub enum ParserError {
     IoError(String),
     ParseError(String),
     InvalidLength(String),
+    InvalidLengthField { length: u16, reason: String },
+    InvalidMarker,
+    InvalidMessageType(u8),
 }
 
 impl Display for ParserError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         match self {
-            ParserError::IoError(s) => write!(f, "Parse error: {}", s),
+            ParserError::IoError(s) => write!(f, "IO error: {}", s),
             ParserError::ParseError(s) => write!(f, "Parse error: {}", s),
-            ParserError::InvalidLength(s) => write!(f, "Parse error: {}", s),
+            ParserError::InvalidLength(s) => write!(f, "Invalid length: {}", s),
+            ParserError::InvalidLengthField { length, reason } => {
+                write!(f, "Invalid length field {}: {}", length, reason)
+            }
+            ParserError::InvalidMarker => write!(f, "Invalid marker field"),
+            ParserError::InvalidMessageType(t) => write!(f, "Invalid message type: {}", t),
         }
     }
 }

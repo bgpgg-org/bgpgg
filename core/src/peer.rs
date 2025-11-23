@@ -14,6 +14,7 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
+use crate::bgp::msg_notification::NotifcationMessage;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -139,6 +140,11 @@ impl Peer {
                         }
                         Err(e) => {
                             error!("error reading message from peer", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+
+                            if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                                let _ = self.send_notification(notif).await;
+                            }
+
                             break;
                         }
                     }
@@ -307,6 +313,14 @@ impl Peer {
         self.statistics.keepalive_sent += 1;
         debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
         self.fsm.timers.start_keepalive_timer();
+        Ok(())
+    }
+
+    /// Send NOTIFICATION message (RFC 4271 Section 6.1)
+    async fn send_notification(&mut self, notif_msg: NotifcationMessage) -> Result<(), io::Error> {
+        self.tcp_tx.write_all(&notif_msg.serialize()).await?;
+        self.statistics.notification_sent += 1;
+        warn!("sent NOTIFICATION", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));
         Ok(())
     }
 

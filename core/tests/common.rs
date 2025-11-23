@@ -14,12 +14,18 @@
 
 //! Common test utilities for BGP server testing
 
+use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message};
+use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
+use bgpgg::bgp::msg_notification::NotifcationMessage;
+use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 
 /// Test server handle that includes runtime for killing the server
@@ -808,4 +814,86 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
 
     peers == expected_peers
+}
+
+/// Fake BGP peer for testing error handling
+///
+/// This allows sending raw/malformed BGP messages to test error handling.
+/// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
+pub struct FakePeer {
+    stream: TcpStream,
+}
+
+impl FakePeer {
+    /// Create a new FakePeer, connect to the given peer via TCP, and complete BGP handshake
+    pub async fn new(
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+        peer: &TestServer,
+    ) -> Self {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", peer.bgp_port))
+            .await
+            .expect("Failed to connect to BGP peer");
+
+        // 1. Send our OPEN
+        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+        let open_bytes = open.serialize();
+        stream
+            .write_all(&open_bytes)
+            .await
+            .expect("Failed to send OPEN");
+
+        // 2. Read their OPEN
+        let msg = read_bgp_message(&mut stream)
+            .await
+            .expect("Failed to read OPEN");
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message during handshake"),
+        }
+
+        // 3. Send KEEPALIVE
+        let keepalive = KeepAliveMessage {};
+        let keepalive_bytes = keepalive.serialize();
+        stream
+            .write_all(&keepalive_bytes)
+            .await
+            .expect("Failed to send KEEPALIVE");
+
+        // 4. Read their KEEPALIVE
+        let msg = read_bgp_message(&mut stream)
+            .await
+            .expect("Failed to read KEEPALIVE");
+        match msg {
+            BgpMessage::KeepAlive(_) => {}
+            _ => panic!("Expected KEEPALIVE message during handshake"),
+        }
+
+        // Now in Established state (no background KEEPALIVEs needed with long hold_time)
+        FakePeer { stream }
+    }
+
+    /// Send raw bytes to the peer
+    pub async fn send_raw(&mut self, bytes: &[u8]) {
+        self.stream
+            .write_all(bytes)
+            .await
+            .expect("Failed to send raw bytes");
+    }
+
+    /// Read a NOTIFICATION message (skips any KEEPALIVEs)
+    pub async fn read_notification(&mut self) -> NotifcationMessage {
+        loop {
+            let msg = read_bgp_message(&mut self.stream)
+                .await
+                .expect("Failed to read message");
+
+            match msg {
+                BgpMessage::Notification(notif) => return notif,
+                BgpMessage::KeepAlive(_) => continue, // Skip KEEPALIVEs sent by peer
+                _ => panic!("Expected NOTIFICATION, got unexpected message type"),
+            }
+        }
+    }
 }
