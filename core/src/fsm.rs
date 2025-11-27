@@ -14,6 +14,7 @@
 
 //! This module implements the BGP FSM.
 
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 /// BGP FSM states
@@ -174,17 +175,19 @@ pub struct Fsm {
     local_asn: u16,
     local_hold_time: u16,
     local_bgp_id: u32,
+    local_addr: Ipv4Addr,
 }
 
 impl Fsm {
     /// Create a new FSM in Connect state with local BGP configuration
-    pub fn new(local_asn: u16, local_hold_time: u16, local_bgp_id: u32) -> Self {
+    pub fn new(local_asn: u16, local_hold_time: u16, local_bgp_id: u32, local_addr: Ipv4Addr) -> Self {
         Fsm {
             state: BgpState::Connect,
             timers: FsmTimers::default(),
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_addr,
         }
     }
 
@@ -195,6 +198,7 @@ impl Fsm {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
+        local_addr: Ipv4Addr,
     ) -> Self {
         Fsm {
             state,
@@ -202,6 +206,7 @@ impl Fsm {
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_addr,
         }
     }
 
@@ -223,6 +228,11 @@ impl Fsm {
     /// Get local BGP ID
     pub fn local_bgp_id(&self) -> u32 {
         self.local_bgp_id
+    }
+
+    /// Get local address
+    pub fn local_addr(&self) -> Ipv4Addr {
+        self.local_addr
     }
 
     /// Handle an event and return the new state
@@ -288,15 +298,17 @@ impl Fsm {
 mod tests {
     use super::*;
 
+    const TEST_LOCAL_ADDR: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+
     #[test]
     fn test_initial_state() {
-        let fsm = Fsm::new(65000, 180, 0x01010101);
+        let fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
     #[test]
     fn test_tcp_connection_confirmed() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> OpenSent
         let new_state = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -306,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_successful_connection_establishment() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -329,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_connection_failure_handling() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> Active (connection failed)
         fsm.handle_event(&FsmEvent::TcpConnectionFails);
@@ -342,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_hold_timer_expiry() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Move to OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -474,7 +486,7 @@ mod tests {
         ];
 
         for (initial_state, event, expected_state) in test_cases {
-            let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101);
+            let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
             let new_state = fsm.handle_event(&event);
 
             assert_eq!(

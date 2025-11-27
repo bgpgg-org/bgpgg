@@ -16,7 +16,7 @@ use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
-use crate::net::create_and_bind_tcp_socket;
+use crate::net::{create_and_bind_tcp_socket, ipv4_from_sockaddr};
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
@@ -193,6 +193,14 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
+        let local_ip = match stream.local_addr().ok().and_then(ipv4_from_sockaddr) {
+            Some(ip) => ip,
+            None => {
+                error!("failed to get local IPv4 address");
+                return;
+            }
+        };
+
         let (tcp_rx, tcp_tx) = stream.into_split();
 
         // Create peer in Connect state - it owns the handshake
@@ -205,6 +213,7 @@ impl BgpServer {
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_ip,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -362,6 +371,7 @@ impl BgpServer {
         let local_asn = self.config.asn;
         let local_bgp_id = self.local_bgp_id;
         let local_hold_time = self.config.hold_time_secs as u16;
+        let local_ip = ipv4_from_sockaddr(local_addr).expect("local_addr must be IPv4");
 
         // Create peer in Connect state - it owns the handshake
         let server_tx = self.op_tx.clone();
@@ -373,6 +383,7 @@ impl BgpServer {
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_ip,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes

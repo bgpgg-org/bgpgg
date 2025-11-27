@@ -116,7 +116,7 @@ pub fn build_path(
 /// # Arguments
 /// * `asn` - Autonomous System Number
 /// * `router_id` - Router ID (IPv4 address)
-/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+/// * `hold_timer_secs` - BGP hold timer in seconds
 ///
 /// Returns a TestServer struct containing the client, port, and abort handles
 pub async fn start_test_server(
@@ -137,8 +137,9 @@ pub async fn start_test_server(
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     drop(grpc_listener);
 
-    // Use the provided hold timer, or default to 3 seconds for testing (short time so peers detect disconnections quickly)
-    let hold_timer_secs = hold_timer_secs.unwrap_or(3);
+    // Use the provided hold timer, or default to 90 seconds.
+    // Tests that need to verify hold timer behavior should pass an explicit low value
+    let hold_timer_secs = hold_timer_secs.unwrap_or(90);
     let config = Config::new(
         asn,
         &format!("{}:{}", bind_ip, bgp_port),

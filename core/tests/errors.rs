@@ -645,3 +645,33 @@ async fn test_update_invalid_next_hop_attribute() {
         );
     }
 }
+
+// RFC 4271 5.1.3 NEXT_HOP semantic validation tests
+
+#[tokio::test]
+async fn test_next_hop_is_local_address_rejected() {
+    // Server bound to 127.0.0.1, FakePeer sends UPDATE with NEXT_HOP = 127.0.0.1
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with NEXT_HOP = server's local address (127.0.0.1)
+    let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(127, 0, 0, 1)), // Server's local addr
+        ],
+        nlri,
+        None,
+    );
+    peer.send_raw(&msg).await;
+
+    // Give server time to process
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Route should NOT be installed (NEXT_HOP = local address)
+    let routes = server.client.get_routes().await.expect("Failed to get routes");
+    assert!(routes.is_empty(), "Route should be rejected when NEXT_HOP is local address");
+}

@@ -24,6 +24,7 @@ use crate::rib::{Path, RouteSource};
 use crate::server::ServerOp;
 use crate::{debug, error, info, warn};
 use std::io;
+use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
@@ -80,12 +81,13 @@ impl Peer {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
+        local_addr: Ipv4Addr,
     ) -> (Self, mpsc::UnboundedSender<PeerOp>) {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         let peer = Peer {
             addr: addr.clone(),
-            fsm: Fsm::new(local_asn, local_hold_time, local_bgp_id),
+            fsm: Fsm::new(local_asn, local_hold_time, local_bgp_id, local_addr),
             tcp_tx,
             tcp_rx,
             asn: None,
@@ -453,6 +455,13 @@ impl Peer {
 
         // Only process announcements if we have required attributes
         if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
+            // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
+            if next_hop == self.fsm.local_addr() {
+                warn!("rejecting UPDATE: NEXT_HOP is local address",
+                      "next_hop" => next_hop.to_string(), "peer" => &self.addr);
+                return announced;
+            }
+
             let source = RouteSource::from_session(
                 self.session_type
                     .expect("session_type must be set in Established state"),
@@ -511,9 +520,10 @@ mod tests {
         let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         // Create peer directly for testing (bypass Peer::new which does handshake)
+        let local_addr = Ipv4Addr::new(127, 0, 0, 1);
         Peer {
             addr: addr.ip().to_string(),
-            fsm: Fsm::with_state(state, 65000, 180, 0x01010101),
+            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_addr),
             tcp_tx,
             tcp_rx,
             asn: Some(65001),
