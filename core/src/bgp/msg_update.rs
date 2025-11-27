@@ -323,18 +323,9 @@ fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
     Ok(AsPath { segments })
 }
 
-fn read_attr_next_hop(bytes: &[u8]) -> Result<NextHopAddr, ParserError> {
-    // RFC 4271: NEXT_HOP must be exactly 4 bytes (IPv4 address)
-    // This should already be validated by validate_attribute_length, but check defensively
-    if bytes.len() != 4 {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop),
-            data: Vec::new(),
-        });
-    }
-
-    let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-    Ok(NextHopAddr::Ipv4(ip))
+fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
+    // Length already validated by validate_attribute_length
+    NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
 }
 
 fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
@@ -423,7 +414,7 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::AsPath(as_path)
                 }
                 AttrType::NextHop => {
-                    let next_hop = read_attr_next_hop(&attr_data)?;
+                    let next_hop = read_attr_next_hop(&attr_data);
 
                     // RFC 4271: NEXT_HOP must be a valid IP host address
                     if let NextHopAddr::Ipv4(addr) = next_hop {

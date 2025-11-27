@@ -68,11 +68,11 @@ pub enum UpdateMessageError {
     AttributeFlagsError = 4,
     AttributeLengthError = 5,
     InvalidOriginAttribute = 6,
-    InvalidNextHopAttribute = 7,
-    OptionalAttributeError = 8,
-    InvalidNetworkField = 9,
-    MalformedASPath = 10,
-    MalformedNextHop = 11,
+    // 7 is deprecated (was AS Routing Loop)
+    InvalidNextHopAttribute = 8,
+    OptionalAttributeError = 9,
+    InvalidNetworkField = 10,
+    MalformedASPath = 11,
     Unknown(u8),
 }
 
@@ -85,11 +85,11 @@ impl From<u8> for UpdateMessageError {
             4 => UpdateMessageError::AttributeFlagsError,
             5 => UpdateMessageError::AttributeLengthError,
             6 => UpdateMessageError::InvalidOriginAttribute,
-            7 => UpdateMessageError::InvalidNextHopAttribute,
-            8 => UpdateMessageError::OptionalAttributeError,
-            9 => UpdateMessageError::InvalidNetworkField,
-            10 => UpdateMessageError::MalformedASPath,
-            11 => UpdateMessageError::MalformedNextHop,
+            // 7 is deprecated
+            8 => UpdateMessageError::InvalidNextHopAttribute,
+            9 => UpdateMessageError::OptionalAttributeError,
+            10 => UpdateMessageError::InvalidNetworkField,
+            11 => UpdateMessageError::MalformedASPath,
             val => UpdateMessageError::Unknown(val),
         }
     }
@@ -185,11 +185,11 @@ impl BgpError {
                 UpdateMessageError::AttributeFlagsError => 4,
                 UpdateMessageError::AttributeLengthError => 5,
                 UpdateMessageError::InvalidOriginAttribute => 6,
-                UpdateMessageError::InvalidNextHopAttribute => 7,
-                UpdateMessageError::OptionalAttributeError => 8,
-                UpdateMessageError::InvalidNetworkField => 9,
-                UpdateMessageError::MalformedASPath => 10,
-                UpdateMessageError::MalformedNextHop => 11,
+                // 7 is deprecated
+                UpdateMessageError::InvalidNextHopAttribute => 8,
+                UpdateMessageError::OptionalAttributeError => 9,
+                UpdateMessageError::InvalidNetworkField => 10,
+                UpdateMessageError::MalformedASPath => 11,
                 UpdateMessageError::Unknown(val) => *val,
             },
             _ => 0,

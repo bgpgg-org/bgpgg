@@ -594,6 +594,7 @@ async fn test_update_invalid_origin_attribute() {
 async fn test_update_invalid_next_hop_attribute() {
     let test_cases = vec![
         ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
+        ("255.255.255.255", [0xff, 0xff, 0xff, 0xff]),
         ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
     ];
 
@@ -682,6 +683,58 @@ async fn test_next_hop_is_local_address_rejected() {
         routes.is_empty(),
         "Route should be rejected when NEXT_HOP is local address"
     );
+}
+
+#[tokio::test]
+async fn test_update_malformed_as_path() {
+    let test_cases = vec![
+        (
+            "invalid_segment_type",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                4,
+                &[0x00, 0x01, 0x00, 0x0a], // segment_type=0 (invalid), len=1, ASN=10
+            ),
+        ),
+        (
+            "truncated_asn_data",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                4,
+                &[0x02, 0x02, 0x00, 0x0a], // AS_SEQUENCE, claims 2 ASNs but only 1 provided
+            ),
+        ),
+    ];
+
+    for (name, malformed_as_path) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &malformed_as_path,
+                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+            "Test case: {}",
+            name
+        );
+    }
 }
 
 #[tokio::test]
