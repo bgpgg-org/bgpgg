@@ -130,7 +130,6 @@ impl LocRib {
             .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).cloned())
             .collect()
     }
-
 }
 
 impl LocRib {

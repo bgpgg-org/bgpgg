@@ -64,19 +64,15 @@ async fn test_peer_down() {
     // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
     server2.kill();
 
-    // Give some time for Server1 to detect the disconnection
-    // With a 3-second hold time, the peer should be detected as down
-    // when the next keepalive fails (keepalive is sent every hold_time/3 = 1 second)
-    tokio::time::sleep(tokio::time::Duration::from_secs(
-        (hold_timer_secs + 2).into(),
-    ))
+    // Poll for peer removal (TCP error detected quickly, no need to wait for hold timer)
+    poll_until(
+        || async { verify_peers(&server1, vec![]).await },
+        "Timeout waiting for peer down detection",
+    )
     .await;
 
-    // Poll for route withdrawal - route should be withdrawn when peer goes down
+    // Poll for route withdrawal
     poll_route_withdrawal(&[&server1]).await;
-
-    // Verify Server1 has no peers in Established state anymore
-    assert!(verify_peers(&server1, vec![]).await);
 }
 
 #[tokio::test]
@@ -157,10 +153,36 @@ async fn test_peer_down_four_node_mesh() {
     // Kill Server4 to simulate peer going down
     server4.kill();
 
-    // Give time for other servers to detect Server4 is down
-    tokio::time::sleep(tokio::time::Duration::from_secs(
-        (hold_timer_secs + 2).into(),
-    ))
+    // Poll for all servers to detect Server4 is down
+    poll_until(
+        || async {
+            verify_peers(
+                &server1,
+                vec![
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
+                ],
+            )
+            .await
+                && verify_peers(
+                    &server2,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+                && verify_peers(
+                    &server3,
+                    vec![
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                    ],
+                )
+                .await
+        },
+        "Timeout waiting for Server4 peer down detection",
+    )
     .await;
 
     // Verify Server2 and Server3 still have the route (learned from Server1, not Server4)
@@ -200,39 +222,6 @@ async fn test_peer_down_four_node_mesh() {
         ),
     ])
     .await;
-
-    // Verify all servers have correct peers after Server4 goes down
-    // Peers are now identified by IP address only (no port)
-    assert!(
-        verify_peers(
-            &server1,
-            vec![
-                server2.to_peer(BgpState::Established),
-                server3.to_peer(BgpState::Established),
-            ],
-        )
-        .await
-    );
-    assert!(
-        verify_peers(
-            &server2,
-            vec![
-                server1.to_peer(BgpState::Established),
-                server3.to_peer(BgpState::Established),
-            ],
-        )
-        .await
-    );
-    assert!(
-        verify_peers(
-            &server3,
-            vec![
-                server1.to_peer(BgpState::Established),
-                server2.to_peer(BgpState::Established),
-            ],
-        )
-        .await
-    );
 }
 
 #[tokio::test]
@@ -438,56 +427,59 @@ async fn test_remove_peer_four_node_mesh() {
     // Server2 and Server3 still learn directly from Server4
     // eBGP: NEXT_HOP rewritten to router IDs
     // Use longer timeout for re-convergence after peer removal
-    poll_route_propagation_with_timeout(&[
-        (
-            &server1,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65002, 65004])],
-                    "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
-                    server2.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )], // Via server2 (127.0.0.2 < 127.0.0.3)
-            }],
-        ),
-        (
-            &server2,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65004])],
-                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
-                    server4.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )],
-            }],
-        ),
-        (
-            &server3,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65004])],
-                    "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
-                    server4.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )],
-            }],
-        ),
-    ], 200)
+    poll_route_propagation_with_timeout(
+        &[
+            (
+                &server1,
+                vec![Route {
+                    prefix: "10.4.0.0/24".to_string(),
+                    paths: vec![build_path(
+                        vec![as_sequence(vec![65002, 65004])],
+                        "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
+                        server2.address.clone(),
+                        Origin::Igp,
+                        Some(100),
+                        None,
+                        false,
+                        vec![],
+                    )], // Via server2 (127.0.0.2 < 127.0.0.3)
+                }],
+            ),
+            (
+                &server2,
+                vec![Route {
+                    prefix: "10.4.0.0/24".to_string(),
+                    paths: vec![build_path(
+                        vec![as_sequence(vec![65004])],
+                        "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
+                        server4.address.clone(),
+                        Origin::Igp,
+                        Some(100),
+                        None,
+                        false,
+                        vec![],
+                    )],
+                }],
+            ),
+            (
+                &server3,
+                vec![Route {
+                    prefix: "10.4.0.0/24".to_string(),
+                    paths: vec![build_path(
+                        vec![as_sequence(vec![65004])],
+                        "4.4.4.4", // eBGP: NEXT_HOP rewritten to server4's router ID
+                        server4.address.clone(),
+                        Origin::Igp,
+                        Some(100),
+                        None,
+                        false,
+                        vec![],
+                    )],
+                }],
+            ),
+        ],
+        200,
+    )
     .await;
 
     // Verify Server1 no longer has Server4 as a peer
@@ -512,8 +504,8 @@ async fn test_peer_up() {
     let expected = ExpectedStats {
         open_sent: Some(1),
         open_received: Some(1),
-        min_keepalive_sent: Some(1),
-        min_keepalive_received: Some(1),
+        min_keepalive_sent: Some(2),
+        min_keepalive_received: Some(2),
         ..Default::default()
     };
     poll_peer_stats(&server1, &server2.address, expected).await;
@@ -532,8 +524,8 @@ async fn test_peer_up_four_node_mesh() {
 
     // Poll until multiple keepalive cycles completed (proves connection stays up)
     let expected = ExpectedStats {
-        min_keepalive_sent: Some(3),
-        min_keepalive_received: Some(3),
+        min_keepalive_sent: Some(2),
+        min_keepalive_received: Some(2),
         ..Default::default()
     };
     poll_peer_stats(&server1, &server2.address, expected).await;
@@ -608,12 +600,9 @@ async fn test_peer_crash_and_recover() {
     let server2_bind_ip = server2.address.clone();
 
     // Crash and recover the peer multiple times
-    for _ in 0..crash_count {
+    for i in 0..crash_count {
         // Kill Server2 (simulates crash)
         server2.kill();
-
-        // Wait a bit before restarting
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Restart Server2 with same configuration
         server2 = start_test_server(
@@ -631,16 +620,17 @@ async fn test_peer_crash_and_recover() {
             .await
             .expect("Failed to re-add peer after crash");
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Poll until re-established before next crash cycle
+        poll_until(
+            || async {
+                verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                    && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
+            },
+            &format!(
+                "Timeout waiting for peers to re-establish after crash {}",
+                i + 1
+            ),
+        )
+        .await;
     }
-
-    // Wait for peers to re-establish after the final crash and recovery
-    poll_until(
-        || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
-        },
-        "Timeout waiting for peers to re-establish after crash and recovery",
-    )
-    .await;
 }

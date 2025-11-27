@@ -180,7 +180,12 @@ pub struct Fsm {
 
 impl Fsm {
     /// Create a new FSM in Connect state with local BGP configuration
-    pub fn new(local_asn: u16, local_hold_time: u16, local_bgp_id: u32, local_addr: Ipv4Addr) -> Self {
+    pub fn new(
+        local_asn: u16,
+        local_hold_time: u16,
+        local_bgp_id: u32,
+        local_addr: Ipv4Addr,
+    ) -> Self {
         Fsm {
             state: BgpState::Connect,
             timers: FsmTimers::default(),

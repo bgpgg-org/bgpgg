@@ -157,7 +157,9 @@ pub async fn start_test_server(
         let grpc_listener = tokio::net::TcpListener::from_std(grpc_listener).unwrap();
         tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
             .await
             .unwrap();
     });
@@ -620,11 +622,19 @@ impl ExpectedStats {
         self.open_sent.map_or(true, |e| s.open_sent == e)
             && self.open_received.map_or(true, |e| s.open_received == e)
             && self.update_sent.map_or(true, |e| s.update_sent == e)
-            && self.update_received.map_or(true, |e| s.update_received == e)
+            && self
+                .update_received
+                .map_or(true, |e| s.update_received == e)
             && self.min_update_sent.map_or(true, |e| s.update_sent >= e)
-            && self.min_update_received.map_or(true, |e| s.update_received >= e)
-            && self.min_keepalive_sent.map_or(true, |e| s.keepalive_sent >= e)
-            && self.min_keepalive_received.map_or(true, |e| s.keepalive_received >= e)
+            && self
+                .min_update_received
+                .map_or(true, |e| s.update_received >= e)
+            && self
+                .min_keepalive_sent
+                .map_or(true, |e| s.keepalive_sent >= e)
+            && self
+                .min_keepalive_received
+                .map_or(true, |e| s.keepalive_received >= e)
     }
 }
 

@@ -205,8 +205,14 @@ async fn test_announce_withdraw_four_node_mesh() {
             vec![],
         )],
     }];
-    let recv_1 = ExpectedStats { min_update_received: Some(1), ..Default::default() };
-    let sent_1 = ExpectedStats { min_update_sent: Some(1), ..Default::default() };
+    let recv_1 = ExpectedStats {
+        min_update_received: Some(1),
+        ..Default::default()
+    };
+    let sent_1 = ExpectedStats {
+        min_update_sent: Some(1),
+        ..Default::default()
+    };
     wait_convergence(
         &[
             (&server2, expected_route.clone()),
@@ -215,13 +221,22 @@ async fn test_announce_withdraw_four_node_mesh() {
         ],
         &[
             // Each server receives UPDATE from all peers
-            (&server2, &server1, recv_1), (&server2, &server3, recv_1), (&server2, &server4, recv_1),
-            (&server3, &server1, recv_1), (&server3, &server2, recv_1), (&server3, &server4, recv_1),
-            (&server4, &server1, recv_1), (&server4, &server2, recv_1), (&server4, &server3, recv_1),
+            (&server2, &server1, recv_1),
+            (&server2, &server3, recv_1),
+            (&server2, &server4, recv_1),
+            (&server3, &server1, recv_1),
+            (&server3, &server2, recv_1),
+            (&server3, &server4, recv_1),
+            (&server4, &server1, recv_1),
+            (&server4, &server2, recv_1),
+            (&server4, &server3, recv_1),
             // Each server sends UPDATE to non-originating peers
-            (&server2, &server3, sent_1), (&server2, &server4, sent_1),
-            (&server3, &server2, sent_1), (&server3, &server4, sent_1),
-            (&server4, &server2, sent_1), (&server4, &server3, sent_1),
+            (&server2, &server3, sent_1),
+            (&server2, &server4, sent_1),
+            (&server3, &server2, sent_1),
+            (&server3, &server4, sent_1),
+            (&server4, &server2, sent_1),
+            (&server4, &server3, sent_1),
         ],
     )
     .await;

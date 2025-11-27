@@ -672,6 +672,13 @@ async fn test_next_hop_is_local_address_rejected() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Route should NOT be installed (NEXT_HOP = local address)
-    let routes = server.client.get_routes().await.expect("Failed to get routes");
-    assert!(routes.is_empty(), "Route should be rejected when NEXT_HOP is local address");
+    let routes = server
+        .client
+        .get_routes()
+        .await
+        .expect("Failed to get routes");
+    assert!(
+        routes.is_empty(),
+        "Route should be rejected when NEXT_HOP is local address"
+    );
 }
