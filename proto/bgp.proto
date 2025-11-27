@@ -19,7 +19,8 @@ service BgpService {
 message GetServerInfoRequest {}
 
 message GetServerInfoResponse {
-    uint32 listen_port = 1;
+    string listen_addr = 1;
+    uint32 listen_port = 2;
 }
 
 // Add peer request/response

@@ -42,14 +42,14 @@ async fn test_announce_withdraw() {
     let peer_addr = &peers[0].address;
 
     // Poll for route to appear in Server1's RIB
-    // eBGP: NEXT_HOP rewritten to router ID
+    // eBGP: NEXT_HOP rewritten to sender's local address
     poll_route_propagation(&[(
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                "2.2.2.2", // eBGP: NEXT_HOP rewritten to server2's router ID
+                &server2.address,
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -94,7 +94,7 @@ async fn test_announce_withdraw_mesh() {
         .expect("Failed to announce route from server 1");
 
     // Poll for route propagation with expected AS paths
-    // eBGP: NEXT_HOP rewritten to router ID
+    // eBGP: NEXT_HOP rewritten to sender's local address
     poll_route_propagation(&[
         (
             &server2,
@@ -102,7 +102,7 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
+                    &server1.address,
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -118,7 +118,7 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
+                    &server1.address,
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -192,11 +192,12 @@ async fn test_announce_withdraw_four_node_mesh() {
         .expect("Failed to announce route from server 1");
 
     // Wait for full mesh convergence: routes + UPDATE received/sent counts
+    // eBGP: NEXT_HOP rewritten to sender's local address
     let expected_route = vec![Route {
         prefix: "10.1.0.0/24".to_string(),
         paths: vec![build_path(
             vec![as_sequence(vec![65001])],
-            "1.1.1.1",
+            &server1.address,
             server1.address.clone(),
             Origin::Igp,
             Some(100),
@@ -431,13 +432,14 @@ async fn test_as_loop_prevention() {
     // AS path progression:
     // - AS1_A: originates route (AS_PATH = [])
     // - AS2: receives from AS1_A (AS_PATH = [65001])
+    // eBGP: NEXT_HOP rewritten to sender's local address
     poll_route_propagation(&[(
         &server2,
         vec![Route {
             prefix: "10.1.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001])],
-                "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1_a's router ID
+                &server1_a.address,
                 server1_a.address.clone(),
                 Origin::Igp,
                 Some(100),

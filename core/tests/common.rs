@@ -186,7 +186,7 @@ pub async fn start_test_server(
     let mut bgp_port = 0;
     for _ in 0..50 {
         match client.get_server_info().await {
-            Ok(port) if port > 0 => {
+            Ok((_, port)) if port > 0 => {
                 bgp_port = port;
                 break;
             }
