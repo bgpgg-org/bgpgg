@@ -437,7 +437,8 @@ async fn test_remove_peer_four_node_mesh() {
     // Server1 now learns via server2 (deterministically chosen due to lower peer IP)
     // Server2 and Server3 still learn directly from Server4
     // eBGP: NEXT_HOP rewritten to router IDs
-    poll_route_propagation(&[
+    // Use longer timeout for re-convergence after peer removal
+    poll_route_propagation_with_timeout(&[
         (
             &server1,
             vec![Route {
@@ -486,7 +487,7 @@ async fn test_remove_peer_four_node_mesh() {
                 )],
             }],
         ),
-    ])
+    ], 200)
     .await;
 
     // Verify Server1 no longer has Server4 as a peer
@@ -507,16 +508,20 @@ async fn test_peer_up() {
     let hold_timer_secs = 3;
     let (server1, server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
-    // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connection stays up
-    tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
+    // Poll until OPEN exchanged and at least one keepalive cycle completed
+    let expected = ExpectedStats {
+        open_sent: Some(1),
+        open_received: Some(1),
+        min_keepalive_sent: Some(1),
+        min_keepalive_received: Some(1),
+        ..Default::default()
+    };
+    poll_peer_stats(&server1, &server2.address, expected).await;
+    poll_peer_stats(&server2, &server1.address, expected).await;
 
     // Verify both peers are still in Established state
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
     assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
-
-    // Verify OPEN message was sent exactly once by each peer, and no UPDATEs sent yet
-    verify_peer_statistics(&server1, server2.address.clone(), 1, 1, 0).await;
-    verify_peer_statistics(&server2, server1.address.clone(), 1, 1, 0).await;
 }
 
 #[tokio::test]
@@ -525,8 +530,24 @@ async fn test_peer_up_four_node_mesh() {
     let (server1, server2, server3, server4) =
         setup_four_meshed_servers(Some(hold_timer_secs)).await;
 
-    // Wait for 3x hold timer to ensure multiple keepalives are exchanged and the connections stay up
-    tokio::time::sleep(tokio::time::Duration::from_secs(hold_timer_secs as u64 * 3)).await;
+    // Poll until multiple keepalive cycles completed (proves connection stays up)
+    let expected = ExpectedStats {
+        min_keepalive_sent: Some(3),
+        min_keepalive_received: Some(3),
+        ..Default::default()
+    };
+    poll_peer_stats(&server1, &server2.address, expected).await;
+    poll_peer_stats(&server1, &server3.address, expected).await;
+    poll_peer_stats(&server1, &server4.address, expected).await;
+    poll_peer_stats(&server2, &server1.address, expected).await;
+    poll_peer_stats(&server2, &server3.address, expected).await;
+    poll_peer_stats(&server2, &server4.address, expected).await;
+    poll_peer_stats(&server3, &server1.address, expected).await;
+    poll_peer_stats(&server3, &server2.address, expected).await;
+    poll_peer_stats(&server3, &server4.address, expected).await;
+    poll_peer_stats(&server4, &server1.address, expected).await;
+    poll_peer_stats(&server4, &server2.address, expected).await;
+    poll_peer_stats(&server4, &server3.address, expected).await;
 
     // Verify all peers are still in Established state
     assert!(

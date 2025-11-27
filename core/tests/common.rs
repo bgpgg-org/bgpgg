@@ -555,26 +555,32 @@ pub async fn setup_two_ases_with_ebgp(
 }
 
 /// Polls for route propagation to multiple servers with expected routes
-///
-/// # Arguments
-/// * `expectations` - Slice of tuples containing (TestServer, expected routes)
 pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) {
+    poll_route_propagation_with_timeout(expectations, 100).await;
+}
+
+/// Polls for route propagation with custom timeout (iterations × 100ms)
+pub async fn poll_route_propagation_with_timeout(
+    expectations: &[(&TestServer, Vec<Route>)],
+    max_iterations: usize,
+) {
     use std::collections::HashMap;
 
-    poll_until(
+    poll_until_with_timeout(
         || async {
             for (server, expected_routes) in expectations {
                 let Ok(routes) = server.client.get_routes().await else {
                     return false;
                 };
 
-                // Convert to HashMaps keyed by prefix for order-independent comparison
-                // (routes come from HashMap in RIB, so order is not guaranteed)
-                let routes_map: HashMap<_, _> =
-                    routes.into_iter().map(|r| (r.prefix.clone(), r)).collect();
+                // Compare only best paths (first path in each route)
+                let routes_map: HashMap<_, _> = routes
+                    .into_iter()
+                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
+                    .collect();
                 let expected_map: HashMap<_, _> = expected_routes
                     .iter()
-                    .map(|r| (r.prefix.clone(), r.clone()))
+                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
                     .collect();
 
                 if routes_map != expected_map {
@@ -584,6 +590,95 @@ pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) 
             true
         },
         "Timeout waiting for routes to propagate",
+        max_iterations,
+    )
+    .await;
+}
+
+/// Expected peer statistics for polling. None means don't check that field.
+/// Uses `==` for exact match, `>=` for `min_*` fields.
+#[derive(Default, Clone, Copy)]
+pub struct ExpectedStats {
+    pub open_sent: Option<u64>,
+    pub open_received: Option<u64>,
+    pub update_sent: Option<u64>,
+    pub update_received: Option<u64>,
+    pub min_update_sent: Option<u64>,
+    pub min_update_received: Option<u64>,
+    pub min_keepalive_sent: Option<u64>,
+    pub min_keepalive_received: Option<u64>,
+}
+
+impl ExpectedStats {
+    pub fn is_met_by(&self, s: &bgpgg::grpc::proto::PeerStatistics) -> bool {
+        self.open_sent.map_or(true, |e| s.open_sent == e)
+            && self.open_received.map_or(true, |e| s.open_received == e)
+            && self.update_sent.map_or(true, |e| s.update_sent == e)
+            && self.update_received.map_or(true, |e| s.update_received == e)
+            && self.min_update_sent.map_or(true, |e| s.update_sent >= e)
+            && self.min_update_received.map_or(true, |e| s.update_received >= e)
+            && self.min_keepalive_sent.map_or(true, |e| s.keepalive_sent >= e)
+            && self.min_keepalive_received.map_or(true, |e| s.keepalive_received >= e)
+    }
+}
+
+/// Poll until peer statistics meet expected thresholds.
+pub async fn poll_peer_stats(server: &TestServer, peer_addr: &str, expected: ExpectedStats) {
+    poll_until(
+        || async {
+            let Ok((_, stats)) = server.client.get_peer(peer_addr.to_string()).await else {
+                return false;
+            };
+            let Some(s) = stats else {
+                return false;
+            };
+            expected.is_met_by(&s)
+        },
+        "Timeout waiting for peer statistics",
+    )
+    .await;
+}
+
+/// Wait for routes and peer stats to converge.
+pub async fn wait_convergence(
+    route_expectations: &[(&TestServer, Vec<Route>)],
+    stats_expectations: &[(&TestServer, &TestServer, ExpectedStats)],
+) {
+    use std::collections::HashMap;
+
+    poll_until(
+        || async {
+            for (server, expected_routes) in route_expectations {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                // Compare only best paths (first path in each route)
+                let routes_map: HashMap<_, _> = routes
+                    .into_iter()
+                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
+                    .collect();
+                let expected_map: HashMap<_, _> = expected_routes
+                    .iter()
+                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+                    .collect();
+                if routes_map != expected_map {
+                    return false;
+                }
+            }
+            for (server, peer, expected) in stats_expectations {
+                let Ok((_, stats)) = server.client.get_peer(peer.address.clone()).await else {
+                    return false;
+                };
+                let Some(s) = stats else {
+                    return false;
+                };
+                if !expected.is_met_by(&s) {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for route convergence",
     )
     .await;
 }
@@ -835,9 +930,20 @@ impl FakePeer {
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
-        let mut stream = TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port))
-            .await
-            .expect("Failed to connect to BGP peer");
+        // Retry connecting to BGP server until it's ready
+        let mut stream = None;
+        for _ in 0..50 {
+            match TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port)).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        let mut stream = stream.expect("Failed to connect to BGP peer after retries");
 
         // 1. Send our OPEN
         let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));

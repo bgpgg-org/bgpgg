@@ -41,6 +41,8 @@ impl LocRib {
                 } else {
                     route.paths.push(path.clone());
                 }
+                // Keep paths sorted (best first)
+                route.paths.sort_by(|a, b| b.cmp(a));
             })
             .or_insert_with(|| Route {
                 prefix,
@@ -82,7 +84,7 @@ impl LocRib {
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
     /// Applies import policy (via closure) before adding routes
-    /// Returns the set of prefixes that changed for propagation to other peers
+    /// Returns the set of prefixes where the best path actually changed
     pub fn update_from_peer<F>(
         &mut self,
         peer_ip: String,
@@ -93,15 +95,22 @@ impl LocRib {
     where
         F: Fn(&IpNetwork, &mut Path) -> bool,
     {
-        let mut changed_prefixes = Vec::new();
+        // Collect affected prefixes and snapshot old best BEFORE mutations
+        let mut affected: Vec<IpNetwork> = withdrawn.clone();
+        for (prefix, _) in &announced {
+            if !affected.contains(prefix) {
+                affected.push(*prefix);
+            }
+        }
+        let old_best: HashMap<IpNetwork, Option<Path>> = affected
+            .iter()
+            .map(|p| (*p, self.get_best_path(p).cloned()))
+            .collect();
 
         // Process withdrawals
         for prefix in withdrawn {
             info!("withdrawing route from Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
-
-            if self.remove_peer_path(prefix, peer_ip.clone()) {
-                changed_prefixes.push(prefix);
-            }
+            self.remove_peer_path(prefix, peer_ip.clone());
         }
 
         // Process announcements - apply import policy and add to Loc-RIB
@@ -109,41 +118,19 @@ impl LocRib {
             if import_policy(&prefix, &mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
                 self.add_route(prefix, path);
-                changed_prefixes.push(prefix);
             } else {
                 debug!("route rejected by import policy", "prefix" => format!("{:?}", prefix), "peer_ip" => &peer_ip);
-
-                // Implicit withdrawal: remove any existing route for this prefix from this peer
-                if self.remove_peer_path(prefix, peer_ip.clone()) {
-                    changed_prefixes.push(prefix);
-                }
+                self.remove_peer_path(prefix, peer_ip.clone());
             }
         }
 
-        // Run best path selection on changed prefixes only
-        self.run_best_path_selection(&changed_prefixes);
-
-        // Return changed prefixes for propagation
-        changed_prefixes
+        // Return only prefixes where best path actually changed
+        affected
+            .into_iter()
+            .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).cloned())
+            .collect()
     }
 
-    fn run_best_path_selection(&mut self, changed_prefixes: &[IpNetwork]) {
-        for prefix in changed_prefixes {
-            if let Some(route) = self.routes.get_mut(prefix) {
-                if route.paths.len() > 1 {
-                    debug!("running best path selection", "prefix" => format!("{:?}", prefix), "num_paths" => route.paths.len());
-
-                    // Find the best path using Ord implementation
-                    // paths are compared such that "greater" means "better"
-                    if let Some(best_path) = route.paths.iter().max().cloned() {
-                        route.paths = vec![best_path];
-                    }
-                } else {
-                    debug!("skipping best path selection (single path)", "prefix" => format!("{:?}", prefix));
-                }
-            }
-        }
-    }
 }
 
 impl LocRib {
@@ -181,7 +168,6 @@ impl LocRib {
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
         self.add_route(prefix, path);
-        self.run_best_path_selection(&[prefix]);
     }
 
     /// Remove a locally originated route
@@ -199,35 +185,43 @@ impl LocRib {
                 self.routes.remove(&prefix);
             }
 
-            self.run_best_path_selection(&[prefix]);
             removed
         } else {
             false
         }
     }
 
+    /// Remove all routes from a peer. Returns prefixes where best path changed.
     pub fn remove_routes_from_peer(&mut self, peer_ip: String) -> Vec<IpNetwork> {
-        let mut changed_prefixes = Vec::new();
+        // Snapshot old best for all prefixes that have paths from this peer
+        let old_best: HashMap<IpNetwork, Option<Path>> = self
+            .routes
+            .iter()
+            .filter(|(_, route)| {
+                route.paths.iter().any(|p| {
+                    matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if ip == &peer_ip)
+                })
+            })
+            .map(|(prefix, _)| (*prefix, self.get_best_path(prefix).cloned()))
+            .collect();
 
-        for (prefix, route) in self.routes.iter_mut() {
-            let original_len = route.paths.len();
+        // Remove paths from this peer
+        for route in self.routes.values_mut() {
             route.paths.retain(|p| {
                 !matches!(
                     &p.source,
                     RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if ip == &peer_ip
                 )
             });
-            // If paths were removed, this prefix was affected
-            if route.paths.len() != original_len {
-                changed_prefixes.push(*prefix);
-            }
         }
         self.routes.retain(|_, route| !route.paths.is_empty());
 
-        // Run best path selection on all affected prefixes
-        self.run_best_path_selection(&changed_prefixes);
-
-        changed_prefixes
+        // Return only prefixes where best changed
+        old_best
+            .into_iter()
+            .filter(|(prefix, old)| old != &self.get_best_path(prefix).cloned())
+            .map(|(prefix, _)| prefix)
+            .collect()
     }
 
     pub fn routes_len(&self) -> usize {

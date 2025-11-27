@@ -191,58 +191,39 @@ async fn test_announce_withdraw_four_node_mesh() {
         .await
         .expect("Failed to announce route from server 1");
 
-    // Poll for route propagation with expected AS paths
-    // eBGP: NEXT_HOP rewritten to router IDs
-    poll_route_propagation(&[
-        (
-            &server2,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65001])],
-                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
-                    server1.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )],
-            }],
-        ),
-        (
-            &server3,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65001])],
-                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
-                    server1.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )],
-            }],
-        ),
-        (
-            &server4,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65001])],
-                    "1.1.1.1", // eBGP: NEXT_HOP rewritten to server1's router ID
-                    server1.address.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                )],
-            }],
-        ),
-    ])
+    // Wait for full mesh convergence: routes + UPDATE received/sent counts
+    let expected_route = vec![Route {
+        prefix: "10.1.0.0/24".to_string(),
+        paths: vec![build_path(
+            vec![as_sequence(vec![65001])],
+            "1.1.1.1",
+            server1.address.clone(),
+            Origin::Igp,
+            Some(100),
+            None,
+            false,
+            vec![],
+        )],
+    }];
+    let recv_1 = ExpectedStats { min_update_received: Some(1), ..Default::default() };
+    let sent_1 = ExpectedStats { min_update_sent: Some(1), ..Default::default() };
+    wait_convergence(
+        &[
+            (&server2, expected_route.clone()),
+            (&server3, expected_route.clone()),
+            (&server4, expected_route.clone()),
+        ],
+        &[
+            // Each server receives UPDATE from all peers
+            (&server2, &server1, recv_1), (&server2, &server3, recv_1), (&server2, &server4, recv_1),
+            (&server3, &server1, recv_1), (&server3, &server2, recv_1), (&server3, &server4, recv_1),
+            (&server4, &server1, recv_1), (&server4, &server2, recv_1), (&server4, &server3, recv_1),
+            // Each server sends UPDATE to non-originating peers
+            (&server2, &server3, sent_1), (&server2, &server4, sent_1),
+            (&server3, &server2, sent_1), (&server3, &server4, sent_1),
+            (&server4, &server2, sent_1), (&server4, &server3, sent_1),
+        ],
+    )
     .await;
 
     // Server1 withdraws the route
