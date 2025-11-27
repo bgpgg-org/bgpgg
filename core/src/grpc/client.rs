@@ -14,8 +14,8 @@
 
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
-    GetPeerRequest, GetPeersRequest, GetRoutesRequest, Origin, Peer, PeerStatistics,
-    RemovePeerRequest, RemoveRouteRequest, Route,
+    GetPeerRequest, GetPeersRequest, GetRoutesRequest, GetServerInfoRequest, Origin, Peer,
+    PeerStatistics, RemovePeerRequest, RemoveRouteRequest, Route,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -158,5 +158,17 @@ impl BgpClient {
         } else {
             Err(tonic::Status::unknown(resp.message))
         }
+    }
+
+    /// Get server info including the listen port
+    pub async fn get_server_info(&self) -> Result<u16, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .get_server_info(GetServerInfoRequest {})
+            .await?
+            .into_inner();
+
+        Ok(resp.listen_port as u16)
     }
 }

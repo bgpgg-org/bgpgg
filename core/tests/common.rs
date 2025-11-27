@@ -127,29 +127,20 @@ pub async fn start_test_server(
 ) -> TestServer {
     use tokio::net::TcpListener;
 
-    // Bind to port 0 to let OS allocate a free BGP port
-    let bgp_listener = TcpListener::bind(format!("{}:0", bind_ip)).await.unwrap();
-    let bgp_port = bgp_listener.local_addr().unwrap().port();
-    drop(bgp_listener);
-
-    // Bind to port 0 to let OS allocate a free gRPC port
+    // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
     let grpc_port = grpc_listener.local_addr().unwrap().port();
-    drop(grpc_listener);
+    let grpc_listener = grpc_listener.into_std().unwrap();
 
-    // Use the provided hold timer, or default to 90 seconds.
-    // Tests that need to verify hold timer behavior should pass an explicit low value
     let hold_timer_secs = hold_timer_secs.unwrap_or(90);
     let config = Config::new(
         asn,
-        &format!("{}:{}", bind_ip, bgp_port),
+        &format!("{}:0", bind_ip),
         router_id,
         hold_timer_secs as u64,
     );
 
     let server = BgpServer::new(config);
-
-    // Create gRPC service
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -158,15 +149,15 @@ pub async fn start_test_server(
         .build()
         .unwrap();
 
-    // Spawn BGP server in its own runtime
+    // Spawn BGP server
     runtime.spawn(async move { server.run().await });
 
-    // Spawn gRPC server in the same runtime
-    let grpc_addr = format!("[::1]:{}", grpc_port).parse().unwrap();
+    // Spawn gRPC server
     runtime.spawn(async move {
+        let grpc_listener = tokio::net::TcpListener::from_std(grpc_listener).unwrap();
         tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
-            .serve(grpc_addr)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
             .await
             .unwrap();
     });
@@ -188,6 +179,21 @@ pub async fn start_test_server(
     }
 
     let client = client.expect("Failed to connect to gRPC server after retries");
+
+    // Query actual BGP port from server
+    let mut bgp_port = 0;
+    for _ in 0..50 {
+        match client.get_server_info().await {
+            Ok(port) if port > 0 => {
+                bgp_port = port;
+                break;
+            }
+            _ => {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    assert!(bgp_port > 0, "Failed to get BGP port from server");
 
     TestServer {
         client,

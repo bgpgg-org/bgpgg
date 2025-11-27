@@ -63,6 +63,9 @@ pub enum MgmtOp {
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
     },
+    GetServerInfo {
+        response: oneshot::Sender<Option<u16>>,
+    },
 }
 
 // Server operations sent from peer tasks to the main server loop
@@ -110,6 +113,7 @@ pub struct BgpServer {
     loc_rib: LocRib,
     config: Config,
     local_bgp_id: u32,
+    listen_port: Option<u16>,
     pub mgmt_tx: mpsc::Sender<MgmtOp>,
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
@@ -131,6 +135,7 @@ impl BgpServer {
             loc_rib,
             config,
             local_bgp_id,
+            listen_port: None,
             mgmt_tx,
             mgmt_rx,
             op_tx,
@@ -143,6 +148,7 @@ impl BgpServer {
         info!("BGP server starting", "listen_addr" => addr);
 
         let listener = TcpListener::bind(&addr).await.unwrap();
+        self.listen_port = Some(listener.local_addr().unwrap().port());
 
         // Get local bind address for outgoing connections
         let local_addr = self
@@ -274,6 +280,9 @@ impl BgpServer {
             }
             MgmtOp::GetRoutes { response } => {
                 self.handle_get_routes(response);
+            }
+            MgmtOp::GetServerInfo { response } => {
+                let _ = response.send(self.listen_port);
             }
         }
     }
