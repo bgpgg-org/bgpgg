@@ -955,3 +955,24 @@ pub fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> V
     bytes.extend_from_slice(value);
     bytes
 }
+
+// Pre-built common path attributes for error tests
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin as MsgOrigin};
+
+pub fn attr_origin_igp() -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::ORIGIN,
+        1,
+        &[MsgOrigin::IGP as u8],
+    )
+}
+
+pub fn attr_as_path_empty() -> Vec<u8> {
+    build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[])
+}
+
+pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
+    let octets = ip.octets();
+    build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
+}

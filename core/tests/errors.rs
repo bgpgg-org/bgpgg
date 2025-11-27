@@ -22,7 +22,7 @@ use bgpgg::bgp::msg_notification::{
     BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
 };
 use bgpgg::bgp::msg_open::OpenMessage;
-use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
 use std::net::Ipv4Addr;
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -304,35 +304,19 @@ async fn test_update_missing_well_known_attribute() {
         (
             "origin",
             vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
-                build_attr_bytes(
-                    attr_flags::TRANSITIVE,
-                    attr_type_code::NEXT_HOP,
-                    4,
-                    &[10, 0, 0, 1],
-                ),
+                attr_as_path_empty(),
+                attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
             attr_type_code::ORIGIN,
         ),
         (
             "as_path",
-            vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
-                build_attr_bytes(
-                    attr_flags::TRANSITIVE,
-                    attr_type_code::NEXT_HOP,
-                    4,
-                    &[10, 0, 0, 1],
-                ),
-            ],
+            vec![attr_origin_igp(), attr_next_hop(Ipv4Addr::new(10, 0, 0, 1))],
             attr_type_code::AS_PATH,
         ),
         (
             "next_hop",
-            vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
-            ],
+            vec![attr_origin_igp(), attr_as_path_empty()],
             attr_type_code::NEXT_HOP,
         ),
     ];
@@ -408,7 +392,8 @@ async fn test_update_attribute_flags_error_origin() {
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
         let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-        let malformed_attr = build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[0]);
+        let malformed_attr =
+            build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
 
         peer.send_raw(&msg).await;
@@ -462,7 +447,12 @@ async fn test_update_attribute_length_error() {
     let test_cases = vec![
         (
             "origin_wrong_length",
-            build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0]), // WRONG: length=2, should be 1
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::ORIGIN,
+                2,
+                &[Origin::IGP as u8],
+            ), // WRONG: length=2, should be 1
             vec![attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2],
         ),
         (
@@ -572,19 +562,16 @@ async fn test_update_invalid_origin_attribute() {
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     let invalid_origin_attr =
-        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]);
-    let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);
-    let next_hop_attr = build_attr_bytes(
-        attr_flags::TRANSITIVE,
-        attr_type_code::NEXT_HOP,
-        4,
-        &[10, 0, 0, 1],
-    );
+        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
 
     let nlri = &[24, 10, 11, 12];
     let msg = build_raw_update(
         &[],
-        &[&invalid_origin_attr, &as_path_attr, &next_hop_attr],
+        &[
+            &invalid_origin_attr,
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
         nlri,
         None,
     );
@@ -600,4 +587,61 @@ async fn test_update_invalid_origin_attribute() {
         notif.data(),
         &[attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, 3]
     );
+}
+
+#[tokio::test]
+async fn test_update_invalid_next_hop_attribute() {
+    let test_cases = vec![
+        ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
+        ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
+    ];
+
+    for (name, ip_bytes) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let invalid_next_hop_attr = build_attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type_code::NEXT_HOP,
+            4,
+            &ip_bytes,
+        );
+
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_empty(),
+                &invalid_next_hop_attr,
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+            "Test case: {}",
+            name
+        );
+        assert_eq!(
+            notif.data(),
+            &[
+                attr_flags::TRANSITIVE,
+                attr_type_code::NEXT_HOP,
+                4,
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3]
+            ],
+            "Test case: {}",
+            name
+        );
+    }
 }

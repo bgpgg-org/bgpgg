@@ -14,7 +14,7 @@
 
 use super::msg::{Message, MessageType};
 use super::msg_notification::{BgpError, UpdateMessageError};
-use super::utils::{parse_nlri_list, read_u32, IpNetwork, ParserError};
+use super::utils::{is_valid_unicast_ipv4, parse_nlri_list, read_u32, IpNetwork, ParserError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
@@ -424,6 +424,19 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                 }
                 AttrType::NextHop => {
                     let next_hop = read_attr_next_hop(&attr_data)?;
+
+                    // RFC 4271: NEXT_HOP must be a valid IP host address
+                    if let NextHopAddr::Ipv4(addr) = next_hop {
+                        if !is_valid_unicast_ipv4(u32::from(addr)) {
+                            return Err(ParserError::BgpError {
+                                error: BgpError::UpdateMessageError(
+                                    UpdateMessageError::InvalidNextHopAttribute,
+                                ),
+                                data: attr_bytes.to_vec(),
+                            });
+                        }
+                    }
+
                     PathAttrValue::NextHop(next_hop)
                 }
                 AttrType::MultiExtiDisc => {
@@ -1183,6 +1196,41 @@ mod tests {
                 assert_eq!(data, input.to_vec());
             }
             _ => panic!("Expected AttributeLengthError"),
+        }
+    }
+
+    #[test]
+    fn test_read_path_attribute_next_hop_invalid_address() {
+        let test_cases = vec![
+            ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
+            ("255.255.255.255", [0xff, 0xff, 0xff, 0xff]),
+            ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
+            ("239.255.255.255", [0xef, 0xff, 0xff, 0xff]),
+        ];
+
+        for (name, ip_bytes) in test_cases {
+            let input: Vec<u8> = vec![
+                PathAttrFlag::TRANSITIVE,
+                AttrType::NextHop as u8,
+                0x04,
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+            ];
+
+            match read_path_attribute(&input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(data, input, "Failed for {}", name);
+                }
+                _ => panic!("Expected InvalidNextHopAttribute for {}", name),
+            }
         }
     }
 

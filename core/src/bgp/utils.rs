@@ -95,6 +95,12 @@ pub fn read_u32(bytes: &[u8]) -> Result<u32, ParserError> {
     }
 }
 
+/// Validates if an IPv4 address is a valid unicast host address.
+/// Returns false for 0.0.0.0, 255.255.255.255, or multicast (224.0.0.0/4).
+pub fn is_valid_unicast_ipv4(ip: u32) -> bool {
+    !(ip == 0 || ip == 0xFFFFFFFF || (ip & 0xF0000000) == 0xE0000000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +136,31 @@ mod tests {
             }),
         ];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_is_valid_unicast_ipv4() {
+        let test_cases = vec![
+            (u32::from(Ipv4Addr::new(10, 0, 0, 1)), true, "10.0.0.1"),
+            (
+                u32::from(Ipv4Addr::new(192, 168, 1, 1)),
+                true,
+                "192.168.1.1",
+            ),
+            (u32::from(Ipv4Addr::new(1, 1, 1, 1)), true, "1.1.1.1"),
+            (
+                u32::from(Ipv4Addr::new(223, 255, 255, 255)),
+                true,
+                "223.255.255.255",
+            ),
+            (0x00000000, false, "0.0.0.0"),
+            (0xFFFFFFFF, false, "255.255.255.255"),
+            (0xE0000001, false, "224.0.0.1 (multicast)"),
+            (0xEFFFFFFF, false, "239.255.255.255 (multicast)"),
+        ];
+
+        for (ip, expected, name) in test_cases {
+            assert_eq!(is_valid_unicast_ipv4(ip), expected, "Failed for {}", name);
+        }
     }
 }
