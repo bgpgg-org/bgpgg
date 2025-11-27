@@ -23,6 +23,7 @@ use bgpgg::bgp::msg_notification::{
 };
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
+use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -681,4 +682,43 @@ async fn test_next_hop_is_local_address_rejected() {
         routes.is_empty(),
         "Route should be rejected when NEXT_HOP is local address"
     );
+}
+
+#[tokio::test]
+async fn test_hold_timer_expiry() {
+    let hold_timer_secs: u16 = 3;
+    let server = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        Some(hold_timer_secs),
+        "127.0.0.1",
+    )
+    .await;
+
+    // FakePeer connects with same hold time but won't send keepalives
+    let mut fake_peer =
+        FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, &server).await;
+
+    // Verify peer is established
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap_or_default();
+            peers
+                .iter()
+                .any(|p| p.state == BgpState::Established as i32)
+        },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    // FakePeer does nothing - server should detect hold timer expiry and send NOTIFICATION
+    let notif = fake_peer.read_notification().await;
+    assert_eq!(*notif.error(), BgpError::HoldTimerExpired);
+
+    // Server should have removed the peer
+    poll_until(
+        || async { verify_peers(&server, vec![]).await },
+        "Timeout waiting for peer removal after hold timer expiry",
+    )
+    .await;
 }

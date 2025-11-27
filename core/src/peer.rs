@@ -14,7 +14,7 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_notification::NotifcationMessage;
+use crate::bgp::msg_notification::{BgpError, NotifcationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -177,6 +177,8 @@ impl Peer {
                     // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
                     if self.fsm.timers.hold_timer_expired() {
                         error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_ip" => &peer_ip);
+                        let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+                        let _ = self.send_notification(notif).await;
                         break;
                     }
 
