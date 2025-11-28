@@ -138,6 +138,10 @@ impl AttrType {
                 | AttrType::AtomicAggregate
         )
     }
+
+    fn is_optional(&self) -> bool {
+        matches!(self, AttrType::MultiExtiDisc | AttrType::Aggregator)
+    }
 }
 
 /// Parse attribute type and handle unrecognized attributes per RFC 4271 Section 6.3.
@@ -338,18 +342,12 @@ fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
     NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
 }
 
-fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
-    if bytes.len() != 6 {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
-            data: Vec::new(),
-        });
-    }
-
+fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
+    // Length already validated by validate_attribute_length
     let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
     let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
 
-    Ok(Aggregator { asn, ip_addr })
+    Aggregator { asn, ip_addr }
 }
 
 fn validate_attribute_length(
@@ -368,8 +366,14 @@ fn validate_attribute_length(
     };
 
     if !valid {
+        // RFC 4271 Section 6.3: for recognized optional attributes, use OptionalAttributeError
+        let error = if attr_type.is_optional() {
+            UpdateMessageError::OptionalAttributeError
+        } else {
+            UpdateMessageError::AttributeLengthError
+        };
         return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            error: BgpError::UpdateMessageError(error),
             data: attr_bytes.to_vec(),
         });
     }
@@ -460,7 +464,7 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::AtomicAggregate
                 }
                 AttrType::Aggregator => {
-                    let aggregator = read_attr_aggregator(&attr_data)?;
+                    let aggregator = read_attr_aggregator(&attr_data);
                     PathAttrValue::Aggregator(aggregator)
                 }
             }
@@ -1271,10 +1275,10 @@ mod tests {
     }
 
     #[test]
-    fn test_read_path_attribute_multi_exit_disc_invalid_length() {
+    fn test_read_path_attribute_optional_invalid_length() {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL,        // Attribute flags
-            AttrType::MultiExtiDisc as u8, // Attribute type
+            AttrType::MultiExtiDisc as u8, // Attribute type (optional)
             0x03,                          // Attribute length (invalid - should be 4)
             0x00,
             0x00,
@@ -1283,13 +1287,14 @@ mod tests {
 
         match read_path_attribute(input) {
             Err(ParserError::BgpError { error, data }) => {
+                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
                 assert_eq!(
                     error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
                 );
                 assert_eq!(data, input.to_vec());
             }
-            _ => panic!("Expected AttributeLengthError"),
+            _ => panic!("Expected OptionalAttributeError"),
         }
     }
 
@@ -1413,7 +1418,7 @@ mod tests {
     fn test_read_path_attribute_aggregator_invalid_length() {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::Aggregator as u8,                        // Attribute type
+            AttrType::Aggregator as u8,                        // Attribute type (optional)
             0x03, // Attribute length (invalid - should be 6)
             0x00, // ASN
             0x10,
@@ -1422,13 +1427,14 @@ mod tests {
 
         match read_path_attribute(input) {
             Err(ParserError::BgpError { error, data }) => {
+                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
                 assert_eq!(
                     error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
                 );
                 assert_eq!(data, input.to_vec());
             }
-            _ => panic!("Expected AttributeLengthError"),
+            _ => panic!("Expected OptionalAttributeError"),
         }
     }
 

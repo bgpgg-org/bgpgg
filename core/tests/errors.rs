@@ -445,6 +445,8 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
 
 #[tokio::test]
 async fn test_update_attribute_length_error() {
+    // Tests AttributeLengthError for well-known attributes.
+    // Optional attributes (MED, AGGREGATOR) use OptionalAttributeError instead.
     let test_cases = vec![
         (
             "origin_wrong_length",
@@ -467,16 +469,6 @@ async fn test_update_attribute_length_error() {
             vec![attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 5],
         ),
         (
-            "med_wrong_length",
-            build_attr_bytes(
-                attr_flags::OPTIONAL,
-                attr_type_code::MULTI_EXIT_DISC,
-                5,
-                &[0, 0, 0, 0, 0],
-            ), // WRONG: length=5, should be 4
-            vec![attr_flags::OPTIONAL, attr_type_code::MULTI_EXIT_DISC, 5],
-        ),
-        (
             "local_pref_wrong_length",
             build_attr_bytes(
                 attr_flags::TRANSITIVE,
@@ -495,20 +487,6 @@ async fn test_update_attribute_length_error() {
                 &[0],
             ), // WRONG: length=1, should be 0
             vec![attr_flags::TRANSITIVE, attr_type_code::ATOMIC_AGGREGATE, 1],
-        ),
-        (
-            "aggregator_wrong_length",
-            build_attr_bytes(
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                attr_type_code::AGGREGATOR,
-                5,
-                &[0, 10, 10, 0, 0],
-            ), // WRONG: length=5, should be 6
-            vec![
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                attr_type_code::AGGREGATOR,
-                5,
-            ],
         ),
     ];
 
@@ -744,6 +722,59 @@ async fn test_update_malformed_as_path() {
             "Test case: {}",
             name
         );
+    }
+}
+
+#[tokio::test]
+async fn test_update_optional_attribute_error() {
+    let test_cases = vec![
+        (
+            "med_invalid_length",
+            attr_flags::OPTIONAL,
+            attr_type_code::MULTI_EXIT_DISC,
+            3,
+            vec![0x00, 0x00, 0x01],
+        ),
+        (
+            "aggregator_invalid_length",
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type_code::AGGREGATOR,
+            4,
+            vec![0x00, 0x01, 0x01, 0x01],
+        ),
+    ];
+
+    for (name, flags, type_code, len, data) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_empty(),
+                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+                &invalid_attr,
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            "Test case: {}",
+            name
+        );
+        let mut expected_data = vec![flags, type_code, len];
+        expected_data.extend(&data);
+        assert_eq!(notif.data(), &expected_data, "Test case: {}", name);
     }
 }
 
