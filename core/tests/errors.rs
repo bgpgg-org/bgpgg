@@ -816,3 +816,20 @@ async fn test_hold_timer_expiry() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_update_duplicate_attribute() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with two ORIGIN attributes (duplicate)
+    let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+    );
+}

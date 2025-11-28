@@ -82,6 +82,19 @@ impl PathAttribute {
             false
         }
     }
+
+    fn type_code(&self) -> u8 {
+        match &self.value {
+            PathAttrValue::Origin(_) => attr_type_code::ORIGIN,
+            PathAttrValue::AsPath(_) => attr_type_code::AS_PATH,
+            PathAttrValue::NextHop(_) => attr_type_code::NEXT_HOP,
+            PathAttrValue::MultiExtiDisc(_) => attr_type_code::MULTI_EXIT_DISC,
+            PathAttrValue::LocalPref(_) => attr_type_code::LOCAL_PREF,
+            PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
+            PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
+            PathAttrValue::Unknown { type_code, .. } => *type_code,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -506,17 +519,28 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
 }
 
 fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
+    use std::collections::HashSet;
+
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
+    let mut seen_type_codes: HashSet<u8> = HashSet::new();
 
     while cursor < bytes.len() {
         let (attribute, offset) = read_path_attribute(&bytes[cursor..])?;
-        cursor = cursor + offset as usize;
+        cursor += offset as usize;
+
+        let type_code = attribute.type_code();
+        if !seen_type_codes.insert(type_code) {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                data: Vec::new(),
+            });
+        }
 
         path_attributes.push(attribute);
     }
 
-    return Ok(path_attributes);
+    Ok(path_attributes)
 }
 
 fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
@@ -2273,5 +2297,21 @@ mod tests {
             vec![],
         );
         assert_eq!(msg_empty_path.get_leftmost_as(), None);
+    }
+
+    #[test]
+    fn test_duplicate_attribute_malformed_attribute_list() {
+        // Two ORIGIN attributes in the same UPDATE message
+        let input = build_update_body(&[PATH_ATTR_ORIGIN_IGP, PATH_ATTR_ORIGIN_IGP], &[]);
+
+        match UpdateMessage::from_bytes(input) {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+                );
+            }
+            _ => panic!("Expected MalformedAttributeList error for duplicate attribute"),
+        }
     }
 }
