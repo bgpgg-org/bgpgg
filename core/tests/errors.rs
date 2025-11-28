@@ -910,3 +910,29 @@ async fn test_update_multicast_nlri_ignored() {
         .expect("Failed to get routes");
     assert!(routes.is_empty(), "Multicast NLRI should be ignored");
 }
+
+// FSM Error Tests (RFC 4271 Section 6.6)
+
+#[tokio::test]
+async fn test_fsm_error_update_in_openconfirm() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+
+    // Connect and exchange OPEN only - server ends up in OpenConfirm
+    let mut peer = FakePeer::new_open_only(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE while server is in OpenConfirm (should trigger FSM Error)
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        &[24, 10, 11, 12], // 10.11.12.0/24
+        None,
+    );
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(notif.error(), &BgpError::FiniteStateMachineError);
+}

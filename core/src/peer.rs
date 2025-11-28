@@ -207,7 +207,17 @@ impl Peer {
     /// Handle an FSM event and perform state transitions
     async fn handle_fsm_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
-        let new_state = self.fsm.handle_event(event);
+        let (new_state, fsm_error) = self.fsm.handle_event(event);
+
+        // RFC 4271 6.6: Send NOTIFICATION for FSM errors
+        if let Some(error) = fsm_error {
+            let notif = NotifcationMessage::new(error, vec![]);
+            let _ = self.send_notification(notif).await;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FSM error: unexpected event",
+            ));
+        }
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {

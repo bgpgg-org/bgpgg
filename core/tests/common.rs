@@ -948,7 +948,36 @@ impl FakePeer {
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
-        // Retry connecting to BGP server until it's ready
+        let mut fake_peer = Self::new_open_only(local_asn, local_router_id, hold_time, peer).await;
+
+        // Send KEEPALIVE
+        let keepalive = KeepAliveMessage {};
+        fake_peer
+            .stream
+            .write_all(&keepalive.serialize())
+            .await
+            .expect("Failed to send KEEPALIVE");
+
+        // Read their KEEPALIVE (they already sent it when entering OpenConfirm)
+        let msg = read_bgp_message(&mut fake_peer.stream)
+            .await
+            .expect("Failed to read KEEPALIVE");
+        match msg {
+            BgpMessage::KeepAlive(_) => {}
+            _ => panic!("Expected KEEPALIVE message during handshake"),
+        }
+
+        fake_peer
+    }
+
+    /// Create a FakePeer that only exchanges OPEN (server ends up in OpenConfirm).
+    /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
+    pub async fn new_open_only(
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+        peer: &TestServer,
+    ) -> Self {
         let mut stream = None;
         for _ in 0..50 {
             match TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port)).await {
@@ -963,41 +992,23 @@ impl FakePeer {
         }
         let mut stream = stream.expect("Failed to connect to BGP peer after retries");
 
-        // 1. Send our OPEN
+        // Send our OPEN
         let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
-        let open_bytes = open.serialize();
         stream
-            .write_all(&open_bytes)
+            .write_all(&open.serialize())
             .await
             .expect("Failed to send OPEN");
 
-        // 2. Read their OPEN
+        // Read their OPEN (server transitions to OpenConfirm after receiving our OPEN)
         let msg = read_bgp_message(&mut stream)
             .await
             .expect("Failed to read OPEN");
         match msg {
             BgpMessage::Open(_) => {}
-            _ => panic!("Expected OPEN message during handshake"),
+            _ => panic!("Expected OPEN message"),
         }
 
-        // 3. Send KEEPALIVE
-        let keepalive = KeepAliveMessage {};
-        let keepalive_bytes = keepalive.serialize();
-        stream
-            .write_all(&keepalive_bytes)
-            .await
-            .expect("Failed to send KEEPALIVE");
-
-        // 4. Read their KEEPALIVE
-        let msg = read_bgp_message(&mut stream)
-            .await
-            .expect("Failed to read KEEPALIVE");
-        match msg {
-            BgpMessage::KeepAlive(_) => {}
-            _ => panic!("Expected KEEPALIVE message during handshake"),
-        }
-
-        // Now in Established state (no background KEEPALIVEs needed with long hold_time)
+        // Server is now in OpenConfirm, waiting for our KEEPALIVE
         let address = stream
             .local_addr()
             .expect("Failed to get local address")
