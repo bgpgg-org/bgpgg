@@ -833,3 +833,80 @@ async fn test_update_duplicate_attribute() {
         &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
     );
 }
+
+#[tokio::test]
+async fn test_update_no_nlri_valid() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // UPDATE with valid attributes but no NLRI
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        &[], // No NLRI
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Wait for UPDATE to be received
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Peer should still be established (no NOTIFICATION sent)
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should remain established after valid UPDATE with no NLRI"
+    );
+}
+
+#[tokio::test]
+async fn test_update_multicast_nlri_ignored() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with multicast NLRI (224.0.0.0/24)
+    let multicast_nlri = &[24, 224, 0, 0];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        multicast_nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Wait for UPDATE to be received
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Multicast prefix should be silently ignored, not installed
+    let routes = server
+        .client
+        .get_routes()
+        .await
+        .expect("Failed to get routes");
+    assert!(routes.is_empty(), "Multicast NLRI should be ignored");
+}

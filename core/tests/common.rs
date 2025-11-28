@@ -936,6 +936,8 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
 /// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
 pub struct FakePeer {
     stream: TcpStream,
+    pub address: String,
+    pub asn: u16,
 }
 
 impl FakePeer {
@@ -996,7 +998,24 @@ impl FakePeer {
         }
 
         // Now in Established state (no background KEEPALIVEs needed with long hold_time)
-        FakePeer { stream }
+        let address = stream
+            .local_addr()
+            .expect("Failed to get local address")
+            .ip()
+            .to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: local_asn,
+        }
+    }
+
+    pub fn to_peer(&self, state: BgpState) -> Peer {
+        Peer {
+            address: self.address.clone(),
+            asn: self.asn as u32,
+            state: state.into(),
+        }
     }
 
     /// Send raw bytes to the peer

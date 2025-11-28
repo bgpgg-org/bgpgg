@@ -881,7 +881,7 @@ impl UpdateMessage {
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
-        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len]);
+        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len])?;
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -899,7 +899,7 @@ impl UpdateMessage {
 
         let nlri_list = match total_path_attributes_len {
             0 => vec![],
-            _ => parse_nlri_list(&data),
+            _ => parse_nlri_list(&data)?,
         };
 
         validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
