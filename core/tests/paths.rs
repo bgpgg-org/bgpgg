@@ -110,13 +110,13 @@ async fn test_origin_preservation() {
         };
 
     // Verify ORIGIN is preserved at each hop
-    // eBGP rewrites NEXT_HOP to router ID of the sending speaker
+    // eBGP rewrites NEXT_HOP to local address of the sending speaker
     poll_route_propagation(&[
         (
             &server2,
             build_expected_routes(
                 vec![as_sequence(vec![65001])],
-                "1.1.1.1",
+                &server1.address,
                 server1.address.clone(),
             ),
         ),
@@ -124,7 +124,7 @@ async fn test_origin_preservation() {
             &server3,
             build_expected_routes(
                 vec![as_sequence(vec![65002, 65001])],
-                "2.2.2.2",
+                &server2.address,
                 server2.address.clone(),
             ),
         ),
@@ -200,7 +200,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // eBGP: S1 created AS_SEQUENCE with its AS
-                    "1.1.1.1",                      // eBGP: NEXT_HOP rewritten to S1's router ID
+                    &server1.address, // eBGP: NEXT_HOP rewritten to S1's local address
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -216,7 +216,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // iBGP: S2 did NOT modify AS_PATH
-                    "1.1.1.1",                      // iBGP: NEXT_HOP preserved from S2
+                    &server1.address,               // iBGP: NEXT_HOP preserved from S2
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -232,7 +232,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65002, 65001])], // eBGP: S3 prepended its AS
-                    "3.3.3.3", // eBGP: NEXT_HOP rewritten to S3's router ID
+                    &server3.address, // eBGP: NEXT_HOP rewritten to S3's local address
                     server3.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -322,7 +322,7 @@ async fn test_originating_speaker_as_path() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // eBGP: S2 prepended AS65001
-                    "2.2.2.2",                      // eBGP: NEXT_HOP rewritten to S2's router ID
+                    &server2.address, // eBGP: NEXT_HOP rewritten to S2's local address
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -395,7 +395,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                     as_set(vec![65003, 65004]), // Original AS_SET
                     as_sequence(vec![65005]),   // Original AS_SEQUENCE
                 ],
-                "1.1.1.1", // eBGP: NEXT_HOP rewritten to S1's router ID
+                &server1.address, // eBGP: NEXT_HOP rewritten to S1's local address
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100),
@@ -458,15 +458,15 @@ async fn test_next_hop_locally_originated_to_ibgp() {
         .await
         .expect("Failed to announce route from server 1");
 
-    // RFC expectation: S2 should receive the route with NEXT_HOP set to 1.1.1.1
-    // (S1's local address for the peering session)
+    // RFC expectation: S2 should receive the route with NEXT_HOP set to S1's local address
+    // (the interface address used for the peering session)
     poll_route_propagation(&[(
         &server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
-                vec![],    // iBGP: empty AS_PATH for locally-originated route
-                "1.1.1.1", // NEXT_HOP should be set to S1's local address
+                vec![],           // iBGP: empty AS_PATH for locally-originated route
+                &server1.address, // NEXT_HOP should be set to S1's local address
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100),
@@ -558,7 +558,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])], // eBGP: AS prepended
-                    "2.2.2.2",                      // eBGP: NEXT_HOP rewritten to S2's address
+                    &server2.address, // eBGP: NEXT_HOP rewritten to S2's local address
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100),
@@ -636,7 +636,7 @@ async fn test_local_pref_send_to_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65000])],
-                    "1.1.1.1",
+                    &server1.address,
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF set by DefaultLocalPref policy
@@ -652,7 +652,7 @@ async fn test_local_pref_send_to_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65000])], // iBGP preserves AS_PATH
-                    "1.1.1.1",                      // iBGP preserves NEXT_HOP
+                    &server1.address,               // iBGP preserves NEXT_HOP
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF preserved from S2's UPDATE (proves it was included)
@@ -750,7 +750,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001])], // eBGP: AS prepended
-                "2.2.2.2",                      // eBGP: NEXT_HOP rewritten
+                &server2.address,               // eBGP: NEXT_HOP rewritten
                 server2.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF=100 (set by policy, NOT 200 from S2!)
@@ -827,7 +827,7 @@ async fn test_med_propagation_over_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65000])],
-                    "1.1.1.1",
+                    &server1.address,
                     server1.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF set by DefaultLocalPref policy
@@ -843,7 +843,7 @@ async fn test_med_propagation_over_ibgp() {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65000])], // iBGP preserves AS_PATH
-                    "1.1.1.1",                      // iBGP preserves NEXT_HOP
+                    &server1.address,               // iBGP preserves NEXT_HOP
                     server2.address.clone(),
                     Origin::Igp,
                     Some(100), // LOCAL_PREF preserved from S2
@@ -918,7 +918,7 @@ async fn test_med_not_propagated_to_other_as() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65000])],
-                "1.1.1.1",
+                &server1.address,
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF set by policy
@@ -938,7 +938,7 @@ async fn test_med_not_propagated_to_other_as() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001, 65000])], // eBGP: S2 prepended AS65001
-                "2.2.2.2",                             // eBGP: NEXT_HOP rewritten
+                &server2.address,                      // eBGP: NEXT_HOP rewritten
                 server2.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF set by policy
@@ -1012,7 +1012,7 @@ async fn test_atomic_aggregate_propagation() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001])], // eBGP: S1 prepended its AS
-                "1.1.1.1",                      // eBGP: NEXT_HOP rewritten to S1's router ID
+                &server1.address,               // eBGP: NEXT_HOP rewritten to S1's local address
                 server1.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF set by DefaultLocalPref policy
@@ -1032,7 +1032,7 @@ async fn test_atomic_aggregate_propagation() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001])], // iBGP: AS_PATH preserved
-                "1.1.1.1",                      // iBGP: NEXT_HOP preserved
+                &server1.address,               // iBGP: NEXT_HOP preserved
                 server2.address.clone(),
                 Origin::Igp,
                 Some(100), // LOCAL_PREF preserved from S2
@@ -1116,7 +1116,7 @@ async fn test_unknown_optional_attribute_handling(
             prefix: "192.168.1.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                "2.2.2.2",
+                &server2.address,
                 server2.address.clone(),
                 Origin::Igp,
                 Some(100),

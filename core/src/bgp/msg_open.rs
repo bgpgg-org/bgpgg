@@ -14,7 +14,7 @@
 
 use super::msg::{Message, MessageType};
 use super::msg_notification::{BgpError, OpenMessageError};
-use super::utils::ParserError;
+use super::utils::{is_valid_unicast_ipv4, ParserError};
 
 const BGP_VERSION: u8 = 4;
 
@@ -205,11 +205,7 @@ fn validate_hold_time(hold_time: u16) -> Result<(), ParserError> {
 /// Must be a valid unicast IP host address
 /// Cannot be 0.0.0.0, 255.255.255.255, or multicast (224.0.0.0/4)
 fn validate_bgp_identifier(bgp_identifier: u32) -> Result<(), ParserError> {
-    if bgp_identifier == 0
-        || bgp_identifier == 0xFFFFFFFF
-        || (bgp_identifier & 0xF0000000) == 0xE0000000
-    {
-        // RFC 4271: No specific data field requirement for BadBgpIdentifier
+    if !is_valid_unicast_ipv4(bgp_identifier) {
         return Err(ParserError::BgpError {
             error: BgpError::OpenMessageError(OpenMessageError::BadBgpIdentifier),
             data: Vec::new(),

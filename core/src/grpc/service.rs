@@ -24,7 +24,8 @@ use tonic::{Request, Response, Status};
 use super::proto::{
     self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
     AddRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse, GetPeersRequest,
-    GetPeersResponse, GetRoutesRequest, GetRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
+    GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
+    GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
     PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
     RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
 };
@@ -445,6 +446,28 @@ impl BgpService for BgpGrpcService {
 
         Ok(Response::new(GetRoutesResponse {
             routes: proto_routes,
+        }))
+    }
+
+    async fn get_server_info(
+        &self,
+        _request: Request<GetServerInfoRequest>,
+    ) -> Result<Response<GetServerInfoResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetServerInfo { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let (listen_addr, listen_port) = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(GetServerInfoResponse {
+            listen_addr: listen_addr.to_string(),
+            listen_port: listen_port as u32,
         }))
     }
 }

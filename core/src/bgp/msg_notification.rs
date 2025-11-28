@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::warn;
+
 use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
@@ -68,11 +70,11 @@ pub enum UpdateMessageError {
     AttributeFlagsError = 4,
     AttributeLengthError = 5,
     InvalidOriginAttribute = 6,
-    InvalidNextHopAttribute = 7,
-    OptionalAttributeError = 8,
-    InvalidNetworkField = 9,
-    MalformedASPath = 10,
-    MalformedNextHop = 11,
+    // 7 is deprecated (was AS Routing Loop)
+    InvalidNextHopAttribute = 8,
+    OptionalAttributeError = 9,
+    InvalidNetworkField = 10,
+    MalformedASPath = 11,
     Unknown(u8),
 }
 
@@ -85,11 +87,11 @@ impl From<u8> for UpdateMessageError {
             4 => UpdateMessageError::AttributeFlagsError,
             5 => UpdateMessageError::AttributeLengthError,
             6 => UpdateMessageError::InvalidOriginAttribute,
-            7 => UpdateMessageError::InvalidNextHopAttribute,
-            8 => UpdateMessageError::OptionalAttributeError,
-            9 => UpdateMessageError::InvalidNetworkField,
-            10 => UpdateMessageError::MalformedASPath,
-            11 => UpdateMessageError::MalformedNextHop,
+            // 7 is deprecated
+            8 => UpdateMessageError::InvalidNextHopAttribute,
+            9 => UpdateMessageError::OptionalAttributeError,
+            10 => UpdateMessageError::InvalidNetworkField,
+            11 => UpdateMessageError::MalformedASPath,
             val => UpdateMessageError::Unknown(val),
         }
     }
@@ -136,17 +138,32 @@ impl BgpError {
         match ErrorCode::from(err_code) {
             ErrorCode::Cease => BgpError::Cease,
             ErrorCode::MessageHeaderError => {
-                BgpError::MessageHeaderError(MessageHeaderError::from(err_sub_code))
+                let err = MessageHeaderError::from(err_sub_code);
+                if matches!(err, MessageHeaderError::Unknown(_)) {
+                    warn!("received NOTIFICATION with unknown MessageHeaderError subcode", "subcode" => err_sub_code);
+                }
+                BgpError::MessageHeaderError(err)
             }
             ErrorCode::OpenMessageError => {
-                BgpError::OpenMessageError(OpenMessageError::from(err_sub_code))
+                let err = OpenMessageError::from(err_sub_code);
+                if matches!(err, OpenMessageError::Unknown(_)) {
+                    warn!("received NOTIFICATION with unknown OpenMessageError subcode", "subcode" => err_sub_code);
+                }
+                BgpError::OpenMessageError(err)
             }
             ErrorCode::UpdateMessageError => {
-                BgpError::UpdateMessageError(UpdateMessageError::from(err_sub_code))
+                let err = UpdateMessageError::from(err_sub_code);
+                if matches!(err, UpdateMessageError::Unknown(_)) {
+                    warn!("received NOTIFICATION with unknown UpdateMessageError subcode", "subcode" => err_sub_code);
+                }
+                BgpError::UpdateMessageError(err)
             }
             ErrorCode::HoldTimerExpired => BgpError::HoldTimerExpired,
             ErrorCode::FiniteStateMachineError => BgpError::FiniteStateMachineError,
-            _ => BgpError::Unknown,
+            ErrorCode::Unknown => {
+                warn!("received NOTIFICATION with unknown error code", "code" => err_code);
+                BgpError::Unknown
+            }
         }
     }
 
@@ -185,11 +202,11 @@ impl BgpError {
                 UpdateMessageError::AttributeFlagsError => 4,
                 UpdateMessageError::AttributeLengthError => 5,
                 UpdateMessageError::InvalidOriginAttribute => 6,
-                UpdateMessageError::InvalidNextHopAttribute => 7,
-                UpdateMessageError::OptionalAttributeError => 8,
-                UpdateMessageError::InvalidNetworkField => 9,
-                UpdateMessageError::MalformedASPath => 10,
-                UpdateMessageError::MalformedNextHop => 11,
+                // 7 is deprecated
+                UpdateMessageError::InvalidNextHopAttribute => 8,
+                UpdateMessageError::OptionalAttributeError => 9,
+                UpdateMessageError::InvalidNetworkField => 10,
+                UpdateMessageError::MalformedASPath => 11,
                 UpdateMessageError::Unknown(val) => *val,
             },
             _ => 0,
@@ -218,6 +235,16 @@ impl NotifcationMessage {
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        // RFC 4271: errors in NOTIFICATION messages cannot be reported back via NOTIFICATION,
+        // so we log locally and return Unknown for malformed messages.
+        if bytes.len() < 2 {
+            warn!("received malformed NOTIFICATION message", "len" => bytes.len());
+            return NotifcationMessage {
+                error: BgpError::Unknown,
+                data: bytes,
+            };
+        }
+
         let err_code = bytes[0];
         let err_sub_code = bytes[1];
 
@@ -403,5 +430,27 @@ mod tests {
     fn test_from_parser_error_none() {
         let parser_error = ParserError::IoError("connection reset".to_string());
         assert!(NotifcationMessage::from_parser_error(&parser_error).is_none());
+    }
+
+    #[test]
+    fn test_from_bytes_malformed_too_short() {
+        let result = NotifcationMessage::from_bytes(vec![0x01]);
+        assert_eq!(result.error(), &BgpError::Unknown);
+        assert_eq!(result.data(), &[0x01]);
+    }
+
+    #[test]
+    fn test_from_bytes_unknown_error_code() {
+        let result = NotifcationMessage::from_bytes(vec![99, 0]);
+        assert_eq!(result.error(), &BgpError::Unknown);
+    }
+
+    #[test]
+    fn test_from_bytes_unknown_subcode() {
+        let result = NotifcationMessage::from_bytes(vec![1, 99]); // MessageHeaderError with unknown subcode
+        assert_eq!(
+            result.error(),
+            &BgpError::MessageHeaderError(MessageHeaderError::Unknown(99))
+        );
     }
 }

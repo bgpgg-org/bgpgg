@@ -16,7 +16,7 @@ use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
-use crate::net::create_and_bind_tcp_socket;
+use crate::net::{create_and_bind_tcp_socket, ipv4_from_sockaddr};
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
@@ -62,6 +62,9 @@ pub enum MgmtOp {
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
+    },
+    GetServerInfo {
+        response: oneshot::Sender<(Ipv4Addr, u16)>,
     },
 }
 
@@ -110,6 +113,8 @@ pub struct BgpServer {
     loc_rib: LocRib,
     config: Config,
     local_bgp_id: u32,
+    local_addr: Ipv4Addr,
+    local_port: u16,
     pub mgmt_tx: mpsc::Sender<MgmtOp>,
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
@@ -118,19 +123,23 @@ pub struct BgpServer {
 
 impl BgpServer {
     pub fn new(config: Config) -> Self {
-        // Convert the configured router_id (Ipv4Addr) to u32 for BGP identifier
         let local_bgp_id = u32::from(config.router_id);
+        let sock_addr: SocketAddr = config.listen_addr.parse().expect("invalid listen_addr");
+        let local_addr = match sock_addr.ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            std::net::IpAddr::V6(_) => panic!("IPv6 listen_addr not supported"),
+        };
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
-        let peers = HashMap::new();
-        let loc_rib = LocRib::new();
 
         BgpServer {
-            peers,
-            loc_rib,
+            peers: HashMap::new(),
+            loc_rib: LocRib::new(),
             config,
             local_bgp_id,
+            local_addr,
+            local_port: sock_addr.port(),
             mgmt_tx,
             mgmt_rx,
             op_tx,
@@ -139,16 +148,12 @@ impl BgpServer {
     }
 
     pub async fn run(mut self) {
-        let addr = self.config.listen_addr.clone();
-        info!("BGP server starting", "listen_addr" => addr);
+        info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
-        let listener = TcpListener::bind(&addr).await.unwrap();
+        let listener = TcpListener::bind(&self.config.listen_addr).await.unwrap();
+        self.local_port = listener.local_addr().unwrap().port();
 
-        // Get local bind address for outgoing connections
-        let local_addr = self
-            .config
-            .get_local_addr()
-            .expect("invalid listen address");
+        let local_addr = SocketAddr::new(self.local_addr.into(), 0);
         let local_asn = self.config.asn;
         let local_bgp_id = self.local_bgp_id;
         let hold_time = self.config.hold_time_secs as u16;
@@ -193,6 +198,14 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
+        let local_ip = match stream.local_addr().ok().and_then(ipv4_from_sockaddr) {
+            Some(ip) => ip,
+            None => {
+                error!("failed to get local IPv4 address");
+                return;
+            }
+        };
+
         let (tcp_rx, tcp_tx) = stream.into_split();
 
         // Create peer in Connect state - it owns the handshake
@@ -205,6 +218,7 @@ impl BgpServer {
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_ip,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -265,6 +279,9 @@ impl BgpServer {
             }
             MgmtOp::GetRoutes { response } => {
                 self.handle_get_routes(response);
+            }
+            MgmtOp::GetServerInfo { response } => {
+                let _ = response.send((self.local_addr, self.local_port));
             }
         }
     }
@@ -362,6 +379,7 @@ impl BgpServer {
         let local_asn = self.config.asn;
         let local_bgp_id = self.local_bgp_id;
         let local_hold_time = self.config.hold_time_secs as u16;
+        let local_ip = ipv4_from_sockaddr(local_addr).expect("local_addr must be IPv4");
 
         // Create peer in Connect state - it owns the handshake
         let server_tx = self.op_tx.clone();
@@ -373,6 +391,7 @@ impl BgpServer {
             local_asn,
             local_hold_time,
             local_bgp_id,
+            local_ip,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -554,7 +573,7 @@ impl BgpServer {
                     &to_announce,
                     local_asn,
                     peer_asn,
-                    self.config.router_id,
+                    self.local_addr,
                     export_policy,
                 );
             } else {

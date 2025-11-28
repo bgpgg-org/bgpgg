@@ -13,6 +13,14 @@ service BgpService {
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
+    rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+    string listen_addr = 1;
+    uint32 listen_port = 2;
 }
 
 // Add peer request/response

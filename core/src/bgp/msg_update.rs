@@ -14,7 +14,7 @@
 
 use super::msg::{Message, MessageType};
 use super::msg_notification::{BgpError, UpdateMessageError};
-use super::utils::{parse_nlri_list, read_u32, IpNetwork, ParserError};
+use super::utils::{is_valid_unicast_ipv4, parse_nlri_list, read_u32, IpNetwork, ParserError};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
@@ -82,6 +82,19 @@ impl PathAttribute {
             false
         }
     }
+
+    fn type_code(&self) -> u8 {
+        match &self.value {
+            PathAttrValue::Origin(_) => attr_type_code::ORIGIN,
+            PathAttrValue::AsPath(_) => attr_type_code::AS_PATH,
+            PathAttrValue::NextHop(_) => attr_type_code::NEXT_HOP,
+            PathAttrValue::MultiExtiDisc(_) => attr_type_code::MULTI_EXIT_DISC,
+            PathAttrValue::LocalPref(_) => attr_type_code::LOCAL_PREF,
+            PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
+            PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
+            PathAttrValue::Unknown { type_code, .. } => *type_code,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -137,6 +150,10 @@ impl AttrType {
                 | AttrType::LocalPref
                 | AttrType::AtomicAggregate
         )
+    }
+
+    fn is_optional(&self) -> bool {
+        matches!(self, AttrType::MultiExtiDisc | AttrType::Aggregator)
     }
 }
 
@@ -279,6 +296,16 @@ pub struct AsPath {
     segments: Vec<AsPathSegment>,
 }
 
+impl AsPath {
+    /// Returns the leftmost AS in the AS_PATH (first AS of the first segment).
+    /// Per RFC 4271, this is the AS that most recently added itself to the path.
+    pub fn leftmost_as(&self) -> Option<u16> {
+        self.segments
+            .first()
+            .and_then(|seg| seg.asn_list.first().copied())
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct Aggregator {
     asn: u16,
@@ -323,32 +350,17 @@ fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
     Ok(AsPath { segments })
 }
 
-fn read_attr_next_hop(bytes: &[u8]) -> Result<NextHopAddr, ParserError> {
-    // RFC 4271: NEXT_HOP must be exactly 4 bytes (IPv4 address)
-    // This should already be validated by validate_attribute_length, but check defensively
-    if bytes.len() != 4 {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedNextHop),
-            data: Vec::new(),
-        });
-    }
-
-    let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-    Ok(NextHopAddr::Ipv4(ip))
+fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
+    // Length already validated by validate_attribute_length
+    NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
 }
 
-fn read_attr_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
-    if bytes.len() != 6 {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
-            data: Vec::new(),
-        });
-    }
-
+fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
+    // Length already validated by validate_attribute_length
     let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
     let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
 
-    Ok(Aggregator { asn, ip_addr })
+    Aggregator { asn, ip_addr }
 }
 
 fn validate_attribute_length(
@@ -367,8 +379,14 @@ fn validate_attribute_length(
     };
 
     if !valid {
+        // RFC 4271 Section 6.3: for recognized optional attributes, use OptionalAttributeError
+        let error = if attr_type.is_optional() {
+            UpdateMessageError::OptionalAttributeError
+        } else {
+            UpdateMessageError::AttributeLengthError
+        };
         return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            error: BgpError::UpdateMessageError(error),
             data: attr_bytes.to_vec(),
         });
     }
@@ -423,7 +441,20 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::AsPath(as_path)
                 }
                 AttrType::NextHop => {
-                    let next_hop = read_attr_next_hop(&attr_data)?;
+                    let next_hop = read_attr_next_hop(&attr_data);
+
+                    // RFC 4271: NEXT_HOP must be a valid IP host address
+                    if let NextHopAddr::Ipv4(addr) = next_hop {
+                        if !is_valid_unicast_ipv4(u32::from(addr)) {
+                            return Err(ParserError::BgpError {
+                                error: BgpError::UpdateMessageError(
+                                    UpdateMessageError::InvalidNextHopAttribute,
+                                ),
+                                data: attr_bytes.to_vec(),
+                            });
+                        }
+                    }
+
                     PathAttrValue::NextHop(next_hop)
                 }
                 AttrType::MultiExtiDisc => {
@@ -446,7 +477,7 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::AtomicAggregate
                 }
                 AttrType::Aggregator => {
-                    let aggregator = read_attr_aggregator(&attr_data)?;
+                    let aggregator = read_attr_aggregator(&attr_data);
                     PathAttrValue::Aggregator(aggregator)
                 }
             }
@@ -488,17 +519,28 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
 }
 
 fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
+    use std::collections::HashSet;
+
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
+    let mut seen_type_codes: HashSet<u8> = HashSet::new();
 
     while cursor < bytes.len() {
         let (attribute, offset) = read_path_attribute(&bytes[cursor..])?;
-        cursor = cursor + offset as usize;
+        cursor += offset as usize;
+
+        let type_code = attribute.type_code();
+        if !seen_type_codes.insert(type_code) {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                data: Vec::new(),
+            });
+        }
 
         path_attributes.push(attribute);
     }
 
-    return Ok(path_attributes);
+    Ok(path_attributes)
 }
 
 fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
@@ -769,6 +811,17 @@ impl UpdateMessage {
         })
     }
 
+    /// Returns the leftmost AS in the AS_PATH attribute.
+    pub fn get_leftmost_as(&self) -> Option<u16> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::AsPath(ref as_path) = attr.value {
+                as_path.leftmost_as()
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn get_next_hop(&self) -> Option<Ipv4Addr> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::NextHop(ref next_hop) = attr.value {
@@ -828,7 +881,7 @@ impl UpdateMessage {
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
-        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len]);
+        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len])?;
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -846,7 +899,7 @@ impl UpdateMessage {
 
         let nlri_list = match total_path_attributes_len {
             0 => vec![],
-            _ => parse_nlri_list(&data),
+            _ => parse_nlri_list(&data)?,
         };
 
         validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
@@ -1187,6 +1240,41 @@ mod tests {
     }
 
     #[test]
+    fn test_read_path_attribute_next_hop_invalid_address() {
+        let test_cases = vec![
+            ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
+            ("255.255.255.255", [0xff, 0xff, 0xff, 0xff]),
+            ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
+            ("239.255.255.255", [0xef, 0xff, 0xff, 0xff]),
+        ];
+
+        for (name, ip_bytes) in test_cases {
+            let input: Vec<u8> = vec![
+                PathAttrFlag::TRANSITIVE,
+                AttrType::NextHop as u8,
+                0x04,
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+            ];
+
+            match read_path_attribute(&input) {
+                Err(ParserError::BgpError { error, data }) => {
+                    assert_eq!(
+                        error,
+                        BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+                        "Failed for {}",
+                        name
+                    );
+                    assert_eq!(data, input, "Failed for {}", name);
+                }
+                _ => panic!("Expected InvalidNextHopAttribute for {}", name),
+            }
+        }
+    }
+
+    #[test]
     fn test_read_path_attribute_multi_exit_disc() {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL,        // Attribute flags
@@ -1211,10 +1299,10 @@ mod tests {
     }
 
     #[test]
-    fn test_read_path_attribute_multi_exit_disc_invalid_length() {
+    fn test_read_path_attribute_optional_invalid_length() {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL,        // Attribute flags
-            AttrType::MultiExtiDisc as u8, // Attribute type
+            AttrType::MultiExtiDisc as u8, // Attribute type (optional)
             0x03,                          // Attribute length (invalid - should be 4)
             0x00,
             0x00,
@@ -1223,13 +1311,14 @@ mod tests {
 
         match read_path_attribute(input) {
             Err(ParserError::BgpError { error, data }) => {
+                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
                 assert_eq!(
                     error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
                 );
                 assert_eq!(data, input.to_vec());
             }
-            _ => panic!("Expected AttributeLengthError"),
+            _ => panic!("Expected OptionalAttributeError"),
         }
     }
 
@@ -1353,7 +1442,7 @@ mod tests {
     fn test_read_path_attribute_aggregator_invalid_length() {
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::Aggregator as u8,                        // Attribute type
+            AttrType::Aggregator as u8,                        // Attribute type (optional)
             0x03, // Attribute length (invalid - should be 6)
             0x00, // ASN
             0x10,
@@ -1362,13 +1451,14 @@ mod tests {
 
         match read_path_attribute(input) {
             Err(ParserError::BgpError { error, data }) => {
+                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
                 assert_eq!(
                     error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
                 );
                 assert_eq!(data, input.to_vec());
             }
-            _ => panic!("Expected AttributeLengthError"),
+            _ => panic!("Expected OptionalAttributeError"),
         }
     }
 
@@ -2132,6 +2222,96 @@ mod tests {
             let output = write_path_attribute(&attr);
             let (parsed_attr, _) = read_path_attribute(&output).unwrap();
             assert_eq!(parsed_attr, attr);
+        }
+    }
+
+    #[test]
+    fn test_as_path_leftmost_as() {
+        let test_cases = vec![
+            (vec![], None),
+            (
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                Some(100),
+            ),
+            (
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSet,
+                    segment_len: 2,
+                    asn_list: vec![300, 400],
+                }],
+                Some(300),
+            ),
+            (
+                vec![
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![500],
+                    },
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![600],
+                    },
+                ],
+                Some(500),
+            ),
+        ];
+
+        for (segments, expected) in test_cases {
+            let as_path = AsPath { segments };
+            assert_eq!(as_path.leftmost_as(), expected);
+        }
+    }
+
+    #[test]
+    fn test_update_message_get_leftmost_as() {
+        let msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![65001, 65002],
+            }],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        );
+        assert_eq!(msg.get_leftmost_as(), Some(65001));
+
+        let msg_empty_path = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        );
+        assert_eq!(msg_empty_path.get_leftmost_as(), None);
+    }
+
+    #[test]
+    fn test_duplicate_attribute_malformed_attribute_list() {
+        // Two ORIGIN attributes in the same UPDATE message
+        let input = build_update_body(&[PATH_ATTR_ORIGIN_IGP, PATH_ATTR_ORIGIN_IGP], &[]);
+
+        match UpdateMessage::from_bytes(input) {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+                );
+            }
+            _ => panic!("Expected MalformedAttributeList error for duplicate attribute"),
         }
     }
 }

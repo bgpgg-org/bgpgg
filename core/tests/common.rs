@@ -116,7 +116,7 @@ pub fn build_path(
 /// # Arguments
 /// * `asn` - Autonomous System Number
 /// * `router_id` - Router ID (IPv4 address)
-/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+/// * `hold_timer_secs` - BGP hold timer in seconds
 ///
 /// Returns a TestServer struct containing the client, port, and abort handles
 pub async fn start_test_server(
@@ -127,28 +127,20 @@ pub async fn start_test_server(
 ) -> TestServer {
     use tokio::net::TcpListener;
 
-    // Bind to port 0 to let OS allocate a free BGP port
-    let bgp_listener = TcpListener::bind(format!("{}:0", bind_ip)).await.unwrap();
-    let bgp_port = bgp_listener.local_addr().unwrap().port();
-    drop(bgp_listener);
-
-    // Bind to port 0 to let OS allocate a free gRPC port
+    // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
     let grpc_port = grpc_listener.local_addr().unwrap().port();
-    drop(grpc_listener);
+    let grpc_listener = grpc_listener.into_std().unwrap();
 
-    // Use the provided hold timer, or default to 3 seconds for testing (short time so peers detect disconnections quickly)
-    let hold_timer_secs = hold_timer_secs.unwrap_or(3);
+    let hold_timer_secs = hold_timer_secs.unwrap_or(90);
     let config = Config::new(
         asn,
-        &format!("{}:{}", bind_ip, bgp_port),
+        &format!("{}:0", bind_ip),
         router_id,
         hold_timer_secs as u64,
     );
 
     let server = BgpServer::new(config);
-
-    // Create gRPC service
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -157,15 +149,17 @@ pub async fn start_test_server(
         .build()
         .unwrap();
 
-    // Spawn BGP server in its own runtime
+    // Spawn BGP server
     runtime.spawn(async move { server.run().await });
 
-    // Spawn gRPC server in the same runtime
-    let grpc_addr = format!("[::1]:{}", grpc_port).parse().unwrap();
+    // Spawn gRPC server
     runtime.spawn(async move {
+        let grpc_listener = tokio::net::TcpListener::from_std(grpc_listener).unwrap();
         tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
-            .serve(grpc_addr)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
             .await
             .unwrap();
     });
@@ -187,6 +181,21 @@ pub async fn start_test_server(
     }
 
     let client = client.expect("Failed to connect to gRPC server after retries");
+
+    // Query actual BGP port from server
+    let mut bgp_port = 0;
+    for _ in 0..50 {
+        match client.get_server_info().await {
+            Ok((_, port)) if port > 0 => {
+                bgp_port = port;
+                break;
+            }
+            _ => {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    assert!(bgp_port > 0, "Failed to get BGP port from server");
 
     TestServer {
         client,
@@ -554,26 +563,32 @@ pub async fn setup_two_ases_with_ebgp(
 }
 
 /// Polls for route propagation to multiple servers with expected routes
-///
-/// # Arguments
-/// * `expectations` - Slice of tuples containing (TestServer, expected routes)
 pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) {
+    poll_route_propagation_with_timeout(expectations, 100).await;
+}
+
+/// Polls for route propagation with custom timeout (iterations × 100ms)
+pub async fn poll_route_propagation_with_timeout(
+    expectations: &[(&TestServer, Vec<Route>)],
+    max_iterations: usize,
+) {
     use std::collections::HashMap;
 
-    poll_until(
+    poll_until_with_timeout(
         || async {
             for (server, expected_routes) in expectations {
                 let Ok(routes) = server.client.get_routes().await else {
                     return false;
                 };
 
-                // Convert to HashMaps keyed by prefix for order-independent comparison
-                // (routes come from HashMap in RIB, so order is not guaranteed)
-                let routes_map: HashMap<_, _> =
-                    routes.into_iter().map(|r| (r.prefix.clone(), r)).collect();
+                // Compare only best paths (first path in each route)
+                let routes_map: HashMap<_, _> = routes
+                    .into_iter()
+                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
+                    .collect();
                 let expected_map: HashMap<_, _> = expected_routes
                     .iter()
-                    .map(|r| (r.prefix.clone(), r.clone()))
+                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
                     .collect();
 
                 if routes_map != expected_map {
@@ -583,6 +598,103 @@ pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) 
             true
         },
         "Timeout waiting for routes to propagate",
+        max_iterations,
+    )
+    .await;
+}
+
+/// Expected peer statistics for polling. None means don't check that field.
+/// Uses `==` for exact match, `>=` for `min_*` fields.
+#[derive(Default, Clone, Copy)]
+pub struct ExpectedStats {
+    pub open_sent: Option<u64>,
+    pub open_received: Option<u64>,
+    pub update_sent: Option<u64>,
+    pub update_received: Option<u64>,
+    pub min_update_sent: Option<u64>,
+    pub min_update_received: Option<u64>,
+    pub min_keepalive_sent: Option<u64>,
+    pub min_keepalive_received: Option<u64>,
+}
+
+impl ExpectedStats {
+    pub fn is_met_by(&self, s: &bgpgg::grpc::proto::PeerStatistics) -> bool {
+        self.open_sent.map_or(true, |e| s.open_sent == e)
+            && self.open_received.map_or(true, |e| s.open_received == e)
+            && self.update_sent.map_or(true, |e| s.update_sent == e)
+            && self
+                .update_received
+                .map_or(true, |e| s.update_received == e)
+            && self.min_update_sent.map_or(true, |e| s.update_sent >= e)
+            && self
+                .min_update_received
+                .map_or(true, |e| s.update_received >= e)
+            && self
+                .min_keepalive_sent
+                .map_or(true, |e| s.keepalive_sent >= e)
+            && self
+                .min_keepalive_received
+                .map_or(true, |e| s.keepalive_received >= e)
+    }
+}
+
+/// Poll until peer statistics meet expected thresholds.
+pub async fn poll_peer_stats(server: &TestServer, peer_addr: &str, expected: ExpectedStats) {
+    poll_until(
+        || async {
+            let Ok((_, stats)) = server.client.get_peer(peer_addr.to_string()).await else {
+                return false;
+            };
+            let Some(s) = stats else {
+                return false;
+            };
+            expected.is_met_by(&s)
+        },
+        "Timeout waiting for peer statistics",
+    )
+    .await;
+}
+
+/// Wait for routes and peer stats to converge.
+pub async fn wait_convergence(
+    route_expectations: &[(&TestServer, Vec<Route>)],
+    stats_expectations: &[(&TestServer, &TestServer, ExpectedStats)],
+) {
+    use std::collections::HashMap;
+
+    poll_until(
+        || async {
+            for (server, expected_routes) in route_expectations {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                // Compare only best paths (first path in each route)
+                let routes_map: HashMap<_, _> = routes
+                    .into_iter()
+                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
+                    .collect();
+                let expected_map: HashMap<_, _> = expected_routes
+                    .iter()
+                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+                    .collect();
+                if routes_map != expected_map {
+                    return false;
+                }
+            }
+            for (server, peer, expected) in stats_expectations {
+                let Ok((_, stats)) = server.client.get_peer(peer.address.clone()).await else {
+                    return false;
+                };
+                let Some(s) = stats else {
+                    return false;
+                };
+                if !expected.is_met_by(&s) {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for route convergence",
     )
     .await;
 }
@@ -824,6 +936,8 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
 /// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
 pub struct FakePeer {
     stream: TcpStream,
+    pub address: String,
+    pub asn: u16,
 }
 
 impl FakePeer {
@@ -834,37 +948,18 @@ impl FakePeer {
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
-        let mut stream = TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port))
-            .await
-            .expect("Failed to connect to BGP peer");
+        let mut fake_peer = Self::new_open_only(local_asn, local_router_id, hold_time, peer).await;
 
-        // 1. Send our OPEN
-        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
-        let open_bytes = open.serialize();
-        stream
-            .write_all(&open_bytes)
-            .await
-            .expect("Failed to send OPEN");
-
-        // 2. Read their OPEN
-        let msg = read_bgp_message(&mut stream)
-            .await
-            .expect("Failed to read OPEN");
-        match msg {
-            BgpMessage::Open(_) => {}
-            _ => panic!("Expected OPEN message during handshake"),
-        }
-
-        // 3. Send KEEPALIVE
+        // Send KEEPALIVE
         let keepalive = KeepAliveMessage {};
-        let keepalive_bytes = keepalive.serialize();
-        stream
-            .write_all(&keepalive_bytes)
+        fake_peer
+            .stream
+            .write_all(&keepalive.serialize())
             .await
             .expect("Failed to send KEEPALIVE");
 
-        // 4. Read their KEEPALIVE
-        let msg = read_bgp_message(&mut stream)
+        // Read their KEEPALIVE (they already sent it when entering OpenConfirm)
+        let msg = read_bgp_message(&mut fake_peer.stream)
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
@@ -872,8 +967,66 @@ impl FakePeer {
             _ => panic!("Expected KEEPALIVE message during handshake"),
         }
 
-        // Now in Established state (no background KEEPALIVEs needed with long hold_time)
-        FakePeer { stream }
+        fake_peer
+    }
+
+    /// Create a FakePeer that only exchanges OPEN (server ends up in OpenConfirm).
+    /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
+    pub async fn new_open_only(
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+        peer: &TestServer,
+    ) -> Self {
+        let mut stream = None;
+        for _ in 0..50 {
+            match TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port)).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        let mut stream = stream.expect("Failed to connect to BGP peer after retries");
+
+        // Send our OPEN
+        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+        stream
+            .write_all(&open.serialize())
+            .await
+            .expect("Failed to send OPEN");
+
+        // Read their OPEN (server transitions to OpenConfirm after receiving our OPEN)
+        let msg = read_bgp_message(&mut stream)
+            .await
+            .expect("Failed to read OPEN");
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message"),
+        }
+
+        // Server is now in OpenConfirm, waiting for our KEEPALIVE
+        let address = stream
+            .local_addr()
+            .expect("Failed to get local address")
+            .ip()
+            .to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: local_asn,
+        }
+    }
+
+    pub fn to_peer(&self, state: BgpState) -> Peer {
+        Peer {
+            address: self.address.clone(),
+            asn: self.asn as u32,
+            state: state.into(),
+        }
     }
 
     /// Send raw bytes to the peer
@@ -954,4 +1107,25 @@ pub fn build_attr_bytes(flags: u8, attr_type: u8, length: u8, value: &[u8]) -> V
     let mut bytes = vec![flags, attr_type, length];
     bytes.extend_from_slice(value);
     bytes
+}
+
+// Pre-built common path attributes for error tests
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin as MsgOrigin};
+
+pub fn attr_origin_igp() -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::ORIGIN,
+        1,
+        &[MsgOrigin::IGP as u8],
+    )
+}
+
+pub fn attr_as_path_empty() -> Vec<u8> {
+    build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[])
+}
+
+pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
+    let octets = ip.octets();
+    build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
 }

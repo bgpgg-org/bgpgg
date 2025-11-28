@@ -22,7 +22,8 @@ use bgpgg::bgp::msg_notification::{
     BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
 };
 use bgpgg::bgp::msg_open::OpenMessage;
-use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
+use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -304,35 +305,19 @@ async fn test_update_missing_well_known_attribute() {
         (
             "origin",
             vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
-                build_attr_bytes(
-                    attr_flags::TRANSITIVE,
-                    attr_type_code::NEXT_HOP,
-                    4,
-                    &[10, 0, 0, 1],
-                ),
+                attr_as_path_empty(),
+                attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
             attr_type_code::ORIGIN,
         ),
         (
             "as_path",
-            vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
-                build_attr_bytes(
-                    attr_flags::TRANSITIVE,
-                    attr_type_code::NEXT_HOP,
-                    4,
-                    &[10, 0, 0, 1],
-                ),
-            ],
+            vec![attr_origin_igp(), attr_next_hop(Ipv4Addr::new(10, 0, 0, 1))],
             attr_type_code::AS_PATH,
         ),
         (
             "next_hop",
-            vec![
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]),
-                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]),
-            ],
+            vec![attr_origin_igp(), attr_as_path_empty()],
             attr_type_code::NEXT_HOP,
         ),
     ];
@@ -408,7 +393,8 @@ async fn test_update_attribute_flags_error_origin() {
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
         let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
-        let malformed_attr = build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[0]);
+        let malformed_attr =
+            build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
 
         peer.send_raw(&msg).await;
@@ -459,10 +445,17 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
 
 #[tokio::test]
 async fn test_update_attribute_length_error() {
+    // Tests AttributeLengthError for well-known attributes.
+    // Optional attributes (MED, AGGREGATOR) use OptionalAttributeError instead.
     let test_cases = vec![
         (
             "origin_wrong_length",
-            build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0]), // WRONG: length=2, should be 1
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::ORIGIN,
+                2,
+                &[Origin::IGP as u8],
+            ), // WRONG: length=2, should be 1
             vec![attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2],
         ),
         (
@@ -474,16 +467,6 @@ async fn test_update_attribute_length_error() {
                 &[10, 0, 0, 1, 0],
             ), // WRONG: length=5, should be 4
             vec![attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 5],
-        ),
-        (
-            "med_wrong_length",
-            build_attr_bytes(
-                attr_flags::OPTIONAL,
-                attr_type_code::MULTI_EXIT_DISC,
-                5,
-                &[0, 0, 0, 0, 0],
-            ), // WRONG: length=5, should be 4
-            vec![attr_flags::OPTIONAL, attr_type_code::MULTI_EXIT_DISC, 5],
         ),
         (
             "local_pref_wrong_length",
@@ -504,20 +487,6 @@ async fn test_update_attribute_length_error() {
                 &[0],
             ), // WRONG: length=1, should be 0
             vec![attr_flags::TRANSITIVE, attr_type_code::ATOMIC_AGGREGATE, 1],
-        ),
-        (
-            "aggregator_wrong_length",
-            build_attr_bytes(
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                attr_type_code::AGGREGATOR,
-                5,
-                &[0, 10, 10, 0, 0],
-            ), // WRONG: length=5, should be 6
-            vec![
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                attr_type_code::AGGREGATOR,
-                5,
-            ],
         ),
     ];
 
@@ -572,19 +541,16 @@ async fn test_update_invalid_origin_attribute() {
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     let invalid_origin_attr =
-        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]);
-    let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);
-    let next_hop_attr = build_attr_bytes(
-        attr_flags::TRANSITIVE,
-        attr_type_code::NEXT_HOP,
-        4,
-        &[10, 0, 0, 1],
-    );
+        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
 
     let nlri = &[24, 10, 11, 12];
     let msg = build_raw_update(
         &[],
-        &[&invalid_origin_attr, &as_path_attr, &next_hop_attr],
+        &[
+            &invalid_origin_attr,
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
         nlri,
         None,
     );
@@ -600,4 +566,373 @@ async fn test_update_invalid_origin_attribute() {
         notif.data(),
         &[attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, 3]
     );
+}
+
+#[tokio::test]
+async fn test_update_invalid_next_hop_attribute() {
+    let test_cases = vec![
+        ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
+        ("255.255.255.255", [0xff, 0xff, 0xff, 0xff]),
+        ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
+    ];
+
+    for (name, ip_bytes) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let invalid_next_hop_attr = build_attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type_code::NEXT_HOP,
+            4,
+            &ip_bytes,
+        );
+
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_empty(),
+                &invalid_next_hop_attr,
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+            "Test case: {}",
+            name
+        );
+        assert_eq!(
+            notif.data(),
+            &[
+                attr_flags::TRANSITIVE,
+                attr_type_code::NEXT_HOP,
+                4,
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3]
+            ],
+            "Test case: {}",
+            name
+        );
+    }
+}
+
+// RFC 4271 5.1.3 NEXT_HOP semantic validation tests
+
+#[tokio::test]
+async fn test_next_hop_is_local_address_rejected() {
+    // Server bound to 127.0.0.1, FakePeer sends UPDATE with NEXT_HOP = 127.0.0.1
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with NEXT_HOP = server's local address (127.0.0.1)
+    let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(127, 0, 0, 1)), // Server's local addr
+        ],
+        nlri,
+        None,
+    );
+    peer.send_raw(&msg).await;
+
+    // Give server time to process
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Route should NOT be installed (NEXT_HOP = local address)
+    let routes = server
+        .client
+        .get_routes()
+        .await
+        .expect("Failed to get routes");
+    assert!(
+        routes.is_empty(),
+        "Route should be rejected when NEXT_HOP is local address"
+    );
+}
+
+#[tokio::test]
+async fn test_update_malformed_as_path() {
+    let test_cases = vec![
+        (
+            "invalid_segment_type",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                4,
+                &[0x00, 0x01, 0x00, 0x0a], // segment_type=0 (invalid), len=1, ASN=10
+            ),
+        ),
+        (
+            "truncated_asn_data",
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                4,
+                &[0x02, 0x02, 0x00, 0x0a], // AS_SEQUENCE, claims 2 ASNs but only 1 provided
+            ),
+        ),
+        (
+            "ebgp_first_as_mismatch",
+            // Peer is AS 65002, but AS_PATH starts with 65003 (0xFE03)
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                6,
+                &[0x02, 0x02, 0xfe, 0x03, 0xfe, 0x04], // AS_SEQUENCE [65003, 65028]
+            ),
+        ),
+    ];
+
+    for (name, malformed_as_path) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &malformed_as_path,
+                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+            "Test case: {}",
+            name
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_update_optional_attribute_error() {
+    let test_cases = vec![
+        (
+            "med_invalid_length",
+            attr_flags::OPTIONAL,
+            attr_type_code::MULTI_EXIT_DISC,
+            3,
+            vec![0x00, 0x00, 0x01],
+        ),
+        (
+            "aggregator_invalid_length",
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type_code::AGGREGATOR,
+            4,
+            vec![0x00, 0x01, 0x01, 0x01],
+        ),
+    ];
+
+    for (name, flags, type_code, len, data) in test_cases {
+        let server =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+        let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_empty(),
+                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+                &invalid_attr,
+            ],
+            nlri,
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            "Test case: {}",
+            name
+        );
+        let mut expected_data = vec![flags, type_code, len];
+        expected_data.extend(&data);
+        assert_eq!(notif.data(), &expected_data, "Test case: {}", name);
+    }
+}
+
+#[tokio::test]
+async fn test_hold_timer_expiry() {
+    let hold_timer_secs: u16 = 3;
+    let server = start_test_server(
+        65001,
+        Ipv4Addr::new(1, 1, 1, 1),
+        Some(hold_timer_secs),
+        "127.0.0.1",
+    )
+    .await;
+
+    // FakePeer connects with same hold time but won't send keepalives
+    let mut fake_peer =
+        FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, &server).await;
+
+    // Verify peer is established
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap_or_default();
+            peers
+                .iter()
+                .any(|p| p.state == BgpState::Established as i32)
+        },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    // FakePeer does nothing - server should detect hold timer expiry and send NOTIFICATION
+    let notif = fake_peer.read_notification().await;
+    assert_eq!(*notif.error(), BgpError::HoldTimerExpired);
+
+    // Server should have removed the peer
+    poll_until(
+        || async { verify_peers(&server, vec![]).await },
+        "Timeout waiting for peer removal after hold timer expiry",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_update_duplicate_attribute() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with two ORIGIN attributes (duplicate)
+    let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
+
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+    );
+}
+
+#[tokio::test]
+async fn test_update_no_nlri_valid() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // UPDATE with valid attributes but no NLRI
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        &[], // No NLRI
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Wait for UPDATE to be received
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Peer should still be established (no NOTIFICATION sent)
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should remain established after valid UPDATE with no NLRI"
+    );
+}
+
+#[tokio::test]
+async fn test_update_multicast_nlri_ignored() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE with multicast NLRI (224.0.0.0/24)
+    let multicast_nlri = &[24, 224, 0, 0];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        multicast_nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Wait for UPDATE to be received
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Multicast prefix should be silently ignored, not installed
+    let routes = server
+        .client
+        .get_routes()
+        .await
+        .expect("Failed to get routes");
+    assert!(routes.is_empty(), "Multicast NLRI should be ignored");
+}
+
+// FSM Error Tests (RFC 4271 Section 6.6)
+
+#[tokio::test]
+async fn test_fsm_error_update_in_openconfirm() {
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+
+    // Connect and exchange OPEN only - server ends up in OpenConfirm
+    let mut peer = FakePeer::new_open_only(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    // Send UPDATE while server is in OpenConfirm (should trigger FSM Error)
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        &[24, 10, 11, 12], // 10.11.12.0/24
+        None,
+    );
+    peer.send_raw(&msg).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(notif.error(), &BgpError::FiniteStateMachineError);
 }
