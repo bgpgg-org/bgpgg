@@ -706,6 +706,16 @@ async fn test_update_malformed_as_path() {
                 &[0x02, 0x02, 0x00, 0x0a], // AS_SEQUENCE, claims 2 ASNs but only 1 provided
             ),
         ),
+        (
+            "ebgp_first_as_mismatch",
+            // Peer is AS 65002, but AS_PATH starts with 65003 (0xFE03)
+            build_attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type_code::AS_PATH,
+                6,
+                &[0x02, 0x02, 0xfe, 0x03, 0xfe, 0x04], // AS_SEQUENCE [65003, 65028]
+            ),
+        ),
     ];
 
     for (name, malformed_as_path) in test_cases {

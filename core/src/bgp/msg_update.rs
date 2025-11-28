@@ -279,6 +279,16 @@ pub struct AsPath {
     segments: Vec<AsPathSegment>,
 }
 
+impl AsPath {
+    /// Returns the leftmost AS in the AS_PATH (first AS of the first segment).
+    /// Per RFC 4271, this is the AS that most recently added itself to the path.
+    pub fn leftmost_as(&self) -> Option<u16> {
+        self.segments
+            .first()
+            .and_then(|seg| seg.asn_list.first().copied())
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct Aggregator {
     asn: u16,
@@ -767,6 +777,17 @@ impl UpdateMessage {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 Some(as_path.segments.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the leftmost AS in the AS_PATH attribute.
+    pub fn get_leftmost_as(&self) -> Option<u16> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::AsPath(ref as_path) = attr.value {
+                as_path.leftmost_as()
             } else {
                 None
             }
@@ -2172,5 +2193,79 @@ mod tests {
             let (parsed_attr, _) = read_path_attribute(&output).unwrap();
             assert_eq!(parsed_attr, attr);
         }
+    }
+
+    #[test]
+    fn test_as_path_leftmost_as() {
+        let test_cases = vec![
+            (vec![], None),
+            (
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                Some(100),
+            ),
+            (
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSet,
+                    segment_len: 2,
+                    asn_list: vec![300, 400],
+                }],
+                Some(300),
+            ),
+            (
+                vec![
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![500],
+                    },
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![600],
+                    },
+                ],
+                Some(500),
+            ),
+        ];
+
+        for (segments, expected) in test_cases {
+            let as_path = AsPath { segments };
+            assert_eq!(as_path.leftmost_as(), expected);
+        }
+    }
+
+    #[test]
+    fn test_update_message_get_leftmost_as() {
+        let msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![65001, 65002],
+            }],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        );
+        assert_eq!(msg.get_leftmost_as(), Some(65001));
+
+        let msg_empty_path = UpdateMessage::new(
+            Origin::IGP,
+            vec![],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        );
+        assert_eq!(msg_empty_path.get_leftmost_as(), None);
     }
 }

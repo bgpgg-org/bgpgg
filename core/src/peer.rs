@@ -14,7 +14,7 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_notification::{BgpError, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, NotifcationMessage, UpdateMessageError};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -414,7 +414,17 @@ impl Peer {
 
         // Process UPDATE message content
         if let BgpMessage::Update(update_msg) = message {
-            Ok(Some(self.handle_update(update_msg)))
+            match self.handle_update(update_msg) {
+                Ok(delta) => Ok(Some(delta)),
+                Err(bgp_error) => {
+                    let notif = NotifcationMessage::new(bgp_error, vec![]);
+                    let _ = self.send_notification(notif).await;
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "UPDATE message validation failed",
+                    ))
+                }
+            }
         } else {
             Ok(None)
         }
@@ -425,10 +435,26 @@ impl Peer {
     fn handle_update(
         &mut self,
         update_msg: UpdateMessage,
-    ) -> (Vec<IpNetwork>, Vec<(IpNetwork, Path)>) {
+    ) -> Result<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>), BgpError> {
+        // RFC 4271 Section 6.3: For eBGP, check that leftmost AS in AS_PATH equals peer AS.
+        // If mismatch, MUST set error subcode to MalformedASPath.
+        if self.session_type == Some(SessionType::Ebgp) {
+            if let Some(leftmost_as) = update_msg.get_leftmost_as() {
+                if let Some(peer_asn) = self.asn {
+                    if leftmost_as != peer_asn {
+                        warn!("AS_PATH first AS does not match peer AS",
+                              "peer_ip" => &self.addr, "leftmost_as" => leftmost_as, "peer_asn" => peer_asn);
+                        return Err(BgpError::UpdateMessageError(
+                            UpdateMessageError::MalformedASPath,
+                        ));
+                    }
+                }
+            }
+        }
+
         let withdrawn = self.process_withdrawals(&update_msg);
         let announced = self.process_announcements(&update_msg);
-        (withdrawn, announced)
+        Ok((withdrawn, announced))
     }
 
     /// Process withdrawn routes from an UPDATE message
@@ -507,6 +533,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
     use tokio::net::TcpListener;
 
     async fn create_test_peer_with_state(state: BgpState) -> Peer {
@@ -547,5 +574,46 @@ mod tests {
 
         let peer = create_test_peer_with_state(BgpState::Established).await;
         assert_eq!(peer.state(), BgpState::Established);
+    }
+
+    #[tokio::test]
+    async fn test_handle_update_first_as_validation() {
+        // (session_type, peer_asn, first_as_in_path, should_pass)
+        let cases = vec![
+            (SessionType::Ebgp, 65001, 65002, false), // eBGP mismatch -> fail
+            (SessionType::Ebgp, 65001, 65001, true),  // eBGP match -> pass
+            (SessionType::Ibgp, 65001, 65002, true),  // iBGP mismatch -> pass (no check)
+        ];
+
+        for (session_type, peer_asn, first_as, should_pass) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.session_type = Some(session_type);
+            peer.asn = Some(peer_asn);
+
+            let update = UpdateMessage::new(
+                Origin::IGP,
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![first_as],
+                }],
+                Ipv4Addr::new(10, 0, 0, 1),
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            );
+
+            let result = peer.handle_update(update);
+            assert_eq!(
+                result.is_ok(),
+                should_pass,
+                "{:?} peer_asn={} first_as={}",
+                session_type,
+                peer_asn,
+                first_as
+            );
+        }
     }
 }
