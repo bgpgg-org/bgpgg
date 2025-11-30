@@ -8,6 +8,8 @@ package bgp;
 service BgpService {
     rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
+    rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
+    rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
     rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
@@ -55,6 +57,20 @@ message RemovePeerResponse {
     bool success = 1;
     string message = 2;
 }
+
+// Disable peer request/response (RFC 4486 Administrative Shutdown)
+message DisablePeerRequest {
+    string address = 1;
+}
+
+message DisablePeerResponse {}
+
+// Enable peer request/response (RFC 4486 undo Administrative Shutdown)
+message EnablePeerRequest {
+    string address = 1;
+}
+
+message EnablePeerResponse {}
 
 // Get peers request/response
 message GetPeersRequest {}

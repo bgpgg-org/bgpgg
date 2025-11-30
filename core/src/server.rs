@@ -41,6 +41,14 @@ pub enum MgmtOp {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    DisablePeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    EnablePeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     AddRoute {
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
@@ -254,6 +262,12 @@ impl BgpServer {
             MgmtOp::RemovePeer { addr, response } => {
                 self.handle_remove_peer(addr, response).await;
             }
+            MgmtOp::DisablePeer { addr, response } => {
+                self.handle_admin_state_change(addr, PeerOp::Disable, response);
+            }
+            MgmtOp::EnablePeer { addr, response } => {
+                self.handle_admin_state_change(addr, PeerOp::Enable, response);
+            }
             MgmtOp::AddRoute {
                 prefix,
                 next_hop,
@@ -455,6 +469,20 @@ impl BgpServer {
         )
         .await;
 
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_admin_state_change(
+        &self,
+        addr: String,
+        op: PeerOp,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let Some(peer_info) = self.peers.get(&addr) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+        let _ = peer_info.peer_tx.send(op);
         let _ = response.send(Ok(()));
     }
 

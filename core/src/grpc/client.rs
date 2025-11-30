@@ -14,8 +14,9 @@
 
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
-    GetPeerRequest, GetPeersRequest, GetRoutesRequest, GetServerInfoRequest, MaxPrefixSetting,
-    Origin, Peer, PeerStatistics, RemovePeerRequest, RemoveRouteRequest, Route,
+    DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetPeersRequest, GetRoutesRequest,
+    GetServerInfoRequest, MaxPrefixSetting, Origin, Peer, PeerStatistics, RemovePeerRequest,
+    RemoveRouteRequest, Route,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -118,6 +119,22 @@ impl BgpClient {
         } else {
             Err(tonic::Status::unknown(resp.message))
         }
+    }
+
+    /// Disable a BGP peer (RFC 4486 Administrative Shutdown)
+    pub async fn disable_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+        self.inner
+            .disable_peer(DisablePeerRequest { address })
+            .await?;
+        Ok(())
+    }
+
+    /// Enable a BGP peer (undo Administrative Shutdown)
+    pub async fn enable_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+        self.inner
+            .enable_peer(EnablePeerRequest { address })
+            .await?;
+        Ok(())
     }
 
     /// Add a route to the global RIB

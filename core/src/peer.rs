@@ -37,6 +37,10 @@ pub enum PeerOp {
     GetStatistics(oneshot::Sender<PeerStatistics>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
+    /// Disable peer - sends CEASE with AdministrativeShutdown (RFC 4486)
+    Disable,
+    /// Enable peer - reconnect after admin shutdown
+    Enable,
 }
 
 /// Type of BGP session based on AS relationship
@@ -85,6 +89,7 @@ pub struct Peer {
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
     pub max_prefix_setting: Option<MaxPrefixSetting>,
+    pub admin_down: bool,
     pub tcp_tx: OwnedWriteHalf,
     tcp_rx: OwnedReadHalf,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
@@ -117,6 +122,7 @@ impl Peer {
             session_type: None,
             statistics: PeerStatistics::default(),
             max_prefix_setting,
+            admin_down: false,
             peer_rx,
             server_tx,
         };
@@ -195,6 +201,19 @@ impl Peer {
                             );
                             let _ = self.send_notification(notif).await;
                             break;
+                        }
+                        PeerOp::Disable => {
+                            info!("admin shutdown", "peer_ip" => &peer_ip);
+                            self.admin_down = true;
+                            let notif = NotifcationMessage::new(
+                                BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+                                Vec::new(),
+                            );
+                            let _ = self.send_notification(notif).await;
+                        }
+                        PeerOp::Enable => {
+                            info!("admin enable", "peer_ip" => &peer_ip);
+                            self.admin_down = false;
                         }
                     }
                 }
@@ -627,6 +646,7 @@ mod tests {
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             max_prefix_setting: None,
+            admin_down: false,
             peer_rx,
             server_tx,
         }

@@ -24,7 +24,8 @@ use tonic::{Request, Response, Status};
 
 use super::proto::{
     self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
-    AddRouteResponse, BgpState as ProtoBgpState, GetPeerRequest, GetPeerResponse, GetPeersRequest,
+    AddRouteResponse, BgpState as ProtoBgpState, DisablePeerRequest, DisablePeerResponse,
+    EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse, GetPeersRequest,
     GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
     GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
     PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
@@ -134,6 +135,44 @@ impl BgpService for BgpGrpcService {
                 success: false,
                 message: e,
             })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn disable_peer(
+        &self,
+        request: Request<DisablePeerRequest>,
+    ) -> Result<Response<DisablePeerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.mgmt_request_tx
+            .send(MgmtOp::DisablePeer { addr, response: tx })
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(DisablePeerResponse {})),
+            Ok(Err(e)) => Err(Status::not_found(e)),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn enable_peer(
+        &self,
+        request: Request<EnablePeerRequest>,
+    ) -> Result<Response<EnablePeerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.mgmt_request_tx
+            .send(MgmtOp::EnablePeer { addr, response: tx })
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(EnablePeerResponse {})),
+            Ok(Err(e)) => Err(Status::not_found(e)),
             Err(_) => Err(Status::internal("request processing failed")),
         }
     }

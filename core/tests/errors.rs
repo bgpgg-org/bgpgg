@@ -1034,7 +1034,8 @@ async fn test_max_prefix_limit() {
 
 #[tokio::test]
 async fn test_remove_peer_sends_cease_notification() {
-    let mut server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
@@ -1053,5 +1054,30 @@ async fn test_remove_peer_sends_cease_notification() {
     assert_eq!(
         notif.error(),
         &BgpError::Cease(CeaseSubcode::PeerDeconfigured)
+    );
+}
+
+#[tokio::test]
+async fn test_disable_peer_sends_admin_shutdown() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    server
+        .client
+        .disable_peer(peer.address.clone())
+        .await
+        .expect("Failed to disable peer");
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::Cease(CeaseSubcode::AdministrativeShutdown)
     );
 }
