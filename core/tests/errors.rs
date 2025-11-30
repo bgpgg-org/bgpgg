@@ -19,11 +19,11 @@ pub use common::*;
 
 use bgpgg::bgp::msg::{Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_notification::{
-    BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
+    BgpError, CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
 };
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
-use bgpgg::grpc::proto::BgpState;
+use bgpgg::grpc::proto::{BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin};
 use std::net::Ipv4Addr;
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -935,4 +935,149 @@ async fn test_fsm_error_update_in_openconfirm() {
 
     let notif = peer.read_notification().await;
     assert_eq!(notif.error(), &BgpError::FiniteStateMachineError);
+}
+
+// Cease NOTIFICATION Tests (RFC 4271 Section 6.7)
+
+#[tokio::test]
+async fn test_max_prefix_limit() {
+    let test_cases = vec![
+        ("terminate", MaxPrefixAction::Terminate as i32, true),
+        ("discard", MaxPrefixAction::Discard as i32, false),
+    ];
+
+    for (name, action, expect_disconnect) in test_cases {
+        // Server1: will inject routes
+        let mut server1 =
+            start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+
+        // Server2: will receive routes with max_prefix limit
+        let mut server2 =
+            start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), Some(300), "127.0.0.2").await;
+
+        // Server2 connects to Server1 with max_prefix limit of 2
+        server2
+            .client
+            .add_peer(
+                format!("127.0.0.1:{}", server1.bgp_port),
+                Some(MaxPrefixSetting { limit: 2, action }),
+            )
+            .await
+            .expect("Failed to add peer");
+
+        // Wait for peering to establish
+        poll_until(
+            || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await },
+            "Timeout waiting for peering",
+        )
+        .await;
+
+        // Server1 adds 3 routes (exceeds limit of 2)
+        for i in 0..3 {
+            server1
+                .client
+                .add_route(
+                    format!("10.{}.0.0/24", i),
+                    "1.1.1.1".to_string(),
+                    ProtoOrigin::Igp,
+                    vec![],
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .expect("Failed to add route");
+        }
+
+        if expect_disconnect {
+            // Terminate: peer should be disconnected (CEASE sent)
+            poll_until(
+                || async { verify_peers(&server2, vec![]).await },
+                &format!("Test case {}: timeout waiting for peer disconnect", name),
+            )
+            .await;
+        } else {
+            // Discard: peer stays connected, routes are limited
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            assert!(
+                verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await,
+                "Test case {}: peer should remain established",
+                name
+            );
+
+            // Verify no CEASE notification was sent
+            poll_peer_stats(
+                &server2,
+                &server1.address,
+                ExpectedStats {
+                    notification_sent: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let routes = server2
+                .client
+                .get_routes()
+                .await
+                .expect("Failed to get routes");
+            assert!(
+                routes.len() <= 2,
+                "Test case {}: should have at most 2 routes, got {}",
+                name,
+                routes.len()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_remove_peer_sends_cease_notification() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    server
+        .client
+        .remove_peer(peer.address.clone())
+        .await
+        .expect("Failed to remove peer");
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::Cease(CeaseSubcode::PeerDeconfigured)
+    );
+}
+
+#[tokio::test]
+async fn test_disable_peer_sends_admin_shutdown() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    server
+        .client
+        .disable_peer(peer.address.clone())
+        .await
+        .expect("Failed to disable peer");
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::Cease(CeaseSubcode::AdministrativeShutdown)
+    );
 }

@@ -35,12 +35,18 @@ enum Commands {
     Peer(PeerCommands),
 }
 
-#[derive(Subcommand, Debug, PartialEq)]
+#[derive(Subcommand, Debug)]
 pub enum PeerCommands {
     /// Add a BGP peer
     Add {
         /// Peer address (IP:PORT)
         address: String,
+        /// Maximum number of prefixes to accept
+        #[arg(long)]
+        max_prefix_limit: Option<u32>,
+        /// Action when limit reached: terminate (default) or discard
+        #[arg(long, default_value = "terminate")]
+        max_prefix_action: String,
     },
 
     /// Remove a BGP peer
@@ -86,8 +92,36 @@ mod tests {
         let cli = Cli::parse_from(args);
 
         match cli.command {
-            Commands::Peer(PeerCommands::Add { address }) => {
+            Commands::Peer(PeerCommands::Add { address, .. }) => {
                 assert_eq!(address, "192.168.1.1:179");
+            }
+            _ => panic!("Expected Peer Add command"),
+        }
+    }
+
+    #[test]
+    fn test_peer_add_with_max_prefix() {
+        let args = vec![
+            "bgpgg",
+            "peer",
+            "add",
+            "10.0.0.1:179",
+            "--max-prefix-limit",
+            "100",
+            "--max-prefix-action",
+            "discard",
+        ];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Peer(PeerCommands::Add {
+                address,
+                max_prefix_limit,
+                max_prefix_action,
+            }) => {
+                assert_eq!(address, "10.0.0.1:179");
+                assert_eq!(max_prefix_limit, Some(100));
+                assert_eq!(max_prefix_action, "discard");
             }
             _ => panic!("Expected Peer Add command"),
         }

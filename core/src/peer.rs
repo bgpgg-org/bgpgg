@@ -14,7 +14,9 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_notification::{BgpError, NotifcationMessage, UpdateMessageError};
+use crate::bgp::msg_notification::{
+    BgpError, CeaseSubcode, NotifcationMessage, UpdateMessageError,
+};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -33,6 +35,12 @@ use tokio::sync::{mpsc, oneshot};
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
     GetStatistics(oneshot::Sender<PeerStatistics>),
+    /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
+    Shutdown(CeaseSubcode),
+    /// Disable peer - sends CEASE with AdministrativeShutdown (RFC 4486)
+    Disable,
+    /// Enable peer - reconnect after admin shutdown
+    Enable,
 }
 
 /// Type of BGP session based on AS relationship
@@ -42,6 +50,22 @@ pub enum SessionType {
     Ebgp,
     /// Internal BGP session (same AS)
     Ibgp,
+}
+
+/// Action to take when max prefix limit is reached
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxPrefixAction {
+    /// Send CEASE notification and close the session
+    Terminate,
+    /// Discard new prefixes but keep the session
+    Discard,
+}
+
+/// Max prefix limit configuration
+#[derive(Debug, Clone, Copy)]
+pub struct MaxPrefixSetting {
+    pub limit: u32,
+    pub action: MaxPrefixAction,
 }
 
 /// Statistics for BGP messages
@@ -64,6 +88,8 @@ pub struct Peer {
     pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
+    pub max_prefix_setting: Option<MaxPrefixSetting>,
+    pub admin_down: bool,
     pub tcp_tx: OwnedWriteHalf,
     tcp_rx: OwnedReadHalf,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
@@ -82,6 +108,7 @@ impl Peer {
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
+        max_prefix_setting: Option<MaxPrefixSetting>,
     ) -> (Self, mpsc::UnboundedSender<PeerOp>) {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
@@ -94,6 +121,8 @@ impl Peer {
             rib_in: AdjRibIn::new(addr),
             session_type: None,
             statistics: PeerStatistics::default(),
+            max_prefix_setting,
+            admin_down: false,
             peer_rx,
             server_tx,
         };
@@ -163,6 +192,28 @@ impl Peer {
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
+                        }
+                        PeerOp::Shutdown(subcode) => {
+                            info!("graceful shutdown requested", "peer_ip" => &peer_ip, "subcode" => format!("{:?}", subcode));
+                            let notif = NotifcationMessage::new(
+                                BgpError::Cease(subcode),
+                                Vec::new(),
+                            );
+                            let _ = self.send_notification(notif).await;
+                            break;
+                        }
+                        PeerOp::Disable => {
+                            info!("admin shutdown", "peer_ip" => &peer_ip);
+                            self.admin_down = true;
+                            let notif = NotifcationMessage::new(
+                                BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+                                Vec::new(),
+                            );
+                            let _ = self.send_notification(notif).await;
+                        }
+                        PeerOp::Enable => {
+                            info!("admin enable", "peer_ip" => &peer_ip);
+                            self.admin_down = false;
                         }
                     }
                 }
@@ -463,7 +514,7 @@ impl Peer {
         }
 
         let withdrawn = self.process_withdrawals(&update_msg);
-        let announced = self.process_announcements(&update_msg);
+        let announced = self.process_announcements(&update_msg)?;
         Ok((withdrawn, announced))
     }
 
@@ -479,8 +530,32 @@ impl Peer {
     }
 
     /// Process announced routes (NLRI) from an UPDATE message
-    fn process_announcements(&mut self, update_msg: &UpdateMessage) -> Vec<(IpNetwork, Path)> {
+    fn process_announcements(
+        &mut self,
+        update_msg: &UpdateMessage,
+    ) -> Result<Vec<(IpNetwork, Path)>, BgpError> {
         let mut announced = Vec::new();
+
+        // Check max prefix limit
+        if let Some(setting) = self.max_prefix_setting {
+            let current_count = self.rib_in.prefix_count();
+            let new_prefixes = update_msg.nlri_list().len();
+
+            if current_count + new_prefixes > setting.limit as usize {
+                match setting.action {
+                    MaxPrefixAction::Terminate => {
+                        warn!("max prefix limit exceeded, terminating session",
+                              "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
+                        return Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached));
+                    }
+                    MaxPrefixAction::Discard => {
+                        warn!("max prefix limit reached, discarding new prefixes",
+                              "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
+                        return Ok(announced);
+                    }
+                }
+            }
+        }
 
         // Extract path attributes for announced routes
         let origin = update_msg.get_origin();
@@ -497,7 +572,7 @@ impl Peer {
             if next_hop == self.fsm.local_addr() {
                 warn!("rejecting UPDATE: NEXT_HOP is local address",
                       "next_hop" => next_hop.to_string(), "peer" => &self.addr);
-                return announced;
+                return Ok(announced);
             }
 
             let source = RouteSource::from_session(
@@ -526,7 +601,7 @@ impl Peer {
             warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => &self.addr);
         }
 
-        announced
+        Ok(announced)
     }
 
     /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
@@ -543,6 +618,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::Message;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
     use tokio::net::TcpListener;
 
@@ -569,6 +645,8 @@ mod tests {
             rib_in: AdjRibIn::new(addr.ip().to_string()),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
+            max_prefix_setting: None,
+            admin_down: false,
             peer_rx,
             server_tx,
         }
@@ -625,5 +703,103 @@ mod tests {
                 first_as
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_max_prefix() {
+        let cases = vec![
+            // (max_prefix_setting, num_prefixes, expected_ok, description)
+            (None, 10, true, "no limit set"),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                3,
+                true,
+                "under limit",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                5,
+                true,
+                "at limit",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                6,
+                false,
+                "over limit terminate",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Discard,
+                }),
+                6,
+                true,
+                "over limit discard",
+            ),
+        ];
+
+        for (setting, num_prefixes, expected_ok, desc) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.max_prefix_setting = setting;
+
+            let nlri: Vec<_> = (0..num_prefixes)
+                .map(|i| {
+                    crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, i as u8, 0),
+                        prefix_length: 24,
+                    })
+                })
+                .collect();
+
+            let update = UpdateMessage::new(
+                Origin::IGP,
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Ipv4Addr::new(10, 0, 0, 1),
+                nlri,
+                None,
+                None,
+                false,
+                vec![],
+            );
+
+            let result = peer.handle_update(update);
+            assert_eq!(result.is_ok(), expected_ok, "case: {}", desc);
+
+            if let Some(s) = setting {
+                if s.action == MaxPrefixAction::Discard && num_prefixes > s.limit as usize {
+                    assert_eq!(
+                        peer.rib_in.prefix_count(),
+                        0,
+                        "discard should not add prefixes"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_admin_shutdown_notification() {
+        let notif = NotifcationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            Vec::new(),
+        );
+        let bytes = notif.to_bytes();
+        assert_eq!(bytes[0], 6); // Cease error code
+        assert_eq!(bytes[1], 2); // AdministrativeShutdown subcode
+        assert_eq!(bytes.len(), 2); // No data
     }
 }

@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::{create_and_bind_tcp_socket, ipv4_from_sockaddr};
-use crate::peer::{Peer, PeerOp, PeerStatistics};
+use crate::peer::{MaxPrefixSetting, Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
@@ -33,9 +34,18 @@ use tokio::sync::{mpsc, oneshot};
 pub enum MgmtOp {
     AddPeer {
         addr: String,
+        max_prefix_setting: Option<MaxPrefixSetting>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    DisablePeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    EnablePeer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
@@ -219,6 +229,7 @@ impl BgpServer {
             local_hold_time,
             local_bgp_id,
             local_ip,
+            None, // No max_prefix for incoming connections (not configured via gRPC)
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -240,11 +251,22 @@ impl BgpServer {
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, local_addr: SocketAddr) {
         match req {
-            MgmtOp::AddPeer { addr, response } => {
-                self.handle_add_peer(addr, response, local_addr).await;
+            MgmtOp::AddPeer {
+                addr,
+                max_prefix_setting,
+                response,
+            } => {
+                self.handle_add_peer(addr, max_prefix_setting, response, local_addr)
+                    .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
                 self.handle_remove_peer(addr, response).await;
+            }
+            MgmtOp::DisablePeer { addr, response } => {
+                self.handle_admin_state_change(addr, PeerOp::Disable, response);
+            }
+            MgmtOp::EnablePeer { addr, response } => {
+                self.handle_admin_state_change(addr, PeerOp::Enable, response);
             }
             MgmtOp::AddRoute {
                 prefix,
@@ -347,6 +369,7 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
+        max_prefix_setting: Option<MaxPrefixSetting>,
         response: oneshot::Sender<Result<(), String>>,
         local_addr: SocketAddr,
     ) {
@@ -392,6 +415,7 @@ impl BgpServer {
             local_hold_time,
             local_bgp_id,
             local_ip,
+            max_prefix_setting,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -421,13 +445,19 @@ impl BgpServer {
     ) {
         info!("removing peer via request", "peer_ip" => &addr);
 
-        // Remove peer from map
-        let removed = self.peers.remove(&addr).is_some();
+        // Remove peer from map and get peer_tx to send shutdown notification
+        let peer_info = self.peers.remove(&addr);
 
-        if !removed {
+        if peer_info.is_none() {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
+
+        // Send graceful shutdown notification (RFC 4486: PeerDeconfigured)
+        let peer_info = peer_info.unwrap();
+        let _ = peer_info
+            .peer_tx
+            .send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
 
         // Notify Loc-RIB to remove routes from this peer
         let changed_prefixes = self.loc_rib.remove_routes_from_peer(addr.clone());
@@ -439,6 +469,20 @@ impl BgpServer {
         )
         .await;
 
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_admin_state_change(
+        &self,
+        addr: String,
+        op: PeerOp,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let Some(peer_info) = self.peers.get(&addr) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+        let _ = peer_info.peer_tx.send(op);
         let _ = response.send(Ok(()));
     }
 
