@@ -23,9 +23,22 @@ message GetServerInfoResponse {
     uint32 listen_port = 2;
 }
 
+// Action when max prefix limit is reached
+enum MaxPrefixAction {
+    TERMINATE = 0;  // Send CEASE and close session
+    DISCARD = 1;    // Drop new prefixes, keep session
+}
+
+// Max prefix limit configuration
+message MaxPrefixSetting {
+    uint32 limit = 1;
+    MaxPrefixAction action = 2;
+}
+
 // Add peer request/response
 message AddPeerRequest {
     string address = 1;  // IP:PORT format (e.g., "192.168.1.1:179")
+    optional MaxPrefixSetting max_prefix = 2;
 }
 
 message AddPeerResponse {

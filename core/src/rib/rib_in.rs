@@ -40,6 +40,10 @@ impl AdjRibIn {
         self.routes.values().cloned().collect()
     }
 
+    pub fn prefix_count(&self) -> usize {
+        self.routes.len()
+    }
+
     #[cfg(test)]
     pub fn clear(&mut self) {
         self.routes.clear();

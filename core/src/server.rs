@@ -17,7 +17,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
 use crate::fsm::BgpState;
 use crate::net::{create_and_bind_tcp_socket, ipv4_from_sockaddr};
-use crate::peer::{Peer, PeerOp, PeerStatistics};
+use crate::peer::{MaxPrefixSetting, Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum MgmtOp {
     AddPeer {
         addr: String,
+        max_prefix_setting: Option<MaxPrefixSetting>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePeer {
@@ -219,6 +220,7 @@ impl BgpServer {
             local_hold_time,
             local_bgp_id,
             local_ip,
+            None, // No max_prefix for incoming connections (not configured via gRPC)
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes
@@ -240,8 +242,8 @@ impl BgpServer {
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, local_addr: SocketAddr) {
         match req {
-            MgmtOp::AddPeer { addr, response } => {
-                self.handle_add_peer(addr, response, local_addr).await;
+            MgmtOp::AddPeer { addr, max_prefix_setting, response } => {
+                self.handle_add_peer(addr, max_prefix_setting, response, local_addr).await;
             }
             MgmtOp::RemovePeer { addr, response } => {
                 self.handle_remove_peer(addr, response).await;
@@ -347,6 +349,7 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
+        max_prefix_setting: Option<MaxPrefixSetting>,
         response: oneshot::Sender<Result<(), String>>,
         local_addr: SocketAddr,
     ) {
@@ -392,6 +395,7 @@ impl BgpServer {
             local_hold_time,
             local_bgp_id,
             local_ip,
+            max_prefix_setting,
         );
 
         // Add to HashMap IMMEDIATELY - asn is None until handshake completes

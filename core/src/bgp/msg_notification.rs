@@ -104,8 +104,24 @@ pub enum BgpError {
     UpdateMessageError(UpdateMessageError),
     HoldTimerExpired,
     FiniteStateMachineError,
-    Cease,
+    Cease(CeaseSubcode),
     Unknown,
+}
+
+#[repr(u8)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum CeaseSubcode {
+    MaxPrefixesReached = 1,
+    Unknown(u8),
+}
+
+impl From<u8> for CeaseSubcode {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => CeaseSubcode::MaxPrefixesReached,
+            val => CeaseSubcode::Unknown(val),
+        }
+    }
 }
 
 #[repr(u8)]
@@ -136,7 +152,7 @@ impl From<u8> for ErrorCode {
 impl BgpError {
     fn new(err_code: u8, err_sub_code: u8) -> BgpError {
         match ErrorCode::from(err_code) {
-            ErrorCode::Cease => BgpError::Cease,
+            ErrorCode::Cease => BgpError::Cease(CeaseSubcode::from(err_sub_code)),
             ErrorCode::MessageHeaderError => {
                 let err = MessageHeaderError::from(err_sub_code);
                 if matches!(err, MessageHeaderError::Unknown(_)) {
@@ -174,7 +190,7 @@ impl BgpError {
             BgpError::UpdateMessageError(_) => 3,
             BgpError::HoldTimerExpired => 4,
             BgpError::FiniteStateMachineError => 5,
-            BgpError::Cease => 6,
+            BgpError::Cease(_) => 6,
             BgpError::Unknown => 0,
         }
     }
@@ -208,6 +224,10 @@ impl BgpError {
                 UpdateMessageError::InvalidNetworkField => 10,
                 UpdateMessageError::MalformedASPath => 11,
                 UpdateMessageError::Unknown(val) => *val,
+            },
+            BgpError::Cease(subcode) => match subcode {
+                CeaseSubcode::MaxPrefixesReached => 1,
+                CeaseSubcode::Unknown(val) => *val,
             },
             _ => 0,
         }
@@ -316,7 +336,11 @@ mod tests {
     );
     test_bgp_error_new!(
         bgp_error_new_cease, 6, 0,
-        expected BgpError::Cease
+        expected BgpError::Cease(CeaseSubcode::Unknown(0))
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_max_prefix, 6, 1,
+        expected BgpError::Cease(CeaseSubcode::MaxPrefixesReached)
     );
     test_bgp_error_new!(
         bgp_error_new_unknown, 99, 0,

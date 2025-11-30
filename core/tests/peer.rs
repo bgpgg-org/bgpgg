@@ -616,7 +616,7 @@ async fn test_peer_crash_and_recover() {
         // Server2 reconnects to Server1
         server2
             .client
-            .add_peer(format!("127.0.0.1:{}", server2_port))
+            .add_peer(format!("127.0.0.1:{}", server2_port), None)
             .await
             .expect("Failed to re-add peer after crash");
 

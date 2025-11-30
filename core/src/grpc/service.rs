@@ -15,6 +15,7 @@
 use crate::bgp::msg_update::{AsPathSegmentType, Origin};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
+use crate::peer::{MaxPrefixAction, MaxPrefixSetting};
 use crate::rib::RouteSource;
 use crate::server::MgmtOp;
 use std::net::Ipv4Addr;
@@ -61,12 +62,23 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<AddPeerRequest>,
     ) -> Result<Response<AddPeerResponse>, Status> {
-        let addr = request.into_inner().address;
+        let inner = request.into_inner();
+        let addr = inner.address;
+
+        // Convert proto MaxPrefixSetting to internal type
+        let max_prefix_setting = inner.max_prefix.map(|proto_setting| MaxPrefixSetting {
+            limit: proto_setting.limit,
+            action: match proto_setting.action {
+                1 => MaxPrefixAction::Discard,
+                _ => MaxPrefixAction::Terminate,
+            },
+        });
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::AddPeer {
             addr: addr.clone(),
+            max_prefix_setting,
             response: tx,
         };
 
