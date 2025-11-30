@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::Config;
@@ -430,13 +431,19 @@ impl BgpServer {
     ) {
         info!("removing peer via request", "peer_ip" => &addr);
 
-        // Remove peer from map
-        let removed = self.peers.remove(&addr).is_some();
+        // Remove peer from map and get peer_tx to send shutdown notification
+        let peer_info = self.peers.remove(&addr);
 
-        if !removed {
+        if peer_info.is_none() {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
+
+        // Send graceful shutdown notification (RFC 4486: PeerDeconfigured)
+        let peer_info = peer_info.unwrap();
+        let _ = peer_info
+            .peer_tx
+            .send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
 
         // Notify Loc-RIB to remove routes from this peer
         let changed_prefixes = self.loc_rib.remove_routes_from_peer(addr.clone());

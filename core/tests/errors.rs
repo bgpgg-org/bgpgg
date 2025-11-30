@@ -19,7 +19,7 @@ pub use common::*;
 
 use bgpgg::bgp::msg::{Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_notification::{
-    BgpError, MessageHeaderError, OpenMessageError, UpdateMessageError,
+    BgpError, CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
 };
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
@@ -1030,4 +1030,28 @@ async fn test_max_prefix_limit() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_remove_peer_sends_cease_notification() {
+    let mut server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        "Timeout waiting for peer to establish",
+    )
+    .await;
+
+    server
+        .client
+        .remove_peer(peer.address.clone())
+        .await
+        .expect("Failed to remove peer");
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::Cease(CeaseSubcode::PeerDeconfigured)
+    );
 }

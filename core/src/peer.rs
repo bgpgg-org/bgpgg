@@ -35,6 +35,8 @@ use tokio::sync::{mpsc, oneshot};
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
     GetStatistics(oneshot::Sender<PeerStatistics>),
+    /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
+    Shutdown(CeaseSubcode),
 }
 
 /// Type of BGP session based on AS relationship
@@ -184,6 +186,15 @@ impl Peer {
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
+                        }
+                        PeerOp::Shutdown(subcode) => {
+                            info!("graceful shutdown requested", "peer_ip" => &peer_ip, "subcode" => format!("{:?}", subcode));
+                            let notif = NotifcationMessage::new(
+                                BgpError::Cease(subcode),
+                                Vec::new(),
+                            );
+                            let _ = self.send_notification(notif).await;
+                            break;
                         }
                     }
                 }
@@ -588,6 +599,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::Message;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
     use tokio::net::TcpListener;
 
@@ -757,5 +769,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_admin_shutdown_notification() {
+        let notif = NotifcationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            Vec::new(),
+        );
+        let bytes = notif.to_bytes();
+        assert_eq!(bytes[0], 6); // Cease error code
+        assert_eq!(bytes[1], 2); // AdministrativeShutdown subcode
+        assert_eq!(bytes.len(), 2); // No data
     }
 }
