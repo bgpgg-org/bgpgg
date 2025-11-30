@@ -108,10 +108,18 @@ pub enum BgpError {
     Unknown,
 }
 
+/// RFC 4486 Cease NOTIFICATION subcodes
 #[repr(u8)]
 #[derive(Debug, PartialEq, Clone)]
 pub enum CeaseSubcode {
     MaxPrefixesReached = 1,
+    AdministrativeShutdown = 2,
+    PeerDeconfigured = 3,
+    AdministrativeReset = 4,
+    ConnectionRejected = 5,
+    OtherConfigurationChange = 6,
+    ConnectionCollisionResolution = 7,
+    OutOfResources = 8,
     Unknown(u8),
 }
 
@@ -119,6 +127,13 @@ impl From<u8> for CeaseSubcode {
     fn from(value: u8) -> Self {
         match value {
             1 => CeaseSubcode::MaxPrefixesReached,
+            2 => CeaseSubcode::AdministrativeShutdown,
+            3 => CeaseSubcode::PeerDeconfigured,
+            4 => CeaseSubcode::AdministrativeReset,
+            5 => CeaseSubcode::ConnectionRejected,
+            6 => CeaseSubcode::OtherConfigurationChange,
+            7 => CeaseSubcode::ConnectionCollisionResolution,
+            8 => CeaseSubcode::OutOfResources,
             val => CeaseSubcode::Unknown(val),
         }
     }
@@ -227,6 +242,13 @@ impl BgpError {
             },
             BgpError::Cease(subcode) => match subcode {
                 CeaseSubcode::MaxPrefixesReached => 1,
+                CeaseSubcode::AdministrativeShutdown => 2,
+                CeaseSubcode::PeerDeconfigured => 3,
+                CeaseSubcode::AdministrativeReset => 4,
+                CeaseSubcode::ConnectionRejected => 5,
+                CeaseSubcode::OtherConfigurationChange => 6,
+                CeaseSubcode::ConnectionCollisionResolution => 7,
+                CeaseSubcode::OutOfResources => 8,
                 CeaseSubcode::Unknown(val) => *val,
             },
             _ => 0,
@@ -341,6 +363,34 @@ mod tests {
     test_bgp_error_new!(
         bgp_error_new_cease_max_prefix, 6, 1,
         expected BgpError::Cease(CeaseSubcode::MaxPrefixesReached)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_admin_shutdown, 6, 2,
+        expected BgpError::Cease(CeaseSubcode::AdministrativeShutdown)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_peer_deconfigured, 6, 3,
+        expected BgpError::Cease(CeaseSubcode::PeerDeconfigured)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_admin_reset, 6, 4,
+        expected BgpError::Cease(CeaseSubcode::AdministrativeReset)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_connection_rejected, 6, 5,
+        expected BgpError::Cease(CeaseSubcode::ConnectionRejected)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_other_config_change, 6, 6,
+        expected BgpError::Cease(CeaseSubcode::OtherConfigurationChange)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_collision_resolution, 6, 7,
+        expected BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_cease_out_of_resources, 6, 8,
+        expected BgpError::Cease(CeaseSubcode::OutOfResources)
     );
     test_bgp_error_new!(
         bgp_error_new_unknown, 99, 0,

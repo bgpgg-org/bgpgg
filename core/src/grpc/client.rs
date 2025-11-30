@@ -91,7 +91,10 @@ impl BgpClient {
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .add_peer(AddPeerRequest { address, max_prefix })
+            .add_peer(AddPeerRequest {
+                address,
+                max_prefix,
+            })
             .await?
             .into_inner();
 

@@ -101,11 +101,24 @@ mod tests {
 
     #[test]
     fn test_peer_add_with_max_prefix() {
-        let args = vec!["bgpgg", "peer", "add", "10.0.0.1:179", "--max-prefix-limit", "100", "--max-prefix-action", "discard"];
+        let args = vec![
+            "bgpgg",
+            "peer",
+            "add",
+            "10.0.0.1:179",
+            "--max-prefix-limit",
+            "100",
+            "--max-prefix-action",
+            "discard",
+        ];
         let cli = Cli::parse_from(args);
 
         match cli.command {
-            Commands::Peer(PeerCommands::Add { address, max_prefix_limit, max_prefix_action }) => {
+            Commands::Peer(PeerCommands::Add {
+                address,
+                max_prefix_limit,
+                max_prefix_action,
+            }) => {
                 assert_eq!(address, "10.0.0.1:179");
                 assert_eq!(max_prefix_limit, Some(100));
                 assert_eq!(max_prefix_action, "discard");

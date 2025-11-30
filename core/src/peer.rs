@@ -14,7 +14,9 @@
 
 use crate::bgp::msg::{read_bgp_message, BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage, UpdateMessageError};
+use crate::bgp::msg_notification::{
+    BgpError, CeaseSubcode, NotifcationMessage, UpdateMessageError,
+};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -676,10 +678,42 @@ mod tests {
         let cases = vec![
             // (max_prefix_setting, num_prefixes, expected_ok, description)
             (None, 10, true, "no limit set"),
-            (Some(MaxPrefixSetting { limit: 5, action: MaxPrefixAction::Terminate }), 3, true, "under limit"),
-            (Some(MaxPrefixSetting { limit: 5, action: MaxPrefixAction::Terminate }), 5, true, "at limit"),
-            (Some(MaxPrefixSetting { limit: 5, action: MaxPrefixAction::Terminate }), 6, false, "over limit terminate"),
-            (Some(MaxPrefixSetting { limit: 5, action: MaxPrefixAction::Discard }), 6, true, "over limit discard"),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                3,
+                true,
+                "under limit",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                5,
+                true,
+                "at limit",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                6,
+                false,
+                "over limit terminate",
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Discard,
+                }),
+                6,
+                true,
+                "over limit discard",
+            ),
         ];
 
         for (setting, num_prefixes, expected_ok, desc) in cases {
@@ -687,10 +721,12 @@ mod tests {
             peer.max_prefix_setting = setting;
 
             let nlri: Vec<_> = (0..num_prefixes)
-                .map(|i| crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, i as u8, 0),
-                    prefix_length: 24,
-                }))
+                .map(|i| {
+                    crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, i as u8, 0),
+                        prefix_length: 24,
+                    })
+                })
                 .collect();
 
             let update = UpdateMessage::new(
@@ -713,7 +749,11 @@ mod tests {
 
             if let Some(s) = setting {
                 if s.action == MaxPrefixAction::Discard && num_prefixes > s.limit as usize {
-                    assert_eq!(peer.rib_in.prefix_count(), 0, "discard should not add prefixes");
+                    assert_eq!(
+                        peer.rib_in.prefix_count(),
+                        0,
+                        "discard should not add prefixes"
+                    );
                 }
             }
         }

@@ -242,8 +242,13 @@ impl BgpServer {
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, local_addr: SocketAddr) {
         match req {
-            MgmtOp::AddPeer { addr, max_prefix_setting, response } => {
-                self.handle_add_peer(addr, max_prefix_setting, response, local_addr).await;
+            MgmtOp::AddPeer {
+                addr,
+                max_prefix_setting,
+                response,
+            } => {
+                self.handle_add_peer(addr, max_prefix_setting, response, local_addr)
+                    .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
                 self.handle_remove_peer(addr, response).await;
