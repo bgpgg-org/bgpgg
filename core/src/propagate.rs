@@ -149,7 +149,7 @@ pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u3
 /// Send withdrawal messages to a peer
 pub fn send_withdrawals_to_peer(
     peer_addr: &str,
-    message_tx: &mpsc::UnboundedSender<PeerOp>,
+    peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
 ) {
     if to_withdraw.is_empty() {
@@ -157,7 +157,7 @@ pub fn send_withdrawals_to_peer(
     }
 
     let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
-    if let Err(e) = message_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
+    if let Err(e) = peer_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
         error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr, "error" => e.to_string());
     } else {
         info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr);
@@ -219,7 +219,7 @@ fn build_export_next_hop(
 /// Batches prefixes that share the same path attributes into single UPDATE messages
 pub fn send_announcements_to_peer(
     peer_addr: &str,
-    message_tx: &mpsc::UnboundedSender<PeerOp>,
+    peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_announce: &[(IpNetwork, Path)],
     local_asn: u16,
     peer_asn: u16,
@@ -280,7 +280,7 @@ pub fn send_announcements_to_peer(
             unknown_attrs,
         );
 
-        if let Err(e) = message_tx.send(PeerOp::SendUpdate(update_msg)) {
+        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
             error!("failed to send UPDATE to peer", "peer_ip" => peer_addr, "error" => e.to_string());
         } else {
             info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => peer_addr);

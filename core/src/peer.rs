@@ -31,16 +31,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
-// Operations that can be sent to a peer task
+/// Operations that can be sent to a peer task
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
     GetStatistics(oneshot::Sender<PeerStatistics>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
-    /// Disable peer - sends CEASE with AdministrativeShutdown (RFC 4486)
-    Disable,
-    /// Enable peer - reconnect after admin shutdown
-    Enable,
 }
 
 /// Type of BGP session based on AS relationship
@@ -89,7 +85,6 @@ pub struct Peer {
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
     pub max_prefix_setting: Option<MaxPrefixSetting>,
-    pub admin_down: bool,
     pub tcp_tx: OwnedWriteHalf,
     tcp_rx: OwnedReadHalf,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
@@ -98,21 +93,19 @@ pub struct Peer {
 
 impl Peer {
     /// Create a new Peer in Connect state
-    /// Returns (Peer, sender) where sender is used to send operations to this peer
     pub fn new(
         addr: String,
         tcp_tx: OwnedWriteHalf,
         tcp_rx: OwnedReadHalf,
+        peer_rx: mpsc::UnboundedReceiver<PeerOp>,
         server_tx: mpsc::UnboundedSender<ServerOp>,
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
         max_prefix_setting: Option<MaxPrefixSetting>,
-    ) -> (Self, mpsc::UnboundedSender<PeerOp>) {
-        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-
-        let peer = Peer {
+    ) -> Self {
+        Peer {
             addr: addr.clone(),
             fsm: Fsm::new(local_asn, local_hold_time, local_bgp_id, local_addr),
             tcp_tx,
@@ -122,12 +115,9 @@ impl Peer {
             session_type: None,
             statistics: PeerStatistics::default(),
             max_prefix_setting,
-            admin_down: false,
             peer_rx,
             server_tx,
-        };
-
-        (peer, peer_tx)
+        }
     }
 
     /// Main peer task - handles the full lifecycle of a BGP peer connection after handshake
@@ -181,7 +171,7 @@ impl Peer {
                     }
                 }
 
-                // Receive messages from server (route updates to send to peer)
+                // Receive messages from server (route updates to send to session)
                 Some(msg) = self.peer_rx.recv() => {
                     match msg {
                         PeerOp::SendUpdate(update_msg) => {
@@ -201,19 +191,6 @@ impl Peer {
                             );
                             let _ = self.send_notification(notif).await;
                             break;
-                        }
-                        PeerOp::Disable => {
-                            info!("admin shutdown", "peer_ip" => &peer_ip);
-                            self.admin_down = true;
-                            let notif = NotifcationMessage::new(
-                                BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
-                                Vec::new(),
-                            );
-                            let _ = self.send_notification(notif).await;
-                        }
-                        PeerOp::Enable => {
-                            info!("admin enable", "peer_ip" => &peer_ip);
-                            self.admin_down = false;
                         }
                     }
                 }
@@ -634,7 +611,7 @@ mod tests {
         let (server_tx, _server_rx) = mpsc::unbounded_channel();
         let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
 
-        // Create peer directly for testing (bypass Peer::new which does handshake)
+        // Create peer directly for testing
         let local_addr = Ipv4Addr::new(127, 0, 0, 1);
         Peer {
             addr: addr.ip().to_string(),
@@ -646,7 +623,6 @@ mod tests {
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             max_prefix_setting: None,
-            admin_down: false,
             peer_rx,
             server_tx,
         }

@@ -153,7 +153,7 @@ async fn test_peer_down_four_node_mesh() {
     // Kill Server4 to simulate peer going down
     server4.kill();
 
-    // Poll for all servers to detect Server4 is down
+    // Poll for all servers to detect Server4 is down (configured peers stay in Idle)
     poll_until(
         || async {
             verify_peers(
@@ -161,6 +161,7 @@ async fn test_peer_down_four_node_mesh() {
                 vec![
                     server2.to_peer(BgpState::Established),
                     server3.to_peer(BgpState::Established),
+                    server4.to_peer(BgpState::Idle),
                 ],
             )
             .await
@@ -169,6 +170,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![
                         server1.to_peer(BgpState::Established),
                         server3.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Idle),
                     ],
                 )
                 .await
@@ -177,6 +179,7 @@ async fn test_peer_down_four_node_mesh() {
                     vec![
                         server1.to_peer(BgpState::Established),
                         server2.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Idle),
                     ],
                 )
                 .await
@@ -633,4 +636,31 @@ async fn test_peer_crash_and_recover() {
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn test_dynamic_peer_removed_on_disconnect() {
+    use std::net::Ipv4Addr;
+
+    let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(90), "127.0.0.1").await;
+
+    // FakePeer connects to the server - this is a dynamic/incoming peer
+    let fake_peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 90, &server).await;
+
+    // Verify peer is established
+    poll_until(
+        || async { verify_peers(&server, vec![fake_peer.to_peer(BgpState::Established)]).await },
+        "Timeout waiting for FakePeer to establish",
+    )
+    .await;
+
+    // Drop FakePeer to disconnect - dynamic peer should be removed entirely
+    drop(fake_peer);
+
+    // Verify peer is removed (not in Idle, but completely gone)
+    poll_until(
+        || async { verify_peers(&server, vec![]).await },
+        "Timeout waiting for dynamic peer removal",
+    )
+    .await;
 }

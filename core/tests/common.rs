@@ -63,6 +63,7 @@ impl TestServer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
+            admin_down: false,
         }
     }
 }
@@ -1034,6 +1035,7 @@ impl FakePeer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
+            admin_down: false,
         }
     }
 

@@ -990,10 +990,10 @@ async fn test_max_prefix_limit() {
         }
 
         if expect_disconnect {
-            // Terminate: peer should be disconnected (CEASE sent)
+            // Terminate: session should be closed (CEASE sent), configured peer stays in Idle
             poll_until(
-                || async { verify_peers(&server2, vec![]).await },
-                &format!("Test case {}: timeout waiting for peer disconnect", name),
+                || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Idle)]).await },
+                &format!("Test case {}: timeout waiting for peer to go Idle", name),
             )
             .await;
         } else {
