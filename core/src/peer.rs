@@ -532,6 +532,11 @@ impl Peer {
                     MaxPrefixAction::Terminate => {
                         warn!("max prefix limit exceeded, terminating session",
                               "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
+                        // Notify server to set AdminState before we disconnect
+                        let _ = self.server_tx.send(ServerOp::SetAdminState {
+                            peer_ip: self.addr.clone(),
+                            state: crate::server::AdminState::PrefixLimitReached,
+                        });
                         return Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached));
                     }
                     MaxPrefixAction::Discard => {

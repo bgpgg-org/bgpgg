@@ -23,7 +23,9 @@ use bgpgg::bgp::msg_notification::{
 };
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
-use bgpgg::grpc::proto::{BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin};
+use bgpgg::grpc::proto::{
+    AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin, Peer,
+};
 use std::net::Ipv4Addr;
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -84,7 +86,7 @@ fn build_raw_notification(
 #[tokio::test]
 async fn test_invalid_marker() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Corrupt first byte of marker
     let mut corrupted_marker = BGP_MARKER;
@@ -119,7 +121,7 @@ async fn test_bad_message_length() {
     for (name, length) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let wrong_length = u16::from_be_bytes(length);
         let msg = build_raw_open(
@@ -149,7 +151,7 @@ async fn test_bad_message_length() {
 #[tokio::test]
 async fn test_keepalive_wrong_length() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // KEEPALIVE must be exactly 19 bytes, make it 20
     let msg = build_raw_keepalive(Some(20));
@@ -168,7 +170,7 @@ async fn test_keepalive_wrong_length() {
 #[tokio::test]
 async fn test_notification_length_too_small() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
     // Create a message with type=3 (NOTIFICATION) and length=20
@@ -187,7 +189,7 @@ async fn test_notification_length_too_small() {
 #[tokio::test]
 async fn test_invalid_message_type() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Create message with invalid type (99)
     let msg = build_raw_open(
@@ -216,7 +218,7 @@ async fn test_invalid_message_type() {
 #[tokio::test]
 async fn test_open_unsupported_version() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     let msg = build_raw_open(
         65002,
@@ -246,7 +248,7 @@ async fn test_open_unacceptable_hold_time() {
     for hold_time in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let msg =
             OpenMessage::new(65002, hold_time, u32::from(Ipv4Addr::new(2, 2, 2, 2))).serialize();
@@ -280,7 +282,7 @@ async fn test_open_bad_bgp_identifier() {
     for (name, bgp_id) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let msg = OpenMessage::new(65002, 300, bgp_id).serialize();
 
@@ -325,7 +327,7 @@ async fn test_update_missing_well_known_attribute() {
     for (name, attrs, expected_missing_type) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
         let msg = build_raw_update(
@@ -356,7 +358,7 @@ async fn test_update_missing_well_known_attribute() {
 #[tokio::test]
 async fn test_update_malformed_attribute_list() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Withdrawn route: 10.11.12.0/24 (prefix length byte followed by prefix bytes)
     let withdrawn_data = &[24, 10, 11, 12];
@@ -391,7 +393,7 @@ async fn test_update_attribute_flags_error_origin() {
     for (name, wrong_flags) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let malformed_attr =
             build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
@@ -418,7 +420,7 @@ async fn test_update_attribute_flags_error_origin() {
 #[tokio::test]
 async fn test_update_attribute_flags_error_med_missing_optional_bit() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Build MED attribute with WRONG flags (missing OPTIONAL bit)
     let wrong_flags = attr_flags::TRANSITIVE; // Should have OPTIONAL too
@@ -493,7 +495,7 @@ async fn test_update_attribute_length_error() {
     for (name, malformed_attr, expected_data_prefix) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         // Build UPDATE with single malformed attribute (no alignment issues!)
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
@@ -519,7 +521,7 @@ async fn test_update_attribute_length_error() {
 #[tokio::test]
 async fn test_update_unrecognized_well_known_attribute() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Build an unrecognized well-known attribute (type 8, OPTIONAL=0)
     let unrecognized_attr = build_attr_bytes(attr_flags::TRANSITIVE, 8, 2, &[0xaa, 0xbb]);
@@ -538,7 +540,7 @@ async fn test_update_unrecognized_well_known_attribute() {
 #[tokio::test]
 async fn test_update_invalid_origin_attribute() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     let invalid_origin_attr =
         build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
@@ -579,7 +581,7 @@ async fn test_update_invalid_next_hop_attribute() {
     for (name, ip_bytes) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let invalid_next_hop_attr = build_attr_bytes(
             attr_flags::TRANSITIVE,
@@ -632,7 +634,7 @@ async fn test_update_invalid_next_hop_attribute() {
 async fn test_next_hop_is_local_address_rejected() {
     // Server bound to 127.0.0.1, FakePeer sends UPDATE with NEXT_HOP = 127.0.0.1
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Send UPDATE with NEXT_HOP = server's local address (127.0.0.1)
     let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
@@ -699,7 +701,7 @@ async fn test_update_malformed_as_path() {
     for (name, malformed_as_path) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let nlri = &[24, 10, 11, 12];
         let msg = build_raw_update(
@@ -747,7 +749,7 @@ async fn test_update_optional_attribute_error() {
     for (name, flags, type_code, len, data) in test_cases {
         let server =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-        let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
         let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
         let nlri = &[24, 10, 11, 12];
@@ -791,7 +793,7 @@ async fn test_hold_timer_expiry() {
 
     // FakePeer connects with same hold time but won't send keepalives
     let mut fake_peer =
-        FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, &server).await;
+        FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs, &server).await;
 
     // Verify peer is established
     poll_until(
@@ -820,7 +822,7 @@ async fn test_hold_timer_expiry() {
 #[tokio::test]
 async fn test_update_duplicate_attribute() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Send UPDATE with two ORIGIN attributes (duplicate)
     let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
@@ -837,7 +839,7 @@ async fn test_update_duplicate_attribute() {
 #[tokio::test]
 async fn test_update_no_nlri_valid() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // UPDATE with valid attributes but no NLRI
     let msg = build_raw_update(
@@ -874,7 +876,7 @@ async fn test_update_no_nlri_valid() {
 #[tokio::test]
 async fn test_update_multicast_nlri_ignored() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Send UPDATE with multicast NLRI (224.0.0.0/24)
     let multicast_nlri = &[24, 224, 0, 0];
@@ -918,7 +920,8 @@ async fn test_fsm_error_update_in_openconfirm() {
     let server = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
 
     // Connect and exchange OPEN only - server ends up in OpenConfirm
-    let mut peer = FakePeer::new_open_only(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer =
+        FakePeer::connect_open_only(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     // Send UPDATE while server is in OpenConfirm (should trigger FSM Error)
     let msg = build_raw_update(
@@ -967,7 +970,13 @@ async fn test_max_prefix_limit() {
 
         // Wait for peering to establish
         poll_until(
-            || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established, false)]).await },
+            || async {
+                verify_peers(
+                    &server2,
+                    vec![server1.to_peer(BgpState::Established, false)],
+                )
+                .await
+            },
             "Timeout waiting for peering",
         )
         .await;
@@ -991,8 +1000,21 @@ async fn test_max_prefix_limit() {
 
         if expect_disconnect {
             // Terminate: session should be closed (CEASE sent), configured peer stays in Idle
+            // AdminState is set to PrefixLimitReached which maps to admin_down=true
             poll_until(
-                || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Idle, false)]).await },
+                || async {
+                    verify_peers(
+                        &server2,
+                        vec![Peer {
+                            address: server1.address.clone(),
+                            asn: server1.asn as u32,
+                            state: BgpState::Idle.into(),
+                            admin_state: AdminState::PrefixLimitExceeded.into(),
+                            dynamic: false,
+                        }],
+                    )
+                    .await
+                },
                 &format!("Test case {}: timeout waiting for peer to go Idle", name),
             )
             .await;
@@ -1001,7 +1023,11 @@ async fn test_max_prefix_limit() {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             assert!(
-                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, false)]).await,
+                verify_peers(
+                    &server2,
+                    vec![server1.to_peer(BgpState::Established, false)]
+                )
+                .await,
                 "Test case {}: peer should remain established",
                 name
             );
@@ -1036,7 +1062,7 @@ async fn test_max_prefix_limit() {
 async fn test_remove_peer_sends_cease_notification() {
     let mut server =
         start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
@@ -1061,7 +1087,7 @@ async fn test_remove_peer_sends_cease_notification() {
 async fn test_disable_peer_sends_admin_shutdown() {
     let mut server =
         start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
-    let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },

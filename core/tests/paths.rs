@@ -1088,7 +1088,7 @@ async fn test_unknown_optional_attribute_handling(
     .await;
 
     let mut server1 =
-        FakePeer::new(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300, &server2).await;
+        FakePeer::connect(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300, &server2).await;
 
     let origin_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]);
     let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);

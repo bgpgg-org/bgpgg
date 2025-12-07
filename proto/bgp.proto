@@ -111,12 +111,19 @@ enum BgpState {
     ESTABLISHED = 5;
 }
 
+// Administrative state of a peer
+enum AdminState {
+    UP = 0;
+    DOWN = 1;
+    PREFIX_LIMIT_EXCEEDED = 2;
+}
+
 // Peer information
 message Peer {
     string address = 1;
     uint32 asn = 2;
     BgpState state = 3;
-    bool admin_down = 4;
+    AdminState admin_state = 4;
     bool dynamic = 5;  // true if accepted from incoming connection, not explicitly configured
 }
 

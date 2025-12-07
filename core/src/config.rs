@@ -25,6 +25,8 @@ pub struct Config {
     pub grpc_listen_addr: String,
     #[serde(default = "default_hold_time")]
     pub hold_time_secs: u64,
+    #[serde(default = "default_connect_retry_time")]
+    pub connect_retry_secs: u64,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -33,6 +35,10 @@ fn default_grpc_listen_addr() -> String {
 
 fn default_hold_time() -> u64 {
     180
+}
+
+fn default_connect_retry_time() -> u64 {
+    30 // RFC suggests 120s, but 30s is more practical
 }
 
 impl Config {
@@ -44,6 +50,7 @@ impl Config {
             router_id,
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs,
+            connect_retry_secs: default_connect_retry_time(),
         }
     }
 
@@ -75,6 +82,7 @@ impl Default for Config {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs: default_hold_time(),
+            connect_retry_secs: default_connect_retry_time(),
         }
     }
 }

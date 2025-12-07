@@ -20,12 +20,14 @@ use bgpgg::bgp::msg_notification::NotifcationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
-use bgpgg::grpc::proto::{AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route};
+use bgpgg::grpc::proto::{
+    AdminState, AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route,
+};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 
 /// Test server handle that includes runtime for killing the server
@@ -63,7 +65,7 @@ impl TestServer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
-            admin_down: false,
+            admin_state: AdminState::Up.into(),
             dynamic,
         }
     }
@@ -114,18 +116,22 @@ pub fn build_path(
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-///
-/// # Arguments
-/// * `asn` - Autonomous System Number
-/// * `router_id` - Router ID (IPv4 address)
-/// * `hold_timer_secs` - BGP hold timer in seconds
-///
-/// Returns a TestServer struct containing the client, port, and abort handles
 pub async fn start_test_server(
     asn: u16,
     router_id: Ipv4Addr,
     hold_timer_secs: Option<u16>,
     bind_ip: &str,
+) -> TestServer {
+    start_test_server_on_port(asn, router_id, hold_timer_secs, bind_ip, 0).await
+}
+
+/// Starts a single BGP server on a specific port (0 = auto-assign)
+pub async fn start_test_server_on_port(
+    asn: u16,
+    router_id: Ipv4Addr,
+    hold_timer_secs: Option<u16>,
+    bind_ip: &str,
+    port: u16,
 ) -> TestServer {
     use tokio::net::TcpListener;
 
@@ -137,7 +143,7 @@ pub async fn start_test_server(
     let hold_timer_secs = hold_timer_secs.unwrap_or(90);
     let config = Config::new(
         asn,
-        &format!("{}:0", bind_ip),
+        &format!("{}:{}", bind_ip, port),
         router_id,
         hold_timer_secs as u64,
     );
@@ -955,20 +961,21 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
 /// This allows sending raw/malformed BGP messages to test error handling.
 /// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
 pub struct FakePeer {
-    stream: TcpStream,
+    pub stream: TcpStream,
     pub address: String,
     pub asn: u16,
 }
 
 impl FakePeer {
-    /// Create a new FakePeer, connect to the given peer via TCP, and complete BGP handshake
-    pub async fn new(
+    /// Connect to the given peer via TCP and complete BGP handshake
+    pub async fn connect(
         local_asn: u16,
         local_router_id: Ipv4Addr,
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
-        let mut fake_peer = Self::new_open_only(local_asn, local_router_id, hold_time, peer).await;
+        let mut fake_peer =
+            Self::connect_open_only(local_asn, local_router_id, hold_time, peer).await;
 
         // Send KEEPALIVE
         let keepalive = KeepAliveMessage {};
@@ -990,9 +997,9 @@ impl FakePeer {
         fake_peer
     }
 
-    /// Create a FakePeer that only exchanges OPEN (server ends up in OpenConfirm).
+    /// Connect and exchange OPENs only (server ends up in OpenConfirm).
     /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
-    pub async fn new_open_only(
+    pub async fn connect_open_only(
         local_asn: u16,
         local_router_id: Ipv4Addr,
         hold_time: u16,
@@ -1046,7 +1053,7 @@ impl FakePeer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
-            admin_down: false,
+            admin_state: AdminState::Up.into(),
             dynamic,
         }
     }
@@ -1072,6 +1079,58 @@ impl FakePeer {
                 _ => panic!("Expected NOTIFICATION, got unexpected message type"),
             }
         }
+    }
+
+    /// Accept connection and exchange OPENs only (peer ends up in OpenConfirm).
+    /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
+    pub async fn accept_open_only(
+        listener: &TcpListener,
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+    ) -> Self {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        // Read their OPEN (they connected, they send first)
+        let msg = read_bgp_message(&mut stream).await.unwrap();
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message"),
+        }
+
+        // Send our OPEN
+        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+        stream.write_all(&open.serialize()).await.unwrap();
+
+        let address = stream.local_addr().unwrap().ip().to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: local_asn,
+        }
+    }
+
+    /// Accept connection and complete full BGP handshake
+    pub async fn accept(
+        listener: &TcpListener,
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+    ) -> Self {
+        let mut peer =
+            Self::accept_open_only(listener, local_asn, local_router_id, hold_time).await;
+
+        // KEEPALIVE exchange - same as connect()
+        let keepalive = KeepAliveMessage {};
+        peer.stream.write_all(&keepalive.serialize()).await.unwrap();
+
+        let msg = read_bgp_message(&mut peer.stream).await.unwrap();
+        match msg {
+            BgpMessage::KeepAlive(_) => {}
+            _ => panic!("Expected KEEPALIVE message"),
+        }
+
+        peer
     }
 }
 

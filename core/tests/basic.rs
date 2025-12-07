@@ -71,7 +71,13 @@ async fn test_announce_withdraw() {
     // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server1]).await;
     // chain_servers: server1 connected to server2
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, false)],).await);
+    assert!(
+        verify_peers(
+            &server1,
+            vec![server2.to_peer(BgpState::Established, false)],
+        )
+        .await
+    );
     assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
 }
 
@@ -385,7 +391,13 @@ async fn test_ibgp_split_horizon() {
 
     // Verify all peers are still established
     // chain_servers: s1 -> s2 -> s3
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, false)],).await);
+    assert!(
+        verify_peers(
+            &server1,
+            vec![server2.to_peer(BgpState::Established, false)],
+        )
+        .await
+    );
     assert!(
         verify_peers(
             &server2,
@@ -486,7 +498,13 @@ async fn test_as_loop_prevention() {
 
     // Verify all peers are still established
     // chain_servers: server1_a -> server2 -> server1_b
-    assert!(verify_peers(&server1_a, vec![server2.to_peer(BgpState::Established, false)],).await);
+    assert!(
+        verify_peers(
+            &server1_a,
+            vec![server2.to_peer(BgpState::Established, false)],
+        )
+        .await
+    );
     assert!(
         verify_peers(
             &server2,
@@ -497,5 +515,11 @@ async fn test_as_loop_prevention() {
         )
         .await
     );
-    assert!(verify_peers(&server1_b, vec![server2.to_peer(BgpState::Established, true)],).await);
+    assert!(
+        verify_peers(
+            &server1_b,
+            vec![server2.to_peer(BgpState::Established, true)],
+        )
+        .await
+    );
 }
