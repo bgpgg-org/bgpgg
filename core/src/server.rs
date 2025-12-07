@@ -24,11 +24,25 @@ use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
 use crate::rib::rib_loc::LocRib;
-use crate::{error, info};
+use crate::{debug, error, info};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+
+/// Administrative state of a peer, controls auto-reconnect behavior.
+/// Follows GoBGP's approach: only reconnect when Up.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AdminState {
+    /// Normal operation, auto-reconnect enabled
+    #[default]
+    Up,
+    /// Manually disabled by admin
+    Down,
+    /// Disabled due to prefix limit exceeded
+    PrefixLimitReached,
+}
 
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
@@ -64,11 +78,20 @@ pub enum MgmtOp {
         response: oneshot::Sender<Result<(), String>>,
     },
     GetPeers {
-        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState)>>,
+        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState, AdminState, bool)>>,
     },
     GetPeer {
         addr: String,
-        response: oneshot::Sender<Option<(String, Option<u16>, BgpState, PeerStatistics)>>,
+        response: oneshot::Sender<
+            Option<(
+                String,
+                Option<u16>,
+                BgpState,
+                AdminState,
+                bool,
+                PeerStatistics,
+            )>,
+        >,
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
@@ -88,6 +111,11 @@ pub enum ServerOp {
         peer_ip: String,
         asn: u16,
     },
+    /// Sent when peer receives OPEN message, for collision detection (RFC 4271 Section 6.8)
+    OpenReceived {
+        peer_ip: String,
+        bgp_id: u32,
+    },
     PeerUpdate {
         peer_ip: String,
         withdrawn: Vec<IpNetwork>,
@@ -96,19 +124,44 @@ pub enum ServerOp {
     PeerDisconnected {
         peer_ip: String,
     },
+    /// Set peer's admin state (e.g., when max prefix limit exceeded)
+    SetAdminState {
+        peer_ip: String,
+        state: AdminState,
+    },
+    /// Outbound connection succeeded (from connector task)
+    OutboundConnected {
+        peer_addr: SocketAddr,
+        stream: TcpStream,
+    },
 }
 
-// Information about a peer
+/// Peer configuration and state stored in server's HashMap.
+/// The peer IP is the HashMap key.
 pub struct PeerInfo {
-    pub addr: String,
+    pub admin_state: AdminState,
+    /// true if accepted from incoming connection, not explicitly configured
+    pub dynamic: bool,
+    /// Port for reconnection (configured peers only)
+    pub port: Option<u16>,
     pub asn: Option<u16>,
-    pub state: BgpState,
-    pub peer_tx: mpsc::UnboundedSender<PeerOp>,
+    /// BGP Identifier from OPEN message, used for collision detection (RFC 4271 Section 6.8)
+    pub bgp_id: Option<u32>,
     pub import_policy: Option<Policy>,
     pub export_policy: Option<Policy>,
+    pub max_prefix_setting: Option<MaxPrefixSetting>,
+    pub state: BgpState,
+    pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
 }
 
 impl PeerInfo {
+    pub async fn get_statistics(&self) -> Option<PeerStatistics> {
+        let peer_tx = self.peer_tx.as_ref()?;
+        let (tx, rx) = oneshot::channel();
+        peer_tx.send(PeerOp::GetStatistics(tx)).ok()?;
+        rx.await.ok()
+    }
+
     pub fn policy_in(&self) -> Option<&Policy> {
         self.import_policy.as_ref()
     }
@@ -116,6 +169,45 @@ impl PeerInfo {
     pub fn policy_out(&self) -> Option<&Policy> {
         self.export_policy.as_ref()
     }
+}
+
+/// Spawns an outbound connector task that attempts to connect to a peer.
+/// On success, sends OutboundConnected back to the server.
+/// Retries with ConnectRetryTimer on failure.
+fn spawn_outbound_connector(
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    connect_retry_secs: u64,
+    server_tx: mpsc::UnboundedSender<ServerOp>,
+) {
+    tokio::spawn(async move {
+        let retry_duration = Duration::from_secs(connect_retry_secs);
+
+        loop {
+            debug!("attempting outbound connection", "peer_addr" => peer_addr);
+
+            match create_and_bind_tcp_socket(local_addr, peer_addr).await {
+                Ok(stream) => {
+                    info!("outbound connection established", "peer_addr" => peer_addr);
+                    let _ = server_tx.send(ServerOp::OutboundConnected { peer_addr, stream });
+                    return; // Task completes, server will spawn new one if peer disconnects
+                }
+                Err(e) => {
+                    debug!("outbound connection failed, will retry",
+                           "peer_addr" => peer_addr, "error" => e.to_string(),
+                           "retry_secs" => connect_retry_secs);
+                }
+            }
+
+            // ConnectRetryTimer - wait before next attempt
+            tokio::time::sleep(retry_duration).await;
+
+            // Check if server channel is closed (server shutdown)
+            if server_tx.is_closed() {
+                return;
+            }
+        }
+    });
 }
 
 pub struct BgpServer {
@@ -164,15 +256,12 @@ impl BgpServer {
         self.local_port = listener.local_addr().unwrap().port();
 
         let local_addr = SocketAddr::new(self.local_addr.into(), 0);
-        let local_asn = self.config.asn;
-        let local_bgp_id = self.local_bgp_id;
-        let hold_time = self.config.hold_time_secs as u16;
 
         loop {
             tokio::select! {
                 // Handle incoming BGP connections
                 Ok((stream, _)) = listener.accept() => {
-                    self.accept_peer(stream, local_asn, local_bgp_id, hold_time).await;
+                    self.accept_peer(stream).await;
                 }
 
                 // Handle management requests
@@ -188,13 +277,7 @@ impl BgpServer {
         }
     }
 
-    async fn accept_peer(
-        &mut self,
-        stream: TcpStream,
-        local_asn: u16,
-        local_bgp_id: u32,
-        local_hold_time: u16,
-    ) {
+    async fn accept_peer(&mut self, stream: TcpStream) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -208,45 +291,43 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
-        let local_ip = match stream.local_addr().ok().and_then(ipv4_from_sockaddr) {
-            Some(ip) => ip,
-            None => {
-                error!("failed to get local IPv4 address");
-                return;
+        // RFC 4271 Section 6.8: Connection Collision Detection
+        if let Some(existing) = self.peers.get_mut(&peer_ip) {
+            if existing.peer_tx.is_some() {
+                // Compare BGP IDs: if local >= remote, reject incoming
+                let dominated = existing.bgp_id.map_or(true, |id| self.local_bgp_id >= id);
+                if dominated {
+                    info!("collision: rejecting incoming", "peer_ip" => &peer_ip);
+                    return;
+                }
+                // local < remote: close existing, accept incoming
+                info!("collision: closing existing", "peer_ip" => &peer_ip);
+                if let Some(tx) = existing.peer_tx.take() {
+                    let _ = tx.send(PeerOp::Shutdown(
+                        CeaseSubcode::ConnectionCollisionResolution,
+                    ));
+                }
             }
+        }
+
+        let (peer_tx, initial_state) = self.spawn_peer_from_stream(stream, &peer_ip, None);
+
+        // Add dynamic peer (will be removed on disconnect)
+        let entry = PeerInfo {
+            admin_state: AdminState::Up,
+            dynamic: true,
+            port: None,
+            asn: None,
+            bgp_id: None,
+            import_policy: None,
+            export_policy: None,
+            max_prefix_setting: None,
+            state: initial_state,
+            peer_tx: Some(peer_tx),
         };
 
-        let (tcp_rx, tcp_tx) = stream.into_split();
-
-        // Create peer in Connect state - it owns the handshake
-        let server_tx = self.op_tx.clone();
-        let (peer, peer_tx) = Peer::new(
-            peer_ip.clone(),
-            tcp_tx,
-            tcp_rx,
-            server_tx,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-            local_ip,
-            None, // No max_prefix for incoming connections (not configured via gRPC)
-        );
-
-        // Add to HashMap IMMEDIATELY - asn is None until handshake completes
-        let peer_info = PeerInfo {
-            addr: peer_ip.clone(),
-            asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
-            state: peer.state(),
-            peer_tx: peer_tx.clone(),
-            import_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
-            export_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
-        };
-
-        self.peers.insert(peer_ip.clone(), peer_info);
-        info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", peer.state()), "total_peers" => self.peers.len());
-
-        // Spawn peer task - handshake happens inside run()
-        tokio::spawn(peer.run());
+        self.peers.insert(peer_ip.clone(), entry);
+        info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
     }
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, local_addr: SocketAddr) {
@@ -263,10 +344,10 @@ impl BgpServer {
                 self.handle_remove_peer(addr, response).await;
             }
             MgmtOp::DisablePeer { addr, response } => {
-                self.handle_admin_state_change(addr, PeerOp::Disable, response);
+                self.handle_disable_peer(addr, response);
             }
             MgmtOp::EnablePeer { addr, response } => {
-                self.handle_admin_state_change(addr, PeerOp::Enable, response);
+                self.handle_enable_peer(addr, response);
             }
             MgmtOp::AddRoute {
                 prefix,
@@ -311,18 +392,18 @@ impl BgpServer {
     async fn handle_server_op(&mut self, op: ServerOp) {
         match op {
             ServerOp::PeerStateChanged { peer_ip, state } => {
-                // Update peer state in the HashMap
-                if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-                    peer_info.state = state;
+                // Update session state
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.state = state;
                     info!("peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
                 }
             }
             ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
-                // Update peer ASN and initialize policies in the HashMap
-                if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-                    peer_info.asn = Some(asn);
-                    peer_info.import_policy = Some(Policy::default_in(self.config.asn));
-                    peer_info.export_policy = Some(Policy::default_out(self.config.asn, asn));
+                // Update ASN and initialize policies
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.asn = Some(asn);
+                    peer.import_policy = Some(Policy::default_in(self.config.asn));
+                    peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
                     info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
@@ -331,9 +412,9 @@ impl BgpServer {
                 withdrawn,
                 announced,
             } => {
-                let peer_info = self.peers.get(&peer_ip).expect("peer should exist");
+                let peer = self.peers.get(&peer_ip).expect("peer should exist");
 
-                if let Some(policy) = peer_info.policy_in() {
+                if let Some(policy) = peer.policy_in() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip.clone(),
                         withdrawn,
@@ -350,10 +431,58 @@ impl BgpServer {
                     error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
                 }
             }
+            ServerOp::OpenReceived { peer_ip, bgp_id } => {
+                self.handle_open_received(peer_ip, bgp_id);
+            }
             ServerOp::PeerDisconnected { peer_ip } => {
-                // Remove peer from the map
-                self.peers.remove(&peer_ip);
-                info!("peer disconnected", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                // Ignore stale disconnect if a new connection is already active
+                // (peer_tx exists and is NOT closed means there's a live new connection)
+                if self
+                    .peers
+                    .get(&peer_ip)
+                    .and_then(|p| p.peer_tx.as_ref())
+                    .map_or(false, |tx| !tx.is_closed())
+                {
+                    debug!("ignoring stale disconnect", "peer_ip" => &peer_ip);
+                    return;
+                }
+
+                // Check if peer is configured or dynamic
+                let (is_dynamic, admin_state, port) = self
+                    .peers
+                    .get(&peer_ip)
+                    .map(|p| (p.dynamic, p.admin_state, p.port))
+                    .unwrap_or((true, AdminState::Up, None));
+
+                if is_dynamic {
+                    // Dynamic peer: remove entirely
+                    self.peers.remove(&peer_ip);
+                    info!("dynamic peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                } else {
+                    // Configured peer: clear session but keep peer
+                    if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                        peer.peer_tx = None;
+                        peer.state = BgpState::Idle;
+                    }
+                    info!("peer session ended", "peer_ip" => &peer_ip);
+
+                    // AutomaticStart: spawn connector only if AdminState::Up
+                    if admin_state == AdminState::Up {
+                        if let Some(port) = port {
+                            if let Ok(peer_addr) =
+                                format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
+                            {
+                                let local_addr = SocketAddr::new(self.local_addr.into(), 0);
+                                spawn_outbound_connector(
+                                    peer_addr,
+                                    local_addr,
+                                    self.config.connect_retry_secs,
+                                    self.op_tx.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Notify Loc-RIB about disconnection and get affected prefixes
                 let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip.clone());
@@ -363,6 +492,21 @@ impl BgpServer {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
                 }
             }
+            ServerOp::SetAdminState { peer_ip, state } => {
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.admin_state = state;
+                }
+            }
+            ServerOp::OutboundConnected { peer_addr, stream } => {
+                self.handle_outbound_connected(peer_addr, stream).await;
+            }
+        }
+    }
+
+    /// Handle OPEN message received - store BGP ID (RFC 4271 Section 6.8)
+    fn handle_open_received(&mut self, peer_ip: String, bgp_id: u32) {
+        if let Some(peer) = self.peers.get_mut(&peer_ip) {
+            peer.bgp_id = Some(bgp_id);
         }
     }
 
@@ -397,45 +541,140 @@ impl BgpServer {
         let peer_ip = peer_addr.ip().to_string();
         info!("connected to peer", "peer_ip" => &peer_ip);
 
+        // RFC 4271 Section 6.8: Connection Collision Detection
+        if let Some(existing) = self.peers.get_mut(&peer_ip) {
+            if existing.peer_tx.is_some() {
+                // local >= remote: keep outgoing (local initiated), close incoming
+                // local < remote: keep incoming (remote initiated), abort outgoing
+                let dominated = existing.bgp_id.map_or(false, |id| self.local_bgp_id < id);
+                if dominated {
+                    info!("collision: aborting outgoing", "peer_ip" => &peer_ip);
+                    let _ = response.send(Ok(()));
+                    return;
+                }
+                // local >= remote (or unknown): close existing, continue with outgoing
+                info!("collision: closing existing", "peer_ip" => &peer_ip);
+                if let Some(tx) = existing.peer_tx.take() {
+                    let _ = tx.send(PeerOp::Shutdown(
+                        CeaseSubcode::ConnectionCollisionResolution,
+                    ));
+                }
+            }
+        }
+
+        let (peer_tx, initial_state) =
+            self.spawn_peer_from_stream(stream, &peer_ip, max_prefix_setting);
+
+        // Add configured peer (persists on disconnect)
+        let entry = PeerInfo {
+            admin_state: AdminState::Up,
+            dynamic: false,
+            port: Some(peer_addr.port()),
+            asn: None,
+            bgp_id: None,
+            import_policy: None,
+            export_policy: None,
+            max_prefix_setting,
+            state: initial_state,
+            peer_tx: Some(peer_tx),
+        };
+
+        self.peers.insert(peer_ip.clone(), entry);
+        info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
+
+        // Connection successful, send response
+        let _ = response.send(Ok(()));
+    }
+
+    /// Handle successful outbound connection from connector task
+    async fn handle_outbound_connected(&mut self, peer_addr: SocketAddr, stream: TcpStream) {
+        let peer_ip = peer_addr.ip().to_string();
+
+        // Extract info we need, checking peer exists and is valid
+        let (admin_state, has_active_conn, bgp_id, max_prefix_setting) =
+            match self.peers.get(&peer_ip) {
+                Some(p) => (
+                    p.admin_state,
+                    p.peer_tx.as_ref().map_or(false, |tx| !tx.is_closed()),
+                    p.bgp_id,
+                    p.max_prefix_setting,
+                ),
+                None => {
+                    debug!("ignoring outbound connection for removed peer", "peer_ip" => &peer_ip);
+                    return;
+                }
+            };
+
+        if admin_state != AdminState::Up {
+            debug!("ignoring outbound connection for non-Up peer", "peer_ip" => &peer_ip, "state" => format!("{:?}", admin_state));
+            return;
+        }
+
+        // Collision detection: if there's already an active connection, compare BGP IDs
+        if has_active_conn {
+            let dominated = bgp_id.map_or(false, |id| self.local_bgp_id < id);
+            if dominated {
+                info!("collision: aborting outbound", "peer_ip" => &peer_ip);
+                return;
+            }
+            // We win: close existing, continue with outbound
+            info!("collision: closing existing", "peer_ip" => &peer_ip);
+            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                if let Some(tx) = peer.peer_tx.take() {
+                    let _ = tx.send(PeerOp::Shutdown(
+                        CeaseSubcode::ConnectionCollisionResolution,
+                    ));
+                }
+            }
+        }
+
+        let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, max_prefix_setting);
+
+        // Update existing peer entry
+        if let Some(entry) = self.peers.get_mut(&peer_ip) {
+            entry.peer_tx = Some(peer_tx);
+            entry.state = state;
+            entry.asn = None;
+            entry.bgp_id = None;
+        }
+
+        info!("outbound peer connected", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+    }
+
+    /// Common helper to create and spawn a peer from a connected stream.
+    /// Returns (peer_tx, initial_state).
+    fn spawn_peer_from_stream(
+        &self,
+        stream: TcpStream,
+        peer_ip: &str,
+        max_prefix_setting: Option<MaxPrefixSetting>,
+    ) -> (mpsc::UnboundedSender<PeerOp>, BgpState) {
+        let local_ip = stream
+            .local_addr()
+            .ok()
+            .and_then(ipv4_from_sockaddr)
+            .unwrap_or(self.local_addr);
+
         let (tcp_rx, tcp_tx) = stream.into_split();
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
-        let local_asn = self.config.asn;
-        let local_bgp_id = self.local_bgp_id;
-        let local_hold_time = self.config.hold_time_secs as u16;
-        let local_ip = ipv4_from_sockaddr(local_addr).expect("local_addr must be IPv4");
-
-        // Create peer in Connect state - it owns the handshake
-        let server_tx = self.op_tx.clone();
-        let (peer, peer_tx) = Peer::new(
-            peer_ip.clone(),
+        let peer = Peer::new(
+            peer_ip.to_string(),
             tcp_tx,
             tcp_rx,
-            server_tx,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
+            peer_rx,
+            self.op_tx.clone(),
+            self.config.asn,
+            self.config.hold_time_secs as u16,
+            self.local_bgp_id,
             local_ip,
             max_prefix_setting,
         );
 
-        // Add to HashMap IMMEDIATELY - asn is None until handshake completes
-        let peer_info = PeerInfo {
-            addr: peer_ip.clone(),
-            asn: None, // Will be set when ServerOp::PeerHandshakeComplete received
-            state: peer.state(),
-            peer_tx: peer_tx.clone(),
-            import_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
-            export_policy: None, // Will be set when ServerOp::PeerHandshakeComplete received
-        };
-
-        self.peers.insert(peer_ip.clone(), peer_info);
-        info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", peer.state()), "total_peers" => self.peers.len());
-
-        // Connection successful, send response
-        let _ = response.send(Ok(()));
-
-        // Spawn peer task - handshake happens inside run()
+        let state = peer.state();
         tokio::spawn(peer.run());
+
+        (peer_tx, state)
     }
 
     async fn handle_remove_peer(
@@ -445,19 +684,19 @@ impl BgpServer {
     ) {
         info!("removing peer via request", "peer_ip" => &addr);
 
-        // Remove peer from map and get peer_tx to send shutdown notification
-        let peer_info = self.peers.remove(&addr);
+        // Remove entry from map
+        let entry = self.peers.remove(&addr);
 
-        if peer_info.is_none() {
+        if entry.is_none() {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
 
-        // Send graceful shutdown notification (RFC 4486: PeerDeconfigured)
-        let peer_info = peer_info.unwrap();
-        let _ = peer_info
-            .peer_tx
-            .send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+        // Send graceful shutdown notification if peer_tx is active
+        let entry = entry.unwrap();
+        if let Some(peer_tx) = entry.peer_tx {
+            let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+        }
 
         // Notify Loc-RIB to remove routes from this peer
         let changed_prefixes = self.loc_rib.remove_routes_from_peer(addr.clone());
@@ -472,17 +711,30 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn handle_admin_state_change(
-        &self,
-        addr: String,
-        op: PeerOp,
-        response: oneshot::Sender<Result<(), String>>,
-    ) {
-        let Some(peer_info) = self.peers.get(&addr) else {
+    fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let Some(entry) = self.peers.get_mut(&addr) else {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         };
-        let _ = peer_info.peer_tx.send(op);
+
+        entry.admin_state = AdminState::Down;
+
+        // Shutdown active session if exists
+        if let Some(peer_tx) = &entry.peer_tx {
+            let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::AdministrativeShutdown));
+        }
+
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_enable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let Some(entry) = self.peers.get_mut(&addr) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+
+        entry.admin_state = AdminState::Up;
+        // TODO: Initiate reconnection if configured peer with no active session
         let _ = response.send(Ok(()));
     }
 
@@ -537,38 +789,55 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn handle_get_peers(&self, response: oneshot::Sender<Vec<(String, Option<u16>, BgpState)>>) {
-        let peer_info: Vec<(String, Option<u16>, BgpState)> = self
+    fn handle_get_peers(
+        &self,
+        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState, AdminState, bool)>>,
+    ) {
+        let peers: Vec<(String, Option<u16>, BgpState, AdminState, bool)> = self
             .peers
-            .values()
-            .map(|p| (p.addr.clone(), p.asn, p.state))
+            .iter()
+            .map(|(addr, entry)| {
+                (
+                    addr.clone(),
+                    entry.asn,
+                    entry.state,
+                    entry.admin_state,
+                    entry.dynamic,
+                )
+            })
             .collect();
-        let _ = response.send(peer_info);
+        let _ = response.send(peers);
     }
 
     async fn handle_get_peer(
         &self,
         addr: String,
-        response: oneshot::Sender<Option<(String, Option<u16>, BgpState, PeerStatistics)>>,
+        response: oneshot::Sender<
+            Option<(
+                String,
+                Option<u16>,
+                BgpState,
+                AdminState,
+                bool,
+                PeerStatistics,
+            )>,
+        >,
     ) {
-        // Get peer info from HashMap
-        let peer_info = self.peers.get(&addr);
+        let Some(entry) = self.peers.get(&addr) else {
+            let _ = response.send(None);
+            return;
+        };
 
-        if let Some(peer) = peer_info {
-            // Query statistics from peer task
-            let (stats_tx, stats_rx) = oneshot::channel();
-            if peer.peer_tx.send(PeerOp::GetStatistics(stats_tx)).is_ok() {
-                // Wait for statistics response
-                if let Ok(statistics) = stats_rx.await {
-                    let result = Some((peer.addr.clone(), peer.asn, peer.state, statistics));
-                    let _ = response.send(result);
-                    return;
-                }
-            }
-        }
+        let stats = entry.get_statistics().await.unwrap_or_default();
 
-        // Peer not found or query failed
-        let _ = response.send(None);
+        let _ = response.send(Some((
+            addr,
+            entry.asn,
+            entry.state,
+            entry.admin_state,
+            entry.dynamic,
+            stats,
+        )));
     }
 
     fn handle_get_routes(&self, response: oneshot::Sender<Vec<crate::rib::Route>>) {
@@ -600,20 +869,25 @@ impl BgpServer {
         }
 
         // Send updates to all established peers (except the originating peer)
-        for (peer_addr, peer_info) in self.peers.iter() {
-            if !should_propagate_to_peer(peer_addr, peer_info.state, &originating_peer) {
+        for (peer_addr, entry) in self.peers.iter() {
+            if !should_propagate_to_peer(peer_addr, entry.state, &originating_peer) {
                 continue;
             }
 
-            // Get peer ASN, default to local ASN if not yet known (shouldn't happen in Established state)
-            let peer_asn = peer_info.asn.unwrap_or(local_asn);
+            // Need active peer_tx to send updates
+            let Some(peer_tx) = &entry.peer_tx else {
+                continue;
+            };
+
+            // Get peer ASN, default to local ASN if not yet known
+            let peer_asn = entry.asn.unwrap_or(local_asn);
 
             // Export policy should always be Some for Established peers
-            if let Some(export_policy) = peer_info.policy_out() {
-                send_withdrawals_to_peer(peer_addr, &peer_info.peer_tx, &to_withdraw);
+            if let Some(export_policy) = entry.policy_out() {
+                send_withdrawals_to_peer(peer_addr, peer_tx, &to_withdraw);
                 send_announcements_to_peer(
                     peer_addr,
-                    &peer_info.peer_tx,
+                    peer_tx,
                     &to_announce,
                     local_asn,
                     peer_asn,

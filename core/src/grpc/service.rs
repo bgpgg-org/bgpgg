@@ -17,16 +17,16 @@ use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::peer::{MaxPrefixAction, MaxPrefixSetting};
 use crate::rib::RouteSource;
-use crate::server::MgmtOp;
+use crate::server::{AdminState, MgmtOp};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
     self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
-    AddRouteResponse, BgpState as ProtoBgpState, DisablePeerRequest, DisablePeerResponse,
-    EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse, GetPeersRequest,
-    GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
+    AddRouteResponse, AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
+    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
+    GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
     GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
     PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
     RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
@@ -43,6 +43,15 @@ fn to_proto_state(state: BgpState) -> i32 {
         BgpState::OpenSent => ProtoBgpState::OpenSent as i32,
         BgpState::OpenConfirm => ProtoBgpState::OpenConfirm as i32,
         BgpState::Established => ProtoBgpState::Established as i32,
+    }
+}
+
+/// Convert internal AdminState to proto AdminState
+fn to_proto_admin_state(state: AdminState) -> i32 {
+    match state {
+        AdminState::Up => ProtoAdminState::Up as i32,
+        AdminState::Down => ProtoAdminState::Down as i32,
+        AdminState::PrefixLimitReached => ProtoAdminState::PrefixLimitExceeded as i32,
     }
 }
 
@@ -197,10 +206,12 @@ impl BgpService for BgpGrpcService {
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|(addr, asn, state)| ProtoPeer {
+            .map(|(addr, asn, state, admin_state, dynamic)| ProtoPeer {
                 address: addr.to_string(),
                 asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                 state: to_proto_state(*state),
+                admin_state: to_proto_admin_state(*admin_state),
+                dynamic: *dynamic,
             })
             .collect();
 
@@ -231,11 +242,13 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         match peer_info {
-            Some((addr, asn, state, statistics)) => {
+            Some((addr, asn, state, admin_state, dynamic, statistics)) => {
                 let proto_peer = ProtoPeer {
                     address: addr,
                     asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                     state: to_proto_state(state),
+                    admin_state: to_proto_admin_state(admin_state),
+                    dynamic,
                 };
 
                 let proto_statistics = ProtoPeerStatistics {
