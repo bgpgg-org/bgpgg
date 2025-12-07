@@ -117,6 +117,7 @@ message Peer {
     uint32 asn = 2;
     BgpState state = 3;
     bool admin_down = 4;
+    bool dynamic = 5;  // true if accepted from incoming connection, not explicitly configured
 }
 
 // Add route request/response

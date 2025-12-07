@@ -866,7 +866,7 @@ async fn test_update_no_nlri_valid() {
 
     // Peer should still be established (no NOTIFICATION sent)
     assert!(
-        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await,
         "Peer should remain established after valid UPDATE with no NLRI"
     );
 }
@@ -967,7 +967,7 @@ async fn test_max_prefix_limit() {
 
         // Wait for peering to establish
         poll_until(
-            || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await },
+            || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established, false)]).await },
             "Timeout waiting for peering",
         )
         .await;
@@ -992,7 +992,7 @@ async fn test_max_prefix_limit() {
         if expect_disconnect {
             // Terminate: session should be closed (CEASE sent), configured peer stays in Idle
             poll_until(
-                || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Idle)]).await },
+                || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Idle, false)]).await },
                 &format!("Test case {}: timeout waiting for peer to go Idle", name),
             )
             .await;
@@ -1001,7 +1001,7 @@ async fn test_max_prefix_limit() {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             assert!(
-                verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await,
+                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, false)]).await,
                 "Test case {}: peer should remain established",
                 name
             );
@@ -1039,7 +1039,7 @@ async fn test_remove_peer_sends_cease_notification() {
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for peer to establish",
     )
     .await;
@@ -1064,7 +1064,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
     let mut peer = FakePeer::new(65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for peer to establish",
     )
     .await;
@@ -1079,5 +1079,58 @@ async fn test_disable_peer_sends_admin_shutdown() {
     assert_eq!(
         notif.error(),
         &BgpError::Cease(CeaseSubcode::AdministrativeShutdown)
+    );
+}
+
+/// RFC 4271 Section 6.8: Connection Collision Detection
+/// When two BGP speakers try to establish connections to each other simultaneously,
+/// both end up with two connections. One must be closed based on BGP Identifier comparison.
+#[tokio::test]
+async fn test_connection_collision_detection() {
+    // Server A with BGP ID 1.1.1.1 (lower)
+    let mut server_a =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
+    // Server B with BGP ID 2.2.2.2 (higher)
+    let mut server_b =
+        start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), Some(300), "127.0.0.2").await;
+
+    // Both servers add each other as peers simultaneously - creates collision
+    server_a
+        .client
+        .add_peer(format!("127.0.0.2:{}", server_b.bgp_port), None)
+        .await
+        .expect("Failed to add peer B to A");
+    server_b
+        .client
+        .add_peer(format!("127.0.0.1:{}", server_a.bgp_port), None)
+        .await
+        .expect("Failed to add peer A to B");
+
+    // After collision resolution, both should have exactly one peer in Established
+    poll_until(
+        || async {
+            let peers_a = server_a.client.get_peers().await.unwrap_or_default();
+            let peers_b = server_b.client.get_peers().await.unwrap_or_default();
+            peers_a.len() == 1
+                && peers_b.len() == 1
+                && peers_a[0].state == BgpState::Established as i32
+                && peers_b[0].state == BgpState::Established as i32
+        },
+        "Timeout waiting for collision resolution and single established session",
+    )
+    .await;
+
+    // RFC 4271 Section 6.8: lower BGP ID keeps connection initiated by higher BGP ID
+    // A (lower ID) should have kept B's incoming connection -> dynamic = true
+    // B (higher ID) should have kept its outgoing connection -> dynamic = false
+    let peers_a = server_a.client.get_peers().await.unwrap();
+    let peers_b = server_b.client.get_peers().await.unwrap();
+    assert!(
+        peers_a[0].dynamic,
+        "Server A (lower BGP ID) should have dynamic peer (accepted incoming from B)"
+    );
+    assert!(
+        !peers_b[0].dynamic,
+        "Server B (higher BGP ID) should have configured peer (kept outgoing to A)"
     );
 }

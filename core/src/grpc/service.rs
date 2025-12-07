@@ -197,11 +197,12 @@ impl BgpService for BgpGrpcService {
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|(addr, asn, state, admin_down)| ProtoPeer {
+            .map(|(addr, asn, state, admin_down, dynamic)| ProtoPeer {
                 address: addr.to_string(),
                 asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                 state: to_proto_state(*state),
                 admin_down: *admin_down,
+                dynamic: *dynamic,
             })
             .collect();
 
@@ -232,12 +233,13 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         match peer_info {
-            Some((addr, asn, state, admin_down, statistics)) => {
+            Some((addr, asn, state, admin_down, dynamic, statistics)) => {
                 let proto_peer = ProtoPeer {
                     address: addr,
                     asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                     state: to_proto_state(state),
                     admin_down,
+                    dynamic,
                 };
 
                 let proto_statistics = ProtoPeerStatistics {

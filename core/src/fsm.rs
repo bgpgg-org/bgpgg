@@ -46,6 +46,7 @@ pub enum FsmEvent {
     BgpOpenReceived {
         peer_asn: u16,
         peer_hold_time: u16,
+        peer_bgp_id: u32,
         local_asn: u16,
         local_hold_time: u16,
     },
@@ -358,6 +359,7 @@ mod tests {
         fsm.handle_event(&FsmEvent::BgpOpenReceived {
             peer_asn: 65001,
             peer_hold_time: 180,
+            peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
         });
@@ -444,6 +446,7 @@ mod tests {
                 FsmEvent::BgpOpenReceived {
                     peer_asn: 65001,
                     peer_hold_time: 180,
+                    peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
                 },

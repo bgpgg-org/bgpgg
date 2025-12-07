@@ -263,6 +263,7 @@ impl Peer {
                     peer_hold_time,
                     local_asn,
                     local_hold_time,
+                    ..
                 },
             ) => {
                 self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
@@ -434,12 +435,20 @@ impl Peer {
 
         // Determine FSM event and process it - FSM will ignore if state doesn't match
         let event = match &message {
-            BgpMessage::Open(open_msg) => Some(FsmEvent::BgpOpenReceived {
-                peer_asn: open_msg.asn,
-                peer_hold_time: open_msg.hold_time,
-                local_asn: self.fsm.local_asn(),
-                local_hold_time: self.fsm.local_hold_time(),
-            }),
+            BgpMessage::Open(open_msg) => {
+                // RFC 4271 6.8: Notify server for collision detection
+                let _ = self.server_tx.send(ServerOp::OpenReceived {
+                    peer_ip: self.addr.clone(),
+                    bgp_id: open_msg.bgp_identifier,
+                });
+                Some(FsmEvent::BgpOpenReceived {
+                    peer_asn: open_msg.asn,
+                    peer_hold_time: open_msg.hold_time,
+                    peer_bgp_id: open_msg.bgp_identifier,
+                    local_asn: self.fsm.local_asn(),
+                    local_hold_time: self.fsm.local_hold_time(),
+                })
+            }
             BgpMessage::Update(_) => Some(FsmEvent::BgpUpdateReceived),
             BgpMessage::KeepAlive(_) => Some(FsmEvent::BgpKeepaliveReceived),
             BgpMessage::Notification(_) => Some(FsmEvent::NotificationReceived),
