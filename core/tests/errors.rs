@@ -26,6 +26,7 @@ use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin, Peer,
+    SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -1152,14 +1153,13 @@ async fn test_max_prefix_limit() {
         // Server2 connects to Server1 with max_prefix limit of 2
         server2
             .client
-            .add_peer_with_config(
+            .add_peer(
                 format!("127.0.0.1:{}", server1.bgp_port),
-                Some(MaxPrefixSetting { limit: 2, action }),
-                None,
-                None,
-                None,
-                allow_automatic_stop,
-                None,
+                Some(SessionConfig {
+                    max_prefix: Some(MaxPrefixSetting { limit: 2, action }),
+                    allow_automatic_stop,
+                    ..Default::default()
+                }),
             )
             .await
             .expect("Failed to add peer");
@@ -1343,12 +1343,12 @@ async fn test_connection_collision_detection() {
     // Both servers add each other as peers simultaneously - creates collision
     server_a
         .client
-        .add_peer(format!("127.0.0.2:{}", server_b.bgp_port))
+        .add_peer(format!("127.0.0.2:{}", server_b.bgp_port), None)
         .await
         .expect("Failed to add peer B to A");
     server_b
         .client
-        .add_peer(format!("127.0.0.1:{}", server_a.bgp_port))
+        .add_peer(format!("127.0.0.1:{}", server_a.bgp_port), None)
         .await
         .expect("Failed to add peer A to B");
 

@@ -107,7 +107,13 @@ impl Peer {
     ) -> Self {
         Peer {
             addr: addr.clone(),
-            fsm: Fsm::new(local_asn, local_hold_time, local_bgp_id, local_addr),
+            fsm: Fsm::new(
+                local_asn,
+                local_hold_time,
+                local_bgp_id,
+                local_addr,
+                session_config.delay_open_time,
+            ),
             tcp_tx,
             tcp_rx,
             asn: None,
@@ -126,21 +132,33 @@ impl Peer {
 
         debug!("starting peer event loop", "peer_ip" => &peer_ip);
 
-        // Fire TcpConnectionConfirmed to start handshake (Connect → OpenSent, sends OPEN)
-        if let Err(e) = self
-            .handle_fsm_event(&FsmEvent::TcpConnectionConfirmed)
-            .await
-        {
-            error!("failed to start handshake", "peer_ip" => &peer_ip, "error" => e.to_string());
-            let _ = self.server_tx.send(ServerOp::PeerDisconnected {
-                peer_ip: peer_ip.clone(),
-            });
-            return;
+        // RFC 4271 8.2.1.3: DelayOpen - delay sending OPEN to allow peer to send first
+        if self.fsm.timers.delay_open_time.is_some() {
+            debug!("DelayOpen enabled, starting timer", "peer_ip" => &peer_ip);
+            self.fsm.timers.start_delay_open_timer();
+            // Stay in Connect state, don't send OPEN yet
+        } else {
+            // Normal behavior: send OPEN immediately (Connect → OpenSent)
+            if let Err(e) = self
+                .handle_fsm_event(&FsmEvent::TcpConnectionConfirmed)
+                .await
+            {
+                error!("failed to start handshake", "peer_ip" => &peer_ip, "error" => e.to_string());
+                let _ = self.server_tx.send(ServerOp::PeerDisconnected {
+                    peer_ip: peer_ip.clone(),
+                });
+                return;
+            }
         }
 
-        // Interval for periodic timer checks (hold timer and keepalive timer)
-        // Initialized lazily when hold_timeout is set (i.e., when entering OpenConfirm)
-        let mut keepalive_check_interval: Option<tokio::time::Interval> = None;
+        // Interval for periodic timer checks (hold timer, keepalive timer, delay open timer)
+        // Initialized early if delay_open enabled, otherwise lazily when entering OpenConfirm
+        let mut timer_check_interval: Option<tokio::time::Interval> =
+            if self.fsm.timers.delay_open_time.is_some() {
+                Some(tokio::time::interval(std::time::Duration::from_millis(100)))
+            } else {
+                None
+            };
 
         // Main event loop for this peer
         loop {
@@ -155,8 +173,8 @@ impl Peer {
                             }
 
                             // Initialize interval when entering OpenConfirm (handshake complete)
-                            if keepalive_check_interval.is_none() && self.state() == BgpState::OpenConfirm {
-                                keepalive_check_interval = Some(tokio::time::interval(std::time::Duration::from_millis(500)));
+                            if timer_check_interval.is_none() && self.state() == BgpState::OpenConfirm {
+                                timer_check_interval = Some(tokio::time::interval(std::time::Duration::from_millis(500)));
                             }
                         }
                         Err(e) => {
@@ -195,13 +213,22 @@ impl Peer {
                     }
                 }
 
-                // Periodic timer checks (both hold timer and keepalive timer)
+                // Periodic timer checks (hold timer, keepalive timer, delay open timer)
                 _ = async {
-                    match &mut keepalive_check_interval {
+                    match &mut timer_check_interval {
                         Some(interval) => interval.tick().await,
                         None => std::future::pending().await,
                     }
                 } => {
+                    // RFC 4271 8.2.1.3: Check if delay open timer expired
+                    if self.fsm.timers.delay_open_timer_expired() {
+                        debug!("delay open timer expired", "peer_ip" => &peer_ip);
+                        if let Err(e) = self.handle_fsm_event(&FsmEvent::DelayOpenTimerExpires).await {
+                            error!("failed to handle delay open timer", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            break;
+                        }
+                    }
+
                     // RFC 4271: Check if hold timer expired (no KEEPALIVE/UPDATE received)
                     if self.fsm.timers.hold_timer_expired() {
                         error!("hold timer expired (no KEEPALIVE or UPDATE received)", "peer_ip" => &peer_ip);
@@ -239,12 +266,36 @@ impl Peer {
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
-            // Entering OpenSent - send OPEN message
+            // Entering OpenSent - send OPEN message (normal path)
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
                 self.enter_open_sent().await?;
             }
 
-            // Entering OpenConfirm - send KEEPALIVE
+            // DelayOpen timer expired in Connect - send OPEN (RFC 4271 8.2.1.3)
+            (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
+                self.fsm.timers.stop_delay_open_timer();
+                self.enter_open_sent().await?;
+            }
+
+            // Received OPEN while in Connect with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 8.2.1.3)
+            (
+                BgpState::Connect,
+                BgpState::OpenConfirm,
+                &FsmEvent::BgpOpenReceived {
+                    peer_asn,
+                    peer_hold_time,
+                    local_asn,
+                    local_hold_time,
+                    ..
+                },
+            ) => {
+                self.fsm.timers.stop_delay_open_timer();
+                self.enter_open_sent().await?;
+                self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
+                    .await?;
+            }
+
+            // Entering OpenConfirm from OpenSent - send KEEPALIVE
             (
                 BgpState::OpenSent,
                 BgpState::OpenConfirm,

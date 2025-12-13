@@ -21,26 +21,26 @@ use std::net::{Ipv4Addr, SocketAddr};
 pub struct PeerConfig {
     #[serde(default)]
     pub address: String,
+    /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
+    /// None disables automatic restart, Some(secs) enables with given delay.
     #[serde(default = "default_idle_hold_time")]
-    pub idle_hold_time_secs: u64,
-    #[serde(default = "default_allow_automatic_start")]
-    pub allow_automatic_start: bool,
+    pub idle_hold_time_secs: Option<u64>,
     #[serde(default = "default_damp_peer_oscillations")]
     pub damp_peer_oscillations: bool,
     #[serde(default = "default_allow_automatic_stop")]
     pub allow_automatic_stop: bool,
     #[serde(default = "default_passive_mode")]
     pub passive_mode: bool,
+    /// DelayOpenTime - seconds to wait before sending OPEN (RFC 4271 8.1.1).
+    /// None disables DelayOpen, Some(secs) enables it with given delay.
+    #[serde(default)]
+    pub delay_open_time_secs: Option<u64>,
     #[serde(default)]
     pub max_prefix: Option<u32>,
 }
 
-fn default_idle_hold_time() -> u64 {
-    30
-}
-
-fn default_allow_automatic_start() -> bool {
-    true
+fn default_idle_hold_time() -> Option<u64> {
+    Some(30)
 }
 
 fn default_damp_peer_oscillations() -> bool {
@@ -60,10 +60,10 @@ impl Default for PeerConfig {
         Self {
             address: String::new(),
             idle_hold_time_secs: default_idle_hold_time(),
-            allow_automatic_start: default_allow_automatic_start(),
             damp_peer_oscillations: default_damp_peer_oscillations(),
             allow_automatic_stop: default_allow_automatic_stop(),
             passive_mode: default_passive_mode(),
+            delay_open_time_secs: None,
             max_prefix: None,
         }
     }

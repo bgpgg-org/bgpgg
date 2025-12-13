@@ -38,16 +38,18 @@ use tokio::sync::{mpsc, oneshot};
 /// Includes RFC 4271 Section 8.1 optional attributes and other peer settings.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
-    /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1)
-    pub idle_hold_time: Duration,
-    /// AllowAutomaticStart - enable automatic restart after disconnect (RFC 4271 8.1.1)
-    pub allow_automatic_start: bool,
+    /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
+    /// None disables automatic restart, Some(duration) enables with given delay.
+    pub idle_hold_time: Option<Duration>,
     /// DampPeerOscillations - use exponential backoff on failures (RFC 4271 8.1.1)
     pub damp_peer_oscillations: bool,
     /// AllowAutomaticStop - enable automatic stop by implementation logic (RFC 4271 8.1.1)
     pub allow_automatic_stop: bool,
     /// Passive mode - wait for remote peer to initiate connection (RFC 4271 8.1.1)
     pub passive_mode: bool,
+    /// DelayOpenTime - delay before sending OPEN (RFC 4271 8.1.1).
+    /// None disables DelayOpen, Some(duration) enables with given delay.
+    pub delay_open_time: Option<Duration>,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
 }
@@ -58,11 +60,11 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            idle_hold_time: Duration::from_secs(30),
-            allow_automatic_start: true,
+            idle_hold_time: Some(Duration::from_secs(30)),
             damp_peer_oscillations: true,
             allow_automatic_stop: true,
             passive_mode: false,
+            delay_open_time: None,
             max_prefix: None,
         }
     }
@@ -71,11 +73,11 @@ impl Default for SessionConfig {
 impl From<&PeerConfig> for SessionConfig {
     fn from(pc: &PeerConfig) -> Self {
         Self {
-            idle_hold_time: Duration::from_secs(pc.idle_hold_time_secs),
-            allow_automatic_start: pc.allow_automatic_start,
+            idle_hold_time: pc.idle_hold_time_secs.map(Duration::from_secs),
             damp_peer_oscillations: pc.damp_peer_oscillations,
             allow_automatic_stop: pc.allow_automatic_stop,
             passive_mode: pc.passive_mode,
+            delay_open_time: pc.delay_open_time_secs.map(Duration::from_secs),
             max_prefix: pc.max_prefix.map(|limit| MaxPrefixSetting {
                 limit,
                 action: MaxPrefixAction::Terminate,
@@ -244,14 +246,16 @@ impl PeerInfo {
     }
 
     /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
-    pub fn get_idle_hold_time(&self) -> Duration {
+    /// Returns None if automatic restart is disabled.
+    pub fn get_idle_hold_time(&self) -> Option<Duration> {
         let cfg = &self.session_config;
+        let base = cfg.idle_hold_time?;
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
-            return cfg.idle_hold_time;
+            return Some(base);
         }
         let exp = self.consecutive_down_count.min(6);
-        let backoff = cfg.idle_hold_time * 2u32.pow(exp);
-        backoff.min(MAX_IDLE_HOLD_TIME)
+        let backoff = base * 2u32.pow(exp);
+        Some(backoff.min(MAX_IDLE_HOLD_TIME))
     }
 }
 
@@ -430,7 +434,8 @@ impl BgpServer {
         }
 
         // RFC 4271 Section 6.8: Connection Collision Detection
-        if let Some(existing) = self.peers.get_mut(&peer_ip) {
+        // Also check if we have a configured peer waiting for this connection
+        let existing_config = if let Some(existing) = self.peers.get_mut(&peer_ip) {
             if existing.peer_tx.is_some() {
                 // Compare BGP IDs: if local >= remote, reject incoming
                 let dominated = existing.bgp_id.map_or(true, |id| self.local_bgp_id >= id);
@@ -446,6 +451,21 @@ impl BgpServer {
                     ));
                 }
             }
+            Some(existing.session_config.clone())
+        } else {
+            None
+        };
+
+        // Use configured peer's session_config if exists, but mark as dynamic (accepted connection)
+        if let Some(session_config) = existing_config {
+            let (peer_tx, initial_state) =
+                self.spawn_peer_from_stream(stream, &peer_ip, session_config);
+            let existing = self.peers.get_mut(&peer_ip).unwrap();
+            existing.peer_tx = Some(peer_tx);
+            existing.state = initial_state;
+            existing.dynamic = true; // Accepted connection, even for configured peer
+            info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
+            return;
         }
 
         let (peer_tx, initial_state) =
@@ -606,24 +626,27 @@ impl BgpServer {
                     let idle_hold_time = peer.get_idle_hold_time();
                     let admin_state = peer.admin_state;
                     let port = peer.port;
-                    let allow_automatic_start = peer.session_config.allow_automatic_start;
                     let passive = peer.session_config.passive_mode;
-                    info!("peer session ended", "peer_ip" => &peer_ip, "idle_hold_time" => idle_hold_time.as_secs());
+                    info!("peer session ended", "peer_ip" => &peer_ip,
+                          "idle_hold_time" => idle_hold_time.map(|d| d.as_secs()));
 
-                    // AutomaticStart: spawn connector only if enabled, not passive, and AdminState::Up
-                    if allow_automatic_start && !passive && admin_state == AdminState::Up {
-                        if let Some(port) = port {
-                            if let Ok(peer_addr) =
-                                format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
-                            {
-                                let local_addr = SocketAddr::new(self.local_addr.into(), 0);
-                                spawn_outbound_connector(
-                                    peer_addr,
-                                    local_addr,
-                                    self.config.connect_retry_secs,
-                                    idle_hold_time,
-                                    self.op_tx.clone(),
-                                );
+                    // AutomaticStart: spawn connector only if idle_hold_time is set (enabled),
+                    // not passive, and AdminState::Up
+                    if let Some(idle_hold) = idle_hold_time {
+                        if !passive && admin_state == AdminState::Up {
+                            if let Some(port) = port {
+                                if let Ok(peer_addr) =
+                                    format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
+                                {
+                                    let local_addr = SocketAddr::new(self.local_addr.into(), 0);
+                                    spawn_outbound_connector(
+                                        peer_addr,
+                                        local_addr,
+                                        self.config.connect_retry_secs,
+                                        idle_hold,
+                                        self.op_tx.clone(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1061,7 +1084,7 @@ impl BgpServer {
 mod tests {
     use super::*;
 
-    fn peer_info(idle_hold_time_secs: u64, damp: bool, down_count: u32) -> PeerInfo {
+    fn peer_info(idle_hold_time_secs: Option<u64>, damp: bool, down_count: u32) -> PeerInfo {
         PeerInfo {
             admin_state: AdminState::Up,
             dynamic: false,
@@ -1073,11 +1096,11 @@ mod tests {
             state: BgpState::Idle,
             peer_tx: None,
             session_config: SessionConfig {
-                idle_hold_time: Duration::from_secs(idle_hold_time_secs),
-                allow_automatic_start: true,
+                idle_hold_time: idle_hold_time_secs.map(Duration::from_secs),
                 damp_peer_oscillations: damp,
                 allow_automatic_stop: true,
                 passive_mode: false,
+                delay_open_time: None,
                 max_prefix: None,
             },
             consecutive_down_count: down_count,
@@ -1109,30 +1132,32 @@ mod tests {
         let mut server = make_server(false);
         server
             .peers
-            .insert("10.0.0.1".to_string(), peer_info(30, true, 0));
+            .insert("10.0.0.1".to_string(), peer_info(Some(30), true, 0));
         assert!(server.should_accept_peer("10.0.0.1"));
     }
 
     #[test]
     fn test_get_idle_hold_time() {
+        // (idle_hold, damping, down_count, expected)
         let cases = [
-            // (idle_hold, damping, down_count, expected)
-            (30, true, 0, 30),   // No downs -> base
-            (30, true, 1, 60),   // 1 down -> 30*2
-            (30, true, 2, 120),  // 2 downs -> 30*4, capped at 120
-            (30, true, 3, 120),  // 3 downs -> 30*8=240, capped at 120
-            (30, false, 5, 30),  // Damping disabled -> base
-            (10, true, 1, 20),   // 10*2
-            (10, true, 3, 80),   // 10*8
-            (10, true, 6, 120),  // 10*64=640, capped at 120
-            (10, true, 10, 120), // exp capped at 6 -> 10*64=640, capped at 120
+            (Some(30), true, 0, Some(30)),   // No downs -> base
+            (Some(30), true, 1, Some(60)),   // 1 down -> 30*2
+            (Some(30), true, 2, Some(120)),  // 2 downs -> 30*4, capped at 120
+            (Some(30), true, 3, Some(120)),  // 3 downs -> 30*8=240, capped at 120
+            (Some(30), false, 5, Some(30)),  // Damping disabled -> base
+            (Some(10), true, 1, Some(20)),   // 10*2
+            (Some(10), true, 3, Some(80)),   // 10*8
+            (Some(10), true, 6, Some(120)),  // 10*64=640, capped at 120
+            (Some(10), true, 10, Some(120)), // exp capped at 6 -> 10*64=640, capped at 120
+            (None, true, 0, None),           // Disabled -> None
+            (None, true, 5, None),           // Disabled with damping -> still None
         ];
         for (idle, damp, count, expected) in cases {
             let peer = peer_info(idle, damp, count);
             assert_eq!(
                 peer.get_idle_hold_time(),
-                Duration::from_secs(expected),
-                "idle={}, damp={}, count={}",
+                expected.map(Duration::from_secs),
+                "idle={:?}, damp={}, count={}",
                 idle,
                 damp,
                 count

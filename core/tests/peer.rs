@@ -17,7 +17,7 @@ pub use common::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -636,7 +636,7 @@ async fn test_peer_crash_and_recover() {
         // Server2 reconnects to Server1
         server2
             .client
-            .add_peer(format!("127.0.0.1:{}", server2_port))
+            .add_peer(format!("127.0.0.1:{}", server2_port), None)
             .await
             .expect("Failed to re-add peer after crash");
 
@@ -676,14 +676,12 @@ async fn test_auto_reconnect() {
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
         .client
-        .add_peer_with_config(
+        .add_peer(
             format!("127.0.0.2:{}", port),
-            None,
-            Some(0),
-            None,
-            None,
-            None,
-            None,
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -745,14 +743,12 @@ async fn test_idle_hold_time_delay() {
     // Add peer with idle_hold_time
     server
         .client
-        .add_peer_with_config(
+        .add_peer(
             format!("127.0.0.2:{}", port),
-            None,
-            Some(idle_hold_secs),
-            None,
-            None,
-            None,
-            None,
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(idle_hold_secs),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -813,17 +809,15 @@ async fn test_allow_automatic_start_false() {
     let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    // Add peer with allow_automatic_start=false
+    // Add peer with automatic restart disabled (idle_hold_time_secs=None)
     server
         .client
-        .add_peer_with_config(
+        .add_peer(
             format!("127.0.0.2:{}", port),
-            None,
-            Some(0),
-            Some(false),
-            None,
-            None,
-            None,
+            Some(SessionConfig {
+                idle_hold_time_secs: None, // Disable automatic restart
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -926,14 +920,13 @@ async fn test_damp_peer_oscillations() {
     // idle_hold_time=1s, damping=true. After 2 downs: 1s * 2^2 = 4s
     server
         .client
-        .add_peer_with_config(
+        .add_peer(
             format!("127.0.0.2:{}", port),
-            None,
-            Some(1),
-            Some(true),
-            Some(true),
-            None,
-            None,
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(1),
+                damp_peer_oscillations: Some(true),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -1027,14 +1020,12 @@ async fn test_passive_mode() {
     // Add peer with passive_mode=true
     server
         .client
-        .add_peer_with_config(
+        .add_peer(
             "127.0.0.2:179".to_string(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(true), // passive
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap();
@@ -1071,4 +1062,71 @@ async fn test_passive_mode() {
         "Passive peer should establish when remote connects",
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_delay_open() {
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        false,
+    ))
+    .await;
+    let mut server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        false,
+    ))
+    .await;
+
+    let delay_secs = 3;
+
+    // Server2: long delay_open so it won't send OPEN first
+    server2
+        .client
+        .add_peer(
+            format!("127.0.0.1:{}", server1.bgp_port),
+            Some(SessionConfig {
+                delay_open_time_secs: Some(60),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let start = std::time::Instant::now();
+
+    // Server1 with delay_open connects to server2
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                delay_open_time_secs: Some(delay_secs),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Poll until OPEN is sent
+    poll_until(
+        || async {
+            let Ok((_, stats)) = server1.client.get_peer(server2.address.clone()).await else {
+                return false;
+            };
+            stats.map_or(false, |s| s.open_sent > 0)
+        },
+        "Timeout waiting for OPEN to be sent",
+    )
+    .await;
+
+    assert!(
+        start.elapsed().as_secs() >= delay_secs,
+        "OPEN sent before delay_open_time elapsed"
+    );
 }

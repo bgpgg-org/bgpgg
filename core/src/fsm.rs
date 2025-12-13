@@ -46,6 +46,8 @@ pub enum FsmEvent {
     ConnectRetryTimerExpires,
     HoldTimerExpires,
     KeepaliveTimerExpires,
+    /// Event 12: DelayOpenTimerExpires (RFC 4271 8.1.3)
+    DelayOpenTimerExpires,
     /// TCP connection is confirmed, ready to send OPEN
     TcpConnectionConfirmed,
     TcpConnectionFails,
@@ -74,6 +76,9 @@ pub struct FsmTimers {
     /// Keepalive timer value (typically 1/3 of hold_time)
     pub keepalive_time: Duration,
 
+    /// DelayOpen timer value (RFC 4271 8.1.3). None means DelayOpen disabled.
+    pub delay_open_time: Option<Duration>,
+
     /// Last time ConnectRetry timer was started
     pub connect_retry_started: Option<Instant>,
 
@@ -82,18 +87,29 @@ pub struct FsmTimers {
 
     /// Last time Keepalive timer was started/reset
     pub keepalive_timer_started: Option<Instant>,
+
+    /// Last time DelayOpen timer was started
+    pub delay_open_timer_started: Option<Instant>,
+}
+
+impl FsmTimers {
+    pub fn new(delay_open_time: Option<Duration>) -> Self {
+        Self {
+            connect_retry_time: Duration::from_secs(120),
+            hold_time: Duration::from_secs(180),
+            keepalive_time: Duration::from_secs(60), // 1/3 of hold_time
+            delay_open_time,
+            connect_retry_started: None,
+            hold_timer_started: None,
+            keepalive_timer_started: None,
+            delay_open_timer_started: None,
+        }
+    }
 }
 
 impl Default for FsmTimers {
     fn default() -> Self {
-        FsmTimers {
-            connect_retry_time: Duration::from_secs(120),
-            hold_time: Duration::from_secs(180),
-            keepalive_time: Duration::from_secs(60), // 1/3 of hold_time
-            connect_retry_started: None,
-            hold_timer_started: None,
-            keepalive_timer_started: None,
-        }
+        Self::new(None)
     }
 }
 
@@ -171,6 +187,29 @@ impl FsmTimers {
         // Keepalive timer should be at most 1/3 of hold time
         self.keepalive_time = Duration::from_secs((hold_time as u64) / 3);
     }
+
+    /// Check if DelayOpen timer has expired
+    pub fn delay_open_timer_expired(&self) -> bool {
+        match (self.delay_open_timer_started, self.delay_open_time) {
+            (Some(started), Some(delay)) => started.elapsed() >= delay,
+            _ => false,
+        }
+    }
+
+    /// Start DelayOpen timer
+    pub fn start_delay_open_timer(&mut self) {
+        self.delay_open_timer_started = Some(Instant::now());
+    }
+
+    /// Stop DelayOpen timer
+    pub fn stop_delay_open_timer(&mut self) {
+        self.delay_open_timer_started = None;
+    }
+
+    /// Check if DelayOpen timer is running
+    pub fn delay_open_timer_running(&self) -> bool {
+        self.delay_open_timer_started.is_some()
+    }
 }
 
 /// BGP Finite State Machine
@@ -195,10 +234,11 @@ impl Fsm {
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
+        delay_open_time: Option<Duration>,
     ) -> Self {
         Fsm {
             state: BgpState::Connect,
-            timers: FsmTimers::default(),
+            timers: FsmTimers::new(delay_open_time),
             local_asn,
             local_hold_time,
             local_bgp_id,
@@ -269,10 +309,13 @@ impl Fsm {
                 (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
             }
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
+            (BgpState::Connect, FsmEvent::DelayOpenTimerExpires) => (BgpState::OpenSent, None),
             (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
             }
             (BgpState::Connect, FsmEvent::TcpConnectionFails) => (BgpState::Active, None),
+            // RFC 4271 8.2.1.3: OPEN received while DelayOpenTimer running -> send OPEN
+            (BgpState::Connect, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -356,13 +399,13 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
     #[test]
     fn test_tcp_connection_confirmed() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
 
         // Connect -> OpenSent
         let (new_state, error) = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -373,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_successful_connection_establishment() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
 
         // Connect -> OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -397,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_connection_failure_handling() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
 
         // Connect -> Active (connection failed)
         fsm.handle_event(&FsmEvent::TcpConnectionFails);
@@ -410,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_hold_timer_expiry() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
 
         // Move to OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -448,6 +491,24 @@ mod tests {
                 BgpState::Connect,
                 FsmEvent::TcpConnectionFails,
                 BgpState::Active,
+            ),
+            // DelayOpen: Connect + DelayOpenTimerExpires -> OpenSent
+            (
+                BgpState::Connect,
+                FsmEvent::DelayOpenTimerExpires,
+                BgpState::OpenSent,
+            ),
+            // DelayOpen: Connect + BgpOpenReceived -> OpenConfirm (peer sent OPEN first)
+            (
+                BgpState::Connect,
+                FsmEvent::BgpOpenReceived {
+                    peer_asn: 65001,
+                    peer_hold_time: 180,
+                    peer_bgp_id: 0x02020202,
+                    local_asn: 65000,
+                    local_hold_time: 180,
+                },
+                BgpState::OpenConfirm,
             ),
             // From Active
             (BgpState::Active, FsmEvent::ManualStop, BgpState::Idle),
