@@ -966,6 +966,7 @@ async fn test_max_prefix_limit() {
                 Some(MaxPrefixSetting { limit: 2, action }),
                 None,
                 None,
+                None,
             )
             .await
             .expect("Failed to add peer");

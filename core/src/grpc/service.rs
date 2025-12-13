@@ -93,10 +93,14 @@ impl BgpService for BgpGrpcService {
         let allow_automatic_start = inner
             .allow_automatic_start
             .unwrap_or(default_config.allow_automatic_start);
+        let damp_peer_oscillations = inner
+            .damp_peer_oscillations
+            .unwrap_or(default_config.damp_peer_oscillations);
 
         let session_config = SessionConfig {
             idle_hold_time,
             allow_automatic_start,
+            damp_peer_oscillations,
             max_prefix,
         };
 

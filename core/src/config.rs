@@ -24,6 +24,8 @@ pub struct PeerConfig {
     pub idle_hold_time_secs: u64,
     #[serde(default = "default_allow_automatic_start")]
     pub allow_automatic_start: bool,
+    #[serde(default = "default_damp_peer_oscillations")]
+    pub damp_peer_oscillations: bool,
     #[serde(default)]
     pub max_prefix: Option<u32>,
 }
@@ -33,6 +35,10 @@ fn default_idle_hold_time() -> u64 {
 }
 
 fn default_allow_automatic_start() -> bool {
+    true
+}
+
+fn default_damp_peer_oscillations() -> bool {
     true
 }
 

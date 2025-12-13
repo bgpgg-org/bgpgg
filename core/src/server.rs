@@ -39,15 +39,21 @@ pub struct SessionConfig {
     pub idle_hold_time: Duration,
     /// AllowAutomaticStart - enable automatic restart after disconnect (RFC 4271 8.1.1)
     pub allow_automatic_start: bool,
+    /// DampPeerOscillations - use exponential backoff on failures (RFC 4271 8.1.1)
+    pub damp_peer_oscillations: bool,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
 }
+
+/// Maximum idle hold time when damping (RFC 4271 8.1.1 example uses 120s)
+const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             idle_hold_time: Duration::from_secs(30),
             allow_automatic_start: true,
+            damp_peer_oscillations: true,
             max_prefix: None,
         }
     }
@@ -175,6 +181,8 @@ pub struct PeerInfo {
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     /// Per-peer session configuration
     pub session_config: SessionConfig,
+    /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
+    pub consecutive_down_count: u32,
 }
 
 impl PeerInfo {
@@ -191,6 +199,17 @@ impl PeerInfo {
 
     pub fn policy_out(&self) -> Option<&Policy> {
         self.export_policy.as_ref()
+    }
+
+    /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
+    pub fn get_idle_hold_time(&self) -> Duration {
+        let cfg = &self.session_config;
+        if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
+            return cfg.idle_hold_time;
+        }
+        let exp = self.consecutive_down_count.min(6);
+        let backoff = cfg.idle_hold_time * 2u32.pow(exp);
+        backoff.min(MAX_IDLE_HOLD_TIME)
     }
 }
 
@@ -357,6 +376,7 @@ impl BgpServer {
             state: initial_state,
             peer_tx: Some(peer_tx),
             session_config: SessionConfig::default(),
+            consecutive_down_count: 0,
         };
 
         self.peers.insert(peer_ip.clone(), entry);
@@ -437,6 +457,7 @@ impl BgpServer {
                     peer.asn = Some(asn);
                     peer.import_policy = Some(Policy::default_in(self.config.asn));
                     peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
+                    peer.consecutive_down_count = 0; // Reset damping on stable connection
                     info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
@@ -481,27 +502,28 @@ impl BgpServer {
                 }
 
                 // Check if peer is configured or dynamic
-                let default_config = SessionConfig::default();
-                let (is_dynamic, admin_state, port, session_config) = self
-                    .peers
-                    .get(&peer_ip)
-                    .map(|p| (p.dynamic, p.admin_state, p.port, p.session_config.clone()))
-                    .unwrap_or((true, AdminState::Up, None, default_config));
+                let is_dynamic = self.peers.get(&peer_ip).map_or(true, |p| p.dynamic);
 
                 if is_dynamic {
                     // Dynamic peer: remove entirely
                     self.peers.remove(&peer_ip);
                     info!("dynamic peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
                 } else {
-                    // Configured peer: clear session but keep peer
-                    if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                        peer.peer_tx = None;
-                        peer.state = BgpState::Idle;
-                    }
-                    info!("peer session ended", "peer_ip" => &peer_ip);
+                    // Configured peer: increment down count and compute idle hold time
+                    let Some(peer) = self.peers.get_mut(&peer_ip) else {
+                        return;
+                    };
+                    peer.peer_tx = None;
+                    peer.state = BgpState::Idle;
+                    peer.consecutive_down_count += 1;
+                    let idle_hold_time = peer.get_idle_hold_time();
+                    let admin_state = peer.admin_state;
+                    let port = peer.port;
+                    let allow_automatic_start = peer.session_config.allow_automatic_start;
+                    info!("peer session ended", "peer_ip" => &peer_ip, "idle_hold_time" => idle_hold_time.as_secs());
 
                     // AutomaticStart: spawn connector only if enabled and AdminState::Up
-                    if session_config.allow_automatic_start && admin_state == AdminState::Up {
+                    if allow_automatic_start && admin_state == AdminState::Up {
                         if let Some(port) = port {
                             if let Ok(peer_addr) =
                                 format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
@@ -511,7 +533,7 @@ impl BgpServer {
                                     peer_addr,
                                     local_addr,
                                     self.config.connect_retry_secs,
-                                    session_config.idle_hold_time,
+                                    idle_hold_time,
                                     self.op_tx.clone(),
                                 );
                             }
@@ -612,6 +634,7 @@ impl BgpServer {
             state: initial_state,
             peer_tx: Some(peer_tx),
             session_config,
+            consecutive_down_count: 0,
         };
 
         self.peers.insert(peer_ip.clone(), entry);
@@ -931,6 +954,59 @@ impl BgpServer {
             } else {
                 error!("export policy not set for established peer", "peer_ip" => peer_addr);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer_info(idle_hold_time_secs: u64, damp: bool, down_count: u32) -> PeerInfo {
+        PeerInfo {
+            admin_state: AdminState::Up,
+            dynamic: false,
+            port: None,
+            asn: None,
+            bgp_id: None,
+            import_policy: None,
+            export_policy: None,
+            state: BgpState::Idle,
+            peer_tx: None,
+            session_config: SessionConfig {
+                idle_hold_time: Duration::from_secs(idle_hold_time_secs),
+                allow_automatic_start: true,
+                damp_peer_oscillations: damp,
+                max_prefix: None,
+            },
+            consecutive_down_count: down_count,
+        }
+    }
+
+    #[test]
+    fn test_get_idle_hold_time() {
+        let cases = [
+            // (idle_hold, damping, down_count, expected)
+            (30, true, 0, 30),   // No downs -> base
+            (30, true, 1, 60),   // 1 down -> 30*2
+            (30, true, 2, 120),  // 2 downs -> 30*4, capped at 120
+            (30, true, 3, 120),  // 3 downs -> 30*8=240, capped at 120
+            (30, false, 5, 30),  // Damping disabled -> base
+            (10, true, 1, 20),   // 10*2
+            (10, true, 3, 80),   // 10*8
+            (10, true, 6, 120),  // 10*64=640, capped at 120
+            (10, true, 10, 120), // exp capped at 6 -> 10*64=640, capped at 120
+        ];
+        for (idle, damp, count, expected) in cases {
+            let peer = peer_info(idle, damp, count);
+            assert_eq!(
+                peer.get_idle_hold_time(),
+                Duration::from_secs(expected),
+                "idle={}, damp={}, count={}",
+                idle,
+                damp,
+                count
+            );
         }
     }
 }

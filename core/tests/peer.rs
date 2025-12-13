@@ -667,7 +667,7 @@ async fn test_auto_reconnect() {
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
         .client
-        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), None)
+        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), None, None)
         .await
         .unwrap();
 
@@ -727,6 +727,7 @@ async fn test_idle_hold_time_delay() {
             None,
             Some(idle_hold_secs),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -774,7 +775,13 @@ async fn test_allow_automatic_start_false() {
     // Add peer with allow_automatic_start=false
     server
         .client
-        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), Some(false))
+        .add_peer_with_config(
+            format!("127.0.0.2:{}", port),
+            None,
+            Some(0),
+            Some(false),
+            None,
+        )
         .await
         .unwrap();
 
@@ -849,6 +856,52 @@ async fn test_dynamic_peer_removed_on_disconnect() {
     poll_until(
         || async { verify_peers(&server, vec![]).await },
         "Timeout waiting for dynamic peer removal",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_damp_peer_oscillations() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(3), "127.0.0.1").await;
+    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // idle_hold_time=1s, damping=true. After 2 downs: 1s * 2^2 = 4s
+    server
+        .client
+        .add_peer_with_config(
+            format!("127.0.0.2:{}", port),
+            None,
+            Some(1),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+    // 2 rapid connect/disconnect cycles to build up consecutive_down_count
+    for _ in 0..2 {
+        let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+        poll_until(
+            || async {
+                verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await
+            },
+            "Timeout waiting for Established",
+        )
+        .await;
+        peer.stream.shutdown().await.ok();
+    }
+
+    // After 2 downs: idle_hold = 1s * 2^2 = 4s
+    // Verify peer stays in Idle for 2s (proving backoff > base 1s)
+    poll_while(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        std::time::Duration::from_secs(2),
+        "Damping should delay reconnect beyond 2s",
     )
     .await;
 }
