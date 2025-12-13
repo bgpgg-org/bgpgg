@@ -1089,6 +1089,15 @@ impl FakePeer {
             .expect("Failed to send raw bytes");
     }
 
+    /// Send a KEEPALIVE message
+    pub async fn send_keepalive(&mut self) {
+        let keepalive = KeepAliveMessage {};
+        self.stream
+            .write_all(&keepalive.serialize())
+            .await
+            .expect("Failed to send KEEPALIVE");
+    }
+
     /// Read a NOTIFICATION message (skips any KEEPALIVEs)
     pub async fn read_notification(&mut self) -> NotifcationMessage {
         loop {

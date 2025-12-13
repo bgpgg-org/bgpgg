@@ -55,6 +55,9 @@ pub struct SessionConfig {
     /// SendNOTIFICATIONwithoutOPEN - allow sending NOTIFICATION before OPEN (RFC 4271 8.2.1.5).
     /// Default false: OPEN must be sent before NOTIFICATION.
     pub send_notification_without_open: bool,
+    /// CollisionDetectEstablishedState - process collisions in Established state (RFC 4271 8.1.1).
+    /// Default false: collision detection is ignored when peer is in Established state.
+    pub collision_detect_established_state: bool,
 }
 
 /// Maximum idle hold time when damping (RFC 4271 8.1.1 example uses 120s)
@@ -70,6 +73,7 @@ impl Default for SessionConfig {
             delay_open_time: None,
             max_prefix: None,
             send_notification_without_open: false,
+            collision_detect_established_state: false,
         }
     }
 }
@@ -87,6 +91,7 @@ impl From<&PeerConfig> for SessionConfig {
                 action: MaxPrefixAction::Terminate,
             }),
             send_notification_without_open: pc.send_notification_without_open,
+            collision_detect_established_state: pc.collision_detect_established_state,
         }
     }
 }
@@ -358,6 +363,54 @@ impl BgpServer {
         is_configured || self.config.accept_unconfigured_peers
     }
 
+    /// RFC 4271 Section 6.8: Connection Collision Detection
+    ///
+    /// Returns true if new connection should be rejected, false if it should proceed.
+    /// If existing connection loses, it is closed automatically.
+    ///
+    /// - is_incoming: true for incoming (remote-initiated), false for outgoing (local-initiated)
+    fn should_reject_connection(&mut self, peer_ip: &str, is_incoming: bool) -> bool {
+        let Some(peer) = self.peers.get(peer_ip) else {
+            return false; // No existing peer, accept
+        };
+        if peer.peer_tx.is_none() {
+            return false; // No active connection, accept
+        }
+
+        // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
+        if peer.state == BgpState::Established
+            && !peer.session_config.collision_detect_established_state
+        {
+            info!("collision: ignoring in Established state", "peer_ip" => peer_ip);
+            return true; // Reject new connection
+        }
+
+        // RFC 4271 6.8: Compare BGP Identifiers
+        // local < remote: close local-initiated, keep remote-initiated
+        // local >= remote: close remote-initiated, keep local-initiated
+        let dominated = if is_incoming {
+            peer.bgp_id.map_or(true, |id| self.local_bgp_id >= id)
+        } else {
+            peer.bgp_id.map_or(false, |id| self.local_bgp_id < id)
+        };
+
+        if dominated {
+            info!("collision: rejecting new connection", "peer_ip" => peer_ip);
+            return true; // Reject new connection
+        }
+
+        // We win: close existing connection, accept new
+        info!("collision: closing existing", "peer_ip" => peer_ip);
+        if let Some(peer) = self.peers.get_mut(peer_ip) {
+            if let Some(tx) = peer.peer_tx.take() {
+                let _ = tx.send(PeerOp::Shutdown(
+                    CeaseSubcode::ConnectionCollisionResolution,
+                ));
+            }
+        }
+        false // Accept new connection
+    }
+
     pub async fn run(mut self) {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
@@ -439,27 +492,12 @@ impl BgpServer {
         }
 
         // RFC 4271 Section 6.8: Connection Collision Detection
-        // Also check if we have a configured peer waiting for this connection
-        let existing_config = if let Some(existing) = self.peers.get_mut(&peer_ip) {
-            if existing.peer_tx.is_some() {
-                // Compare BGP IDs: if local >= remote, reject incoming
-                let dominated = existing.bgp_id.map_or(true, |id| self.local_bgp_id >= id);
-                if dominated {
-                    info!("collision: rejecting incoming", "peer_ip" => &peer_ip);
-                    return;
-                }
-                // local < remote: close existing, accept incoming
-                info!("collision: closing existing", "peer_ip" => &peer_ip);
-                if let Some(tx) = existing.peer_tx.take() {
-                    let _ = tx.send(PeerOp::Shutdown(
-                        CeaseSubcode::ConnectionCollisionResolution,
-                    ));
-                }
-            }
-            Some(existing.session_config.clone())
-        } else {
-            None
-        };
+        if self.should_reject_connection(&peer_ip, true) {
+            return;
+        }
+
+        // Check if we have a configured peer waiting for this connection
+        let existing_config = self.peers.get(&peer_ip).map(|p| p.session_config.clone());
 
         // Use configured peer's session_config if exists, but mark as dynamic (accepted connection)
         if let Some(session_config) = existing_config {
@@ -725,24 +763,9 @@ impl BgpServer {
         info!("connected to peer", "peer_ip" => &peer_ip);
 
         // RFC 4271 Section 6.8: Connection Collision Detection
-        if let Some(existing) = self.peers.get_mut(&peer_ip) {
-            if existing.peer_tx.is_some() {
-                // local >= remote: keep outgoing (local initiated), close incoming
-                // local < remote: keep incoming (remote initiated), abort outgoing
-                let dominated = existing.bgp_id.map_or(false, |id| self.local_bgp_id < id);
-                if dominated {
-                    info!("collision: aborting outgoing", "peer_ip" => &peer_ip);
-                    let _ = response.send(Ok(()));
-                    return;
-                }
-                // local >= remote (or unknown): close existing, continue with outgoing
-                info!("collision: closing existing", "peer_ip" => &peer_ip);
-                if let Some(tx) = existing.peer_tx.take() {
-                    let _ = tx.send(PeerOp::Shutdown(
-                        CeaseSubcode::ConnectionCollisionResolution,
-                    ));
-                }
-            }
+        if self.should_reject_connection(&peer_ip, false) {
+            let _ = response.send(Ok(()));
+            return;
         }
 
         let (peer_tx, initial_state) =
@@ -774,15 +797,9 @@ impl BgpServer {
     async fn handle_outbound_connected(&mut self, peer_addr: SocketAddr, stream: TcpStream) {
         let peer_ip = peer_addr.ip().to_string();
 
-        // Extract info we need, checking peer exists and is valid
-        let (admin_state, has_active_conn, bgp_id, session_config) = match self.peers.get(&peer_ip)
-        {
-            Some(p) => (
-                p.admin_state,
-                p.peer_tx.as_ref().map_or(false, |tx| !tx.is_closed()),
-                p.bgp_id,
-                p.session_config.clone(),
-            ),
+        // Check peer exists and is valid
+        let (admin_state, session_config) = match self.peers.get(&peer_ip) {
+            Some(p) => (p.admin_state, p.session_config.clone()),
             None => {
                 debug!("ignoring outbound connection for removed peer", "peer_ip" => &peer_ip);
                 return;
@@ -794,22 +811,9 @@ impl BgpServer {
             return;
         }
 
-        // Collision detection: if there's already an active connection, compare BGP IDs
-        if has_active_conn {
-            let dominated = bgp_id.map_or(false, |id| self.local_bgp_id < id);
-            if dominated {
-                info!("collision: aborting outbound", "peer_ip" => &peer_ip);
-                return;
-            }
-            // We win: close existing, continue with outbound
-            info!("collision: closing existing", "peer_ip" => &peer_ip);
-            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                if let Some(tx) = peer.peer_tx.take() {
-                    let _ = tx.send(PeerOp::Shutdown(
-                        CeaseSubcode::ConnectionCollisionResolution,
-                    ));
-                }
-            }
+        // RFC 4271 Section 6.8: Connection Collision Detection
+        if self.should_reject_connection(&peer_ip, false) {
+            return;
         }
 
         let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, session_config);
@@ -1108,6 +1112,7 @@ mod tests {
                 delay_open_time: None,
                 max_prefix: None,
                 send_notification_without_open: false,
+                collision_detect_established_state: false,
             },
             consecutive_down_count: down_count,
         }

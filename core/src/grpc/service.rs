@@ -89,6 +89,9 @@ fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
         send_notification_without_open: cfg
             .send_notification_without_open
             .unwrap_or(defaults.send_notification_without_open),
+        collision_detect_established_state: cfg
+            .collision_detect_established_state
+            .unwrap_or(defaults.collision_detect_established_state),
     }
 }
 
