@@ -244,7 +244,7 @@ impl LocRib {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::rib::test_helpers::*;
+    use crate::test_helpers::*;
     use std::net::Ipv4Addr;
 
     #[test]

@@ -424,50 +424,36 @@ impl Peer {
         &mut self,
         message: BgpMessage,
     ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
-        // Track received messages
-        match &message {
-            BgpMessage::Open(open_msg) => {
-                self.statistics.open_received += 1;
-                info!("received OPEN from peer", "peer_ip" => &self.addr, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
-            }
-            BgpMessage::Update(_) => {
-                self.statistics.update_received += 1;
-                info!("received UPDATE", "peer_ip" => &self.addr);
-            }
-            BgpMessage::KeepAlive(_) => {
-                self.statistics.keepalive_received += 1;
-                debug!("received KEEPALIVE", "peer_ip" => &self.addr);
-            }
-            BgpMessage::Notification(notif_msg) => {
-                self.statistics.notification_received += 1;
-                warn!("received NOTIFICATION", "peer_ip" => &self.addr, "notification" => format!("{:?}", notif_msg));
-            }
-        }
+        self.track_received_message(&message);
 
-        // Determine FSM event and process it - FSM will ignore if state doesn't match
-        let event = match &message {
+        // Process FSM event
+        match &message {
             BgpMessage::Open(open_msg) => {
                 // RFC 4271 6.8: Notify server for collision detection
                 let _ = self.server_tx.send(ServerOp::OpenReceived {
                     peer_ip: self.addr.clone(),
                     bgp_id: open_msg.bgp_identifier,
                 });
-                Some(FsmEvent::BgpOpenReceived {
+                self.handle_fsm_event(&FsmEvent::BgpOpenReceived {
                     peer_asn: open_msg.asn,
                     peer_hold_time: open_msg.hold_time,
                     peer_bgp_id: open_msg.bgp_identifier,
                     local_asn: self.fsm.local_asn(),
                     local_hold_time: self.fsm.local_hold_time(),
                 })
+                .await?;
             }
-            BgpMessage::Update(_) => Some(FsmEvent::BgpUpdateReceived),
-            BgpMessage::KeepAlive(_) => Some(FsmEvent::BgpKeepaliveReceived),
-            BgpMessage::Notification(_) => Some(FsmEvent::NotificationReceived),
-        };
-
-        // Process FSM event if present
-        if let Some(event) = event {
-            self.handle_fsm_event(&event).await?;
+            BgpMessage::Update(_) => {
+                self.handle_fsm_event(&FsmEvent::BgpUpdateReceived).await?;
+            }
+            BgpMessage::KeepAlive(_) => {
+                self.handle_fsm_event(&FsmEvent::BgpKeepaliveReceived)
+                    .await?;
+            }
+            BgpMessage::Notification(_) => {
+                self.handle_fsm_event(&FsmEvent::NotificationReceived)
+                    .await?;
+            }
         }
 
         // Process UPDATE message content
@@ -540,79 +526,88 @@ impl Peer {
         withdrawn
     }
 
-    /// Process announced routes (NLRI) from an UPDATE message
+    /// Check if adding new prefixes would exceed max prefix limit.
+    /// Returns Ok(true) to proceed, Ok(false) to discard, Err to terminate.
+    fn check_max_prefix_limit(&self, incoming_prefix_count: usize) -> Result<bool, BgpError> {
+        let Some(setting) = self.session_config.max_prefix else {
+            return Ok(true);
+        };
+        let current = self.rib_in.prefix_count();
+        if current + incoming_prefix_count <= setting.limit as usize {
+            return Ok(true);
+        }
+        match setting.action {
+            MaxPrefixAction::Terminate => {
+                warn!("max prefix limit exceeded",
+                      "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current);
+                Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached))
+            }
+            MaxPrefixAction::Discard => {
+                warn!("max prefix limit reached, discarding new prefixes",
+                      "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current);
+                Ok(false)
+            }
+        }
+    }
+
     fn process_announcements(
         &mut self,
         update_msg: &UpdateMessage,
     ) -> Result<Vec<(IpNetwork, Path)>, BgpError> {
-        let mut announced = Vec::new();
-
-        // Check max prefix limit
-        if let Some(setting) = self.session_config.max_prefix {
-            let current_count = self.rib_in.prefix_count();
-            let new_prefixes = update_msg.nlri_list().len();
-
-            if current_count + new_prefixes > setting.limit as usize {
-                match setting.action {
-                    MaxPrefixAction::Terminate => {
-                        warn!("max prefix limit exceeded",
-                              "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
-                        return Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached));
-                    }
-                    MaxPrefixAction::Discard => {
-                        warn!("max prefix limit reached, discarding new prefixes",
-                              "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
-                        return Ok(announced);
-                    }
-                }
-            }
+        if !self.check_max_prefix_limit(update_msg.nlri_list().len())? {
+            return Ok(Vec::new());
         }
 
-        // Extract path attributes for announced routes
-        let origin = update_msg.get_origin();
-        let as_path = update_msg.get_as_path();
-        let next_hop = update_msg.get_next_hop();
-        let local_pref = update_msg.get_local_pref();
-        let med = update_msg.get_med();
-        let atomic_aggregate = update_msg.get_atomic_aggregate();
-        let unknown_attrs = update_msg.get_unknown_attrs();
+        let mut announced = Vec::new();
 
-        // Only process announcements if we have required attributes
-        if let (Some(origin), Some(as_path), Some(next_hop)) = (origin, as_path, next_hop) {
-            // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
-            if next_hop == self.fsm.local_addr() {
-                warn!("rejecting UPDATE: NEXT_HOP is local address",
-                      "next_hop" => next_hop.to_string(), "peer" => &self.addr);
-                return Ok(announced);
+        let source = RouteSource::from_session(
+            self.session_type
+                .expect("session_type must be set in Established state"),
+            self.addr.clone(),
+        );
+
+        let Some(path) = Path::from_update_msg(update_msg, source) else {
+            if !update_msg.nlri_list().is_empty() {
+                warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => &self.addr);
             }
+            return Ok(announced);
+        };
 
-            let source = RouteSource::from_session(
-                self.session_type
-                    .expect("session_type must be set in Established state"),
-                self.addr.clone(),
-            );
+        // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
+        if path.next_hop == self.fsm.local_addr() {
+            warn!("rejecting UPDATE: NEXT_HOP is local address",
+                  "next_hop" => path.next_hop.to_string(), "peer" => &self.addr);
+            return Ok(announced);
+        }
 
-            // Process announced routes (NLRI)
-            for prefix in update_msg.nlri_list() {
-                let path = Path::from_attributes(
-                    origin,
-                    as_path.clone(),
-                    next_hop,
-                    source.clone(),
-                    local_pref,
-                    med,
-                    atomic_aggregate,
-                    unknown_attrs.clone(),
-                );
-                info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr, "med" => format!("{:?}", med));
-                self.rib_in.add_route(*prefix, path.clone());
-                announced.push((*prefix, path));
-            }
-        } else if !update_msg.nlri_list().is_empty() {
-            warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => &self.addr);
+        for prefix in update_msg.nlri_list() {
+            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr, "med" => format!("{:?}", path.med));
+            self.rib_in.add_route(*prefix, path.clone());
+            announced.push((*prefix, path.clone()));
         }
 
         Ok(announced)
+    }
+
+    fn track_received_message(&mut self, message: &BgpMessage) {
+        match message {
+            BgpMessage::Open(open_msg) => {
+                self.statistics.open_received += 1;
+                info!("received OPEN from peer", "peer_ip" => &self.addr, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
+            }
+            BgpMessage::Update(_) => {
+                self.statistics.update_received += 1;
+                info!("received UPDATE", "peer_ip" => &self.addr);
+            }
+            BgpMessage::KeepAlive(_) => {
+                self.statistics.keepalive_received += 1;
+                debug!("received KEEPALIVE", "peer_ip" => &self.addr);
+            }
+            BgpMessage::Notification(notif_msg) => {
+                self.statistics.notification_received += 1;
+                warn!("received NOTIFICATION", "peer_ip" => &self.addr, "notification" => format!("{:?}", notif_msg));
+            }
+        }
     }
 
     /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
@@ -854,5 +849,100 @@ mod tests {
         assert_eq!(bytes[0], 6); // Cease error code
         assert_eq!(bytes[1], 2); // AdministrativeShutdown subcode
         assert_eq!(bytes.len(), 2); // No data
+    }
+
+    #[tokio::test]
+    async fn test_check_max_prefix_limit() {
+        use crate::test_helpers::{create_test_path, create_test_prefix_n};
+
+        // (setting, rib_count, new_count, expected)
+        // expected: Ok(true)=proceed, Ok(false)=discard, Err=terminate
+        let cases: Vec<(Option<MaxPrefixSetting>, usize, usize, Result<bool, ()>)> = vec![
+            (None, 0, 100, Ok(true)),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                0,
+                5,
+                Ok(true),
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                0,
+                10,
+                Ok(true),
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                0,
+                11,
+                Err(()),
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                8,
+                3,
+                Err(()),
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Discard,
+                }),
+                0,
+                11,
+                Ok(false),
+            ),
+            (
+                Some(MaxPrefixSetting {
+                    limit: 10,
+                    action: MaxPrefixAction::Discard,
+                }),
+                8,
+                3,
+                Ok(false),
+            ),
+        ];
+
+        for (setting, rib_count, incoming, expected) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.session_config.max_prefix = setting.clone();
+            for i in 0..rib_count {
+                peer.rib_in.add_route(
+                    create_test_prefix_n(i as u8),
+                    create_test_path("test".into()),
+                );
+            }
+
+            let result = peer.check_max_prefix_limit(incoming);
+            match expected {
+                Ok(b) => assert_eq!(
+                    result,
+                    Ok(b),
+                    "setting={:?} rib={} incoming={}",
+                    setting,
+                    rib_count,
+                    incoming
+                ),
+                Err(_) => assert!(
+                    result.is_err(),
+                    "setting={:?} rib={} incoming={}",
+                    setting,
+                    rib_count,
+                    incoming
+                ),
+            }
+        }
     }
 }
