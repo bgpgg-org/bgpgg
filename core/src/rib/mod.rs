@@ -27,35 +27,3 @@ mod types;
 // Re-exports
 pub use path::Path;
 pub use types::{Route, RouteSource};
-
-#[cfg(test)]
-mod test_helpers {
-    use super::*;
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
-    use crate::bgp::utils::IpNetwork;
-    use std::net::Ipv4Addr;
-
-    pub(super) fn create_test_path(peer_ip: String) -> Path {
-        Path {
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![100, 200],
-            }],
-            next_hop: Ipv4Addr::new(192, 0, 2, 1),
-            source: RouteSource::Ebgp(peer_ip),
-            local_pref: Some(100),
-            med: Some(0),
-            atomic_aggregate: false,
-            unknown_attrs: vec![],
-        }
-    }
-
-    pub(super) fn create_test_prefix() -> IpNetwork {
-        IpNetwork::V4(crate::bgp::utils::Ipv4Net {
-            address: Ipv4Addr::new(10, 0, 0, 0),
-            prefix_length: 24,
-        })
-    }
-}

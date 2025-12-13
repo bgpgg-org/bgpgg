@@ -37,10 +37,22 @@ message MaxPrefixSetting {
     MaxPrefixAction action = 2;
 }
 
+// Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
+message SessionConfig {
+    optional uint64 idle_hold_time_secs = 1;      // Auto-reconnect delay. Unset disables (default: 30s)
+    optional bool damp_peer_oscillations = 2;     // Exponential backoff on failures (default: true)
+    optional bool allow_automatic_stop = 3;       // Auto-stop on max prefix exceeded (default: true)
+    optional bool passive_mode = 4;               // Wait for remote to connect (default: false)
+    optional uint64 delay_open_time_secs = 5;     // Delay before sending OPEN. Unset disables
+    optional MaxPrefixSetting max_prefix = 6;
+    optional bool send_notification_without_open = 7;  // Allow NOTIFICATION before OPEN (default: false)
+    optional bool collision_detect_established_state = 8;  // Process collisions in Established (default: false)
+}
+
 // Add peer request/response
 message AddPeerRequest {
-    string address = 1;  // IP:PORT format (e.g., "192.168.1.1:179")
-    optional MaxPrefixSetting max_prefix = 2;
+    string address = 1;              // IP:PORT format (e.g., "192.168.1.1:179")
+    optional SessionConfig config = 2;  // Omit for all defaults
 }
 
 message AddPeerResponse {

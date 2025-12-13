@@ -15,8 +15,8 @@
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
     DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetPeersRequest, GetRoutesRequest,
-    GetServerInfoRequest, MaxPrefixSetting, Origin, Peer, PeerStatistics, RemovePeerRequest,
-    RemoveRouteRequest, Route,
+    GetServerInfoRequest, Origin, Peer, PeerStatistics, RemovePeerRequest, RemoveRouteRequest,
+    Route, SessionConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -84,18 +84,15 @@ impl BgpClient {
         Ok((resp.peer, resp.statistics))
     }
 
-    /// Add a new BGP peer
+    /// Add a new BGP peer. Pass None for config to use all defaults.
     pub async fn add_peer(
         &mut self,
         address: String,
-        max_prefix: Option<MaxPrefixSetting>,
+        config: Option<SessionConfig>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .add_peer(AddPeerRequest {
-                address,
-                max_prefix,
-            })
+            .add_peer(AddPeerRequest { address, config })
             .await?
             .into_inner();
 

@@ -15,6 +15,7 @@
 mod common;
 pub use common::*;
 
+use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route};
 use std::net::Ipv4Addr;
 
@@ -325,27 +326,31 @@ async fn test_announce_withdraw_four_node_mesh() {
 async fn test_ibgp_split_horizon() {
     // Linear topology: A--B--C (all same ASN for iBGP)
     // Tests that routes learned via iBGP are not advertised to other iBGP peers
+    // iBGP: all same ASN
     let [mut server1, server2, server3] = chain_servers([
-        start_test_server(
-            65001, // Same ASN
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
-            65001, // Same ASN (iBGP)
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
-            65001, // Same ASN (iBGP)
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.3:0",
             Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -417,15 +422,30 @@ async fn test_as_loop_prevention() {
     // Test that when AS1_A announces a route, it propagates to AS2,
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
     let [mut server1_a, server2, server1_b] = chain_servers([
-        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await,
-        start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), None, "127.0.0.2").await,
-        start_test_server(
-            65001, // Same AS as server1_a
-            Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
+        start_test_server(Config::new(
+            65002,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
+        .await,
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
+        .await, // Same AS as server1_a
     ])
     .await;
 

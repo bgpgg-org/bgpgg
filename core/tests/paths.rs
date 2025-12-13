@@ -31,7 +31,9 @@ mod common;
 pub use common::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AsPathSegment, Origin, Route, UnknownAttribute};
+use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_origin_preservation() {
@@ -41,26 +43,29 @@ async fn test_origin_preservation() {
     // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65003)
     //                          eBGP           eBGP
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65003,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -142,33 +147,37 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65002) -> S4(AS65003)
     //                          eBGP           iBGP           eBGP
     let [server1, server2, server3, server4] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65003,
-            std::net::Ipv4Addr::new(4, 4, 4, 4),
-            None,
-            "127.0.0.4",
-        )
+            "127.0.0.4:0",
+            Ipv4Addr::new(4, 4, 4, 4),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -256,26 +265,29 @@ async fn test_originating_speaker_as_path() {
     // Topology: S1(AS65001) -> S2(AS65001) -> S3(AS65002)
     //                          iBGP           eBGP
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -347,19 +359,21 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // S2 should receive it with AS_SEQUENCE[65001] prepended by S1.
 
     let [server1, server2] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -426,19 +440,21 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     // Note: Per GoBGP implementation, NEXT_HOP is only auto-set when it's unspecified.
     // If explicitly set to a non-zero value, it's preserved.
     let [server1, server2] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -493,26 +509,29 @@ async fn test_next_hop_rewrite_to_ebgp() {
     // When S1 sends a route to S2 via iBGP, S2 preserves NEXT_HOP.
     // When S2 advertises to S3 via eBGP, S2 SHOULD rewrite NEXT_HOP to self.
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -587,26 +606,29 @@ async fn test_local_pref_send_to_ibgp() {
     // - S2 receives via eBGP, DefaultLocalPref policy sets to 100
     // - S3 receives via iBGP with LOCAL_PREF=100 (proves it was in UPDATE)
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65000,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -684,26 +706,29 @@ async fn test_local_pref_not_sent_to_ebgp() {
     // - S2 receives via iBGP with LOCAL_PREF=200
     // - S3 receives via eBGP with LOCAL_PREF=100 (set by policy, NOT from S2)
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -778,26 +803,29 @@ async fn test_med_propagation_over_ibgp() {
     // - S2 receives via eBGP with MED=50
     // - S3 receives via iBGP with MED=50 (proves it was propagated)
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65000,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -872,26 +900,29 @@ async fn test_med_not_propagated_to_other_as() {
     // - S2 receives via eBGP with MED=50
     // - S3 receives via eBGP with MED=None (MED was NOT propagated to different AS)
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65000,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -966,26 +997,29 @@ async fn test_atomic_aggregate_propagation() {
     // - S2 receives via eBGP with ATOMIC_AGGREGATE=true
     // - S3 receives via iBGP with ATOMIC_AGGREGATE=true (proves propagation)
     let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
-            std::net::Ipv4Addr::new(1, 1, 1, 1),
-            None,
-            "127.0.0.1",
-        )
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            None,
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            None,
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            90,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -1070,25 +1104,33 @@ async fn test_unknown_optional_attribute_handling(
     // Topology: FakePeer(S1) -> S2(AS65002) -> S3(AS65003)
     //                            iBGP            eBGP
     let [server2, server3] = &mut chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65002,
-            std::net::Ipv4Addr::new(2, 2, 2, 2),
-            Some(300),
-            "127.0.0.2",
-        )
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            300,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65003,
-            std::net::Ipv4Addr::new(3, 3, 3, 3),
-            Some(300),
-            "127.0.0.3",
-        )
+            "127.0.0.3:0",
+            Ipv4Addr::new(3, 3, 3, 3),
+            300,
+            true,
+        ))
         .await,
     ])
     .await;
 
-    let mut server1 =
-        FakePeer::connect(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300, &server2).await;
+    let mut server1 = FakePeer::connect(
+        None,
+        65002,
+        std::net::Ipv4Addr::new(1, 1, 1, 1),
+        300,
+        &server2,
+    )
+    .await;
 
     let origin_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[0]);
     let as_path_attr = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS_PATH, 0, &[]);

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::grpc::proto::{MaxPrefixAction, MaxPrefixSetting};
+use bgpgg::grpc::proto::{MaxPrefixAction, MaxPrefixSetting, SessionConfig};
 use bgpgg::grpc::BgpClient;
 
 use crate::PeerCommands;
@@ -28,14 +28,17 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
             max_prefix_limit,
             max_prefix_action,
         } => {
-            let max_prefix = max_prefix_limit.map(|limit| MaxPrefixSetting {
-                limit,
-                action: match max_prefix_action.as_str() {
-                    "discard" => MaxPrefixAction::Discard.into(),
-                    _ => MaxPrefixAction::Terminate.into(),
-                },
+            let config = max_prefix_limit.map(|limit| SessionConfig {
+                max_prefix: Some(MaxPrefixSetting {
+                    limit,
+                    action: match max_prefix_action.as_str() {
+                        "discard" => MaxPrefixAction::Discard.into(),
+                        _ => MaxPrefixAction::Terminate.into(),
+                    },
+                }),
+                ..Default::default()
             });
-            match client.add_peer(address, max_prefix).await {
+            match client.add_peer(address, config).await {
                 Ok(message) => println!("✓ {}", message),
                 Err(e) => println!("✗ {}", e.message()),
             }

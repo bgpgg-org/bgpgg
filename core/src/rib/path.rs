@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttribute};
+use crate::bgp::msg_update::{
+    AsPathSegment, AsPathSegmentType, Origin, PathAttribute, UpdateMessage,
+};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -52,6 +54,23 @@ impl Path {
             atomic_aggregate,
             unknown_attrs,
         }
+    }
+
+    /// Create a Path from an UPDATE message. Returns None if required attributes are missing.
+    pub fn from_update_msg(update_msg: &UpdateMessage, source: RouteSource) -> Option<Self> {
+        let origin = update_msg.get_origin()?;
+        let as_path = update_msg.get_as_path()?;
+        let next_hop = update_msg.get_next_hop()?;
+        Some(Path {
+            origin,
+            as_path,
+            next_hop,
+            source,
+            local_pref: update_msg.get_local_pref(),
+            med: update_msg.get_med(),
+            atomic_aggregate: update_msg.get_atomic_aggregate(),
+            unknown_attrs: update_msg.get_unknown_attrs(),
+        })
     }
 
     /// Calculate AS_PATH length for best path selection per RFC 4271
@@ -281,5 +300,38 @@ mod tests {
 
         // Lower peer address should win
         assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_from_update_msg() {
+        let source = RouteSource::Ebgp("10.0.0.1".to_string());
+
+        // Valid UPDATE with all required attrs
+        let update = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![65001],
+            }],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            Some(100),
+            Some(50),
+            true,
+            vec![],
+        );
+        let path = Path::from_update_msg(&update, source.clone());
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert_eq!(path.origin, Origin::IGP);
+        assert_eq!(path.next_hop, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(path.local_pref, Some(100));
+        assert_eq!(path.med, Some(50));
+        assert!(path.atomic_aggregate);
+
+        // Missing required attrs -> None
+        let empty_update = UpdateMessage::new_withdraw(vec![]);
+        assert!(Path::from_update_msg(&empty_update, source).is_none());
     }
 }

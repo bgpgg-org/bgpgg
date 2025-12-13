@@ -17,8 +17,9 @@ use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::peer::{MaxPrefixAction, MaxPrefixSetting};
 use crate::rib::RouteSource;
-use crate::server::{AdminState, MgmtOp};
+use crate::server::{AdminState, MgmtOp, SessionConfig};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -30,6 +31,7 @@ use super::proto::{
     GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
     PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
     RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
+    SessionConfig as ProtoSessionConfig,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -55,6 +57,44 @@ fn to_proto_admin_state(state: AdminState) -> i32 {
     }
 }
 
+/// Convert proto SessionConfig to internal SessionConfig
+fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
+    let defaults = SessionConfig::default();
+    let Some(cfg) = proto else {
+        return defaults;
+    };
+
+    let max_prefix = cfg.max_prefix.map(|p| MaxPrefixSetting {
+        limit: p.limit,
+        action: match p.action {
+            1 => MaxPrefixAction::Discard,
+            _ => MaxPrefixAction::Terminate,
+        },
+    });
+
+    SessionConfig {
+        idle_hold_time: cfg
+            .idle_hold_time_secs
+            .map(Duration::from_secs)
+            .or(defaults.idle_hold_time),
+        damp_peer_oscillations: cfg
+            .damp_peer_oscillations
+            .unwrap_or(defaults.damp_peer_oscillations),
+        allow_automatic_stop: cfg
+            .allow_automatic_stop
+            .unwrap_or(defaults.allow_automatic_stop),
+        passive_mode: cfg.passive_mode.unwrap_or(defaults.passive_mode),
+        delay_open_time: cfg.delay_open_time_secs.map(Duration::from_secs),
+        max_prefix,
+        send_notification_without_open: cfg
+            .send_notification_without_open
+            .unwrap_or(defaults.send_notification_without_open),
+        collision_detect_established_state: cfg
+            .collision_detect_established_state
+            .unwrap_or(defaults.collision_detect_established_state),
+    }
+}
+
 #[derive(Clone)]
 pub struct BgpGrpcService {
     mgmt_request_tx: mpsc::Sender<MgmtOp>,
@@ -75,20 +115,13 @@ impl BgpService for BgpGrpcService {
         let inner = request.into_inner();
         let addr = inner.address;
 
-        // Convert proto MaxPrefixSetting to internal type
-        let max_prefix_setting = inner.max_prefix.map(|proto_setting| MaxPrefixSetting {
-            limit: proto_setting.limit,
-            action: match proto_setting.action {
-                1 => MaxPrefixAction::Discard,
-                _ => MaxPrefixAction::Terminate,
-            },
-        });
+        let session_config = proto_to_session_config(inner.config);
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::AddPeer {
             addr: addr.clone(),
-            max_prefix_setting,
+            session_config,
             response: tx,
         };
 
