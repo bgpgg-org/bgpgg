@@ -34,8 +34,15 @@ pub enum BgpState {
 /// Events now carry necessary data for the FSM to send messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsmEvent {
+    /// Event 1: ManualStart
     ManualStart,
+    /// Event 2: ManualStop
     ManualStop,
+    /// Event 3: AutomaticStart - triggered when IdleHoldTimer expires
+    AutomaticStart,
+    /// Event 8: AutomaticStop - automatic stop based on implementation logic
+    AutomaticStop,
+    /// Event 9: ConnectRetryTimerExpires
     ConnectRetryTimerExpires,
     HoldTimerExpires,
     KeepaliveTimerExpires,
@@ -252,10 +259,13 @@ impl Fsm {
     pub fn handle_event(&mut self, event: &FsmEvent) -> (BgpState, Option<BgpError>) {
         let (new_state, error) = match (&self.state, event) {
             // ===== Idle State =====
+            // Event 1, 3: ManualStart/AutomaticStart -> Connect
             (BgpState::Idle, FsmEvent::ManualStart) => (BgpState::Connect, None),
+            (BgpState::Idle, FsmEvent::AutomaticStart) => (BgpState::Connect, None),
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
+            (BgpState::Connect, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
@@ -264,6 +274,7 @@ impl Fsm {
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
+            (BgpState::Active, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
@@ -271,6 +282,7 @@ impl Fsm {
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, FsmEvent::ManualStop) => (BgpState::Idle, None),
+            (BgpState::OpenSent, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
             (BgpState::OpenSent, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::OpenSent, FsmEvent::TcpConnectionFails) => (BgpState::Active, None),
             (BgpState::OpenSent, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
@@ -278,6 +290,7 @@ impl Fsm {
 
             // ===== OpenConfirm State =====
             (BgpState::OpenConfirm, FsmEvent::ManualStop) => (BgpState::Idle, None),
+            (BgpState::OpenConfirm, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
             (BgpState::OpenConfirm, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::OpenConfirm, FsmEvent::KeepaliveTimerExpires) => {
                 (BgpState::OpenConfirm, None)
@@ -295,6 +308,7 @@ impl Fsm {
 
             // ===== Established State =====
             (BgpState::Established, FsmEvent::ManualStop) => (BgpState::Idle, None),
+            (BgpState::Established, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
             (BgpState::Established, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => {
                 (BgpState::Established, None)
@@ -400,8 +414,12 @@ mod tests {
     fn test_all_valid_state_transitions() {
         // Table of (initial_state, event, expected_state)
         let test_cases = vec![
+            // From Idle
+            (BgpState::Idle, FsmEvent::ManualStart, BgpState::Connect),
+            (BgpState::Idle, FsmEvent::AutomaticStart, BgpState::Connect),
             // From Connect
             (BgpState::Connect, FsmEvent::ManualStop, BgpState::Idle),
+            (BgpState::Connect, FsmEvent::AutomaticStop, BgpState::Idle),
             (
                 BgpState::Connect,
                 FsmEvent::ConnectRetryTimerExpires,
@@ -419,6 +437,7 @@ mod tests {
             ),
             // From Active
             (BgpState::Active, FsmEvent::ManualStop, BgpState::Idle),
+            (BgpState::Active, FsmEvent::AutomaticStop, BgpState::Idle),
             (
                 BgpState::Active,
                 FsmEvent::ConnectRetryTimerExpires,
@@ -431,6 +450,7 @@ mod tests {
             ),
             // From OpenSent
             (BgpState::OpenSent, FsmEvent::ManualStop, BgpState::Idle),
+            (BgpState::OpenSent, FsmEvent::AutomaticStop, BgpState::Idle),
             (
                 BgpState::OpenSent,
                 FsmEvent::HoldTimerExpires,
@@ -461,6 +481,11 @@ mod tests {
             (BgpState::OpenConfirm, FsmEvent::ManualStop, BgpState::Idle),
             (
                 BgpState::OpenConfirm,
+                FsmEvent::AutomaticStop,
+                BgpState::Idle,
+            ),
+            (
+                BgpState::OpenConfirm,
                 FsmEvent::HoldTimerExpires,
                 BgpState::Idle,
             ),
@@ -486,6 +511,11 @@ mod tests {
             ),
             // From Established
             (BgpState::Established, FsmEvent::ManualStop, BgpState::Idle),
+            (
+                BgpState::Established,
+                FsmEvent::AutomaticStop,
+                BgpState::Idle,
+            ),
             (
                 BgpState::Established,
                 FsmEvent::HoldTimerExpires,

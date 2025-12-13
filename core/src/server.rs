@@ -31,6 +31,25 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
+/// Per-peer session configuration.
+/// Includes RFC 4271 Section 8.1 optional attributes and other peer settings.
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1)
+    pub idle_hold_time: Duration,
+    /// Maximum prefix limit settings
+    pub max_prefix: Option<MaxPrefixSetting>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            idle_hold_time: Duration::from_secs(30),
+            max_prefix: None,
+        }
+    }
+}
+
 /// Administrative state of a peer, controls auto-reconnect behavior.
 /// Follows GoBGP's approach: only reconnect when Up.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -48,7 +67,7 @@ pub enum AdminState {
 pub enum MgmtOp {
     AddPeer {
         addr: String,
-        max_prefix_setting: Option<MaxPrefixSetting>,
+        session_config: SessionConfig,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePeer {
@@ -149,9 +168,10 @@ pub struct PeerInfo {
     pub bgp_id: Option<u32>,
     pub import_policy: Option<Policy>,
     pub export_policy: Option<Policy>,
-    pub max_prefix_setting: Option<MaxPrefixSetting>,
     pub state: BgpState,
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
+    /// Per-peer session configuration
+    pub session_config: SessionConfig,
 }
 
 impl PeerInfo {
@@ -178,9 +198,19 @@ fn spawn_outbound_connector(
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
     connect_retry_secs: u64,
+    idle_hold_time: Duration,
     server_tx: mpsc::UnboundedSender<ServerOp>,
 ) {
     tokio::spawn(async move {
+        // IdleHoldTimer - wait before first connection attempt (RFC 4271 8.1.1)
+        if !idle_hold_time.is_zero() {
+            debug!("waiting idle hold time", "peer_addr" => peer_addr, "secs" => idle_hold_time.as_secs());
+            tokio::time::sleep(idle_hold_time).await;
+            if server_tx.is_closed() {
+                return;
+            }
+        }
+
         let retry_duration = Duration::from_secs(connect_retry_secs);
 
         loop {
@@ -321,9 +351,9 @@ impl BgpServer {
             bgp_id: None,
             import_policy: None,
             export_policy: None,
-            max_prefix_setting: None,
             state: initial_state,
             peer_tx: Some(peer_tx),
+            session_config: SessionConfig::default(),
         };
 
         self.peers.insert(peer_ip.clone(), entry);
@@ -334,10 +364,10 @@ impl BgpServer {
         match req {
             MgmtOp::AddPeer {
                 addr,
-                max_prefix_setting,
+                session_config,
                 response,
             } => {
-                self.handle_add_peer(addr, max_prefix_setting, response, local_addr)
+                self.handle_add_peer(addr, session_config, response, local_addr)
                     .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
@@ -448,11 +478,18 @@ impl BgpServer {
                 }
 
                 // Check if peer is configured or dynamic
-                let (is_dynamic, admin_state, port) = self
+                let (is_dynamic, admin_state, port, idle_hold_time) = self
                     .peers
                     .get(&peer_ip)
-                    .map(|p| (p.dynamic, p.admin_state, p.port))
-                    .unwrap_or((true, AdminState::Up, None));
+                    .map(|p| {
+                        (
+                            p.dynamic,
+                            p.admin_state,
+                            p.port,
+                            p.session_config.idle_hold_time,
+                        )
+                    })
+                    .unwrap_or((true, AdminState::Up, None, Duration::ZERO));
 
                 if is_dynamic {
                     // Dynamic peer: remove entirely
@@ -477,6 +514,7 @@ impl BgpServer {
                                     peer_addr,
                                     local_addr,
                                     self.config.connect_retry_secs,
+                                    idle_hold_time,
                                     self.op_tx.clone(),
                                 );
                             }
@@ -513,7 +551,7 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        max_prefix_setting: Option<MaxPrefixSetting>,
+        session_config: SessionConfig,
         response: oneshot::Sender<Result<(), String>>,
         local_addr: SocketAddr,
     ) {
@@ -563,7 +601,7 @@ impl BgpServer {
         }
 
         let (peer_tx, initial_state) =
-            self.spawn_peer_from_stream(stream, &peer_ip, max_prefix_setting);
+            self.spawn_peer_from_stream(stream, &peer_ip, session_config.max_prefix);
 
         // Add configured peer (persists on disconnect)
         let entry = PeerInfo {
@@ -574,9 +612,9 @@ impl BgpServer {
             bgp_id: None,
             import_policy: None,
             export_policy: None,
-            max_prefix_setting,
             state: initial_state,
             peer_tx: Some(peer_tx),
+            session_config,
         };
 
         self.peers.insert(peer_ip.clone(), entry);
@@ -591,19 +629,18 @@ impl BgpServer {
         let peer_ip = peer_addr.ip().to_string();
 
         // Extract info we need, checking peer exists and is valid
-        let (admin_state, has_active_conn, bgp_id, max_prefix_setting) =
-            match self.peers.get(&peer_ip) {
-                Some(p) => (
-                    p.admin_state,
-                    p.peer_tx.as_ref().map_or(false, |tx| !tx.is_closed()),
-                    p.bgp_id,
-                    p.max_prefix_setting,
-                ),
-                None => {
-                    debug!("ignoring outbound connection for removed peer", "peer_ip" => &peer_ip);
-                    return;
-                }
-            };
+        let (admin_state, has_active_conn, bgp_id, max_prefix) = match self.peers.get(&peer_ip) {
+            Some(p) => (
+                p.admin_state,
+                p.peer_tx.as_ref().map_or(false, |tx| !tx.is_closed()),
+                p.bgp_id,
+                p.session_config.max_prefix,
+            ),
+            None => {
+                debug!("ignoring outbound connection for removed peer", "peer_ip" => &peer_ip);
+                return;
+            }
+        };
 
         if admin_state != AdminState::Up {
             debug!("ignoring outbound connection for non-Up peer", "peer_ip" => &peer_ip, "state" => format!("{:?}", admin_state));
@@ -628,7 +665,7 @@ impl BgpServer {
             }
         }
 
-        let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, max_prefix_setting);
+        let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, max_prefix);
 
         // Update existing peer entry
         if let Some(entry) = self.peers.get_mut(&peer_ip) {

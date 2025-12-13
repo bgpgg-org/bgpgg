@@ -17,8 +17,9 @@ use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::fsm::BgpState;
 use crate::peer::{MaxPrefixAction, MaxPrefixSetting};
 use crate::rib::RouteSource;
-use crate::server::{AdminState, MgmtOp};
+use crate::server::{AdminState, MgmtOp, SessionConfig};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -76,7 +77,7 @@ impl BgpService for BgpGrpcService {
         let addr = inner.address;
 
         // Convert proto MaxPrefixSetting to internal type
-        let max_prefix_setting = inner.max_prefix.map(|proto_setting| MaxPrefixSetting {
+        let max_prefix = inner.max_prefix.map(|proto_setting| MaxPrefixSetting {
             limit: proto_setting.limit,
             action: match proto_setting.action {
                 1 => MaxPrefixAction::Discard,
@@ -84,11 +85,21 @@ impl BgpService for BgpGrpcService {
             },
         });
 
+        let idle_hold_time = inner
+            .idle_hold_time_secs
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| SessionConfig::default().idle_hold_time);
+
+        let session_config = SessionConfig {
+            idle_hold_time,
+            max_prefix,
+        };
+
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::AddPeer {
             addr: addr.clone(),
-            max_prefix_setting,
+            session_config,
             response: tx,
         };
 

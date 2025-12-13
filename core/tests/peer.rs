@@ -664,9 +664,10 @@ async fn test_auto_reconnect() {
     let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
+    // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
         .client
-        .add_peer(format!("127.0.0.2:{}", port), None)
+        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0))
         .await
         .unwrap();
 
@@ -706,6 +707,55 @@ async fn test_auto_reconnect() {
         "Timeout waiting for auto-reconnect",
     )
     .await;
+}
+
+/// Test that idle_hold_time delays reconnection attempts
+#[tokio::test]
+async fn test_idle_hold_time_delay() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(3), "127.0.0.1").await;
+    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let idle_hold_secs = 2u64;
+
+    // Add peer with idle_hold_time
+    server
+        .client
+        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(idle_hold_secs))
+        .await
+        .unwrap();
+
+    // Accept first connection and establish
+    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        "Timeout waiting for Established",
+    )
+    .await;
+
+    // Disconnect and record time
+    peer.stream.shutdown().await.ok();
+    let disconnect_time = std::time::Instant::now();
+
+    // Poll until peer leaves Idle (reconnect attempt started)
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state != BgpState::Idle as i32
+        },
+        "Timeout waiting for reconnect attempt",
+    )
+    .await;
+
+    // Verify that at least idle_hold_time elapsed before reconnect
+    let elapsed = disconnect_time.elapsed();
+    assert!(
+        elapsed.as_secs() >= idle_hold_secs,
+        "Reconnect happened too early: {:?} < {}s",
+        elapsed,
+        idle_hold_secs
+    );
 }
 
 #[tokio::test]
