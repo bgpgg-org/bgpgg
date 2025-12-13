@@ -52,6 +52,9 @@ pub struct SessionConfig {
     pub delay_open_time: Option<Duration>,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
+    /// SendNOTIFICATIONwithoutOPEN - allow sending NOTIFICATION before OPEN (RFC 4271 8.2.1.5).
+    /// Default false: OPEN must be sent before NOTIFICATION.
+    pub send_notification_without_open: bool,
 }
 
 /// Maximum idle hold time when damping (RFC 4271 8.1.1 example uses 120s)
@@ -66,6 +69,7 @@ impl Default for SessionConfig {
             passive_mode: false,
             delay_open_time: None,
             max_prefix: None,
+            send_notification_without_open: false,
         }
     }
 }
@@ -82,6 +86,7 @@ impl From<&PeerConfig> for SessionConfig {
                 limit,
                 action: MaxPrefixAction::Terminate,
             }),
+            send_notification_without_open: pc.send_notification_without_open,
         }
     }
 }
@@ -1102,6 +1107,7 @@ mod tests {
                 passive_mode: false,
                 delay_open_time: None,
                 max_prefix: None,
+                send_notification_without_open: false,
             },
             consecutive_down_count: down_count,
         }

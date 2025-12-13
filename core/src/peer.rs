@@ -259,6 +259,11 @@ impl Peer {
         self.fsm.state()
     }
 
+    /// Check if NOTIFICATION can be sent (RFC 4271 8.2.1.5).
+    fn can_send_notification(&self) -> bool {
+        self.session_config.send_notification_without_open || self.statistics.open_sent > 0
+    }
+
     /// Handle an FSM event and perform state transitions
     async fn handle_fsm_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
@@ -422,7 +427,15 @@ impl Peer {
     }
 
     /// Send NOTIFICATION message (RFC 4271 Section 6.1)
+    ///
+    /// RFC 4271 8.2.1.5: SendNOTIFICATIONwithoutOPEN controls whether NOTIFICATION
+    /// can be sent before OPEN. If disabled (default), NOTIFICATION is only sent
+    /// after OPEN has been sent.
     async fn send_notification(&mut self, notif_msg: NotifcationMessage) -> Result<(), io::Error> {
+        if !self.can_send_notification() {
+            warn!("skipping NOTIFICATION (OPEN not sent)", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));
+            return Ok(());
+        }
         self.tcp_tx.write_all(&notif_msg.serialize()).await?;
         self.statistics.notification_sent += 1;
         warn!("sent NOTIFICATION", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));

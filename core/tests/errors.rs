@@ -29,6 +29,8 @@ use bgpgg::grpc::proto::{
     SessionConfig,
 };
 use std::net::Ipv4Addr;
+use tokio::io::AsyncReadExt;
+use tokio::time::{timeout, Duration};
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
 fn build_raw_open(
@@ -1379,4 +1381,48 @@ async fn test_connection_collision_detection() {
         !peers_b[0].dynamic,
         "Server B (higher BGP ID) should have configured peer (kept outgoing to A)"
     );
+}
+
+/// RFC 4271 8.1.1: SendNOTIFICATIONwithoutOPEN
+#[tokio::test]
+async fn test_send_notification_without_open() {
+    for flag in [true, false] {
+        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+        config.peers.push(bgpgg::config::PeerConfig {
+            address: "127.0.0.1:179".to_string(),
+            passive_mode: true,
+            send_notification_without_open: flag,
+            delay_open_time_secs: Some(60), // Delay OPEN so we can send invalid msg first
+            ..Default::default()
+        });
+        let server = start_test_server(config).await;
+
+        let mut peer = FakePeer::connect_raw(None, &server).await;
+
+        // Send invalid marker before OPEN is sent (delay_open delays it)
+        let mut corrupted_marker = BGP_MARKER;
+        corrupted_marker[0] = 0x00;
+        let msg = build_raw_open(
+            65002,
+            300,
+            0x02020202,
+            None,
+            Some(corrupted_marker),
+            None,
+            None,
+        );
+        peer.send_raw(&msg).await;
+
+        let mut buf = [0u8; 1];
+        let result = timeout(Duration::from_millis(100), peer.stream.read(&mut buf)).await;
+
+        if flag {
+            assert!(result.is_ok(), "flag={}: should receive notification", flag);
+        } else {
+            match result {
+                Ok(Ok(0)) | Err(_) => {} // EOF or timeout - no notification sent
+                other => panic!("flag={}: unexpected {:?}", flag, other),
+            }
+        }
+    }
 }

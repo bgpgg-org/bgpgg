@@ -37,6 +37,10 @@ pub struct PeerConfig {
     pub delay_open_time_secs: Option<u64>,
     #[serde(default)]
     pub max_prefix: Option<u32>,
+    /// SendNOTIFICATIONwithoutOPEN - allow sending NOTIFICATION before OPEN (RFC 4271 8.2.1.5).
+    /// Default false: OPEN must be sent before NOTIFICATION.
+    #[serde(default)]
+    pub send_notification_without_open: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -65,6 +69,7 @@ impl Default for PeerConfig {
             passive_mode: default_passive_mode(),
             delay_open_time_secs: None,
             max_prefix: None,
+            send_notification_without_open: false,
         }
     }
 }

@@ -45,6 +45,7 @@ message SessionConfig {
     optional bool passive_mode = 4;               // Wait for remote to connect (default: false)
     optional uint64 delay_open_time_secs = 5;     // Delay before sending OPEN. Unset disables
     optional MaxPrefixSetting max_prefix = 6;
+    optional bool send_notification_without_open = 7;  // Allow NOTIFICATION before OPEN (default: false)
 }
 
 // Add peer request/response

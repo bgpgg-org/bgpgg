@@ -86,6 +86,9 @@ fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
         passive_mode: cfg.passive_mode.unwrap_or(defaults.passive_mode),
         delay_open_time: cfg.delay_open_time_secs.map(Duration::from_secs),
         max_prefix,
+        send_notification_without_open: cfg
+            .send_notification_without_open
+            .unwrap_or(defaults.send_notification_without_open),
     }
 }
 
