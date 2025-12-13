@@ -37,6 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 pub struct SessionConfig {
     /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1)
     pub idle_hold_time: Duration,
+    /// AllowAutomaticStart - enable automatic restart after disconnect (RFC 4271 8.1.1)
+    pub allow_automatic_start: bool,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
 }
@@ -45,6 +47,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             idle_hold_time: Duration::from_secs(30),
+            allow_automatic_start: true,
             max_prefix: None,
         }
     }
@@ -478,18 +481,12 @@ impl BgpServer {
                 }
 
                 // Check if peer is configured or dynamic
-                let (is_dynamic, admin_state, port, idle_hold_time) = self
+                let default_config = SessionConfig::default();
+                let (is_dynamic, admin_state, port, session_config) = self
                     .peers
                     .get(&peer_ip)
-                    .map(|p| {
-                        (
-                            p.dynamic,
-                            p.admin_state,
-                            p.port,
-                            p.session_config.idle_hold_time,
-                        )
-                    })
-                    .unwrap_or((true, AdminState::Up, None, Duration::ZERO));
+                    .map(|p| (p.dynamic, p.admin_state, p.port, p.session_config.clone()))
+                    .unwrap_or((true, AdminState::Up, None, default_config));
 
                 if is_dynamic {
                     // Dynamic peer: remove entirely
@@ -503,8 +500,8 @@ impl BgpServer {
                     }
                     info!("peer session ended", "peer_ip" => &peer_ip);
 
-                    // AutomaticStart: spawn connector only if AdminState::Up
-                    if admin_state == AdminState::Up {
+                    // AutomaticStart: spawn connector only if enabled and AdminState::Up
+                    if session_config.allow_automatic_start && admin_state == AdminState::Up {
                         if let Some(port) = port {
                             if let Ok(peer_addr) =
                                 format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
@@ -514,7 +511,7 @@ impl BgpServer {
                                     peer_addr,
                                     local_addr,
                                     self.config.connect_retry_secs,
-                                    idle_hold_time,
+                                    session_config.idle_hold_time,
                                     self.op_tx.clone(),
                                 );
                             }

@@ -961,9 +961,11 @@ async fn test_max_prefix_limit() {
         // Server2 connects to Server1 with max_prefix limit of 2
         server2
             .client
-            .add_peer(
+            .add_peer_with_config(
                 format!("127.0.0.1:{}", server1.bgp_port),
                 Some(MaxPrefixSetting { limit: 2, action }),
+                None,
+                None,
             )
             .await
             .expect("Failed to add peer");
@@ -1123,12 +1125,12 @@ async fn test_connection_collision_detection() {
     // Both servers add each other as peers simultaneously - creates collision
     server_a
         .client
-        .add_peer(format!("127.0.0.2:{}", server_b.bgp_port), None)
+        .add_peer(format!("127.0.0.2:{}", server_b.bgp_port))
         .await
         .expect("Failed to add peer B to A");
     server_b
         .client
-        .add_peer(format!("127.0.0.1:{}", server_a.bgp_port), None)
+        .add_peer(format!("127.0.0.1:{}", server_a.bgp_port))
         .await
         .expect("Failed to add peer A to B");
 

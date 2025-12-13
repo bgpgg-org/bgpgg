@@ -84,21 +84,18 @@ impl BgpClient {
         Ok((resp.peer, resp.statistics))
     }
 
-    /// Add a new BGP peer
-    pub async fn add_peer(
-        &mut self,
-        address: String,
-        max_prefix: Option<MaxPrefixSetting>,
-    ) -> Result<String, tonic::Status> {
-        self.add_peer_with_config(address, max_prefix, None).await
+    /// Add a new BGP peer with defaults
+    pub async fn add_peer(&mut self, address: String) -> Result<String, tonic::Status> {
+        self.add_peer_with_config(address, None, None, None).await
     }
 
-    /// Add a new BGP peer with custom idle_hold_time
+    /// Add a new BGP peer with custom session config
     pub async fn add_peer_with_config(
         &mut self,
         address: String,
         max_prefix: Option<MaxPrefixSetting>,
         idle_hold_time_secs: Option<u64>,
+        allow_automatic_start: Option<bool>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
@@ -106,6 +103,7 @@ impl BgpClient {
                 address,
                 max_prefix,
                 idle_hold_time_secs,
+                allow_automatic_start,
             })
             .await?
             .into_inner();

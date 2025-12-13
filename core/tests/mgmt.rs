@@ -31,7 +31,7 @@ async fn test_add_peer_failure() {
     // Add peer via gRPC (should fail - no peer listening at that address)
     let result = server1
         .client
-        .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000), None)
+        .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000))
         .await;
     assert!(result.is_err());
 }
@@ -44,7 +44,7 @@ async fn test_add_peer_success() {
     // Add peer via gRPC (should succeed - server2 is listening)
     let result = server1
         .client
-        .add_peer(format!("127.0.0.1:{}", server2.bgp_port), None)
+        .add_peer(format!("127.0.0.1:{}", server2.bgp_port))
         .await;
     assert!(result.is_ok());
 

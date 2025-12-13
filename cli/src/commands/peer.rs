@@ -35,7 +35,10 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                     _ => MaxPrefixAction::Terminate.into(),
                 },
             });
-            match client.add_peer(address, max_prefix).await {
+            match client
+                .add_peer_with_config(address, max_prefix, None, None)
+                .await
+            {
                 Ok(message) => println!("✓ {}", message),
                 Err(e) => println!("✗ {}", e.message()),
             }

@@ -16,6 +16,26 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
 
+/// Peer configuration in YAML config file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PeerConfig {
+    pub address: String,
+    #[serde(default = "default_idle_hold_time")]
+    pub idle_hold_time_secs: u64,
+    #[serde(default = "default_allow_automatic_start")]
+    pub allow_automatic_start: bool,
+    #[serde(default)]
+    pub max_prefix: Option<u32>,
+}
+
+fn default_idle_hold_time() -> u64 {
+    30
+}
+
+fn default_allow_automatic_start() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub asn: u16,
@@ -27,6 +47,8 @@ pub struct Config {
     pub hold_time_secs: u64,
     #[serde(default = "default_connect_retry_time")]
     pub connect_retry_secs: u64,
+    #[serde(default)]
+    pub peers: Vec<PeerConfig>,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -51,6 +73,7 @@ impl Config {
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs,
             connect_retry_secs: default_connect_retry_time(),
+            peers: Vec::new(),
         }
     }
 
@@ -83,6 +106,7 @@ impl Default for Config {
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs: default_hold_time(),
             connect_retry_secs: default_connect_retry_time(),
+            peers: Vec::new(),
         }
     }
 }

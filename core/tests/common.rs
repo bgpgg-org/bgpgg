@@ -429,36 +429,36 @@ pub async fn setup_two_ases_with_ebgp(
     // S1 connects to S2, S3, and S4
     server1
         .client
-        .add_peer(format!("127.0.0.2:{}", server2.bgp_port), None)
+        .add_peer(format!("127.0.0.2:{}", server2.bgp_port))
         .await
         .expect("Failed to add peer 2 to server 1");
     server1
         .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port), None)
+        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 1");
     server1
         .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port), None)
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 1");
 
     // S2 connects to S3 and S4 (already connected to S1)
     server2
         .client
-        .add_peer(format!("127.0.0.3:{}", server3.bgp_port), None)
+        .add_peer(format!("127.0.0.3:{}", server3.bgp_port))
         .await
         .expect("Failed to add peer 3 to server 2");
     server2
         .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port), None)
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 2");
 
     // S3 connects to S4 (already connected to S1 and S2)
     server3
         .client
-        .add_peer(format!("127.0.0.4:{}", server4.bgp_port), None)
+        .add_peer(format!("127.0.0.4:{}", server4.bgp_port))
         .await
         .expect("Failed to add peer 4 to server 3");
 
@@ -466,26 +466,26 @@ pub async fn setup_two_ases_with_ebgp(
     // S5 connects to S6 and S7
     server5
         .client
-        .add_peer(format!("127.0.0.6:{}", server6.bgp_port), None)
+        .add_peer(format!("127.0.0.6:{}", server6.bgp_port))
         .await
         .expect("Failed to add peer 6 to server 5");
     server5
         .client
-        .add_peer(format!("127.0.0.7:{}", server7.bgp_port), None)
+        .add_peer(format!("127.0.0.7:{}", server7.bgp_port))
         .await
         .expect("Failed to add peer 7 to server 5");
 
     // S6 connects to S7 (already connected to S5)
     server6
         .client
-        .add_peer(format!("127.0.0.7:{}", server7.bgp_port), None)
+        .add_peer(format!("127.0.0.7:{}", server7.bgp_port))
         .await
         .expect("Failed to add peer 7 to server 6");
 
     // Bridge connection: S4 (AS65001) to S5 (AS65002) - eBGP
     server4
         .client
-        .add_peer(format!("127.0.0.5:{}", server5.bgp_port), None)
+        .add_peer(format!("127.0.0.5:{}", server5.bgp_port))
         .await
         .expect("Failed to add eBGP bridge peer 5 to server 4");
 
@@ -772,6 +772,20 @@ where
     poll_until_with_timeout(check, timeout_message, 100).await;
 }
 
+/// Poll to verify a condition stays true for a duration.
+/// Panics immediately if condition becomes false.
+pub async fn poll_while<F, Fut>(check: F, duration: Duration, fail_message: &str)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = std::time::Instant::now();
+    while start.elapsed() < duration {
+        assert!(check().await, "{}", fail_message);
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Verify peer statistics
 ///
 /// # Arguments
@@ -840,7 +854,7 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
 
         servers[i]
             .client
-            .add_peer(format!("{}:{}", next_address, next_port), None)
+            .add_peer(format!("{}:{}", next_address, next_port))
             .await
             .expect(&format!("Failed to add peer {} to server {}", i + 1, i));
     }
@@ -907,7 +921,7 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
 
             servers[i]
                 .client
-                .add_peer(format!("{}:{}", peer_address, peer_port), None)
+                .add_peer(format!("{}:{}", peer_address, peer_port))
                 .await
                 .expect(&format!("Failed to add peer {} to server {}", j, i));
         }

@@ -85,13 +85,18 @@ impl BgpService for BgpGrpcService {
             },
         });
 
+        let default_config = SessionConfig::default();
         let idle_hold_time = inner
             .idle_hold_time_secs
             .map(Duration::from_secs)
-            .unwrap_or_else(|| SessionConfig::default().idle_hold_time);
+            .unwrap_or(default_config.idle_hold_time);
+        let allow_automatic_start = inner
+            .allow_automatic_start
+            .unwrap_or(default_config.allow_automatic_start);
 
         let session_config = SessionConfig {
             idle_hold_time,
+            allow_automatic_start,
             max_prefix,
         };
 

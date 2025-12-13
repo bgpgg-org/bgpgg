@@ -42,6 +42,7 @@ message AddPeerRequest {
     string address = 1;  // IP:PORT format (e.g., "192.168.1.1:179")
     optional MaxPrefixSetting max_prefix = 2;
     optional uint64 idle_hold_time_secs = 3;  // Delay before auto-reconnect (default: 30s)
+    optional bool allow_automatic_start = 4;  // Auto-reconnect after disconnect (default: true)
 }
 
 message AddPeerResponse {

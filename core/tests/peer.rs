@@ -633,7 +633,7 @@ async fn test_peer_crash_and_recover() {
         // Server2 reconnects to Server1
         server2
             .client
-            .add_peer(format!("127.0.0.1:{}", server2_port), None)
+            .add_peer(format!("127.0.0.1:{}", server2_port))
             .await
             .expect("Failed to re-add peer after crash");
 
@@ -667,7 +667,7 @@ async fn test_auto_reconnect() {
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
         .client
-        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0))
+        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), None)
         .await
         .unwrap();
 
@@ -722,7 +722,12 @@ async fn test_idle_hold_time_delay() {
     // Add peer with idle_hold_time
     server
         .client
-        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(idle_hold_secs))
+        .add_peer_with_config(
+            format!("127.0.0.2:{}", port),
+            None,
+            Some(idle_hold_secs),
+            None,
+        )
         .await
         .unwrap();
 
@@ -756,6 +761,63 @@ async fn test_idle_hold_time_delay() {
         elapsed,
         idle_hold_secs
     );
+}
+
+/// Test that allow_automatic_start=false prevents auto-reconnect
+#[tokio::test]
+async fn test_allow_automatic_start_false() {
+    let mut server =
+        start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(3), "127.0.0.1").await;
+    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Add peer with allow_automatic_start=false
+    server
+        .client
+        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), Some(false))
+        .await
+        .unwrap();
+
+    // Accept connection and establish
+    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    poll_until(
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        "Timeout waiting for Established",
+    )
+    .await;
+
+    // Disconnect
+    peer.stream.shutdown().await.ok();
+
+    // Wait for peer to go Idle (ASN preserved from previous session)
+    poll_until(
+        || async {
+            verify_peers(
+                &server,
+                vec![Peer {
+                    address: peer.address.clone(),
+                    asn: peer.asn as u32,
+                    state: BgpState::Idle as i32,
+                    admin_state: AdminState::Up.into(),
+                    dynamic: false,
+                }],
+            )
+            .await
+        },
+        "Timeout waiting for Idle state",
+    )
+    .await;
+
+    // Verify peer stays in Idle (no auto-reconnect) for 3 seconds
+    poll_while(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        std::time::Duration::from_secs(3),
+        "Peer should stay in Idle with allow_automatic_start=false",
+    )
+    .await;
 }
 
 #[tokio::test]
