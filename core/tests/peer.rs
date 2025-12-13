@@ -683,6 +683,7 @@ async fn test_auto_reconnect() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -748,6 +749,7 @@ async fn test_idle_hold_time_delay() {
             format!("127.0.0.2:{}", port),
             None,
             Some(idle_hold_secs),
+            None,
             None,
             None,
             None,
@@ -819,6 +821,7 @@ async fn test_allow_automatic_start_false() {
             None,
             Some(0),
             Some(false),
+            None,
             None,
             None,
         )
@@ -930,6 +933,7 @@ async fn test_damp_peer_oscillations() {
             Some(true),
             Some(true),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -968,11 +972,8 @@ async fn test_reject_unconfigured_peer() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, false);
     config.peers.push(bgpgg::config::PeerConfig {
         address: "127.0.0.2:179".to_string(),
-        idle_hold_time_secs: 30,
-        allow_automatic_start: false,
-        damp_peer_oscillations: true,
-        allow_automatic_stop: true,
-        max_prefix: None,
+        passive_mode: true,
+        ..Default::default()
     });
     let server = start_test_server(config).await;
 
@@ -1009,4 +1010,65 @@ async fn test_reject_unconfigured_peer() {
     let peers = server.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].address, "127.0.0.2");
+}
+
+/// Test PassiveTcpEstablishment - server waits for remote to connect (RFC 4271 8.1.1)
+#[tokio::test]
+async fn test_passive_mode() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Add peer with passive_mode=true
+    server
+        .client
+        .add_peer_with_config(
+            "127.0.0.2:179".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true), // passive
+        )
+        .await
+        .unwrap();
+
+    // Verify server does NOT initiate connection (stays in Idle for 2 seconds)
+    poll_while(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        std::time::Duration::from_secs(2),
+        "Passive peer should stay in Idle",
+    )
+    .await;
+
+    // Remote peer connects - should be accepted and establish
+    let fake_peer = FakePeer::connect(
+        Some("127.0.0.2"),
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        &server,
+    )
+    .await;
+
+    poll_until(
+        || async {
+            verify_peers(
+                &server,
+                vec![fake_peer.to_peer(BgpState::Established, true)],
+            )
+            .await
+        },
+        "Passive peer should establish when remote connects",
+    )
+    .await;
 }

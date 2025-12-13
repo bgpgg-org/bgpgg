@@ -46,6 +46,8 @@ pub struct SessionConfig {
     pub damp_peer_oscillations: bool,
     /// AllowAutomaticStop - enable automatic stop by implementation logic (RFC 4271 8.1.1)
     pub allow_automatic_stop: bool,
+    /// Passive mode - wait for remote peer to initiate connection (RFC 4271 8.1.1)
+    pub passive_mode: bool,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
 }
@@ -60,6 +62,7 @@ impl Default for SessionConfig {
             allow_automatic_start: true,
             damp_peer_oscillations: true,
             allow_automatic_stop: true,
+            passive_mode: false,
             max_prefix: None,
         }
     }
@@ -72,6 +75,7 @@ impl From<&PeerConfig> for SessionConfig {
             allow_automatic_start: pc.allow_automatic_start,
             damp_peer_oscillations: pc.damp_peer_oscillations,
             allow_automatic_stop: pc.allow_automatic_stop,
+            passive_mode: pc.passive_mode,
             max_prefix: pc.max_prefix.map(|limit| MaxPrefixSetting {
                 limit,
                 action: MaxPrefixAction::Terminate,
@@ -360,18 +364,23 @@ impl BgpServer {
                 continue;
             };
             let peer_ip = peer_addr.ip().to_string();
+            let session_config = SessionConfig::from(peer_cfg);
+            let passive = session_config.passive_mode;
             self.peers.insert(
                 peer_ip.clone(),
-                PeerInfo::new_configured(peer_addr.port(), SessionConfig::from(peer_cfg)),
+                PeerInfo::new_configured(peer_addr.port(), session_config),
             );
-            spawn_outbound_connector(
-                peer_addr,
-                local_addr,
-                self.config.connect_retry_secs,
-                Duration::ZERO,
-                self.op_tx.clone(),
-            );
-            info!("configured peer", "peer_ip" => &peer_ip);
+            // RFC 4271 8.1.1: PassiveTcpEstablishment - don't initiate connection
+            if !passive {
+                spawn_outbound_connector(
+                    peer_addr,
+                    local_addr,
+                    self.config.connect_retry_secs,
+                    Duration::ZERO,
+                    self.op_tx.clone(),
+                );
+            }
+            info!("configured peer", "peer_ip" => &peer_ip, "passive" => passive);
         }
 
         loop {
@@ -598,10 +607,11 @@ impl BgpServer {
                     let admin_state = peer.admin_state;
                     let port = peer.port;
                     let allow_automatic_start = peer.session_config.allow_automatic_start;
+                    let passive = peer.session_config.passive_mode;
                     info!("peer session ended", "peer_ip" => &peer_ip, "idle_hold_time" => idle_hold_time.as_secs());
 
-                    // AutomaticStart: spawn connector only if enabled and AdminState::Up
-                    if allow_automatic_start && admin_state == AdminState::Up {
+                    // AutomaticStart: spawn connector only if enabled, not passive, and AdminState::Up
+                    if allow_automatic_start && !passive && admin_state == AdminState::Up {
                         if let Some(port) = port {
                             if let Ok(peer_addr) =
                                 format!("{}:{}", peer_ip, port).parse::<SocketAddr>()
@@ -663,6 +673,17 @@ impl BgpServer {
             }
         };
 
+        let peer_ip = peer_addr.ip().to_string();
+
+        // RFC 4271 8.1.1: PassiveTcpEstablishment - wait for remote to connect
+        if session_config.passive_mode {
+            let entry = PeerInfo::new_configured(peer_addr.port(), session_config);
+            self.peers.insert(peer_ip.clone(), entry);
+            info!("passive peer added", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+            let _ = response.send(Ok(()));
+            return;
+        }
+
         // Create socket, bind to local address, and connect to peer
         let stream = match create_and_bind_tcp_socket(local_addr, peer_addr).await {
             Ok(s) => s,
@@ -673,7 +694,6 @@ impl BgpServer {
             }
         };
 
-        let peer_ip = peer_addr.ip().to_string();
         info!("connected to peer", "peer_ip" => &peer_ip);
 
         // RFC 4271 Section 6.8: Connection Collision Detection
@@ -1057,6 +1077,7 @@ mod tests {
                 allow_automatic_start: true,
                 damp_peer_oscillations: damp,
                 allow_automatic_stop: true,
+                passive_mode: false,
                 max_prefix: None,
             },
             consecutive_down_count: down_count,

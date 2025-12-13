@@ -19,6 +19,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
+    #[serde(default)]
     pub address: String,
     #[serde(default = "default_idle_hold_time")]
     pub idle_hold_time_secs: u64,
@@ -28,6 +29,8 @@ pub struct PeerConfig {
     pub damp_peer_oscillations: bool,
     #[serde(default = "default_allow_automatic_stop")]
     pub allow_automatic_stop: bool,
+    #[serde(default = "default_passive_mode")]
+    pub passive_mode: bool,
     #[serde(default)]
     pub max_prefix: Option<u32>,
 }
@@ -46,6 +49,24 @@ fn default_damp_peer_oscillations() -> bool {
 
 fn default_allow_automatic_stop() -> bool {
     true
+}
+
+fn default_passive_mode() -> bool {
+    false
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            idle_hold_time_secs: default_idle_hold_time(),
+            allow_automatic_start: default_allow_automatic_start(),
+            damp_peer_oscillations: default_damp_peer_oscillations(),
+            allow_automatic_stop: default_allow_automatic_stop(),
+            passive_mode: default_passive_mode(),
+            max_prefix: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -36,7 +36,7 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                 },
             });
             match client
-                .add_peer_with_config(address, max_prefix, None, None, None, None)
+                .add_peer_with_config(address, max_prefix, None, None, None, None, None)
                 .await
             {
                 Ok(message) => println!("✓ {}", message),

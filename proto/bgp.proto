@@ -45,6 +45,7 @@ message AddPeerRequest {
     optional bool allow_automatic_start = 4;  // Auto-reconnect after disconnect (default: true)
     optional bool damp_peer_oscillations = 5; // Exponential backoff on failures (default: true)
     optional bool allow_automatic_stop = 6;   // Auto-stop on max prefix exceeded (default: true)
+    optional bool passive_mode = 7; // Wait for remote to connect (default: false)
 }
 
 message AddPeerResponse {
