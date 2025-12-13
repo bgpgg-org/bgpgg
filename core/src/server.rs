@@ -41,6 +41,8 @@ pub struct SessionConfig {
     pub allow_automatic_start: bool,
     /// DampPeerOscillations - use exponential backoff on failures (RFC 4271 8.1.1)
     pub damp_peer_oscillations: bool,
+    /// AllowAutomaticStop - enable automatic stop by implementation logic (RFC 4271 8.1.1)
+    pub allow_automatic_stop: bool,
     /// Maximum prefix limit settings
     pub max_prefix: Option<MaxPrefixSetting>,
 }
@@ -54,6 +56,7 @@ impl Default for SessionConfig {
             idle_hold_time: Duration::from_secs(30),
             allow_automatic_start: true,
             damp_peer_oscillations: true,
+            allow_automatic_stop: true,
             max_prefix: None,
         }
     }
@@ -362,7 +365,8 @@ impl BgpServer {
             }
         }
 
-        let (peer_tx, initial_state) = self.spawn_peer_from_stream(stream, &peer_ip, None);
+        let (peer_tx, initial_state) =
+            self.spawn_peer_from_stream(stream, &peer_ip, SessionConfig::default());
 
         // Add dynamic peer (will be removed on disconnect)
         let entry = PeerInfo {
@@ -620,7 +624,7 @@ impl BgpServer {
         }
 
         let (peer_tx, initial_state) =
-            self.spawn_peer_from_stream(stream, &peer_ip, session_config.max_prefix);
+            self.spawn_peer_from_stream(stream, &peer_ip, session_config.clone());
 
         // Add configured peer (persists on disconnect)
         let entry = PeerInfo {
@@ -649,12 +653,13 @@ impl BgpServer {
         let peer_ip = peer_addr.ip().to_string();
 
         // Extract info we need, checking peer exists and is valid
-        let (admin_state, has_active_conn, bgp_id, max_prefix) = match self.peers.get(&peer_ip) {
+        let (admin_state, has_active_conn, bgp_id, session_config) = match self.peers.get(&peer_ip)
+        {
             Some(p) => (
                 p.admin_state,
                 p.peer_tx.as_ref().map_or(false, |tx| !tx.is_closed()),
                 p.bgp_id,
-                p.session_config.max_prefix,
+                p.session_config.clone(),
             ),
             None => {
                 debug!("ignoring outbound connection for removed peer", "peer_ip" => &peer_ip);
@@ -685,7 +690,7 @@ impl BgpServer {
             }
         }
 
-        let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, max_prefix);
+        let (peer_tx, state) = self.spawn_peer_from_stream(stream, &peer_ip, session_config);
 
         // Update existing peer entry
         if let Some(entry) = self.peers.get_mut(&peer_ip) {
@@ -704,7 +709,7 @@ impl BgpServer {
         &self,
         stream: TcpStream,
         peer_ip: &str,
-        max_prefix_setting: Option<MaxPrefixSetting>,
+        session_config: SessionConfig,
     ) -> (mpsc::UnboundedSender<PeerOp>, BgpState) {
         let local_ip = stream
             .local_addr()
@@ -725,7 +730,7 @@ impl BgpServer {
             self.config.hold_time_secs as u16,
             self.local_bgp_id,
             local_ip,
-            max_prefix_setting,
+            session_config,
         );
 
         let state = peer.state();
@@ -977,6 +982,7 @@ mod tests {
                 idle_hold_time: Duration::from_secs(idle_hold_time_secs),
                 allow_automatic_start: true,
                 damp_peer_oscillations: damp,
+                allow_automatic_stop: true,
                 max_prefix: None,
             },
             consecutive_down_count: down_count,

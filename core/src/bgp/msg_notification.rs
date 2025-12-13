@@ -38,7 +38,7 @@ impl From<u8> for MessageHeaderError {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum OpenMessageError {
     UnsupportedVersionNumber = 1,
     BadPeerAs = 2,
@@ -110,7 +110,7 @@ pub enum BgpError {
 
 /// RFC 4486 Cease NOTIFICATION subcodes
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CeaseSubcode {
     MaxPrefixesReached = 1,
     AdministrativeShutdown = 2,

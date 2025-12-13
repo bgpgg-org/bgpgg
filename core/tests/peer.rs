@@ -667,7 +667,14 @@ async fn test_auto_reconnect() {
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
         .client
-        .add_peer_with_config(format!("127.0.0.2:{}", port), None, Some(0), None, None)
+        .add_peer_with_config(
+            format!("127.0.0.2:{}", port),
+            None,
+            Some(0),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -728,6 +735,7 @@ async fn test_idle_hold_time_delay() {
             Some(idle_hold_secs),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -780,6 +788,7 @@ async fn test_allow_automatic_start_false() {
             None,
             Some(0),
             Some(false),
+            None,
             None,
         )
         .await
@@ -876,6 +885,7 @@ async fn test_damp_peer_oscillations() {
             Some(1),
             Some(true),
             Some(true),
+            None,
         )
         .await
         .unwrap();

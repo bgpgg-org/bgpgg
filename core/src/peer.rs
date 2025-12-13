@@ -23,7 +23,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpState, Fsm, FsmEvent};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::{Path, RouteSource};
-use crate::server::ServerOp;
+use crate::server::{ServerOp, SessionConfig};
 use crate::{debug, error, info, warn};
 use std::io;
 use std::net::Ipv4Addr;
@@ -84,7 +84,7 @@ pub struct Peer {
     pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
-    pub max_prefix_setting: Option<MaxPrefixSetting>,
+    pub session_config: SessionConfig,
     pub tcp_tx: OwnedWriteHalf,
     tcp_rx: OwnedReadHalf,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
@@ -103,7 +103,7 @@ impl Peer {
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
-        max_prefix_setting: Option<MaxPrefixSetting>,
+        session_config: SessionConfig,
     ) -> Self {
         Peer {
             addr: addr.clone(),
@@ -114,7 +114,7 @@ impl Peer {
             rib_in: AdjRibIn::new(addr),
             session_type: None,
             statistics: PeerStatistics::default(),
-            max_prefix_setting,
+            session_config,
             peer_rx,
             server_tx,
         }
@@ -237,16 +237,6 @@ impl Peer {
         let old_state = self.fsm.state();
         let (new_state, fsm_error) = self.fsm.handle_event(event);
 
-        // RFC 4271 6.6: Send NOTIFICATION for FSM errors
-        if let Some(error) = fsm_error {
-            let notif = NotifcationMessage::new(error, vec![]);
-            let _ = self.send_notification(notif).await;
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "FSM error: unexpected event",
-            ));
-        }
-
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
             // Entering OpenSent - send OPEN message
@@ -287,6 +277,20 @@ impl Peer {
                 self.fsm.timers.reset_hold_timer();
             }
 
+            // AutomaticStop: set admin state based on reason
+            (_, BgpState::Idle, FsmEvent::AutomaticStop(subcode)) => {
+                let admin_state = match subcode {
+                    CeaseSubcode::MaxPrefixesReached => {
+                        crate::server::AdminState::PrefixLimitReached
+                    }
+                    _ => crate::server::AdminState::Down,
+                };
+                let _ = self.server_tx.send(ServerOp::SetAdminState {
+                    peer_ip: self.addr.clone(),
+                    state: admin_state,
+                });
+            }
+
             _ => {}
         }
 
@@ -296,6 +300,13 @@ impl Peer {
                 peer_ip: self.addr.clone(),
                 state: new_state,
             });
+        }
+
+        // Send NOTIFICATION and return error if FSM returned an error
+        if let Some(error) = fsm_error {
+            let notif = NotifcationMessage::new(error, vec![]);
+            let _ = self.send_notification(notif).await;
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
         }
 
         Ok(())
@@ -463,6 +474,20 @@ impl Peer {
         if let BgpMessage::Update(update_msg) = message {
             match self.handle_update(update_msg) {
                 Ok(delta) => Ok(Some(delta)),
+                Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
+                    // RFC 4271 8.1.2: check allow_automatic_stop
+                    if self.session_config.allow_automatic_stop {
+                        self.handle_fsm_event(&FsmEvent::AutomaticStop(
+                            CeaseSubcode::MaxPrefixesReached,
+                        ))
+                        .await
+                        .map(|_| None)
+                    } else {
+                        warn!("max prefix exceeded but allow_automatic_stop=false, continuing",
+                              "peer_ip" => &self.addr);
+                        Ok(None)
+                    }
+                }
                 Err(bgp_error) => {
                     let notif = NotifcationMessage::new(bgp_error, vec![]);
                     let _ = self.send_notification(notif).await;
@@ -523,20 +548,15 @@ impl Peer {
         let mut announced = Vec::new();
 
         // Check max prefix limit
-        if let Some(setting) = self.max_prefix_setting {
+        if let Some(setting) = self.session_config.max_prefix {
             let current_count = self.rib_in.prefix_count();
             let new_prefixes = update_msg.nlri_list().len();
 
             if current_count + new_prefixes > setting.limit as usize {
                 match setting.action {
                     MaxPrefixAction::Terminate => {
-                        warn!("max prefix limit exceeded, terminating session",
+                        warn!("max prefix limit exceeded",
                               "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current_count);
-                        // Notify server to set AdminState before we disconnect
-                        let _ = self.server_tx.send(ServerOp::SetAdminState {
-                            peer_ip: self.addr.clone(),
-                            state: crate::server::AdminState::PrefixLimitReached,
-                        });
                         return Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached));
                     }
                     MaxPrefixAction::Discard => {
@@ -636,7 +656,7 @@ mod tests {
             rib_in: AdjRibIn::new(addr.ip().to_string()),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
-            max_prefix_setting: None,
+            session_config: SessionConfig::default(),
             peer_rx,
             server_tx,
         }
@@ -697,52 +717,104 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_prefix() {
-        let cases = vec![
-            // (max_prefix_setting, num_prefixes, expected_ok, description)
-            (None, 10, true, "no limit set"),
+        // (max_prefix, initial, new, expected_ok, expected_rib, desc)
+        let cases: Vec<(Option<MaxPrefixSetting>, usize, usize, bool, usize, &str)> = vec![
+            // No limit: all prefixes accepted
+            (None, 0, 10, true, 10, "no limit set"),
+            // Under limit: accepted
             (
                 Some(MaxPrefixSetting {
                     limit: 5,
                     action: MaxPrefixAction::Terminate,
                 }),
+                0,
                 3,
                 true,
+                3,
                 "under limit",
             ),
+            // Exactly at limit: accepted
             (
                 Some(MaxPrefixSetting {
                     limit: 5,
                     action: MaxPrefixAction::Terminate,
                 }),
+                0,
                 5,
                 true,
+                5,
                 "at limit",
             ),
+            // Over limit with Terminate: error, no prefixes added
             (
                 Some(MaxPrefixSetting {
                     limit: 5,
                     action: MaxPrefixAction::Terminate,
                 }),
+                0,
                 6,
                 false,
+                0,
                 "over limit terminate",
             ),
+            // Over limit with Discard: ok, but no prefixes added
             (
                 Some(MaxPrefixSetting {
                     limit: 5,
                     action: MaxPrefixAction::Discard,
                 }),
+                0,
                 6,
                 true,
+                0,
                 "over limit discard",
+            ),
+            // Have 4, add 2 would exceed 5: reject new, keep existing 4
+            (
+                Some(MaxPrefixSetting {
+                    limit: 5,
+                    action: MaxPrefixAction::Discard,
+                }),
+                4,
+                2,
+                true,
+                4,
+                "existing prefixes preserved on discard",
             ),
         ];
 
-        for (setting, num_prefixes, expected_ok, desc) in cases {
+        for (setting, initial, new_prefixes, expected_ok, expected_rib, desc) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.max_prefix_setting = setting;
+            peer.session_config.max_prefix = setting;
 
-            let nlri: Vec<_> = (0..num_prefixes)
+            // Add initial prefixes (use different subnet to avoid overlap)
+            if initial > 0 {
+                let initial_nlri: Vec<_> = (0..initial)
+                    .map(|i| {
+                        crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+                            address: Ipv4Addr::new(192, 168, i as u8, 0),
+                            prefix_length: 24,
+                        })
+                    })
+                    .collect();
+                let initial_update = UpdateMessage::new(
+                    Origin::IGP,
+                    vec![AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![65001],
+                    }],
+                    Ipv4Addr::new(10, 0, 0, 1),
+                    initial_nlri,
+                    None,
+                    None,
+                    false,
+                    vec![],
+                );
+                peer.handle_update(initial_update).unwrap();
+            }
+
+            let nlri: Vec<_> = (0..new_prefixes)
                 .map(|i| {
                     crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
                         address: Ipv4Addr::new(10, 0, i as u8, 0),
@@ -767,17 +839,8 @@ mod tests {
             );
 
             let result = peer.handle_update(update);
-            assert_eq!(result.is_ok(), expected_ok, "case: {}", desc);
-
-            if let Some(s) = setting {
-                if s.action == MaxPrefixAction::Discard && num_prefixes > s.limit as usize {
-                    assert_eq!(
-                        peer.rib_in.prefix_count(),
-                        0,
-                        "discard should not add prefixes"
-                    );
-                }
-            }
+            assert_eq!(result.is_ok(), expected_ok, "{}", desc);
+            assert_eq!(peer.rib_in.prefix_count(), expected_rib, "{}", desc);
         }
     }
 

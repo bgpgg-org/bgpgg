@@ -44,6 +44,7 @@ message AddPeerRequest {
     optional uint64 idle_hold_time_secs = 3;  // Delay before auto-reconnect (default: 30s)
     optional bool allow_automatic_start = 4;  // Auto-reconnect after disconnect (default: true)
     optional bool damp_peer_oscillations = 5; // Exponential backoff on failures (default: true)
+    optional bool allow_automatic_stop = 6;   // Auto-stop on max prefix exceeded (default: true)
 }
 
 message AddPeerResponse {

@@ -944,12 +944,22 @@ async fn test_fsm_error_update_in_openconfirm() {
 
 #[tokio::test]
 async fn test_max_prefix_limit() {
+    // (name, action, allow_automatic_stop, expect_disconnect)
     let test_cases = vec![
-        ("terminate", MaxPrefixAction::Terminate as i32, true),
-        ("discard", MaxPrefixAction::Discard as i32, false),
+        // Terminate with allow_automatic_stop=true: disconnects
+        ("terminate", MaxPrefixAction::Terminate as i32, None, true),
+        // Discard: stays connected
+        ("discard", MaxPrefixAction::Discard as i32, None, false),
+        // Terminate with allow_automatic_stop=false: stays connected
+        (
+            "terminate_no_auto_stop",
+            MaxPrefixAction::Terminate as i32,
+            Some(false),
+            false,
+        ),
     ];
 
-    for (name, action, expect_disconnect) in test_cases {
+    for (name, action, allow_automatic_stop, expect_disconnect) in test_cases {
         // Server1: will inject routes
         let mut server1 =
             start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), Some(300), "127.0.0.1").await;
@@ -967,6 +977,7 @@ async fn test_max_prefix_limit() {
                 None,
                 None,
                 None,
+                allow_automatic_stop,
             )
             .await
             .expect("Failed to add peer");

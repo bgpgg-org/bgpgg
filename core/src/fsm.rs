@@ -17,7 +17,7 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::bgp::msg_notification::BgpError;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
 
 /// BGP FSM states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +40,8 @@ pub enum FsmEvent {
     ManualStop,
     /// Event 3: AutomaticStart - triggered when IdleHoldTimer expires
     AutomaticStart,
-    /// Event 8: AutomaticStop - automatic stop based on implementation logic
-    AutomaticStop,
+    /// Event 8: AutomaticStop - automatic stop based on implementation logic (e.g., max prefix)
+    AutomaticStop(CeaseSubcode),
     /// Event 9: ConnectRetryTimerExpires
     ConnectRetryTimerExpires,
     HoldTimerExpires,
@@ -265,7 +265,9 @@ impl Fsm {
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::Connect, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
+            (BgpState::Connect, FsmEvent::AutomaticStop(subcode)) => {
+                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
+            }
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
@@ -274,7 +276,9 @@ impl Fsm {
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::Active, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
+            (BgpState::Active, FsmEvent::AutomaticStop(subcode)) => {
+                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
+            }
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
@@ -282,7 +286,9 @@ impl Fsm {
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::OpenSent, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
+            (BgpState::OpenSent, FsmEvent::AutomaticStop(subcode)) => {
+                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
+            }
             (BgpState::OpenSent, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::OpenSent, FsmEvent::TcpConnectionFails) => (BgpState::Active, None),
             (BgpState::OpenSent, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
@@ -290,7 +296,9 @@ impl Fsm {
 
             // ===== OpenConfirm State =====
             (BgpState::OpenConfirm, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::OpenConfirm, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
+            (BgpState::OpenConfirm, FsmEvent::AutomaticStop(subcode)) => {
+                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
+            }
             (BgpState::OpenConfirm, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::OpenConfirm, FsmEvent::KeepaliveTimerExpires) => {
                 (BgpState::OpenConfirm, None)
@@ -308,7 +316,9 @@ impl Fsm {
 
             // ===== Established State =====
             (BgpState::Established, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::Established, FsmEvent::AutomaticStop) => (BgpState::Idle, None),
+            (BgpState::Established, FsmEvent::AutomaticStop(subcode)) => {
+                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
+            }
             (BgpState::Established, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => {
                 (BgpState::Established, None)
@@ -419,7 +429,11 @@ mod tests {
             (BgpState::Idle, FsmEvent::AutomaticStart, BgpState::Connect),
             // From Connect
             (BgpState::Connect, FsmEvent::ManualStop, BgpState::Idle),
-            (BgpState::Connect, FsmEvent::AutomaticStop, BgpState::Idle),
+            (
+                BgpState::Connect,
+                FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
+                BgpState::Idle,
+            ),
             (
                 BgpState::Connect,
                 FsmEvent::ConnectRetryTimerExpires,
@@ -437,7 +451,11 @@ mod tests {
             ),
             // From Active
             (BgpState::Active, FsmEvent::ManualStop, BgpState::Idle),
-            (BgpState::Active, FsmEvent::AutomaticStop, BgpState::Idle),
+            (
+                BgpState::Active,
+                FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
+                BgpState::Idle,
+            ),
             (
                 BgpState::Active,
                 FsmEvent::ConnectRetryTimerExpires,
@@ -450,7 +468,11 @@ mod tests {
             ),
             // From OpenSent
             (BgpState::OpenSent, FsmEvent::ManualStop, BgpState::Idle),
-            (BgpState::OpenSent, FsmEvent::AutomaticStop, BgpState::Idle),
+            (
+                BgpState::OpenSent,
+                FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
+                BgpState::Idle,
+            ),
             (
                 BgpState::OpenSent,
                 FsmEvent::HoldTimerExpires,
@@ -481,7 +503,7 @@ mod tests {
             (BgpState::OpenConfirm, FsmEvent::ManualStop, BgpState::Idle),
             (
                 BgpState::OpenConfirm,
-                FsmEvent::AutomaticStop,
+                FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
                 BgpState::Idle,
             ),
             (
@@ -513,7 +535,7 @@ mod tests {
             (BgpState::Established, FsmEvent::ManualStop, BgpState::Idle),
             (
                 BgpState::Established,
-                FsmEvent::AutomaticStop,
+                FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
                 BgpState::Idle,
             ),
             (
@@ -552,12 +574,21 @@ mod tests {
             let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
             let (new_state, error) = fsm.handle_event(&event);
 
-            assert!(
-                error.is_none(),
-                "Unexpected error for {:?} + {:?}",
-                initial_state,
-                event
-            );
+            // AutomaticStop returns Cease error; others return None
+            if let FsmEvent::AutomaticStop(subcode) = &event {
+                assert_eq!(
+                    error,
+                    Some(BgpError::Cease(subcode.clone())),
+                    "AutomaticStop should return Cease error"
+                );
+            } else {
+                assert!(
+                    error.is_none(),
+                    "Unexpected error for {:?} + {:?}",
+                    initial_state,
+                    event
+                );
+            }
             assert_eq!(
                 new_state, expected_state,
                 "Failed transition: {:?} + {:?} should -> {:?}, got {:?}",
