@@ -17,12 +17,20 @@
 mod common;
 pub use common::*;
 
+use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     // Initially no peers
     let peers = server1.client.get_peers().await.unwrap();
@@ -38,8 +46,22 @@ async fn test_add_peer_failure() {
 
 #[tokio::test]
 async fn test_add_peer_success() {
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
-    let server2 = start_test_server(65002, Ipv4Addr::new(2, 2, 2, 2), None, "127.0.0.1").await;
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+    let server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.1:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        true,
+    ))
+    .await;
 
     // Add peer via gRPC (should succeed - server2 is listening)
     let result = server1
@@ -66,7 +88,14 @@ async fn test_add_peer_success() {
 
 #[tokio::test]
 async fn test_remove_peer_not_found() {
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     // Remove non-existent peer
     let result = server1.client.remove_peer("192.168.1.1".to_string()).await;
@@ -92,7 +121,14 @@ async fn test_remove_peer_success() {
 
 #[tokio::test]
 async fn test_get_peers_empty() {
-    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
@@ -111,7 +147,14 @@ async fn test_get_peers_with_peers() {
 
 #[tokio::test]
 async fn test_get_peer_not_found() {
-    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     let result = server1.client.get_peer("192.168.1.1".to_string()).await;
     assert!(result.is_err());
@@ -140,7 +183,14 @@ async fn test_get_peer_success() {
 
 #[tokio::test]
 async fn test_get_routes_empty() {
-    let server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     let routes = server1.client.get_routes().await.unwrap();
     assert_eq!(routes.len(), 0);
@@ -148,7 +198,14 @@ async fn test_get_routes_empty() {
 
 #[tokio::test]
 async fn test_announce_withdraw_route() {
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     // Announce route first
     server1
@@ -180,7 +237,14 @@ async fn test_announce_withdraw_route() {
 
 #[tokio::test]
 async fn test_withdraw_nonexistent_route() {
-    let mut server1 = start_test_server(65001, Ipv4Addr::new(1, 1, 1, 1), None, "127.0.0.1").await;
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
 
     // Withdraw route that was never announced (should succeed - idempotent)
     let result = server1.client.remove_route("10.0.0.0/24".to_string()).await;

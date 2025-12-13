@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_notification::CeaseSubcode;
+use crate::bgp::msg::Message;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
-use crate::config::Config;
+use crate::config::{Config, PeerConfig};
 use crate::fsm::BgpState;
 use crate::net::{create_and_bind_tcp_socket, ipv4_from_sockaddr};
+use crate::peer::MaxPrefixAction;
 use crate::peer::{MaxPrefixSetting, Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
@@ -28,6 +30,7 @@ use crate::{debug, error, info};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
@@ -58,6 +61,21 @@ impl Default for SessionConfig {
             damp_peer_oscillations: true,
             allow_automatic_stop: true,
             max_prefix: None,
+        }
+    }
+}
+
+impl From<&PeerConfig> for SessionConfig {
+    fn from(pc: &PeerConfig) -> Self {
+        Self {
+            idle_hold_time: Duration::from_secs(pc.idle_hold_time_secs),
+            allow_automatic_start: pc.allow_automatic_start,
+            damp_peer_oscillations: pc.damp_peer_oscillations,
+            allow_automatic_stop: pc.allow_automatic_stop,
+            max_prefix: pc.max_prefix.map(|limit| MaxPrefixSetting {
+                limit,
+                action: MaxPrefixAction::Terminate,
+            }),
         }
     }
 }
@@ -189,6 +207,23 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
+    /// Create a new configured (non-dynamic) peer entry.
+    pub fn new_configured(port: u16, session_config: SessionConfig) -> Self {
+        Self {
+            admin_state: AdminState::Up,
+            dynamic: false,
+            port: Some(port),
+            asn: None,
+            bgp_id: None,
+            import_policy: None,
+            export_policy: None,
+            state: BgpState::Idle,
+            peer_tx: None,
+            session_config,
+            consecutive_down_count: 0,
+        }
+    }
+
     pub async fn get_statistics(&self) -> Option<PeerStatistics> {
         let peer_tx = self.peer_tx.as_ref()?;
         let (tx, rx) = oneshot::channel();
@@ -304,6 +339,12 @@ impl BgpServer {
         }
     }
 
+    /// Check if a peer should be accepted (RFC 4271 8.1.1).
+    fn should_accept_peer(&self, peer_ip: &str) -> bool {
+        let is_configured = self.peers.contains_key(peer_ip);
+        is_configured || self.config.accept_unconfigured_peers
+    }
+
     pub async fn run(mut self) {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
@@ -311,6 +352,27 @@ impl BgpServer {
         self.local_port = listener.local_addr().unwrap().port();
 
         let local_addr = SocketAddr::new(self.local_addr.into(), 0);
+
+        // Initialize configured peers and spawn outbound connectors
+        for peer_cfg in &self.config.peers.clone() {
+            let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
+                error!("invalid peer address in config", "addr" => &peer_cfg.address);
+                continue;
+            };
+            let peer_ip = peer_addr.ip().to_string();
+            self.peers.insert(
+                peer_ip.clone(),
+                PeerInfo::new_configured(peer_addr.port(), SessionConfig::from(peer_cfg)),
+            );
+            spawn_outbound_connector(
+                peer_addr,
+                local_addr,
+                self.config.connect_retry_secs,
+                Duration::ZERO,
+                self.op_tx.clone(),
+            );
+            info!("configured peer", "peer_ip" => &peer_ip);
+        }
 
         loop {
             tokio::select! {
@@ -332,7 +394,7 @@ impl BgpServer {
         }
     }
 
-    async fn accept_peer(&mut self, stream: TcpStream) {
+    async fn accept_peer(&mut self, mut stream: TcpStream) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -345,6 +407,18 @@ impl BgpServer {
         let peer_ip = peer_addr.ip().to_string();
 
         info!("new peer connection", "peer_ip" => &peer_ip);
+
+        // RFC 4271 8.1.1: AcceptConnectionsUnconfiguredPeers
+        // RFC 4486: SHOULD send CEASE/ConnectionRejected when rejecting.
+        if !self.should_accept_peer(&peer_ip) {
+            info!("rejecting unconfigured peer", "peer_ip" => &peer_ip);
+            let notif = NotifcationMessage::new(
+                BgpError::Cease(CeaseSubcode::ConnectionRejected),
+                Vec::new(),
+            );
+            let _ = stream.write_all(&notif.serialize()).await;
+            return;
+        }
 
         // RFC 4271 Section 6.8: Connection Collision Detection
         if let Some(existing) = self.peers.get_mut(&peer_ip) {
@@ -987,6 +1061,35 @@ mod tests {
             },
             consecutive_down_count: down_count,
         }
+    }
+
+    fn make_server(accept_unconfigured_peers: bool) -> BgpServer {
+        let config = Config::new(
+            65000,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            180,
+            accept_unconfigured_peers,
+        );
+        BgpServer::new(config)
+    }
+
+    #[test]
+    fn test_should_accept_peer() {
+        // Unconfigured peer with accept_unconfigured_peers=false -> reject
+        let server = make_server(false);
+        assert!(!server.should_accept_peer("10.0.0.1"));
+
+        // Unconfigured peer with accept_unconfigured_peers=true -> accept
+        let server = make_server(true);
+        assert!(server.should_accept_peer("10.0.0.1"));
+
+        // Configured peer -> accept regardless of accept_unconfigured_peers
+        let mut server = make_server(false);
+        server
+            .peers
+            .insert("10.0.0.1".to_string(), peer_info(30, true, 0));
+        assert!(server.should_accept_peer("10.0.0.1"));
     }
 
     #[test]

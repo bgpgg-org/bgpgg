@@ -59,6 +59,10 @@ pub struct Config {
     pub hold_time_secs: u64,
     #[serde(default = "default_connect_retry_time")]
     pub connect_retry_secs: u64,
+    /// Accept connections from unconfigured peers (RFC 4271 8.1.1).
+    /// Security implications: see RFC 4272.
+    #[serde(default)]
+    pub accept_unconfigured_peers: bool,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
 }
@@ -77,7 +81,13 @@ fn default_connect_retry_time() -> u64 {
 
 impl Config {
     /// Create a new configuration
-    pub fn new(asn: u16, listen_addr: &str, router_id: Ipv4Addr, hold_time_secs: u64) -> Self {
+    pub fn new(
+        asn: u16,
+        listen_addr: &str,
+        router_id: Ipv4Addr,
+        hold_time_secs: u64,
+        accept_unconfigured_peers: bool,
+    ) -> Self {
         Config {
             asn,
             listen_addr: listen_addr.to_string(),
@@ -85,6 +95,7 @@ impl Config {
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs,
             connect_retry_secs: default_connect_retry_time(),
+            accept_unconfigured_peers,
             peers: Vec::new(),
         }
     }
@@ -118,6 +129,7 @@ impl Default for Config {
             grpc_listen_addr: "[::1]:50051".to_string(),
             hold_time_secs: default_hold_time(),
             connect_retry_secs: default_connect_retry_time(),
+            accept_unconfigured_peers: false,
             peers: Vec::new(),
         }
     }
@@ -137,11 +149,27 @@ mod tests {
 
     #[test]
     fn test_config_new() {
-        let config = Config::new(65100, "192.168.1.1:179", Ipv4Addr::new(192, 168, 1, 1), 180);
+        let config = Config::new(
+            65100,
+            "192.168.1.1:179",
+            Ipv4Addr::new(192, 168, 1, 1),
+            180,
+            false,
+        );
         assert_eq!(config.asn, 65100);
         assert_eq!(config.listen_addr, "192.168.1.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(config.hold_time_secs, 180);
+        assert!(!config.accept_unconfigured_peers);
+
+        let config = Config::new(
+            65100,
+            "192.168.1.1:179",
+            Ipv4Addr::new(192, 168, 1, 1),
+            180,
+            true,
+        );
+        assert!(config.accept_unconfigured_peers);
     }
 
     #[test]
@@ -150,6 +178,7 @@ mod tests {
         assert_eq!(config.asn, 65000);
         assert_eq!(config.listen_addr, "127.0.0.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(1, 1, 1, 1));
+        assert!(!config.accept_unconfigured_peers);
     }
 
     #[test]
@@ -163,6 +192,20 @@ mod tests {
         assert_eq!(config.asn, 65200);
         assert_eq!(config.listen_addr, "10.0.0.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(10, 0, 0, 1));
+        assert!(!config.accept_unconfigured_peers); // default
+
+        std::fs::remove_file(temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_config_accept_unconfigured_peers_from_yaml() {
+        let temp_file = write_temp_yaml(
+            "test_config_unconfigured.yaml",
+            "asn: 65200\nlisten_addr: \"10.0.0.1:179\"\nrouter_id: \"10.0.0.1\"\naccept_unconfigured_peers: true\n",
+        );
+
+        let config = Config::from_file(&temp_file).unwrap();
+        assert!(config.accept_unconfigured_peers);
 
         std::fs::remove_file(temp_file).unwrap();
     }

@@ -116,37 +116,22 @@ pub fn build_path(
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-pub async fn start_test_server(
-    asn: u16,
-    router_id: Ipv4Addr,
-    hold_timer_secs: Option<u16>,
-    bind_ip: &str,
-) -> TestServer {
-    start_test_server_on_port(asn, router_id, hold_timer_secs, bind_ip, 0).await
-}
-
-/// Starts a single BGP server on a specific port (0 = auto-assign)
-pub async fn start_test_server_on_port(
-    asn: u16,
-    router_id: Ipv4Addr,
-    hold_timer_secs: Option<u16>,
-    bind_ip: &str,
-    port: u16,
-) -> TestServer {
+pub async fn start_test_server(config: Config) -> TestServer {
     use tokio::net::TcpListener;
+
+    let router_id = config.router_id;
+    let asn = config.asn;
+    let bind_ip = config
+        .listen_addr
+        .split(':')
+        .next()
+        .unwrap_or("127.0.0.1")
+        .to_string();
 
     // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
-
-    let hold_timer_secs = hold_timer_secs.unwrap_or(90);
-    let config = Config::new(
-        asn,
-        &format!("{}:{}", bind_ip, port),
-        router_id,
-        hold_timer_secs as u64,
-    );
 
     let server = BgpServer::new(config);
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
@@ -209,7 +194,7 @@ pub async fn start_test_server_on_port(
         client,
         bgp_port,
         asn,
-        address: bind_ip.to_string(),
+        address: bind_ip,
         runtime: Some(runtime),
     }
 }
@@ -224,20 +209,23 @@ pub async fn start_test_server_on_port(
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
 pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServer, TestServer) {
+    let hold = hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2] = chain_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
+            "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
-            hold_timer_secs,
-            "127.0.0.1",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
+            "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
-            hold_timer_secs,
-            "127.0.0.2",
-        )
+            hold,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -261,27 +249,31 @@ pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServ
 pub async fn setup_three_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer) {
+    let hold = hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3] = mesh_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
+            "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
-            hold_timer_secs,
-            "127.0.0.1",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
+            "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
-            hold_timer_secs,
-            "127.0.0.2",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65003,
+            "127.0.0.3:0",
             Ipv4Addr::new(3, 3, 3, 3),
-            hold_timer_secs,
-            "127.0.0.3",
-        )
+            hold,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -308,34 +300,39 @@ pub async fn setup_three_meshed_servers(
 pub async fn setup_four_meshed_servers(
     hold_timer_secs: Option<u16>,
 ) -> (TestServer, TestServer, TestServer, TestServer) {
+    let hold = hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3, server4] = mesh_servers([
-        start_test_server(
+        start_test_server(Config::new(
             65001,
+            "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
-            hold_timer_secs,
-            "127.0.0.1",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65002,
+            "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
-            hold_timer_secs,
-            "127.0.0.2",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65003,
+            "127.0.0.3:0",
             Ipv4Addr::new(3, 3, 3, 3),
-            hold_timer_secs,
-            "127.0.0.3",
-        )
+            hold,
+            true,
+        ))
         .await,
-        start_test_server(
+        start_test_server(Config::new(
             65004,
+            "127.0.0.4:0",
             Ipv4Addr::new(4, 4, 4, 4),
-            hold_timer_secs,
-            "127.0.0.4",
-        )
+            hold,
+            true,
+        ))
         .await,
     ])
     .await;
@@ -372,57 +369,66 @@ pub async fn setup_two_ases_with_ebgp(
     TestServer,
     TestServer,
 ) {
-    // Start all seven servers on different loopback IPs
-    // Island 1: All servers use AS65001 (iBGP mesh)
-    let mut server1 = start_test_server(
+    let hold = hold_timer_secs.unwrap_or(90) as u64;
+
+    // Island 1: AS65001 (iBGP mesh)
+    let mut server1 = start_test_server(Config::new(
         65001,
+        "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
-        hold_timer_secs,
-        "127.0.0.1",
-    )
+        hold,
+        true,
+    ))
     .await;
-    let mut server2 = start_test_server(
+    let mut server2 = start_test_server(Config::new(
         65001,
+        "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
-        hold_timer_secs,
-        "127.0.0.2",
-    )
+        hold,
+        true,
+    ))
     .await;
-    let mut server3 = start_test_server(
+    let mut server3 = start_test_server(Config::new(
         65001,
+        "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
-        hold_timer_secs,
-        "127.0.0.3",
-    )
+        hold,
+        true,
+    ))
     .await;
-    let mut server4 = start_test_server(
+    let mut server4 = start_test_server(Config::new(
         65001,
+        "127.0.0.4:0",
         Ipv4Addr::new(4, 4, 4, 4),
-        hold_timer_secs,
-        "127.0.0.4",
-    )
+        hold,
+        true,
+    ))
     .await;
-    // Island 2: All servers use AS65002 (iBGP triangle)
-    let mut server5 = start_test_server(
+
+    // Island 2: AS65002 (iBGP triangle)
+    let mut server5 = start_test_server(Config::new(
         65002,
+        "127.0.0.5:0",
         Ipv4Addr::new(5, 5, 5, 5),
-        hold_timer_secs,
-        "127.0.0.5",
-    )
+        hold,
+        true,
+    ))
     .await;
-    let mut server6 = start_test_server(
+    let mut server6 = start_test_server(Config::new(
         65002,
+        "127.0.0.6:0",
         Ipv4Addr::new(6, 6, 6, 6),
-        hold_timer_secs,
-        "127.0.0.6",
-    )
+        hold,
+        true,
+    ))
     .await;
-    let server7 = start_test_server(
+    let server7 = start_test_server(Config::new(
         65002,
+        "127.0.0.7:0",
         Ipv4Addr::new(7, 7, 7, 7),
-        hold_timer_secs,
-        "127.0.0.7",
-    )
+        hold,
+        true,
+    ))
     .await;
 
     // Island 1 mesh: S1, S2, S3, S4
@@ -981,17 +987,72 @@ pub struct FakePeer {
 }
 
 impl FakePeer {
-    /// Connect to the given peer via TCP and complete BGP handshake
+    /// Connect TCP only. Use local_ip to bind to specific address.
+    pub async fn connect_raw(local_ip: Option<&str>, peer: &TestServer) -> Self {
+        use std::net::SocketAddr;
+        use tokio::net::TcpSocket;
+
+        let local_ip = local_ip.unwrap_or("0.0.0.0");
+        let local_addr: SocketAddr = format!("{}:0", local_ip).parse().unwrap();
+        let peer_addr: SocketAddr = format!("{}:{}", peer.address, peer.bgp_port)
+            .parse()
+            .unwrap();
+
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.bind(local_addr).unwrap();
+        let stream = socket.connect(peer_addr).await.unwrap();
+
+        let address = stream.local_addr().unwrap().ip().to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: 0,
+        }
+    }
+
+    /// Connect and exchange OPENs only (server ends up in OpenConfirm).
+    pub async fn connect_open_only(
+        local_ip: Option<&str>,
+        local_asn: u16,
+        local_router_id: Ipv4Addr,
+        hold_time: u16,
+        peer: &TestServer,
+    ) -> Self {
+        let mut fake_peer = Self::connect_raw(local_ip, peer).await;
+        fake_peer.asn = local_asn;
+
+        // Send our OPEN
+        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+        fake_peer
+            .stream
+            .write_all(&open.serialize())
+            .await
+            .expect("Failed to send OPEN");
+
+        // Read their OPEN (server transitions to OpenConfirm after receiving our OPEN)
+        let msg = read_bgp_message(&mut fake_peer.stream)
+            .await
+            .expect("Failed to read OPEN");
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message"),
+        }
+
+        fake_peer
+    }
+
+    /// Connect and complete full BGP handshake.
     pub async fn connect(
+        local_ip: Option<&str>,
         local_asn: u16,
         local_router_id: Ipv4Addr,
         hold_time: u16,
         peer: &TestServer,
     ) -> Self {
         let mut fake_peer =
-            Self::connect_open_only(local_asn, local_router_id, hold_time, peer).await;
+            Self::connect_open_only(local_ip, local_asn, local_router_id, hold_time, peer).await;
 
-        // Send KEEPALIVE
         let keepalive = KeepAliveMessage {};
         fake_peer
             .stream
@@ -999,7 +1060,6 @@ impl FakePeer {
             .await
             .expect("Failed to send KEEPALIVE");
 
-        // Read their KEEPALIVE (they already sent it when entering OpenConfirm)
         let msg = read_bgp_message(&mut fake_peer.stream)
             .await
             .expect("Failed to read KEEPALIVE");
@@ -1009,57 +1069,6 @@ impl FakePeer {
         }
 
         fake_peer
-    }
-
-    /// Connect and exchange OPENs only (server ends up in OpenConfirm).
-    /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
-    pub async fn connect_open_only(
-        local_asn: u16,
-        local_router_id: Ipv4Addr,
-        hold_time: u16,
-        peer: &TestServer,
-    ) -> Self {
-        let mut stream = None;
-        for _ in 0..50 {
-            match TcpStream::connect(format!("{}:{}", peer.address, peer.bgp_port)).await {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(_) => {
-                    sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-        let mut stream = stream.expect("Failed to connect to BGP peer after retries");
-
-        // Send our OPEN
-        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
-        stream
-            .write_all(&open.serialize())
-            .await
-            .expect("Failed to send OPEN");
-
-        // Read their OPEN (server transitions to OpenConfirm after receiving our OPEN)
-        let msg = read_bgp_message(&mut stream)
-            .await
-            .expect("Failed to read OPEN");
-        match msg {
-            BgpMessage::Open(_) => {}
-            _ => panic!("Expected OPEN message"),
-        }
-
-        // Server is now in OpenConfirm, waiting for our KEEPALIVE
-        let address = stream
-            .local_addr()
-            .expect("Failed to get local address")
-            .ip()
-            .to_string();
-        FakePeer {
-            stream,
-            address,
-            asn: local_asn,
-        }
     }
 
     pub fn to_peer(&self, state: BgpState, dynamic: bool) -> Peer {
