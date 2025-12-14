@@ -22,6 +22,7 @@ use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
 use crate::config::{MaxPrefixAction, PeerConfig};
 use crate::fsm::{BgpState, Fsm, FsmEvent};
+use crate::net::create_and_bind_tcp_socket;
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::{Path, RouteSource};
 use crate::server::{ConnectionType, ServerOp};
@@ -32,7 +33,6 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
 /// Operations that can be sent to a peer task
@@ -221,8 +221,7 @@ impl Peer {
                     Some(PeerOp::ManualStart) => {
                         debug!("ManualStart received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
-                        self.fsm.handle_event(&FsmEvent::ManualStart);
-                        self.notify_state_change();
+                        self.transition(&FsmEvent::ManualStart);
                     }
                     Some(PeerOp::Shutdown(_)) => return true,
                     Some(PeerOp::GetStatistics(response)) => {
@@ -237,8 +236,7 @@ impl Peer {
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
                 debug!("IdleHoldTimer expired, AutomaticStart", "peer_ip" => self.addr.to_string());
-                self.fsm.handle_event(&FsmEvent::AutomaticStart);
-                self.notify_state_change();
+                self.transition(&FsmEvent::AutomaticStart);
             }
         }
         false
@@ -252,9 +250,8 @@ impl Peer {
             rx: tcp_rx,
         });
         self.conn_type = ConnectionType::Incoming;
-        self.fsm.handle_event(&FsmEvent::ManualStart);
-        self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
-        self.notify_state_change();
+        self.transition(&FsmEvent::ManualStart);
+        self.transition(&FsmEvent::TcpConnectionConfirmed);
     }
 
     /// Handle Connect state - attempt TCP connection.
@@ -262,7 +259,7 @@ impl Peer {
         let peer_addr = SocketAddr::new(self.addr, self.port);
 
         tokio::select! {
-            result = Self::try_connect(peer_addr, self.local_addr) => {
+            result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
                 match result {
                     Ok(stream) => {
                         info!("TCP connection established", "peer_ip" => self.addr.to_string());
@@ -274,8 +271,7 @@ impl Peer {
                             self.fsm.timers.start_delay_open_timer();
                         }
 
-                        self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
-                        self.notify_state_change();
+                        self.transition(&FsmEvent::TcpConnectionConfirmed);
 
                         // Send OPEN if not using DelayOpen
                         if self.config.delay_open_time_secs.is_none() {
@@ -287,21 +283,18 @@ impl Peer {
                     }
                     Err(e) => {
                         debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        self.fsm.handle_event(&FsmEvent::TcpConnectionFails);
-                        self.notify_state_change();
+                        self.transition(&FsmEvent::TcpConnectionFails);
                     }
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
                 debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
-                self.fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
-                self.notify_state_change();
+                self.transition(&FsmEvent::ConnectRetryTimerExpires);
             }
             op = self.peer_rx.recv() => {
                 if let Some(PeerOp::ManualStop) = op {
                     self.manually_stopped = true;
-                    self.fsm.handle_event(&FsmEvent::ManualStop);
-                    self.notify_state_change();
+                    self.transition(&FsmEvent::ManualStop);
                 }
             }
         }
@@ -314,14 +307,12 @@ impl Peer {
         tokio::select! {
             _ = tokio::time::sleep(retry_time) => {
                 debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
-                self.fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
-                self.notify_state_change();
+                self.transition(&FsmEvent::ConnectRetryTimerExpires);
             }
             op = self.peer_rx.recv() => {
                 if let Some(PeerOp::ManualStop) = op {
                     self.manually_stopped = true;
-                    self.fsm.handle_event(&FsmEvent::ManualStop);
-                    self.notify_state_change();
+                    self.transition(&FsmEvent::ManualStop);
                 }
             }
         }
@@ -354,8 +345,7 @@ impl Peer {
                 Some(c) => c,
                 None => {
                     // Connection lost, transition back to Idle
-                    self.fsm.handle_event(&FsmEvent::TcpConnectionFails);
-                    self.notify_state_change();
+                    self.transition(&FsmEvent::TcpConnectionFails);
                     return false;
                 }
             };
@@ -409,8 +399,7 @@ impl Peer {
                             );
                             let _ = self.send_notification(notif).await;
                             self.disconnect();
-                            self.fsm.handle_event(&FsmEvent::ManualStop);
-                            self.notify_state_change();
+                            self.transition(&FsmEvent::ManualStop);
                             return false;
                         }
                         PeerOp::ManualStart | PeerOp::TcpConnectionAccepted { .. } => {
@@ -459,12 +448,6 @@ impl Peer {
         }
     }
 
-    /// Attempt TCP connection with local address binding.
-    async fn try_connect(peer_addr: SocketAddr, local_addr: SocketAddr) -> io::Result<TcpStream> {
-        use crate::net::create_and_bind_tcp_socket;
-        create_and_bind_tcp_socket(local_addr, peer_addr).await
-    }
-
     /// Disconnect TCP and transition FSM.
     fn disconnect(&mut self) {
         self.conn = None;
@@ -498,6 +481,15 @@ impl Peer {
             peer_ip: self.addr,
             state: self.fsm.state(),
         });
+    }
+
+    /// Handle FSM event and notify server if state changed.
+    fn transition(&mut self, event: &FsmEvent) {
+        let old_state = self.fsm.state();
+        self.fsm.handle_event(event);
+        if self.fsm.state() != old_state {
+            self.notify_state_change();
+        }
     }
 
     /// Get current BGP state
