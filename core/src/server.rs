@@ -18,7 +18,6 @@ use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
 use crate::fsm::BgpState;
-use crate::net::ipv4_from_sockaddr;
 use crate::peer::MaxPrefixAction;
 use crate::peer::{MaxPrefixSetting, Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
@@ -226,18 +225,22 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    /// Create a new configured peer entry.
-    pub fn new_configured(port: u16, session_config: SessionConfig) -> Self {
+    pub fn new(
+        port: Option<u16>,
+        configured: bool,
+        session_config: SessionConfig,
+        peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
+    ) -> Self {
         Self {
             admin_state: AdminState::Up,
-            configured: true,
-            port: Some(port),
+            configured,
+            port,
             asn: None,
             bgp_id: None,
             import_policy: None,
             export_policy: None,
             state: BgpState::Idle,
-            peer_tx: None,
+            peer_tx,
             session_config,
             consecutive_down_count: 0,
         }
@@ -364,36 +367,6 @@ impl BgpServer {
         false // Accept new connection
     }
 
-    /// Initialize configured peers from config and spawn their tasks.
-    fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
-        for peer_cfg in &self.config.peers.clone() {
-            let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
-                error!("invalid peer address in config", "addr" => &peer_cfg.address);
-                continue;
-            };
-            let peer_ip = peer_addr.ip().to_string();
-            let session_config = SessionConfig::from(peer_cfg);
-            let passive = session_config.passive_mode;
-
-            let peer_tx = self.spawn_peer(
-                peer_ip.clone(),
-                peer_addr.port(),
-                session_config.clone(),
-                bind_addr,
-            );
-
-            let mut entry = PeerInfo::new_configured(peer_addr.port(), session_config);
-            entry.peer_tx = Some(peer_tx.clone());
-            self.peers.insert(peer_ip.clone(), entry);
-
-            // RFC 4271 Event 1: ManualStart
-            if !passive {
-                let _ = peer_tx.send(PeerOp::ManualStart);
-            }
-            info!("configured peer", "peer_ip" => &peer_ip, "passive" => passive);
-        }
-    }
-
     pub async fn run(mut self) {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
@@ -421,6 +394,70 @@ impl BgpServer {
                 }
             }
         }
+    }
+
+    /// Initialize configured peers from config and spawn their tasks.
+    fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
+        for peer_cfg in &self.config.peers.clone() {
+            let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
+                error!("invalid peer address in config", "addr" => &peer_cfg.address);
+                continue;
+            };
+            let peer_ip = peer_addr.ip().to_string();
+            let session_config = SessionConfig::from(peer_cfg);
+            let passive = session_config.passive_mode;
+
+            let peer_tx = self.spawn_peer(
+                peer_ip.clone(),
+                peer_addr.port(),
+                session_config.clone(),
+                bind_addr,
+            );
+
+            let entry = PeerInfo::new(
+                Some(peer_addr.port()),
+                true,
+                session_config,
+                Some(peer_tx.clone()),
+            );
+            self.peers.insert(peer_ip.clone(), entry);
+
+            // RFC 4271 Event 1: ManualStart
+            if !passive {
+                let _ = peer_tx.send(PeerOp::ManualStart);
+            }
+            info!("configured peer", "peer_ip" => &peer_ip, "passive" => passive);
+        }
+    }
+
+    /// Spawn a new Peer task in Idle state
+    fn spawn_peer(
+        &self,
+        addr: String,
+        port: u16,
+        session_config: SessionConfig,
+        bind_addr: SocketAddr,
+    ) -> mpsc::UnboundedSender<PeerOp> {
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+
+        let peer = Peer::new(
+            addr,
+            port,
+            peer_rx,
+            self.op_tx.clone(),
+            self.config.asn,
+            self.config.hold_time_secs as u16,
+            self.local_bgp_id,
+            bind_addr,
+            session_config,
+            self.config.connect_retry_secs,
+        );
+
+        tokio::spawn(async move {
+            peer.run().await;
+        });
+
+        peer_tx
     }
 
     async fn accept_peer(&mut self, mut stream: TcpStream) {
@@ -457,35 +494,21 @@ impl BgpServer {
 
         // Use configured peer's session_config if exists
         if let Some(session_config) = existing_config {
-            let (peer_tx, initial_state) =
-                self.spawn_peer_from_stream(stream, &peer_ip, session_config);
+            let peer_tx = self.spawn_peer_from_stream(stream, &peer_ip, session_config);
             let existing = self.peers.get_mut(&peer_ip).unwrap();
             existing.peer_tx = Some(peer_tx);
-            existing.state = initial_state;
-            info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
+            existing.state = BgpState::Idle;
+            info!("peer added", "peer_ip" => &peer_ip, "state" => "Idle", "total_peers" => self.peers.len());
             return;
         }
 
-        let (peer_tx, initial_state) =
-            self.spawn_peer_from_stream(stream, &peer_ip, SessionConfig::default());
+        let peer_tx = self.spawn_peer_from_stream(stream, &peer_ip, SessionConfig::default());
 
         // Add unconfigured peer (will be removed on disconnect)
-        let entry = PeerInfo {
-            admin_state: AdminState::Up,
-            configured: false,
-            port: None,
-            asn: None,
-            bgp_id: None,
-            import_policy: None,
-            export_policy: None,
-            state: initial_state,
-            peer_tx: Some(peer_tx),
-            session_config: SessionConfig::default(),
-            consecutive_down_count: 0,
-        };
+        let entry = PeerInfo::new(None, false, SessionConfig::default(), Some(peer_tx));
 
         self.peers.insert(peer_ip.clone(), entry);
-        info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
+        info!("peer added", "peer_ip" => &peer_ip, "state" => "Idle", "total_peers" => self.peers.len());
     }
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
@@ -678,19 +701,12 @@ impl BgpServer {
         );
 
         // Add peer entry
-        let entry = PeerInfo {
-            admin_state: AdminState::Up,
-            configured: true,
-            port: Some(peer_addr.port()),
-            asn: None,
-            bgp_id: None,
-            import_policy: None,
-            export_policy: None,
-            state: BgpState::Idle,
-            peer_tx: Some(peer_tx.clone()),
-            session_config: session_config.clone(),
-            consecutive_down_count: 0,
-        };
+        let entry = PeerInfo::new(
+            Some(peer_addr.port()),
+            true,
+            session_config.clone(),
+            Some(peer_tx.clone()),
+        );
 
         self.peers.insert(peer_ip.clone(), entry);
 
@@ -703,71 +719,25 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    /// Spawn a new Peer task in Idle state
-    fn spawn_peer(
-        &self,
-        addr: String,
-        port: u16,
-        session_config: SessionConfig,
-        bind_addr: SocketAddr,
-    ) -> mpsc::UnboundedSender<PeerOp> {
-        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-
-        let peer = Peer::new(
-            addr,
-            port,
-            peer_rx,
-            self.op_tx.clone(),
-            self.config.asn,
-            self.config.hold_time_secs as u16,
-            self.local_bgp_id,
-            bind_addr,
-            session_config,
-            self.config.connect_retry_secs,
-        );
-
-        tokio::spawn(async move {
-            peer.run().await;
-        });
-
-        peer_tx
-    }
-
     /// Common helper to create and spawn a peer from a connected stream.
-    /// Returns (peer_tx, initial_state).
+    /// The peer starts in Idle state and transitions to OpenSent after receiving TcpConnectionAccepted.
     fn spawn_peer_from_stream(
         &self,
         stream: TcpStream,
         peer_ip: &str,
         session_config: SessionConfig,
-    ) -> (mpsc::UnboundedSender<PeerOp>, BgpState) {
-        let local_ip = stream
+    ) -> mpsc::UnboundedSender<PeerOp> {
+        let local_addr = stream
             .local_addr()
-            .ok()
-            .and_then(ipv4_from_sockaddr)
-            .unwrap_or(self.local_addr);
+            .unwrap_or_else(|_| SocketAddr::new(self.local_addr.into(), 0));
 
         let (tcp_rx, tcp_tx) = stream.into_split();
-        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
-        let peer = Peer::new_connected(
-            peer_ip.to_string(),
-            tcp_tx,
-            tcp_rx,
-            peer_rx,
-            self.op_tx.clone(),
-            self.config.asn,
-            self.config.hold_time_secs as u16,
-            self.local_bgp_id,
-            local_ip,
-            session_config,
-            self.config.connect_retry_secs,
-        );
+        let peer_tx = self.spawn_peer(peer_ip.to_string(), 0, session_config, local_addr);
 
-        let state = peer.state();
-        tokio::spawn(peer.run());
+        let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
 
-        (peer_tx, state)
+        peer_tx
     }
 
     async fn handle_remove_peer(
@@ -1004,28 +974,19 @@ mod tests {
     use super::*;
 
     fn peer_info(idle_hold_time_secs: Option<u64>, damp: bool, down_count: u32) -> PeerInfo {
-        PeerInfo {
-            admin_state: AdminState::Up,
-            configured: true,
-            port: None,
-            asn: None,
-            bgp_id: None,
-            import_policy: None,
-            export_policy: None,
-            state: BgpState::Idle,
-            peer_tx: None,
-            session_config: SessionConfig {
-                idle_hold_time: idle_hold_time_secs.map(Duration::from_secs),
-                damp_peer_oscillations: damp,
-                allow_automatic_stop: true,
-                passive_mode: false,
-                delay_open_time: None,
-                max_prefix: None,
-                send_notification_without_open: false,
-                collision_detect_established_state: false,
-            },
-            consecutive_down_count: down_count,
-        }
+        let session_config = SessionConfig {
+            idle_hold_time: idle_hold_time_secs.map(Duration::from_secs),
+            damp_peer_oscillations: damp,
+            allow_automatic_stop: true,
+            passive_mode: false,
+            delay_open_time: None,
+            max_prefix: None,
+            send_notification_without_open: false,
+            collision_detect_established_state: false,
+        };
+        let mut entry = PeerInfo::new(None, true, session_config, None);
+        entry.consecutive_down_count = down_count;
+        entry
     }
 
     fn make_server(accept_unconfigured_peers: bool) -> BgpServer {

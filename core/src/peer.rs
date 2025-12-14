@@ -44,6 +44,11 @@ pub enum PeerOp {
     ManualStart,
     /// RFC 4271 Event 2: ManualStop - admin stops the peer connection
     ManualStop,
+    /// Incoming TCP connection accepted - peer should transition to OpenSent
+    TcpConnectionAccepted {
+        tcp_tx: OwnedWriteHalf,
+        tcp_rx: OwnedReadHalf,
+    },
 }
 
 /// Type of BGP session based on AS relationship
@@ -157,54 +162,6 @@ impl Peer {
         }
     }
 
-    /// Create a new Peer with an established TCP connection (for incoming connections).
-    /// FSM transitions to Connect state with TcpConnectionConfirmed.
-    pub fn new_connected(
-        addr: String,
-        tcp_tx: OwnedWriteHalf,
-        tcp_rx: OwnedReadHalf,
-        peer_rx: mpsc::UnboundedReceiver<PeerOp>,
-        server_tx: mpsc::UnboundedSender<ServerOp>,
-        local_asn: u16,
-        local_hold_time: u16,
-        local_bgp_id: u32,
-        local_ip: Ipv4Addr,
-        session_config: SessionConfig,
-        connect_retry_secs: u64,
-    ) -> Self {
-        let mut fsm = Fsm::new_idle(
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-            local_ip,
-            session_config.delay_open_time,
-        );
-        // Transition: Idle -> Connect (ManualStart) -> OpenSent (TcpConnectionConfirmed)
-        fsm.handle_event(&FsmEvent::ManualStart);
-        fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
-
-        Peer {
-            addr: addr.clone(),
-            port: 0, // Port not needed for incoming connections
-            fsm,
-            conn: Some(TcpConnection {
-                tx: tcp_tx,
-                rx: tcp_rx,
-            }),
-            asn: None,
-            rib_in: AdjRibIn::new(addr),
-            session_type: None,
-            statistics: PeerStatistics::default(),
-            session_config,
-            peer_rx,
-            server_tx,
-            local_addr: SocketAddr::new(local_ip.into(), 0),
-            connect_retry_secs,
-            consecutive_down_count: 0,
-            conn_type: ConnectionType::Incoming,
-        }
-    }
-
     /// Main peer task - handles the full lifecycle of a BGP peer.
     /// Runs forever, handling all FSM states including Idle, Connect, Active.
     pub async fn run(mut self) {
@@ -233,29 +190,52 @@ impl Peer {
         }
     }
 
+    /// Accept an incoming TCP connection and transition FSM to OpenSent.
+    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
+        debug!("TcpConnectionAccepted received", "peer_ip" => &self.addr);
+        self.conn = Some(TcpConnection {
+            tx: tcp_tx,
+            rx: tcp_rx,
+        });
+        self.conn_type = ConnectionType::Incoming;
+        self.fsm.handle_event(&FsmEvent::ManualStart);
+        self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+        self.notify_state_change();
+    }
+
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
     /// Returns true if shutdown requested.
     async fn handle_idle_state(&mut self) -> bool {
-        // Passive mode: wait indefinitely for ManualStart only
         if self.session_config.passive_mode {
-            loop {
-                match self.peer_rx.recv().await {
-                    Some(PeerOp::ManualStart) => {
-                        // Passive peers don't initiate - stay in Idle, wait for incoming
-                        debug!("ManualStart ignored for passive peer", "peer_ip" => &self.addr);
-                    }
-                    Some(PeerOp::Shutdown(_)) => return true,
-                    Some(PeerOp::GetStatistics(response)) => {
-                        let _ = response.send(self.statistics.clone());
-                    }
-                    Some(_) => {}
-                    None => return true,
+            self.handle_idle_state_passive().await
+        } else {
+            self.handle_idle_state_active().await
+        }
+    }
+
+    /// Passive mode: wait indefinitely for incoming connection.
+    async fn handle_idle_state_passive(&mut self) -> bool {
+        loop {
+            match self.peer_rx.recv().await {
+                Some(PeerOp::ManualStart) => {
+                    debug!("ManualStart ignored for passive peer", "peer_ip" => &self.addr);
                 }
+                Some(PeerOp::Shutdown(_)) => return true,
+                Some(PeerOp::GetStatistics(response)) => {
+                    let _ = response.send(self.statistics.clone());
+                }
+                Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                    self.accept_connection(tcp_tx, tcp_rx);
+                    return false;
+                }
+                Some(_) => {}
+                None => return true,
             }
         }
+    }
 
-        // None = no auto-reconnect, Some(duration) = auto-reconnect after delay
-        // Uses damped value if DampPeerOscillations is enabled
+    /// Active mode: wait for ManualStart or auto-reconnect timer.
+    async fn handle_idle_state_active(&mut self) -> bool {
         let idle_hold_time = self.get_idle_hold_time();
         let auto_reconnect = idle_hold_time.is_some();
         let idle_hold_time = idle_hold_time.unwrap_or(Duration::ZERO);
@@ -271,6 +251,9 @@ impl Peer {
                     Some(PeerOp::Shutdown(_)) => return true,
                     Some(PeerOp::GetStatistics(response)) => {
                         let _ = response.send(self.statistics.clone());
+                    }
+                    Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                        self.accept_connection(tcp_tx, tcp_rx);
                     }
                     Some(_) => {}
                     None => return true,
@@ -447,7 +430,9 @@ impl Peer {
                             self.notify_state_change();
                             return false;
                         }
-                        PeerOp::ManualStart => {} // Ignored when connected
+                        PeerOp::ManualStart | PeerOp::TcpConnectionAccepted { .. } => {
+                            // Ignored when connected
+                        }
                     }
                 }
 
