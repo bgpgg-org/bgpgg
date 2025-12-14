@@ -20,10 +20,11 @@ use crate::bgp::msg_notification::{
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
+use crate::config::{MaxPrefixAction, PeerConfig};
 use crate::fsm::{BgpState, Fsm, FsmEvent};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::{Path, RouteSource};
-use crate::server::{ConnectionType, ServerOp, SessionConfig};
+use crate::server::{ConnectionType, ServerOp};
 use crate::{debug, error, info, warn};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -60,22 +61,6 @@ pub enum SessionType {
     Ibgp,
 }
 
-/// Action to take when max prefix limit is reached
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaxPrefixAction {
-    /// Send CEASE notification and close the session
-    Terminate,
-    /// Discard new prefixes but keep the session
-    Discard,
-}
-
-/// Max prefix limit configuration
-#[derive(Debug, Clone, Copy)]
-pub struct MaxPrefixSetting {
-    pub limit: u32,
-    pub action: MaxPrefixAction,
-}
-
 /// Statistics for BGP messages
 #[derive(Debug, Clone, Default)]
 pub struct PeerStatistics {
@@ -103,7 +88,7 @@ pub struct Peer {
     pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
-    pub session_config: SessionConfig,
+    pub config: PeerConfig,
     /// TCP connection - None when disconnected (Idle/Connect/Active states)
     conn: Option<TcpConnection>,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
@@ -130,13 +115,14 @@ impl Peer {
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: SocketAddr,
-        session_config: SessionConfig,
+        config: PeerConfig,
         connect_retry_secs: u64,
     ) -> Self {
         let local_ip = match local_addr.ip() {
             std::net::IpAddr::V4(ip) => ip,
             _ => Ipv4Addr::UNSPECIFIED,
         };
+        let delay_open_time = config.delay_open_time_secs.map(Duration::from_secs);
         Peer {
             addr: addr.clone(),
             port,
@@ -145,14 +131,14 @@ impl Peer {
                 local_hold_time,
                 local_bgp_id,
                 local_ip,
-                session_config.delay_open_time,
+                delay_open_time,
             ),
             conn: None,
             asn: None,
             rib_in: AdjRibIn::new(addr),
             session_type: None,
             statistics: PeerStatistics::default(),
-            session_config,
+            config,
             peer_rx,
             server_tx,
             local_addr,
@@ -206,7 +192,7 @@ impl Peer {
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
     /// Returns true if shutdown requested.
     async fn handle_idle_state(&mut self) -> bool {
-        if self.session_config.passive_mode {
+        if self.config.passive_mode {
             self.handle_idle_state_passive().await
         } else {
             self.handle_idle_state_active().await
@@ -289,7 +275,7 @@ impl Peer {
                         self.conn = Some(TcpConnection { tx, rx });
 
                         // Handle DelayOpen if configured
-                        if self.session_config.delay_open_time.is_some() {
+                        if self.config.delay_open_time_secs.is_some() {
                             self.fsm.timers.start_delay_open_timer();
                         }
 
@@ -297,7 +283,7 @@ impl Peer {
                         self.notify_state_change();
 
                         // Send OPEN if not using DelayOpen
-                        if self.session_config.delay_open_time.is_none() {
+                        if self.config.delay_open_time_secs.is_none() {
                             if let Err(e) = self.enter_open_sent().await {
                                 error!("failed to send OPEN", "peer_ip" => &self.addr, "error" => e.to_string());
                                 self.disconnect();
@@ -352,7 +338,7 @@ impl Peer {
         // For incoming connections (new_connected), send OPEN if not already sent
         // But respect DelayOpen - start timer instead of sending immediately
         if self.fsm.state() == BgpState::OpenSent && self.statistics.open_sent == 0 {
-            if self.session_config.delay_open_time.is_some() {
+            if self.config.delay_open_time_secs.is_some() {
                 self.fsm.timers.start_delay_open_timer();
             } else {
                 if let Err(e) = self.enter_open_sent().await {
@@ -499,8 +485,8 @@ impl Peer {
     /// Returns None if automatic restart is disabled.
     fn get_idle_hold_time(&self) -> Option<Duration> {
         const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
-        let cfg = &self.session_config;
-        let base = cfg.idle_hold_time?;
+        let cfg = &self.config;
+        let base = Duration::from_secs(cfg.idle_hold_time_secs?);
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
             return Some(base);
         }
@@ -525,7 +511,7 @@ impl Peer {
     /// Check if NOTIFICATION can be sent (RFC 4271 8.2.1.5).
     fn can_send_notification(&self) -> bool {
         self.conn.is_some()
-            && (self.session_config.send_notification_without_open || self.statistics.open_sent > 0)
+            && (self.config.send_notification_without_open || self.statistics.open_sent > 0)
     }
 
     /// Handle an FSM event and perform state transitions
@@ -809,7 +795,7 @@ impl Peer {
                 Ok(delta) => Ok(Some(delta)),
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
                     // RFC 4271 8.1.2: check allow_automatic_stop
-                    if self.session_config.allow_automatic_stop {
+                    if self.config.allow_automatic_stop {
                         self.handle_fsm_event(&FsmEvent::AutomaticStop(
                             CeaseSubcode::MaxPrefixesReached,
                         ))
@@ -876,7 +862,7 @@ impl Peer {
     /// Check if adding new prefixes would exceed max prefix limit.
     /// Returns Ok(true) to proceed, Ok(false) to discard, Err to terminate.
     fn check_max_prefix_limit(&self, incoming_prefix_count: usize) -> Result<bool, BgpError> {
-        let Some(setting) = self.session_config.max_prefix else {
+        let Some(setting) = self.config.max_prefix else {
             return Ok(true);
         };
         let current = self.rib_in.prefix_count();
@@ -977,6 +963,7 @@ mod tests {
     use super::*;
     use crate::bgp::msg::Message;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+    use crate::config::MaxPrefixSetting;
     use tokio::net::TcpListener;
 
     async fn create_test_peer_with_state(state: BgpState) -> Peer {
@@ -1005,7 +992,7 @@ mod tests {
             rib_in: AdjRibIn::new(addr.ip().to_string()),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
-            session_config: SessionConfig::default(),
+            config: PeerConfig::default(),
             peer_rx,
             server_tx,
             local_addr: SocketAddr::new(local_ip.into(), 0),
@@ -1138,7 +1125,7 @@ mod tests {
 
         for (setting, initial, new_prefixes, expected_ok, expected_rib, desc) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.session_config.max_prefix = setting;
+            peer.config.max_prefix = setting;
 
             // Add initial prefixes (use different subnet to avoid overlap)
             if initial > 0 {
@@ -1275,7 +1262,7 @@ mod tests {
 
         for (setting, rib_count, incoming, expected) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.session_config.max_prefix = setting.clone();
+            peer.config.max_prefix = setting.clone();
             for i in 0..rib_count {
                 peer.rib_in.add_route(
                     create_test_prefix_n(i as u8),

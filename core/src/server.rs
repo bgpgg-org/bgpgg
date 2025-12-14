@@ -18,8 +18,8 @@ use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
 use crate::fsm::BgpState;
-use crate::peer::MaxPrefixAction;
-use crate::peer::{MaxPrefixSetting, Peer, PeerOp, PeerStatistics};
+use crate::net::peer_ip;
+use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
@@ -40,67 +40,8 @@ pub enum ConnectionType {
     Outgoing,
 }
 
-/// Per-peer session configuration.
-/// Includes RFC 4271 Section 8.1 optional attributes and other peer settings.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
-    /// None disables automatic restart, Some(duration) enables with given delay.
-    pub idle_hold_time: Option<Duration>,
-    /// DampPeerOscillations - use exponential backoff on failures (RFC 4271 8.1.1)
-    pub damp_peer_oscillations: bool,
-    /// AllowAutomaticStop - enable automatic stop by implementation logic (RFC 4271 8.1.1)
-    pub allow_automatic_stop: bool,
-    /// Passive mode - wait for remote peer to initiate connection (RFC 4271 8.1.1)
-    pub passive_mode: bool,
-    /// DelayOpenTime - delay before sending OPEN (RFC 4271 8.1.1).
-    /// None disables DelayOpen, Some(duration) enables with given delay.
-    pub delay_open_time: Option<Duration>,
-    /// Maximum prefix limit settings
-    pub max_prefix: Option<MaxPrefixSetting>,
-    /// SendNOTIFICATIONwithoutOPEN - allow sending NOTIFICATION before OPEN (RFC 4271 8.2.1.5).
-    /// Default false: OPEN must be sent before NOTIFICATION.
-    pub send_notification_without_open: bool,
-    /// CollisionDetectEstablishedState - process collisions in Established state (RFC 4271 8.1.1).
-    /// Default false: collision detection is ignored when peer is in Established state.
-    pub collision_detect_established_state: bool,
-}
-
 /// Maximum idle hold time when damping (RFC 4271 8.1.1 example uses 120s)
 const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            idle_hold_time: Some(Duration::from_secs(30)),
-            damp_peer_oscillations: true,
-            allow_automatic_stop: true,
-            passive_mode: false,
-            delay_open_time: None,
-            max_prefix: None,
-            send_notification_without_open: false,
-            collision_detect_established_state: false,
-        }
-    }
-}
-
-impl From<&PeerConfig> for SessionConfig {
-    fn from(pc: &PeerConfig) -> Self {
-        Self {
-            idle_hold_time: pc.idle_hold_time_secs.map(Duration::from_secs),
-            damp_peer_oscillations: pc.damp_peer_oscillations,
-            allow_automatic_stop: pc.allow_automatic_stop,
-            passive_mode: pc.passive_mode,
-            delay_open_time: pc.delay_open_time_secs.map(Duration::from_secs),
-            max_prefix: pc.max_prefix.map(|limit| MaxPrefixSetting {
-                limit,
-                action: MaxPrefixAction::Terminate,
-            }),
-            send_notification_without_open: pc.send_notification_without_open,
-            collision_detect_established_state: pc.collision_detect_established_state,
-        }
-    }
-}
 
 /// Administrative state of a peer, controls auto-reconnect behavior.
 /// Follows GoBGP's approach: only reconnect when Up.
@@ -119,7 +60,7 @@ pub enum AdminState {
 pub enum MgmtOp {
     AddPeer {
         addr: String,
-        session_config: SessionConfig,
+        config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePeer {
@@ -219,7 +160,7 @@ pub struct PeerInfo {
     pub state: BgpState,
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     /// Per-peer session configuration
-    pub session_config: SessionConfig,
+    pub config: PeerConfig,
     /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
     pub consecutive_down_count: u32,
 }
@@ -228,7 +169,7 @@ impl PeerInfo {
     pub fn new(
         port: Option<u16>,
         configured: bool,
-        session_config: SessionConfig,
+        config: PeerConfig,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     ) -> Self {
         Self {
@@ -241,7 +182,7 @@ impl PeerInfo {
             export_policy: None,
             state: BgpState::Idle,
             peer_tx,
-            session_config,
+            config,
             consecutive_down_count: 0,
         }
     }
@@ -264,8 +205,8 @@ impl PeerInfo {
     /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
     /// Returns None if automatic restart is disabled.
     pub fn get_idle_hold_time(&self) -> Option<Duration> {
-        let cfg = &self.session_config;
-        let base = cfg.idle_hold_time?;
+        let cfg = &self.config;
+        let base = Duration::from_secs(cfg.idle_hold_time_secs?);
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
             return Some(base);
         }
@@ -335,9 +276,7 @@ impl BgpServer {
         }
 
         // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
-        if peer.state == BgpState::Established
-            && !peer.session_config.collision_detect_established_state
-        {
+        if peer.state == BgpState::Established && !peer.config.collision_detect_established_state {
             info!("collision: ignoring in Established state", "peer_ip" => peer_ip);
             return true; // Reject new connection
         }
@@ -404,22 +343,13 @@ impl BgpServer {
                 continue;
             };
             let peer_ip = peer_addr.ip().to_string();
-            let session_config = SessionConfig::from(peer_cfg);
-            let passive = session_config.passive_mode;
+            let config = peer_cfg.clone();
+            let passive = config.passive_mode;
 
-            let peer_tx = self.spawn_peer(
-                peer_ip.clone(),
-                peer_addr.port(),
-                session_config.clone(),
-                bind_addr,
-            );
+            let peer_tx =
+                self.spawn_peer(peer_ip.clone(), peer_addr.port(), config.clone(), bind_addr);
 
-            let entry = PeerInfo::new(
-                Some(peer_addr.port()),
-                true,
-                session_config,
-                Some(peer_tx.clone()),
-            );
+            let entry = PeerInfo::new(Some(peer_addr.port()), true, config, Some(peer_tx.clone()));
             self.peers.insert(peer_ip.clone(), entry);
 
             // RFC 4271 Event 1: ManualStart
@@ -435,7 +365,7 @@ impl BgpServer {
         &self,
         addr: String,
         port: u16,
-        session_config: SessionConfig,
+        config: PeerConfig,
         bind_addr: SocketAddr,
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
@@ -449,7 +379,7 @@ impl BgpServer {
             self.config.hold_time_secs as u16,
             self.local_bgp_id,
             bind_addr,
-            session_config,
+            config,
             self.config.connect_retry_secs,
         );
 
@@ -461,16 +391,10 @@ impl BgpServer {
     }
 
     async fn accept_peer(&mut self, mut stream: TcpStream) {
-        let peer_addr = match stream.peer_addr() {
-            Ok(addr) => addr,
-            Err(e) => {
-                error!("failed to get peer address", "error" => e.to_string());
-                return;
-            }
+        let Some(peer_ip) = peer_ip(&stream) else {
+            error!("failed to get peer address");
+            return;
         };
-
-        // Extract just the IP address (no port) to use as peer identifier
-        let peer_ip = peer_addr.ip().to_string();
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
@@ -484,41 +408,64 @@ impl BgpServer {
             return;
         }
 
-        // RFC 4271 Section 6.8: Connection Collision Detection
         if self.resolve_collision(&peer_ip, ConnectionType::Incoming) {
             return;
         }
 
-        // Check if we have a configured peer waiting for this connection
-        let existing_config = self.peers.get(&peer_ip).map(|p| p.session_config.clone());
+        self.accept_incoming_connection(stream, &peer_ip);
+        info!("peer added", "peer_ip" => &peer_ip, "state" => "Idle", "total_peers" => self.peers.len());
+    }
 
-        // Use configured peer's session_config if exists
-        if let Some(session_config) = existing_config {
-            let peer_tx = self.spawn_peer_from_stream(stream, &peer_ip, session_config);
-            let existing = self.peers.get_mut(&peer_ip).unwrap();
+    /// Accept an incoming TCP connection and create/update peer entry.
+    fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: &str) {
+        let (config, existed) = self
+            .peers
+            .get(peer_ip)
+            .map(|p| (p.config.clone(), true))
+            .unwrap_or_default();
+
+        let peer_tx = self.spawn_peer_from_stream(stream, peer_ip, config.clone());
+
+        if existed {
+            let existing = self.peers.get_mut(peer_ip).unwrap();
             existing.peer_tx = Some(peer_tx);
             existing.state = BgpState::Idle;
-            info!("peer added", "peer_ip" => &peer_ip, "state" => "Idle", "total_peers" => self.peers.len());
-            return;
+        } else {
+            self.peers.insert(
+                peer_ip.to_string(),
+                PeerInfo::new(None, false, config, Some(peer_tx)),
+            );
         }
+    }
 
-        let peer_tx = self.spawn_peer_from_stream(stream, &peer_ip, SessionConfig::default());
+    /// Create a peer from a connected stream and spawn a task.
+    fn spawn_peer_from_stream(
+        &self,
+        stream: TcpStream,
+        peer_ip: &str,
+        config: PeerConfig,
+    ) -> mpsc::UnboundedSender<PeerOp> {
+        let local_addr = stream
+            .local_addr()
+            .unwrap_or_else(|_| SocketAddr::new(self.local_addr.into(), 0));
 
-        // Add unconfigured peer (will be removed on disconnect)
-        let entry = PeerInfo::new(None, false, SessionConfig::default(), Some(peer_tx));
+        let (tcp_rx, tcp_tx) = stream.into_split();
 
-        self.peers.insert(peer_ip.clone(), entry);
-        info!("peer added", "peer_ip" => &peer_ip, "state" => "Idle", "total_peers" => self.peers.len());
+        let peer_tx = self.spawn_peer(peer_ip.to_string(), 0, config, local_addr);
+
+        let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
+
+        peer_tx
     }
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
         match req {
             MgmtOp::AddPeer {
                 addr,
-                session_config,
+                config,
                 response,
             } => {
-                self.handle_add_peer(addr, session_config, response, bind_addr)
+                self.handle_add_peer(addr, config, response, bind_addr)
                     .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
@@ -669,7 +616,7 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        session_config: SessionConfig,
+        config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
@@ -685,6 +632,7 @@ impl BgpServer {
         };
 
         let peer_ip = peer_addr.ip().to_string();
+        let peer_port = peer_addr.port();
 
         // Check if peer already exists
         if self.peers.contains_key(&peer_ip) {
@@ -693,51 +641,20 @@ impl BgpServer {
         }
 
         // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        let peer_tx = self.spawn_peer(
+        let peer_tx = self.spawn_peer(peer_ip.clone(), peer_port, config.clone(), bind_addr);
+
+        self.peers.insert(
             peer_ip.clone(),
-            peer_addr.port(),
-            session_config.clone(),
-            bind_addr,
+            PeerInfo::new(Some(peer_port), true, config.clone(), Some(peer_tx.clone())),
         );
-
-        // Add peer entry
-        let entry = PeerInfo::new(
-            Some(peer_addr.port()),
-            true,
-            session_config.clone(),
-            Some(peer_tx.clone()),
-        );
-
-        self.peers.insert(peer_ip.clone(), entry);
 
         // RFC 4271 Event 1: ManualStart - initiate connection (unless passive)
-        if !session_config.passive_mode {
+        if !config.passive_mode {
             let _ = peer_tx.send(PeerOp::ManualStart);
         }
 
-        info!("peer added", "peer_ip" => &peer_ip, "passive" => session_config.passive_mode, "total_peers" => self.peers.len());
+        info!("peer added", "peer_ip" => &peer_ip, "passive" => config.passive_mode, "total_peers" => self.peers.len());
         let _ = response.send(Ok(()));
-    }
-
-    /// Common helper to create and spawn a peer from a connected stream.
-    /// The peer starts in Idle state and transitions to OpenSent after receiving TcpConnectionAccepted.
-    fn spawn_peer_from_stream(
-        &self,
-        stream: TcpStream,
-        peer_ip: &str,
-        session_config: SessionConfig,
-    ) -> mpsc::UnboundedSender<PeerOp> {
-        let local_addr = stream
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::new(self.local_addr.into(), 0));
-
-        let (tcp_rx, tcp_tx) = stream.into_split();
-
-        let peer_tx = self.spawn_peer(peer_ip.to_string(), 0, session_config, local_addr);
-
-        let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
-
-        peer_tx
     }
 
     async fn handle_remove_peer(
@@ -974,17 +891,18 @@ mod tests {
     use super::*;
 
     fn peer_info(idle_hold_time_secs: Option<u64>, damp: bool, down_count: u32) -> PeerInfo {
-        let session_config = SessionConfig {
-            idle_hold_time: idle_hold_time_secs.map(Duration::from_secs),
+        let config = PeerConfig {
+            address: String::new(),
+            idle_hold_time_secs,
             damp_peer_oscillations: damp,
             allow_automatic_stop: true,
             passive_mode: false,
-            delay_open_time: None,
+            delay_open_time_secs: None,
             max_prefix: None,
             send_notification_without_open: false,
             collision_detect_established_state: false,
         };
-        let mut entry = PeerInfo::new(None, true, session_config, None);
+        let mut entry = PeerInfo::new(None, true, config, None);
         entry.consecutive_down_count = down_count;
         entry
     }
