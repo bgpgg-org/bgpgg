@@ -35,6 +35,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
+/// RFC 4271 8.1.1: Maximum IdleHoldTime for DampPeerOscillations backoff.
+const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
+
 /// Operations that can be sent to a peer task
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
@@ -272,12 +275,12 @@ impl Peer {
             // Have connection, start DelayOpen or transition to OpenSent
             if self.config.delay_open_time_secs.is_some() {
                 self.fsm.timers.start_delay_open_timer();
-            } else {
-                self.transition(&FsmEvent::TcpConnectionConfirmed);
-                if let Err(e) = self.enter_open_sent().await {
-                    error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                    self.disconnect();
-                }
+            } else if let Err(e) = self
+                .handle_fsm_event(&FsmEvent::TcpConnectionConfirmed)
+                .await
+            {
+                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                self.disconnect();
             }
         } else {
             // No connection, attempt outgoing TCP connection
@@ -293,12 +296,9 @@ impl Peer {
 
                             if self.config.delay_open_time_secs.is_some() {
                                 self.fsm.timers.start_delay_open_timer();
-                            } else {
-                                self.transition(&FsmEvent::TcpConnectionConfirmed);
-                                if let Err(e) = self.enter_open_sent().await {
-                                    error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                                    self.disconnect();
-                                }
+                            } else if let Err(e) = self.handle_fsm_event(&FsmEvent::TcpConnectionConfirmed).await {
+                                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                                self.disconnect();
                             }
                         }
                         Err(e) => {
@@ -318,12 +318,31 @@ impl Peer {
                             self.transition(&FsmEvent::ManualStop);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            self.accept_connection(tcp_tx, tcp_rx);
+                            self.accept_connection(tcp_tx, tcp_rx).await;
                         }
                         _ => {}
                     }
                 }
             }
+        }
+    }
+
+    /// Accept an incoming TCP connection in Connect or Active state.
+    async fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
+        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
+        self.conn = Some(TcpConnection {
+            tx: tcp_tx,
+            rx: tcp_rx,
+        });
+        self.conn_type = ConnectionType::Incoming;
+        if self.config.delay_open_time_secs.is_some() {
+            self.fsm.timers.start_delay_open_timer();
+        } else if let Err(e) = self
+            .handle_fsm_event(&FsmEvent::TcpConnectionConfirmed)
+            .await
+        {
+            error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+            self.disconnect();
         }
     }
 
@@ -368,7 +387,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_expired() {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     self.fsm.timers.stop_delay_open_timer();
-                    if let Err(e) = self.enter_open_sent().await {
+                    if let Err(e) = self.send_open().await {
                         error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.disconnect();
                     } else {
@@ -394,21 +413,6 @@ impl Peer {
         }
     }
 
-    /// Accept an incoming TCP connection in Connect or Active state.
-    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
-        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
-        self.conn = Some(TcpConnection {
-            tx: tcp_tx,
-            rx: tcp_rx,
-        });
-        self.conn_type = ConnectionType::Incoming;
-        if self.config.delay_open_time_secs.is_some() {
-            self.fsm.timers.start_delay_open_timer();
-        } else {
-            self.transition(&FsmEvent::TcpConnectionConfirmed);
-        }
-    }
-
     /// Handle Active state - listen for incoming connections.
     async fn handle_active_state(&mut self) {
         if self.fsm.timers.delay_open_timer_running() {
@@ -429,7 +433,7 @@ impl Peer {
                             self.transition(&FsmEvent::ManualStop);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            self.accept_connection(tcp_tx, tcp_rx);
+                            self.accept_connection(tcp_tx, tcp_rx).await;
                         }
                         _ => {}
                     }
@@ -442,20 +446,6 @@ impl Peer {
     /// Returns true if shutdown requested.
     async fn handle_connected_state(&mut self) -> bool {
         let peer_ip = self.addr;
-
-        // For incoming connections (new_connected), send OPEN if not already sent
-        // But respect DelayOpen - start timer instead of sending immediately
-        if self.fsm.state() == BgpState::OpenSent && self.statistics.open_sent == 0 {
-            if self.config.delay_open_time_secs.is_some() {
-                self.fsm.timers.start_delay_open_timer();
-            } else {
-                if let Err(e) = self.enter_open_sent().await {
-                    error!("failed to send OPEN", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                    self.disconnect();
-                    return false;
-                }
-            }
-        }
 
         // Timer interval for hold/keepalive checks
         let mut timer_interval = tokio::time::interval(Duration::from_millis(500));
@@ -577,7 +567,6 @@ impl Peer {
     /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
     /// Returns None if automatic restart is disabled.
     fn get_idle_hold_time(&self) -> Option<Duration> {
-        const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
         let cfg = &self.config;
         let base = Duration::from_secs(cfg.idle_hold_time_secs?);
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
@@ -623,9 +612,10 @@ impl Peer {
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
-            // Entering OpenSent - send OPEN message (normal path)
-            (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
-                self.enter_open_sent().await?;
+            // Entering OpenSent - send OPEN message
+            (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed)
+            | (BgpState::Active, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
+                self.send_open().await?;
             }
 
             // Received OPEN while in Connect with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 8.2.1.3)
@@ -641,7 +631,7 @@ impl Peer {
                 },
             ) => {
                 self.fsm.timers.stop_delay_open_timer();
-                self.enter_open_sent().await?;
+                self.send_open().await?;
                 self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
                     .await?;
             }
@@ -714,8 +704,8 @@ impl Peer {
         Ok(())
     }
 
-    /// Handle entering OpenSent state - send OPEN message
-    async fn enter_open_sent(&mut self) -> Result<(), io::Error> {
+    /// Send OPEN message to peer.
+    async fn send_open(&mut self) -> Result<(), io::Error> {
         let conn = self
             .conn
             .as_mut()
