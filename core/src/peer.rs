@@ -45,6 +45,10 @@ pub enum PeerOp {
     ManualStart,
     /// RFC 4271 Event 2: ManualStop - admin stops the peer connection
     ManualStop,
+    /// RFC 4271 Event 3: AutomaticStart - system automatically starts (non-passive)
+    AutomaticStart,
+    /// RFC 4271 Event 5: AutomaticStartPassive - system automatically starts (passive)
+    AutomaticStartPassive,
     /// Incoming TCP connection accepted - peer should transition to OpenSent
     TcpConnectionAccepted {
         tcp_tx: OwnedWriteHalf,
@@ -188,20 +192,31 @@ impl Peer {
         }
     }
 
-    /// Passive mode: wait indefinitely for incoming connection.
+    /// Passive mode: wait for start event to transition to Active.
     async fn handle_idle_state_passive(&mut self) -> bool {
         loop {
             match self.peer_rx.recv().await {
                 Some(PeerOp::ManualStart) => {
-                    debug!("ManualStart ignored for passive peer", "peer_ip" => self.addr.to_string());
+                    debug!("ManualStart received for passive peer", "peer_ip" => self.addr.to_string());
+                    self.manually_stopped = false;
+                    // Event 4: ManualStartPassive -> Active
+                    self.transition(&FsmEvent::ManualStartPassive);
+                    return false;
+                }
+                Some(PeerOp::AutomaticStartPassive) => {
+                    debug!("AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
+                    self.transition(&FsmEvent::AutomaticStartPassive);
+                    return false;
                 }
                 Some(PeerOp::Shutdown(_)) => return true,
                 Some(PeerOp::GetStatistics(response)) => {
                     let _ = response.send(self.statistics.clone());
                 }
                 Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                    self.accept_connection(tcp_tx, tcp_rx);
-                    return false;
+                    // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                    debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                    drop(tcp_tx);
+                    drop(tcp_rx);
                 }
                 Some(_) => {}
                 None => return true,
@@ -209,7 +224,7 @@ impl Peer {
         }
     }
 
-    /// Active mode: wait for ManualStart or auto-reconnect timer.
+    /// Non-passive mode: wait for ManualStart, AutomaticStart, or auto-reconnect timer.
     async fn handle_idle_state_active(&mut self) -> bool {
         let idle_hold_time = self.get_idle_hold_time();
         let auto_reconnect = idle_hold_time.is_some() && !self.manually_stopped;
@@ -223,12 +238,19 @@ impl Peer {
                         self.manually_stopped = false;
                         self.transition(&FsmEvent::ManualStart);
                     }
+                    Some(PeerOp::AutomaticStart) => {
+                        debug!("AutomaticStart received", "peer_ip" => self.addr.to_string());
+                        self.transition(&FsmEvent::AutomaticStart);
+                    }
                     Some(PeerOp::Shutdown(_)) => return true,
                     Some(PeerOp::GetStatistics(response)) => {
                         let _ = response.send(self.statistics.clone());
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        self.accept_connection(tcp_tx, tcp_rx);
+                        // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                        debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                        drop(tcp_tx);
+                        drop(tcp_rx);
                     }
                     Some(_) => {}
                     None => return true,
@@ -242,77 +264,175 @@ impl Peer {
         false
     }
 
-    /// Accept an incoming TCP connection and transition FSM to OpenSent.
-    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
-        debug!("TcpConnectionAccepted received", "peer_ip" => self.addr.to_string());
-        self.conn = Some(TcpConnection {
-            tx: tcp_tx,
-            rx: tcp_rx,
-        });
-        self.conn_type = ConnectionType::Incoming;
-        self.transition(&FsmEvent::ManualStart);
-        self.transition(&FsmEvent::TcpConnectionConfirmed);
-    }
-
-    /// Handle Connect state - attempt TCP connection.
+    /// Handle Connect state - attempt TCP connection or wait for DelayOpen timer.
     async fn handle_connect_state(&mut self) {
-        let peer_addr = SocketAddr::new(self.addr, self.port);
-
-        tokio::select! {
-            result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
-                match result {
-                    Ok(stream) => {
-                        info!("TCP connection established", "peer_ip" => self.addr.to_string());
-                        let (rx, tx) = stream.into_split();
-                        self.conn = Some(TcpConnection { tx, rx });
-
-                        // Handle DelayOpen if configured
-                        if self.config.delay_open_time_secs.is_some() {
-                            self.fsm.timers.start_delay_open_timer();
-                        }
-
-                        self.transition(&FsmEvent::TcpConnectionConfirmed);
-
-                        // Send OPEN if not using DelayOpen
-                        if self.config.delay_open_time_secs.is_none() {
-                            if let Err(e) = self.enter_open_sent().await {
-                                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                                self.disconnect();
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        self.transition(&FsmEvent::TcpConnectionFails);
-                    }
+        if self.fsm.timers.delay_open_timer_running() {
+            self.handle_delay_open_wait().await;
+        } else if self.conn.is_some() {
+            // Have connection, start DelayOpen or transition to OpenSent
+            if self.config.delay_open_time_secs.is_some() {
+                self.fsm.timers.start_delay_open_timer();
+            } else {
+                self.transition(&FsmEvent::TcpConnectionConfirmed);
+                if let Err(e) = self.enter_open_sent().await {
+                    error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                    self.disconnect();
                 }
             }
-            _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
-                debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
-                self.transition(&FsmEvent::ConnectRetryTimerExpires);
-            }
-            op = self.peer_rx.recv() => {
-                if let Some(PeerOp::ManualStop) = op {
-                    self.manually_stopped = true;
-                    self.transition(&FsmEvent::ManualStop);
+        } else {
+            // No connection, attempt outgoing TCP connection
+            let peer_addr = SocketAddr::new(self.addr, self.port);
+
+            tokio::select! {
+                result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
+                    match result {
+                        Ok(stream) => {
+                            info!("TCP connection established", "peer_ip" => self.addr.to_string());
+                            let (rx, tx) = stream.into_split();
+                            self.conn = Some(TcpConnection { tx, rx });
+
+                            if self.config.delay_open_time_secs.is_some() {
+                                self.fsm.timers.start_delay_open_timer();
+                            } else {
+                                self.transition(&FsmEvent::TcpConnectionConfirmed);
+                                if let Err(e) = self.enter_open_sent().await {
+                                    error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                                    self.disconnect();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            self.transition(&FsmEvent::TcpConnectionFails);
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
+                    debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
+                    self.transition(&FsmEvent::ConnectRetryTimerExpires);
+                }
+                op = self.peer_rx.recv() => {
+                    match op {
+                        Some(PeerOp::ManualStop) => {
+                            self.manually_stopped = true;
+                            self.transition(&FsmEvent::ManualStop);
+                        }
+                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                            self.accept_connection(tcp_tx, tcp_rx);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
-    /// Handle Active state - wait before retrying connection.
-    async fn handle_active_state(&mut self) {
-        let retry_time = Duration::from_secs(self.connect_retry_secs);
+    /// Wait for DelayOpen timer while reading from connection (RFC 4271 8.2.1.4).
+    /// Used by both Connect and Active states.
+    async fn handle_delay_open_wait(&mut self) {
+        let conn = self.conn.as_mut().expect("connection should exist");
+        let mut timer_interval = tokio::time::interval(Duration::from_millis(100));
 
         tokio::select! {
-            _ = tokio::time::sleep(retry_time) => {
-                debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
-                self.transition(&FsmEvent::ConnectRetryTimerExpires);
+            result = read_bgp_message(&mut conn.rx) => {
+                match result {
+                    Ok(BgpMessage::Open(open)) => {
+                        debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
+                        self.fsm.timers.stop_delay_open_timer();
+                        if let Err(e) = self.handle_fsm_event(&FsmEvent::BgpOpenReceived {
+                            peer_asn: open.asn,
+                            peer_hold_time: open.hold_time,
+                            local_asn: self.fsm.local_asn(),
+                            local_hold_time: self.fsm.local_hold_time(),
+                            peer_bgp_id: open.bgp_identifier,
+                        }).await {
+                            error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            self.disconnect();
+                        }
+                    }
+                    Ok(_) => {
+                        error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
+                        self.disconnect();
+                    }
+                    Err(e) => {
+                        debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                            let _ = self.send_notification(notif).await;
+                        }
+                        self.transition(&FsmEvent::TcpConnectionFails);
+                        self.disconnect();
+                    }
+                }
+            }
+            _ = timer_interval.tick() => {
+                if self.fsm.timers.delay_open_timer_expired() {
+                    debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
+                    self.fsm.timers.stop_delay_open_timer();
+                    if let Err(e) = self.enter_open_sent().await {
+                        error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        self.disconnect();
+                    } else {
+                        self.transition(&FsmEvent::DelayOpenTimerExpires);
+                    }
+                }
             }
             op = self.peer_rx.recv() => {
-                if let Some(PeerOp::ManualStop) = op {
-                    self.manually_stopped = true;
-                    self.transition(&FsmEvent::ManualStop);
+                match op {
+                    Some(PeerOp::ManualStop) => {
+                        self.manually_stopped = true;
+                        self.fsm.timers.stop_delay_open_timer();
+                        self.transition(&FsmEvent::ManualStop);
+                    }
+                    Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                        debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
+                        drop(tcp_tx);
+                        drop(tcp_rx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Accept an incoming TCP connection in Connect or Active state.
+    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
+        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
+        self.conn = Some(TcpConnection {
+            tx: tcp_tx,
+            rx: tcp_rx,
+        });
+        self.conn_type = ConnectionType::Incoming;
+        if self.config.delay_open_time_secs.is_some() {
+            self.fsm.timers.start_delay_open_timer();
+        } else {
+            self.transition(&FsmEvent::TcpConnectionConfirmed);
+        }
+    }
+
+    /// Handle Active state - listen for incoming connections.
+    async fn handle_active_state(&mut self) {
+        if self.fsm.timers.delay_open_timer_running() {
+            self.handle_delay_open_wait().await;
+        } else {
+            // Wait for incoming connection
+            let retry_time = Duration::from_secs(self.connect_retry_secs);
+
+            tokio::select! {
+                _ = tokio::time::sleep(retry_time) => {
+                    debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
+                    self.transition(&FsmEvent::ConnectRetryTimerExpires);
+                }
+                op = self.peer_rx.recv() => {
+                    match op {
+                        Some(PeerOp::ManualStop) => {
+                            self.manually_stopped = true;
+                            self.transition(&FsmEvent::ManualStop);
+                        }
+                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                            self.accept_connection(tcp_tx, tcp_rx);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -402,23 +522,16 @@ impl Peer {
                             self.transition(&FsmEvent::ManualStop);
                             return false;
                         }
-                        PeerOp::ManualStart | PeerOp::TcpConnectionAccepted { .. } => {
+                        PeerOp::ManualStart
+                        | PeerOp::AutomaticStart
+                        | PeerOp::AutomaticStartPassive
+                        | PeerOp::TcpConnectionAccepted { .. } => {
                             // Ignored when connected
                         }
                     }
                 }
 
                 _ = timer_interval.tick() => {
-                    // DelayOpen timer check
-                    if self.fsm.timers.delay_open_timer_expired() {
-                        debug!("delay open timer expired", "peer_ip" => peer_ip.to_string());
-                        if let Err(e) = self.handle_fsm_event(&FsmEvent::DelayOpenTimerExpires).await {
-                            error!("failed to handle delay open timer", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect();
-                            return false;
-                        }
-                    }
-
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
                         error!("hold timer expired", "peer_ip" => peer_ip.to_string());
@@ -512,18 +625,6 @@ impl Peer {
         match (old_state, new_state, event) {
             // Entering OpenSent - send OPEN message (normal path)
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
-                self.enter_open_sent().await?;
-            }
-
-            // DelayOpen timer expired in Connect - send OPEN (RFC 4271 8.2.1.3)
-            (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
-                self.fsm.timers.stop_delay_open_timer();
-                self.enter_open_sent().await?;
-            }
-
-            // DelayOpen timer expired in OpenSent - send OPEN (incoming connection case)
-            (BgpState::OpenSent, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
-                self.fsm.timers.stop_delay_open_timer();
                 self.enter_open_sent().await?;
             }
 

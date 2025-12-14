@@ -40,6 +40,10 @@ pub enum FsmEvent {
     ManualStop,
     /// Event 3: AutomaticStart - triggered when IdleHoldTimer expires
     AutomaticStart,
+    /// Event 4: ManualStart_with_PassiveTcpEstablishment
+    ManualStartPassive,
+    /// Event 5: AutomaticStart_with_PassiveTcpEstablishment
+    AutomaticStartPassive,
     /// Event 8: AutomaticStop - automatic stop based on implementation logic (e.g., max prefix)
     AutomaticStop(CeaseSubcode),
     /// Event 9: ConnectRetryTimerExpires
@@ -302,6 +306,10 @@ impl Fsm {
             // Event 1, 3: ManualStart/AutomaticStart -> Connect
             (BgpState::Idle, FsmEvent::ManualStart) => (BgpState::Connect, None),
             (BgpState::Idle, FsmEvent::AutomaticStart) => (BgpState::Connect, None),
+            // Event 4: ManualStartPassive -> Active (RFC 4271 8.2.2)
+            (BgpState::Idle, FsmEvent::ManualStartPassive) => (BgpState::Active, None),
+            // Event 5: AutomaticStartPassive -> Active (RFC 4271 8.2.2)
+            (BgpState::Idle, FsmEvent::AutomaticStartPassive) => (BgpState::Active, None),
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -470,6 +478,16 @@ mod tests {
             // From Idle
             (BgpState::Idle, FsmEvent::ManualStart, BgpState::Connect),
             (BgpState::Idle, FsmEvent::AutomaticStart, BgpState::Connect),
+            (
+                BgpState::Idle,
+                FsmEvent::ManualStartPassive,
+                BgpState::Active,
+            ),
+            (
+                BgpState::Idle,
+                FsmEvent::AutomaticStartPassive,
+                BgpState::Active,
+            ),
             // From Connect
             (BgpState::Connect, FsmEvent::ManualStop, BgpState::Idle),
             (

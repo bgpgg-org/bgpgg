@@ -91,6 +91,11 @@ impl PeerConfig {
     pub fn get_delay_open_time(&self) -> Option<Duration> {
         self.delay_open_time_secs.map(Duration::from_secs)
     }
+
+    /// RFC 4271 8.1.2: AllowAutomaticStart is true if IdleHoldTimer is configured.
+    pub fn allow_automatic_start(&self) -> bool {
+        self.idle_hold_time_secs.is_some()
+    }
 }
 
 impl Default for PeerConfig {

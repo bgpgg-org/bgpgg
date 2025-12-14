@@ -402,7 +402,10 @@ impl BgpServer {
             .map(|p| (p.config.clone(), true))
             .unwrap_or_default();
 
-        let peer_tx = self.spawn_peer_from_stream(stream, peer_ip, config.clone());
+        let Some(peer_tx) = self.spawn_peer_from_stream(stream, peer_ip, config.clone()) else {
+            // AllowAutomaticStart is false - connection rejected
+            return;
+        };
 
         if existed {
             let existing = self.peers.get_mut(&peer_ip).unwrap();
@@ -415,23 +418,39 @@ impl BgpServer {
     }
 
     /// Create a peer from a connected stream and spawn a task.
+    /// Returns None if AllowAutomaticStart is false (RFC 4271 8.1.1).
     fn spawn_peer_from_stream(
         &self,
         stream: TcpStream,
         peer_ip: IpAddr,
         config: PeerConfig,
-    ) -> mpsc::UnboundedSender<PeerOp> {
+    ) -> Option<mpsc::UnboundedSender<PeerOp>> {
+        // RFC 4271 8.1.1: AllowAutomaticStart must be true for automatic events
+        if !config.allow_automatic_start() {
+            info!("rejecting incoming: AllowAutomaticStart is false", "peer_ip" => peer_ip.to_string());
+            return None;
+        }
+
         let local_addr = stream
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::new(self.local_addr.into(), 0));
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
-        let peer_tx = self.spawn_peer(SocketAddr::new(peer_ip, 0), config, local_addr);
+        let peer_tx = self.spawn_peer(SocketAddr::new(peer_ip, 0), config.clone(), local_addr);
+
+        // RFC 4271 8.2.2: Send appropriate start event based on PassiveTcpEstablishment
+        if config.passive_mode {
+            // Event 5: AutomaticStartPassive -> Active
+            let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
+        } else {
+            // Event 3: AutomaticStart -> Connect
+            let _ = peer_tx.send(PeerOp::AutomaticStart);
+        }
 
         let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
 
-        peer_tx
+        Some(peer_tx)
     }
 
     async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
