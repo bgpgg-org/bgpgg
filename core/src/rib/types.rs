@@ -15,21 +15,22 @@
 use crate::bgp::utils::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
+use std::net::IpAddr;
 
 /// Source of a route
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum RouteSource {
     /// Route learned from an EBGP peer (external AS)
-    Ebgp(String),
+    Ebgp(IpAddr),
     /// Route learned from an IBGP peer (same AS)
-    Ibgp(String),
+    Ibgp(IpAddr),
     /// Route originated locally by this router
     Local,
 }
 
 impl RouteSource {
     /// Create a RouteSource based on BGP session type
-    pub fn from_session(session_type: SessionType, peer_addr: String) -> Self {
+    pub fn from_session(session_type: SessionType, peer_addr: IpAddr) -> Self {
         match session_type {
             SessionType::Ebgp => RouteSource::Ebgp(peer_addr),
             SessionType::Ibgp => RouteSource::Ibgp(peer_addr),
@@ -62,37 +63,46 @@ pub struct Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_route_source_from_session() {
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         assert_eq!(
-            RouteSource::from_session(SessionType::Ebgp, "10.0.0.1".to_string()),
-            RouteSource::Ebgp("10.0.0.1".to_string())
+            RouteSource::from_session(SessionType::Ebgp, ip1),
+            RouteSource::Ebgp(ip1)
         );
         assert_eq!(
-            RouteSource::from_session(SessionType::Ibgp, "10.0.0.2".to_string()),
-            RouteSource::Ibgp("10.0.0.2".to_string())
+            RouteSource::from_session(SessionType::Ibgp, ip2),
+            RouteSource::Ibgp(ip2)
         );
     }
 
     #[test]
     fn test_is_ibgp() {
-        assert!(RouteSource::Ibgp("10.0.0.1".to_string()).is_ibgp());
-        assert!(!RouteSource::Ebgp("10.0.0.2".to_string()).is_ibgp());
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        assert!(RouteSource::Ibgp(ip1).is_ibgp());
+        assert!(!RouteSource::Ebgp(ip2).is_ibgp());
         assert!(!RouteSource::Local.is_ibgp());
     }
 
     #[test]
     fn test_is_ebgp() {
-        assert!(RouteSource::Ebgp("10.0.0.1".to_string()).is_ebgp());
-        assert!(!RouteSource::Ibgp("10.0.0.2".to_string()).is_ebgp());
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        assert!(RouteSource::Ebgp(ip1).is_ebgp());
+        assert!(!RouteSource::Ibgp(ip2).is_ebgp());
         assert!(!RouteSource::Local.is_ebgp());
     }
 
     #[test]
     fn test_is_local() {
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         assert!(RouteSource::Local.is_local());
-        assert!(!RouteSource::Ebgp("10.0.0.1".to_string()).is_local());
-        assert!(!RouteSource::Ibgp("10.0.0.2".to_string()).is_local());
+        assert!(!RouteSource::Ebgp(ip1).is_local());
+        assert!(!RouteSource::Ibgp(ip2).is_local());
     }
 }

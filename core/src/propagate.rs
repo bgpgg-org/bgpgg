@@ -22,7 +22,7 @@ use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
 use crate::{error, info};
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc;
 
 /// A batch of route announcements sharing the same path attributes
@@ -34,12 +34,12 @@ pub struct AnnouncementBatch {
 
 /// Check if we should propagate routes to this peer
 pub fn should_propagate_to_peer(
-    peer_addr: &str,
+    peer_addr: IpAddr,
     peer_state: BgpState,
-    originating_peer: &Option<String>,
+    originating_peer: Option<IpAddr>,
 ) -> bool {
     // Skip the peer that sent us the original update (if any)
-    if let Some(ref orig_peer) = originating_peer {
+    if let Some(orig_peer) = originating_peer {
         if peer_addr == orig_peer {
             return false;
         }
@@ -148,7 +148,7 @@ pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u3
 
 /// Send withdrawal messages to a peer
 pub fn send_withdrawals_to_peer(
-    peer_addr: &str,
+    peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
 ) {
@@ -158,9 +158,9 @@ pub fn send_withdrawals_to_peer(
 
     let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
-        error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr, "error" => e.to_string());
+        error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
     } else {
-        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr);
+        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
     }
 }
 
@@ -218,7 +218,7 @@ fn build_export_next_hop(
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
 pub fn send_announcements_to_peer(
-    peer_addr: &str,
+    peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_announce: &[(IpNetwork, Path)],
     local_asn: u16,
@@ -267,7 +267,7 @@ pub fn send_announcements_to_peer(
             .cloned()
             .collect();
 
-        info!("exporting route", "peer_ip" => peer_addr, "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
+        info!("exporting route", "peer_ip" => peer_addr.to_string(), "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
@@ -281,9 +281,9 @@ pub fn send_announcements_to_peer(
         );
 
         if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
-            error!("failed to send UPDATE to peer", "peer_ip" => peer_addr, "error" => e.to_string());
+            error!("failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
         } else {
-            info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => peer_addr);
+            info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => peer_addr.to_string());
         }
     }
 }
@@ -295,7 +295,10 @@ mod tests {
     use crate::bgp::utils::{IpNetwork, Ipv4Net};
     use crate::rib::RouteSource;
     use std::collections::HashSet;
-    use std::net::Ipv4Addr;
+
+    fn test_ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
 
     fn make_path(source: RouteSource, as_path: Vec<AsPathSegment>, next_hop: Ipv4Addr) -> Path {
         Path {
@@ -314,30 +317,30 @@ mod tests {
     fn test_should_propagate_to_peer() {
         // Should propagate to established peer when no originating peer
         assert!(should_propagate_to_peer(
-            "10.0.0.2",
+            test_ip(2),
             BgpState::Established,
-            &None
+            None
         ));
 
         // Should propagate to established peer when different from originating peer
         assert!(should_propagate_to_peer(
-            "10.0.0.2",
+            test_ip(2),
             BgpState::Established,
-            &Some("10.0.0.1".to_string())
+            Some(test_ip(1))
         ));
 
         // Should NOT propagate to same peer that sent the route
         assert!(!should_propagate_to_peer(
-            "10.0.0.2",
+            test_ip(2),
             BgpState::Established,
-            &Some("10.0.0.2".to_string())
+            Some(test_ip(2))
         ));
 
         // Should NOT propagate to non-established peer
         assert!(!should_propagate_to_peer(
-            "10.0.0.3",
+            test_ip(3),
             BgpState::Connect,
-            &Some("10.0.0.1".to_string())
+            Some(test_ip(1))
         ));
     }
 
@@ -347,7 +350,7 @@ mod tests {
         let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
 
         let ebgp_path = make_path(
-            RouteSource::Ebgp("10.0.0.1".to_string()),
+            RouteSource::Ebgp(test_ip(1)),
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
@@ -357,7 +360,7 @@ mod tests {
         );
 
         let ibgp_path = make_path(
-            RouteSource::Ibgp("10.0.0.2".to_string()),
+            RouteSource::Ibgp(test_ip(2)),
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
@@ -449,7 +452,7 @@ mod tests {
     fn test_as_set_preservation_ebgp() {
         // Route with AS_SET should be preserved when exporting to eBGP
         let path_with_as_set = make_path(
-            RouteSource::Ebgp("10.0.0.1".to_string()),
+            RouteSource::Ebgp(test_ip(1)),
             vec![
                 AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -478,7 +481,7 @@ mod tests {
     fn test_as_set_first_segment_ebgp() {
         // Route starting with AS_SET should create new AS_SEQUENCE for local ASN
         let path_starting_with_as_set = make_path(
-            RouteSource::Ebgp("10.0.0.1".to_string()),
+            RouteSource::Ebgp(test_ip(1)),
             vec![
                 AsPathSegment {
                     segment_type: AsPathSegmentType::AsSet,
@@ -509,7 +512,7 @@ mod tests {
     fn test_as_set_preservation_ibgp() {
         // Route with AS_SET should be preserved unchanged when exporting to iBGP
         let path_with_as_set = make_path(
-            RouteSource::Ebgp("10.0.0.1".to_string()),
+            RouteSource::Ebgp(test_ip(1)),
             vec![
                 AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -557,7 +560,7 @@ mod tests {
 
         // iBGP: Learned route -> preserve NEXT_HOP
         let ibgp_path = make_path(
-            RouteSource::Ibgp("10.0.0.1".to_string()),
+            RouteSource::Ibgp(test_ip(1)),
             vec![],
             Ipv4Addr::new(192, 168, 2, 1),
         );
@@ -568,7 +571,7 @@ mod tests {
 
         // eBGP: Learned route -> rewrite to self
         let ebgp_path = make_path(
-            RouteSource::Ebgp("10.0.0.1".to_string()),
+            RouteSource::Ebgp(test_ip(1)),
             vec![],
             Ipv4Addr::new(192, 168, 3, 1),
         );
@@ -617,7 +620,7 @@ mod tests {
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: Ipv4Addr::new(192, 168, 1, 1),
-            source: RouteSource::Ebgp("10.0.0.1".to_string()),
+            source: RouteSource::Ebgp(test_ip(1)),
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,

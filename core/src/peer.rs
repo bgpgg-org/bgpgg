@@ -27,7 +27,7 @@ use crate::rib::{Path, RouteSource};
 use crate::server::{ConnectionType, ServerOp};
 use crate::{debug, error, info, warn};
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -81,7 +81,7 @@ struct TcpConnection {
 }
 
 pub struct Peer {
-    pub addr: String,
+    pub addr: IpAddr,
     pub port: u16,
     pub fsm: Fsm,
     pub asn: Option<u16>,
@@ -107,7 +107,7 @@ impl Peer {
     /// Create a new Peer in Idle state (RFC 4271 8.2.2).
     /// Peer starts without TCP connection - use ManualStart to initiate connection.
     pub fn new(
-        addr: String,
+        addr: IpAddr,
         port: u16,
         peer_rx: mpsc::UnboundedReceiver<PeerOp>,
         server_tx: mpsc::UnboundedSender<ServerOp>,
@@ -124,7 +124,7 @@ impl Peer {
         };
         let delay_open_time = config.delay_open_time_secs.map(Duration::from_secs);
         Peer {
-            addr: addr.clone(),
+            addr,
             port,
             fsm: Fsm::new_idle(
                 local_asn,
@@ -135,7 +135,7 @@ impl Peer {
             ),
             conn: None,
             asn: None,
-            rib_in: AdjRibIn::new(addr),
+            rib_in: AdjRibIn::new(),
             session_type: None,
             statistics: PeerStatistics::default(),
             config,
@@ -151,8 +151,8 @@ impl Peer {
     /// Main peer task - handles the full lifecycle of a BGP peer.
     /// Runs forever, handling all FSM states including Idle, Connect, Active.
     pub async fn run(mut self) {
-        let peer_ip = self.addr.clone();
-        debug!("starting peer task", "peer_ip" => &peer_ip);
+        let peer_ip = self.addr;
+        debug!("starting peer task", "peer_ip" => peer_ip.to_string());
 
         loop {
             match self.fsm.state() {
@@ -178,7 +178,7 @@ impl Peer {
 
     /// Accept an incoming TCP connection and transition FSM to OpenSent.
     fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
-        debug!("TcpConnectionAccepted received", "peer_ip" => &self.addr);
+        debug!("TcpConnectionAccepted received", "peer_ip" => self.addr.to_string());
         self.conn = Some(TcpConnection {
             tx: tcp_tx,
             rx: tcp_rx,
@@ -204,7 +204,7 @@ impl Peer {
         loop {
             match self.peer_rx.recv().await {
                 Some(PeerOp::ManualStart) => {
-                    debug!("ManualStart ignored for passive peer", "peer_ip" => &self.addr);
+                    debug!("ManualStart ignored for passive peer", "peer_ip" => self.addr.to_string());
                 }
                 Some(PeerOp::Shutdown(_)) => return true,
                 Some(PeerOp::GetStatistics(response)) => {
@@ -230,7 +230,7 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStart) => {
-                        debug!("ManualStart received", "peer_ip" => &self.addr);
+                        debug!("ManualStart received", "peer_ip" => self.addr.to_string());
                         self.fsm.handle_event(&FsmEvent::ManualStart);
                         self.notify_state_change();
                     }
@@ -246,7 +246,7 @@ impl Peer {
                 }
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
-                debug!("IdleHoldTimer expired, AutomaticStart", "peer_ip" => &self.addr);
+                debug!("IdleHoldTimer expired, AutomaticStart", "peer_ip" => self.addr.to_string());
                 self.fsm.handle_event(&FsmEvent::AutomaticStart);
                 self.notify_state_change();
             }
@@ -256,21 +256,13 @@ impl Peer {
 
     /// Handle Connect state - attempt TCP connection.
     async fn handle_connect_state(&mut self) {
-        let peer_addr: SocketAddr = match format!("{}:{}", self.addr, self.port).parse() {
-            Ok(addr) => addr,
-            Err(_) => {
-                error!("invalid peer address", "peer_ip" => &self.addr);
-                self.fsm.handle_event(&FsmEvent::TcpConnectionFails);
-                self.notify_state_change();
-                return;
-            }
-        };
+        let peer_addr = SocketAddr::new(self.addr, self.port);
 
         tokio::select! {
             result = Self::try_connect(peer_addr, self.local_addr) => {
                 match result {
                     Ok(stream) => {
-                        info!("TCP connection established", "peer_ip" => &self.addr);
+                        info!("TCP connection established", "peer_ip" => self.addr.to_string());
                         let (rx, tx) = stream.into_split();
                         self.conn = Some(TcpConnection { tx, rx });
 
@@ -285,20 +277,20 @@ impl Peer {
                         // Send OPEN if not using DelayOpen
                         if self.config.delay_open_time_secs.is_none() {
                             if let Err(e) = self.enter_open_sent().await {
-                                error!("failed to send OPEN", "peer_ip" => &self.addr, "error" => e.to_string());
+                                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                                 self.disconnect();
                             }
                         }
                     }
                     Err(e) => {
-                        debug!("TCP connection failed", "peer_ip" => &self.addr, "error" => e.to_string());
+                        debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.fsm.handle_event(&FsmEvent::TcpConnectionFails);
                         self.notify_state_change();
                     }
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
-                debug!("ConnectRetryTimer expired", "peer_ip" => &self.addr);
+                debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
                 self.fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
                 self.notify_state_change();
             }
@@ -317,7 +309,7 @@ impl Peer {
 
         tokio::select! {
             _ = tokio::time::sleep(retry_time) => {
-                debug!("ConnectRetryTimer expired in Active", "peer_ip" => &self.addr);
+                debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
                 self.fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
                 self.notify_state_change();
             }
@@ -333,7 +325,7 @@ impl Peer {
     /// Handle connected states (OpenSent, OpenConfirm, Established).
     /// Returns true if shutdown requested.
     async fn handle_connected_state(&mut self) -> bool {
-        let peer_ip = self.addr.clone();
+        let peer_ip = self.addr;
 
         // For incoming connections (new_connected), send OPEN if not already sent
         // But respect DelayOpen - start timer instead of sending immediately
@@ -342,7 +334,7 @@ impl Peer {
                 self.fsm.timers.start_delay_open_timer();
             } else {
                 if let Err(e) = self.enter_open_sent().await {
-                    error!("failed to send OPEN", "peer_ip" => &peer_ip, "error" => e.to_string());
+                    error!("failed to send OPEN", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                     self.disconnect();
                     return false;
                 }
@@ -367,14 +359,14 @@ impl Peer {
                 result = read_bgp_message(&mut conn.rx) => {
                     match result {
                         Ok(message) => {
-                            if let Err(e) = self.handle_received_message(message, &peer_ip).await {
-                                error!("error processing message", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect();
                                 return false;
                             }
                         }
                         Err(e) => {
-                            error!("error reading message", "peer_ip" => &peer_ip, "error" => format!("{:?}", e));
+                            error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif).await;
                             }
@@ -388,7 +380,7 @@ impl Peer {
                     match msg {
                         PeerOp::SendUpdate(update_msg) => {
                             if let Err(e) = self.send_update(update_msg).await {
-                                error!("failed to send UPDATE", "peer_ip" => &peer_ip, "error" => e.to_string());
+                                error!("failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect();
                                 return false;
                             }
@@ -398,14 +390,14 @@ impl Peer {
                         }
                         PeerOp::Shutdown(subcode) => {
                             // Server-initiated: don't send PeerDisconnected (server knows)
-                            info!("shutdown requested", "peer_ip" => &peer_ip);
+                            info!("shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotifcationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             self.conn = None;
                             return true;
                         }
                         PeerOp::ManualStop => {
-                            info!("ManualStop received", "peer_ip" => &peer_ip);
+                            info!("ManualStop received", "peer_ip" => peer_ip.to_string());
                             let notif = NotifcationMessage::new(
                                 BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
                                 Vec::new(),
@@ -425,9 +417,9 @@ impl Peer {
                 _ = timer_interval.tick() => {
                     // DelayOpen timer check
                     if self.fsm.timers.delay_open_timer_expired() {
-                        debug!("delay open timer expired", "peer_ip" => &peer_ip);
+                        debug!("delay open timer expired", "peer_ip" => peer_ip.to_string());
                         if let Err(e) = self.handle_fsm_event(&FsmEvent::DelayOpenTimerExpires).await {
-                            error!("failed to handle delay open timer", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            error!("failed to handle delay open timer", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect();
                             return false;
                         }
@@ -435,7 +427,7 @@ impl Peer {
 
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
-                        error!("hold timer expired", "peer_ip" => &peer_ip);
+                        error!("hold timer expired", "peer_ip" => peer_ip.to_string());
                         let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
                         let _ = self.send_notification(notif).await;
                         self.fsm.handle_event(&FsmEvent::HoldTimerExpires);
@@ -446,7 +438,7 @@ impl Peer {
                     // Keepalive timer check
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.handle_fsm_event(&FsmEvent::KeepaliveTimerExpires).await {
-                            error!("failed to send keepalive", "peer_ip" => &peer_ip, "error" => e.to_string());
+                            error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect();
                             return false;
                         }
@@ -476,9 +468,9 @@ impl Peer {
         self.fsm.timers.stop_hold_timer();
         self.fsm.timers.stop_keepalive_timer();
         self.fsm.timers.stop_delay_open_timer();
-        let _ = self.server_tx.send(ServerOp::PeerDisconnected {
-            peer_ip: self.addr.clone(),
-        });
+        let _ = self
+            .server_tx
+            .send(ServerOp::PeerDisconnected { peer_ip: self.addr });
     }
 
     /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
@@ -498,7 +490,7 @@ impl Peer {
     /// Notify server of state change.
     fn notify_state_change(&self) {
         let _ = self.server_tx.send(ServerOp::PeerStateChanged {
-            peer_ip: self.addr.clone(),
+            peer_ip: self.addr,
             state: self.fsm.state(),
         });
     }
@@ -598,7 +590,7 @@ impl Peer {
                     _ => crate::server::AdminState::Down,
                 };
                 let _ = self.server_tx.send(ServerOp::SetAdminState {
-                    peer_ip: self.addr.clone(),
+                    peer_ip: self.addr,
                     state: admin_state,
                 });
             }
@@ -609,7 +601,7 @@ impl Peer {
         // Notify server of state change whenever state transitions occur
         if old_state != new_state {
             let _ = self.server_tx.send(ServerOp::PeerStateChanged {
-                peer_ip: self.addr.clone(),
+                peer_ip: self.addr,
                 state: new_state,
             });
         }
@@ -637,7 +629,7 @@ impl Peer {
         );
         conn.tx.write_all(&open_msg.serialize()).await?;
         self.statistics.open_sent += 1;
-        info!("sent OPEN message", "peer_ip" => &self.addr);
+        info!("sent OPEN message", "peer_ip" => self.addr.to_string());
         Ok(())
     }
 
@@ -667,11 +659,11 @@ impl Peer {
         // Send KEEPALIVE
         self.send_keepalive().await?;
 
-        info!("timers initialized", "peer_ip" => &self.addr, "hold_time" => hold_time);
+        info!("timers initialized", "peer_ip" => self.addr.to_string(), "hold_time" => hold_time);
 
         // Notify server that handshake is complete
         let _ = self.server_tx.send(ServerOp::PeerHandshakeComplete {
-            peer_ip: self.addr.clone(),
+            peer_ip: self.addr,
             asn: peer_asn,
         });
 
@@ -687,7 +679,7 @@ impl Peer {
         let keepalive_msg = KeepAliveMessage {};
         conn.tx.write_all(&keepalive_msg.serialize()).await?;
         self.statistics.keepalive_sent += 1;
-        debug!("sent KEEPALIVE message", "peer_ip" => &self.addr);
+        debug!("sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
         self.fsm.timers.start_keepalive_timer();
         Ok(())
     }
@@ -699,14 +691,14 @@ impl Peer {
     /// after OPEN has been sent.
     async fn send_notification(&mut self, notif_msg: NotifcationMessage) -> Result<(), io::Error> {
         if !self.can_send_notification() {
-            warn!("skipping NOTIFICATION", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));
+            warn!("skipping NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
             return Ok(());
         }
         // Safe: can_send_notification checks conn.is_some()
         let conn = self.conn.as_mut().unwrap();
         conn.tx.write_all(&notif_msg.serialize()).await?;
         self.statistics.notification_sent += 1;
-        warn!("sent NOTIFICATION", "peer_ip" => &self.addr, "error" => format!("{:?}", notif_msg.error()));
+        warn!("sent NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
         Ok(())
     }
 
@@ -715,7 +707,7 @@ impl Peer {
     async fn handle_received_message(
         &mut self,
         message: BgpMessage,
-        peer_ip: &str,
+        peer_ip: IpAddr,
     ) -> Result<(), io::Error> {
         match &message {
             BgpMessage::Notification(_) => {
@@ -731,7 +723,7 @@ impl Peer {
 
                 if let Some((withdrawn, announced)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
-                        peer_ip: peer_ip.to_string(),
+                        peer_ip,
                         withdrawn,
                         announced,
                     });
@@ -763,7 +755,7 @@ impl Peer {
             BgpMessage::Open(open_msg) => {
                 // RFC 4271 6.8: Notify server for collision detection
                 let _ = self.server_tx.send(ServerOp::OpenReceived {
-                    peer_ip: self.addr.clone(),
+                    peer_ip: self.addr,
                     bgp_id: open_msg.bgp_identifier,
                     conn_type: self.conn_type,
                 });
@@ -803,7 +795,7 @@ impl Peer {
                         .map(|_| None)
                     } else {
                         warn!("max prefix exceeded but allow_automatic_stop=false, continuing",
-                              "peer_ip" => &self.addr);
+                              "peer_ip" => self.addr.to_string());
                         Ok(None)
                     }
                 }
@@ -834,7 +826,7 @@ impl Peer {
                 if let Some(peer_asn) = self.asn {
                     if leftmost_as != peer_asn {
                         warn!("AS_PATH first AS does not match peer AS",
-                              "peer_ip" => &self.addr, "leftmost_as" => leftmost_as, "peer_asn" => peer_asn);
+                              "peer_ip" => self.addr.to_string(), "leftmost_as" => leftmost_as, "peer_asn" => peer_asn);
                         return Err(BgpError::UpdateMessageError(
                             UpdateMessageError::MalformedASPath,
                         ));
@@ -852,7 +844,7 @@ impl Peer {
     fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
         let mut withdrawn = Vec::new();
         for prefix in update_msg.withdrawn_routes() {
-            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr);
+            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string());
             self.rib_in.remove_route(*prefix);
             withdrawn.push(*prefix);
         }
@@ -872,12 +864,12 @@ impl Peer {
         match setting.action {
             MaxPrefixAction::Terminate => {
                 warn!("max prefix limit exceeded",
-                      "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current);
+                      "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached))
             }
             MaxPrefixAction::Discard => {
                 warn!("max prefix limit reached, discarding new prefixes",
-                      "peer_ip" => &self.addr, "limit" => setting.limit, "current" => current);
+                      "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
                 Ok(false)
             }
         }
@@ -896,12 +888,12 @@ impl Peer {
         let source = RouteSource::from_session(
             self.session_type
                 .expect("session_type must be set in Established state"),
-            self.addr.clone(),
+            self.addr,
         );
 
         let Some(path) = Path::from_update_msg(update_msg, source) else {
             if !update_msg.nlri_list().is_empty() {
-                warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => &self.addr);
+                warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => self.addr.to_string());
             }
             return Ok(announced);
         };
@@ -914,7 +906,7 @@ impl Peer {
         }
 
         for prefix in update_msg.nlri_list() {
-            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => &self.addr, "med" => format!("{:?}", path.med));
+            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path.med));
             self.rib_in.add_route(*prefix, path.clone());
             announced.push((*prefix, path.clone()));
         }
@@ -926,19 +918,19 @@ impl Peer {
         match message {
             BgpMessage::Open(open_msg) => {
                 self.statistics.open_received += 1;
-                info!("received OPEN from peer", "peer_ip" => &self.addr, "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
+                info!("received OPEN from peer", "peer_ip" => self.addr.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
             }
             BgpMessage::Update(_) => {
                 self.statistics.update_received += 1;
-                info!("received UPDATE", "peer_ip" => &self.addr);
+                info!("received UPDATE", "peer_ip" => self.addr.to_string());
             }
             BgpMessage::KeepAlive(_) => {
                 self.statistics.keepalive_received += 1;
-                debug!("received KEEPALIVE", "peer_ip" => &self.addr);
+                debug!("received KEEPALIVE", "peer_ip" => self.addr.to_string());
             }
             BgpMessage::Notification(notif_msg) => {
                 self.statistics.notification_received += 1;
-                warn!("received NOTIFICATION", "peer_ip" => &self.addr, "notification" => format!("{:?}", notif_msg));
+                warn!("received NOTIFICATION", "peer_ip" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
             }
         }
     }
@@ -981,7 +973,7 @@ mod tests {
         // Create peer directly for testing
         let local_ip = Ipv4Addr::new(127, 0, 0, 1);
         Peer {
-            addr: addr.ip().to_string(),
+            addr: addr.ip(),
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip),
             conn: Some(TcpConnection {
@@ -989,7 +981,7 @@ mod tests {
                 rx: tcp_rx,
             }),
             asn: Some(65001),
-            rib_in: AdjRibIn::new(addr.ip().to_string()),
+            rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
@@ -1263,11 +1255,10 @@ mod tests {
         for (setting, rib_count, incoming, expected) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
             peer.config.max_prefix = setting.clone();
+            let test_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
             for i in 0..rib_count {
-                peer.rib_in.add_route(
-                    create_test_prefix_n(i as u8),
-                    create_test_path("test".into()),
-                );
+                peer.rib_in
+                    .add_route(create_test_prefix_n(i as u8), create_test_path(test_ip));
             }
 
             let result = peer.check_max_prefix_limit(incoming);

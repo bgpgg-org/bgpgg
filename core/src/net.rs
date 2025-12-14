@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
 
 /// Extract IPv4 address from a SocketAddr, returns None for IPv6.
@@ -53,16 +53,16 @@ pub async fn create_and_bind_tcp_socket(
     socket.connect(remote_addr).await
 }
 
-/// Extract the peer IP address as a string from a TcpStream.
+/// Extract the peer IP address from a TcpStream.
 /// Returns None if peer_addr() fails.
-pub fn peer_ip(stream: &TcpStream) -> Option<String> {
-    stream.peer_addr().ok().map(|addr| addr.ip().to_string())
+pub fn peer_ip(stream: &TcpStream) -> Option<IpAddr> {
+    stream.peer_addr().ok().map(|addr| addr.ip())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv6Addr};
+    use std::net::Ipv6Addr;
     use tokio::net::TcpListener;
 
     #[test]
@@ -91,9 +91,15 @@ mod tests {
         let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server_stream, _) = listener.accept().await.unwrap();
 
-        assert_eq!(peer_ip(&server_stream), Some("127.0.0.1".to_string()));
+        assert_eq!(
+            peer_ip(&server_stream),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
 
         let client_stream = client.await.unwrap();
-        assert_eq!(peer_ip(&client_stream), Some("127.0.0.1".to_string()));
+        assert_eq!(
+            peer_ip(&client_stream),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
     }
 }
