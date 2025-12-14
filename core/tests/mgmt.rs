@@ -18,7 +18,7 @@ mod common;
 pub use common::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{BgpState, Origin};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -264,4 +264,47 @@ async fn test_withdraw_nonexistent_route() {
     // Routes should still be empty
     let routes = server1.client.get_routes().await.unwrap();
     assert_eq!(routes.len(), 0);
+}
+
+#[tokio::test]
+async fn test_disable_enable_peer() {
+    let (mut server1, server2) = setup_two_peered_servers(None).await;
+
+    // Disable peer
+    server1
+        .client
+        .disable_peer(server2.address.clone())
+        .await
+        .unwrap();
+
+    // Peer should go to Idle with admin_state Down
+    poll_until(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1
+                && peers[0].state == BgpState::Idle as i32
+                && peers[0].admin_state == AdminState::Down as i32
+        },
+        "Peer should be Idle with admin_state Down",
+    )
+    .await;
+
+    // Enable peer
+    server1
+        .client
+        .enable_peer(server2.address.clone())
+        .await
+        .unwrap();
+
+    // Peer should reconnect and reach Established with admin_state Up
+    poll_until(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1
+                && peers[0].state == BgpState::Established as i32
+                && peers[0].admin_state == AdminState::Up as i32
+        },
+        "Peer should be Established with admin_state Up",
+    )
+    .await;
 }

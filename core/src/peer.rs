@@ -101,6 +101,8 @@ pub struct Peer {
     consecutive_down_count: u32,
     /// Connection type for collision detection
     conn_type: ConnectionType,
+    /// True if ManualStop was received - disables auto-reconnect until ManualStart
+    manually_stopped: bool,
 }
 
 impl Peer {
@@ -145,6 +147,7 @@ impl Peer {
             connect_retry_secs,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
+            manually_stopped: false,
         }
     }
 
@@ -223,7 +226,7 @@ impl Peer {
     /// Active mode: wait for ManualStart or auto-reconnect timer.
     async fn handle_idle_state_active(&mut self) -> bool {
         let idle_hold_time = self.get_idle_hold_time();
-        let auto_reconnect = idle_hold_time.is_some();
+        let auto_reconnect = idle_hold_time.is_some() && !self.manually_stopped;
         let idle_hold_time = idle_hold_time.unwrap_or(Duration::ZERO);
 
         tokio::select! {
@@ -231,6 +234,7 @@ impl Peer {
                 match op {
                     Some(PeerOp::ManualStart) => {
                         debug!("ManualStart received", "peer_ip" => self.addr.to_string());
+                        self.manually_stopped = false;
                         self.fsm.handle_event(&FsmEvent::ManualStart);
                         self.notify_state_change();
                     }
@@ -296,6 +300,7 @@ impl Peer {
             }
             op = self.peer_rx.recv() => {
                 if let Some(PeerOp::ManualStop) = op {
+                    self.manually_stopped = true;
                     self.fsm.handle_event(&FsmEvent::ManualStop);
                     self.notify_state_change();
                 }
@@ -315,6 +320,7 @@ impl Peer {
             }
             op = self.peer_rx.recv() => {
                 if let Some(PeerOp::ManualStop) = op {
+                    self.manually_stopped = true;
                     self.fsm.handle_event(&FsmEvent::ManualStop);
                     self.notify_state_change();
                 }
@@ -397,6 +403,7 @@ impl Peer {
                         }
                         PeerOp::ManualStop => {
                             info!("ManualStop received", "peer_ip" => peer_ip.to_string());
+                            self.manually_stopped = true;
                             let notif = NotifcationMessage::new(
                                 BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
                                 Vec::new(),
@@ -990,6 +997,7 @@ mod tests {
             connect_retry_secs: 120,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
+            manually_stopped: false,
         }
     }
 

@@ -866,6 +866,80 @@ async fn test_allow_automatic_start_false() {
     .await;
 }
 
+/// Test that manually stopped peer doesn't auto-reconnect even with idle_hold_time configured
+#[tokio::test]
+async fn test_manually_stopped_no_auto_reconnect() {
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+    let server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        true,
+    ))
+    .await;
+
+    // Add peer with fast auto-reconnect
+    server1
+        .client
+        .add_peer(
+            format!("{}:{}", server2.address, server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for Established
+    poll_until(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Established as i32
+        },
+        "Timeout waiting for Established",
+    )
+    .await;
+
+    // Disable the peer
+    server1
+        .client
+        .disable_peer(server2.address.clone())
+        .await
+        .unwrap();
+
+    // Wait for Idle with admin_state Down
+    poll_until(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1
+                && peers[0].state == BgpState::Idle as i32
+                && peers[0].admin_state == AdminState::Down as i32
+        },
+        "Timeout waiting for Idle/Down",
+    )
+    .await;
+
+    // Verify peer stays in Idle (no auto-reconnect despite idle_hold_time=0)
+    poll_while(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        std::time::Duration::from_secs(2),
+        "Manually stopped peer should not auto-reconnect",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_unconfigured_peer_removed_on_disconnect() {
     use std::net::Ipv4Addr;
