@@ -389,11 +389,10 @@ impl Peer {
                             let _ = response.send(self.statistics.clone());
                         }
                         PeerOp::Shutdown(subcode) => {
-                            // Server-initiated: don't send PeerDisconnected (server knows)
+                            // Server-initiated: kill task
                             info!("shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotifcationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
-                            self.conn = None;
                             return true;
                         }
                         PeerOp::ManualStop => {

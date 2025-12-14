@@ -343,13 +343,12 @@ impl BgpServer {
                 continue;
             };
             let peer_ip = peer_addr.ip();
-            let peer_port = peer_addr.port();
             let config = peer_cfg.clone();
             let passive = config.passive_mode;
 
-            let peer_tx = self.spawn_peer(peer_ip, peer_port, config.clone(), bind_addr);
+            let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
 
-            let entry = PeerInfo::new(Some(peer_port), true, config, Some(peer_tx.clone()));
+            let entry = PeerInfo::new(Some(peer_addr.port()), true, config, Some(peer_tx.clone()));
             self.peers.insert(peer_ip, entry);
 
             // RFC 4271 Event 1: ManualStart
@@ -363,16 +362,15 @@ impl BgpServer {
     /// Spawn a new Peer task in Idle state
     fn spawn_peer(
         &self,
-        addr: IpAddr,
-        port: u16,
+        addr: SocketAddr,
         config: PeerConfig,
         bind_addr: SocketAddr,
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         let peer = Peer::new(
-            addr,
-            port,
+            addr.ip(),
+            addr.port(),
             peer_rx,
             self.op_tx.clone(),
             self.config.asn,
@@ -449,7 +447,7 @@ impl BgpServer {
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
-        let peer_tx = self.spawn_peer(peer_ip, 0, config, local_addr);
+        let peer_tx = self.spawn_peer(SocketAddr::new(peer_ip, 0), config, local_addr);
 
         let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
 
@@ -630,7 +628,6 @@ impl BgpServer {
         };
 
         let peer_ip = peer_addr.ip();
-        let peer_port = peer_addr.port();
 
         // Check if peer already exists
         if self.peers.contains_key(&peer_ip) {
@@ -639,11 +636,16 @@ impl BgpServer {
         }
 
         // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        let peer_tx = self.spawn_peer(peer_ip, peer_port, config.clone(), bind_addr);
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
 
         self.peers.insert(
             peer_ip,
-            PeerInfo::new(Some(peer_port), true, config.clone(), Some(peer_tx.clone())),
+            PeerInfo::new(
+                Some(peer_addr.port()),
+                true,
+                config.clone(),
+                Some(peer_tx.clone()),
+            ),
         );
 
         // RFC 4271 Event 1: ManualStart - initiate connection (unless passive)
@@ -714,9 +716,9 @@ impl BgpServer {
 
         entry.admin_state = AdminState::Down;
 
-        // Shutdown active session if exists
+        // Stop active session if exists
         if let Some(peer_tx) = &entry.peer_tx {
-            let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::AdministrativeShutdown));
+            let _ = peer_tx.send(PeerOp::ManualStop);
         }
 
         let _ = response.send(Ok(()));
