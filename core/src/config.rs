@@ -15,6 +15,29 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
+
+/// Action to take when max prefix limit is reached
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaxPrefixAction {
+    /// Send CEASE notification and close the session
+    Terminate,
+    /// Discard new prefixes but keep the session
+    Discard,
+}
+
+/// Max prefix limit configuration
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct MaxPrefixSetting {
+    pub limit: u32,
+    #[serde(default = "default_max_prefix_action")]
+    pub action: MaxPrefixAction,
+}
+
+fn default_max_prefix_action() -> MaxPrefixAction {
+    MaxPrefixAction::Terminate
+}
 
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,7 +59,7 @@ pub struct PeerConfig {
     #[serde(default)]
     pub delay_open_time_secs: Option<u64>,
     #[serde(default)]
-    pub max_prefix: Option<u32>,
+    pub max_prefix: Option<MaxPrefixSetting>,
     /// SendNOTIFICATIONwithoutOPEN - allow sending NOTIFICATION before OPEN (RFC 4271 8.2.1.5).
     /// Default false: OPEN must be sent before NOTIFICATION.
     #[serde(default)]
@@ -61,6 +84,18 @@ fn default_allow_automatic_stop() -> bool {
 
 fn default_passive_mode() -> bool {
     false
+}
+
+impl PeerConfig {
+    /// Returns the DelayOpenTime as a Duration, or None if disabled.
+    pub fn get_delay_open_time(&self) -> Option<Duration> {
+        self.delay_open_time_secs.map(Duration::from_secs)
+    }
+
+    /// RFC 4271 8.1.2: AllowAutomaticStart is true if IdleHoldTimer is configured.
+    pub fn allow_automatic_start(&self) -> bool {
+        self.idle_hold_time_secs.is_some()
+    }
 }
 
 impl Default for PeerConfig {

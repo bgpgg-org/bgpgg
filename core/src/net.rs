@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
 
 /// Extract IPv4 address from a SocketAddr, returns None for IPv6.
@@ -51,4 +51,55 @@ pub async fn create_and_bind_tcp_socket(
 
     // Connect to remote peer
     socket.connect(remote_addr).await
+}
+
+/// Extract the peer IP address from a TcpStream.
+/// Returns None if peer_addr() fails.
+pub fn peer_ip(stream: &TcpStream) -> Option<IpAddr> {
+    stream.peer_addr().ok().map(|addr| addr.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn test_ipv4_from_sockaddr() {
+        let cases = [
+            (
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 179),
+                Some(Ipv4Addr::new(192, 168, 1, 1)),
+            ),
+            (
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Some(Ipv4Addr::LOCALHOST),
+            ),
+            (SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 179), None),
+        ];
+        for (addr, expected) in cases {
+            assert_eq!(ipv4_from_sockaddr(addr), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_peer_ip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server_stream, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            peer_ip(&server_stream),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+
+        let client_stream = client.await.unwrap();
+        assert_eq!(
+            peer_ip(&client_stream),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
 }

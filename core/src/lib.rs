@@ -30,9 +30,9 @@ pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
     use crate::bgp::utils::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
-    pub fn create_test_path(peer_ip: String) -> Path {
+    pub fn create_test_path(peer_ip: IpAddr) -> Path {
         Path {
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {

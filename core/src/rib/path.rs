@@ -163,6 +163,11 @@ impl Ord for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
+
+    fn test_ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
 
     fn make_base_path() -> Path {
         Path {
@@ -173,7 +178,7 @@ mod tests {
                 asn_list: vec![65001],
             }],
             next_hop: Ipv4Addr::new(192, 168, 1, 1),
-            source: RouteSource::Ebgp("10.0.0.1".to_string()),
+            source: RouteSource::Ebgp(test_ip(1)),
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
@@ -266,7 +271,7 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ebgp("10.0.0.1".to_string());
+        path2.source = RouteSource::Ebgp(test_ip(1));
 
         assert!(path1 > path2);
     }
@@ -276,7 +281,7 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ibgp("10.0.0.1".to_string());
+        path2.source = RouteSource::Ibgp(test_ip(1));
 
         assert!(path1 > path2);
     }
@@ -285,8 +290,8 @@ mod tests {
     fn test_ebgp_vs_ibgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp("10.0.0.1".to_string());
-        path2.source = RouteSource::Ibgp("10.0.0.2".to_string());
+        path1.source = RouteSource::Ebgp(test_ip(1));
+        path2.source = RouteSource::Ibgp(test_ip(2));
 
         assert!(path1 > path2);
     }
@@ -295,8 +300,8 @@ mod tests {
     fn test_peer_address_tiebreaker() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp("10.0.0.1".to_string());
-        path2.source = RouteSource::Ebgp("10.0.0.2".to_string());
+        path1.source = RouteSource::Ebgp(test_ip(1));
+        path2.source = RouteSource::Ebgp(test_ip(2));
 
         // Lower peer address should win
         assert!(path1 > path2);
@@ -304,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_from_update_msg() {
-        let source = RouteSource::Ebgp("10.0.0.1".to_string());
+        let source = RouteSource::Ebgp(test_ip(1));
 
         // Valid UPDATE with all required attrs
         let update = UpdateMessage::new(

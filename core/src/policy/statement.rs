@@ -144,12 +144,16 @@ mod tests {
     use crate::policy::condition::{NeighborCondition, PrefixCondition};
     use crate::policy::test_helpers::{create_path, test_prefix};
     use crate::rib::RouteSource;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn test_ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
 
     #[test]
     fn test_statement_no_conditions() {
         let statement = Statement::new().then(SetLocalPref::new(100));
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
         assert_eq!(path.local_pref, Some(100));
     }
@@ -164,7 +168,7 @@ mod tests {
         let statement = Statement::new()
             .when(PrefixCondition::new(prefix))
             .then(SetLocalPref::new(200));
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
 
         assert_eq!(statement.apply(&prefix, &mut path), Some(true));
         assert_eq!(path.local_pref, Some(200));
@@ -179,14 +183,14 @@ mod tests {
         let prefix = test_prefix();
         let statement = Statement::new()
             .when(PrefixCondition::new(prefix))
-            .when(NeighborCondition::new("10.0.0.1".to_string()))
+            .when(NeighborCondition::new(test_ip(1)))
             .then(SetLocalPref::new(200));
 
-        let mut path1 = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
         assert_eq!(statement.apply(&prefix, &mut path1), Some(true));
         assert_eq!(path1.local_pref, Some(200));
 
-        let mut path2 = create_path(RouteSource::Ebgp("10.0.0.2".to_string()));
+        let mut path2 = create_path(RouteSource::Ebgp(test_ip(2)));
         assert_eq!(statement.apply(&prefix, &mut path2), None);
         assert_eq!(path2.local_pref, None);
     }
@@ -196,7 +200,7 @@ mod tests {
         let statement = Statement::new()
             .then(SetLocalPref::new(200))
             .then(SetMed::remove());
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         path.med = Some(100);
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
         assert_eq!(path.local_pref, Some(200));
@@ -206,21 +210,21 @@ mod tests {
     #[test]
     fn test_statement_reject() {
         let statement = Statement::new().then(Reject);
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(false));
     }
 
     #[test]
     fn test_policy_accept_all() {
         let policy = Policy::new().add(Statement::new().then(Accept));
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
     }
 
     #[test]
     fn test_policy_empty_rejects() {
         let policy = Policy::new();
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(!policy.accept(&test_prefix(), &mut path));
     }
 
@@ -239,11 +243,11 @@ mod tests {
             )
             .add(Statement::new().then(SetLocalPref::new(100)));
 
-        let mut path1 = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&prefix, &mut path1));
         assert_eq!(path1.local_pref, Some(200));
 
-        let mut path2 = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path2 = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&other_prefix, &mut path2));
         assert_eq!(path2.local_pref, Some(100));
     }
@@ -251,7 +255,7 @@ mod tests {
     #[test]
     fn test_stmt_default_local_pref() {
         let policy = Policy::new().add(stmt_default_local_pref(100));
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
         assert_eq!(path.local_pref, Some(100));
     }
@@ -259,7 +263,7 @@ mod tests {
     #[test]
     fn test_stmt_reject_as_loop() {
         let policy = Policy::new().add(stmt_reject_as_loop(65000));
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
@@ -273,9 +277,9 @@ mod tests {
         let policy = Policy::new()
             .add(stmt_reject_ibgp())
             .add(Statement::new().then(Accept));
-        let mut ibgp_path = create_path(RouteSource::Ibgp("10.0.0.1".to_string()));
+        let mut ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
         assert!(!policy.accept(&test_prefix(), &mut ibgp_path));
-        let mut ebgp_path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut ebgp_path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut ebgp_path));
     }
 }

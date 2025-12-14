@@ -83,10 +83,15 @@ mod tests {
     use super::*;
     use crate::policy::test_helpers::create_path;
     use crate::rib::RouteSource;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn test_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    }
 
     #[test]
     fn test_set_local_pref() {
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
         assert!(SetLocalPref::new(100).apply(&mut path));
         assert_eq!(path.local_pref, Some(100));
 
@@ -99,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_set_med() {
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
         assert!(SetMed::new(50).apply(&mut path));
         assert_eq!(path.med, Some(50));
 
@@ -109,11 +114,11 @@ mod tests {
 
     #[test]
     fn test_reject() {
-        assert!(!Reject.apply(&mut create_path(RouteSource::Ebgp("10.0.0.1".to_string()))));
+        assert!(!Reject.apply(&mut create_path(RouteSource::Ebgp(test_ip()))));
     }
 
     #[test]
     fn test_accept() {
-        assert!(Accept.apply(&mut create_path(RouteSource::Ebgp("10.0.0.1".to_string()))));
+        assert!(Accept.apply(&mut create_path(RouteSource::Ebgp(test_ip()))));
     }
 }

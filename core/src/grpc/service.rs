@@ -14,12 +14,11 @@
 
 use crate::bgp::msg_update::{AsPathSegmentType, Origin};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
+use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::fsm::BgpState;
-use crate::peer::{MaxPrefixAction, MaxPrefixSetting};
 use crate::rib::RouteSource;
-use crate::server::{AdminState, MgmtOp, SessionConfig};
+use crate::server::{AdminState, MgmtOp};
 use std::net::Ipv4Addr;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -57,9 +56,9 @@ fn to_proto_admin_state(state: AdminState) -> i32 {
     }
 }
 
-/// Convert proto SessionConfig to internal SessionConfig
-fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
-    let defaults = SessionConfig::default();
+/// Convert proto SessionConfig to internal PeerConfig
+fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
+    let defaults = PeerConfig::default();
     let Some(cfg) = proto else {
         return defaults;
     };
@@ -72,11 +71,9 @@ fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
         },
     });
 
-    SessionConfig {
-        idle_hold_time: cfg
-            .idle_hold_time_secs
-            .map(Duration::from_secs)
-            .or(defaults.idle_hold_time),
+    PeerConfig {
+        address: String::new(),
+        idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
         damp_peer_oscillations: cfg
             .damp_peer_oscillations
             .unwrap_or(defaults.damp_peer_oscillations),
@@ -84,7 +81,7 @@ fn proto_to_session_config(proto: Option<ProtoSessionConfig>) -> SessionConfig {
             .allow_automatic_stop
             .unwrap_or(defaults.allow_automatic_stop),
         passive_mode: cfg.passive_mode.unwrap_or(defaults.passive_mode),
-        delay_open_time: cfg.delay_open_time_secs.map(Duration::from_secs),
+        delay_open_time_secs: cfg.delay_open_time_secs,
         max_prefix,
         send_notification_without_open: cfg
             .send_notification_without_open
@@ -115,13 +112,13 @@ impl BgpService for BgpGrpcService {
         let inner = request.into_inner();
         let addr = inner.address;
 
-        let session_config = proto_to_session_config(inner.config);
+        let config = proto_to_peer_config(inner.config);
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::AddPeer {
             addr: addr.clone(),
-            session_config,
+            config,
             response: tx,
         };
 
@@ -239,12 +236,12 @@ impl BgpService for BgpGrpcService {
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|(addr, asn, state, admin_state, dynamic)| ProtoPeer {
+            .map(|(addr, asn, state, admin_state, configured)| ProtoPeer {
                 address: addr.to_string(),
                 asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                 state: to_proto_state(*state),
                 admin_state: to_proto_admin_state(*admin_state),
-                dynamic: *dynamic,
+                configured: *configured,
             })
             .collect();
 
@@ -275,13 +272,13 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         match peer_info {
-            Some((addr, asn, state, admin_state, dynamic, statistics)) => {
+            Some((addr, asn, state, admin_state, configured, statistics)) => {
                 let proto_peer = ProtoPeer {
                     address: addr,
                     asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
                     state: to_proto_state(state),
                     admin_state: to_proto_admin_state(admin_state),
-                    dynamic,
+                    configured,
                 };
 
                 let proto_statistics = ProtoPeerStatistics {

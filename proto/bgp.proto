@@ -136,7 +136,7 @@ message Peer {
     uint32 asn = 2;
     BgpState state = 3;
     AdminState admin_state = 4;
-    bool dynamic = 5;  // true if accepted from incoming connection, not explicitly configured
+    bool configured = 5;  // true if explicitly configured, false if accepted via accept_unconfigured_peers
 }
 
 // Add route request/response

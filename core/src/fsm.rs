@@ -40,6 +40,10 @@ pub enum FsmEvent {
     ManualStop,
     /// Event 3: AutomaticStart - triggered when IdleHoldTimer expires
     AutomaticStart,
+    /// Event 4: ManualStart_with_PassiveTcpEstablishment
+    ManualStartPassive,
+    /// Event 5: AutomaticStart_with_PassiveTcpEstablishment
+    AutomaticStartPassive,
     /// Event 8: AutomaticStop - automatic stop based on implementation logic (e.g., max prefix)
     AutomaticStop(CeaseSubcode),
     /// Event 9: ConnectRetryTimerExpires
@@ -228,7 +232,7 @@ pub struct Fsm {
 }
 
 impl Fsm {
-    /// Create a new FSM in Connect state with local BGP configuration
+    /// Create a new FSM in Idle state (RFC 4271 8.2.2).
     pub fn new(
         local_asn: u16,
         local_hold_time: u16,
@@ -237,7 +241,7 @@ impl Fsm {
         delay_open_time: Option<Duration>,
     ) -> Self {
         Fsm {
-            state: BgpState::Connect,
+            state: BgpState::Idle,
             timers: FsmTimers::new(delay_open_time),
             local_asn,
             local_hold_time,
@@ -302,6 +306,10 @@ impl Fsm {
             // Event 1, 3: ManualStart/AutomaticStart -> Connect
             (BgpState::Idle, FsmEvent::ManualStart) => (BgpState::Connect, None),
             (BgpState::Idle, FsmEvent::AutomaticStart) => (BgpState::Connect, None),
+            // Event 4: ManualStartPassive -> Active (RFC 4271 8.2.2)
+            (BgpState::Idle, FsmEvent::ManualStartPassive) => (BgpState::Active, None),
+            // Event 5: AutomaticStartPassive -> Active (RFC 4271 8.2.2)
+            (BgpState::Idle, FsmEvent::AutomaticStartPassive) => (BgpState::Active, None),
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -399,13 +407,13 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
     #[test]
     fn test_tcp_connection_confirmed() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> OpenSent
         let (new_state, error) = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -416,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_successful_connection_establishment() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -440,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_connection_failure_handling() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Connect -> Active (connection failed)
         fsm.handle_event(&FsmEvent::TcpConnectionFails);
@@ -453,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_hold_timer_expiry() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
 
         // Move to OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -470,6 +478,16 @@ mod tests {
             // From Idle
             (BgpState::Idle, FsmEvent::ManualStart, BgpState::Connect),
             (BgpState::Idle, FsmEvent::AutomaticStart, BgpState::Connect),
+            (
+                BgpState::Idle,
+                FsmEvent::ManualStartPassive,
+                BgpState::Active,
+            ),
+            (
+                BgpState::Idle,
+                FsmEvent::AutomaticStartPassive,
+                BgpState::Active,
+            ),
             // From Connect
             (BgpState::Connect, FsmEvent::ManualStop, BgpState::Idle),
             (

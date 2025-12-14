@@ -1,5 +1,6 @@
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, RouteSource};
+use std::net::IpAddr;
 
 /// A condition that can match against a route
 pub trait Condition: std::fmt::Debug + Send + Sync {
@@ -27,11 +28,11 @@ impl Condition for PrefixCondition {
 /// Match routes from a specific neighbor
 #[derive(Debug, Clone)]
 pub struct NeighborCondition {
-    pub neighbor: String,
+    pub neighbor: IpAddr,
 }
 
 impl NeighborCondition {
-    pub fn new(neighbor: String) -> Self {
+    pub fn new(neighbor: IpAddr) -> Self {
         Self { neighbor }
     }
 }
@@ -39,7 +40,7 @@ impl NeighborCondition {
 impl Condition for NeighborCondition {
     fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         match &path.source {
-            RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr == &self.neighbor,
+            RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr == self.neighbor,
             RouteSource::Local => false,
         }
     }
@@ -105,6 +106,10 @@ mod tests {
     use crate::rib::RouteSource;
     use std::net::Ipv4Addr;
 
+    fn test_ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
+
     #[test]
     fn test_prefix_condition() {
         let prefix = test_prefix();
@@ -113,18 +118,18 @@ mod tests {
             prefix_length: 24,
         });
         let condition = PrefixCondition::new(prefix);
-        let path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(condition.matches(&prefix, &path));
         assert!(!condition.matches(&other_prefix, &path));
     }
 
     #[test]
     fn test_neighbor_condition() {
-        let condition = NeighborCondition::new("10.0.0.1".to_string());
-        let path1 = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let condition = NeighborCondition::new(test_ip(1));
+        let path1 = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(condition.matches(&test_prefix(), &path1));
 
-        let path2 = create_path(RouteSource::Ebgp("10.0.0.2".to_string()));
+        let path2 = create_path(RouteSource::Ebgp(test_ip(2)));
         assert!(!condition.matches(&test_prefix(), &path2));
 
         let path3 = create_path(RouteSource::Local);
@@ -134,7 +139,7 @@ mod tests {
     #[test]
     fn test_as_path_condition() {
         let condition = AsPathCondition::new(65001);
-        let mut path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
@@ -156,11 +161,11 @@ mod tests {
         let ibgp = RouteTypeCondition::new(RouteType::Ibgp);
         let local = RouteTypeCondition::new(RouteType::Local);
 
-        let ebgp_path = create_path(RouteSource::Ebgp("10.0.0.1".to_string()));
+        let ebgp_path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(ebgp.matches(&test_prefix(), &ebgp_path));
         assert!(!ibgp.matches(&test_prefix(), &ebgp_path));
 
-        let ibgp_path = create_path(RouteSource::Ibgp("10.0.0.1".to_string()));
+        let ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
         assert!(ibgp.matches(&test_prefix(), &ibgp_path));
 
         let local_path = create_path(RouteSource::Local);
