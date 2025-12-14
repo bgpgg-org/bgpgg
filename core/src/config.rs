@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 /// Action to take when max prefix limit is reached
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -83,6 +84,13 @@ fn default_allow_automatic_stop() -> bool {
 
 fn default_passive_mode() -> bool {
     false
+}
+
+impl PeerConfig {
+    /// Returns the DelayOpenTime as a Duration, or None if disabled.
+    pub fn get_delay_open_time(&self) -> Option<Duration> {
+        self.delay_open_time_secs.map(Duration::from_secs)
+    }
 }
 
 impl Default for PeerConfig {

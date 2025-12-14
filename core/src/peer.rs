@@ -124,16 +124,15 @@ impl Peer {
             std::net::IpAddr::V4(ip) => ip,
             _ => Ipv4Addr::UNSPECIFIED,
         };
-        let delay_open_time = config.delay_open_time_secs.map(Duration::from_secs);
         Peer {
             addr,
             port,
-            fsm: Fsm::new_idle(
+            fsm: Fsm::new(
                 local_asn,
                 local_hold_time,
                 local_bgp_id,
                 local_ip,
-                delay_open_time,
+                config.get_delay_open_time(),
             ),
             conn: None,
             asn: None,
@@ -177,19 +176,6 @@ impl Peer {
                 }
             }
         }
-    }
-
-    /// Accept an incoming TCP connection and transition FSM to OpenSent.
-    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
-        debug!("TcpConnectionAccepted received", "peer_ip" => self.addr.to_string());
-        self.conn = Some(TcpConnection {
-            tx: tcp_tx,
-            rx: tcp_rx,
-        });
-        self.conn_type = ConnectionType::Incoming;
-        self.fsm.handle_event(&FsmEvent::ManualStart);
-        self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
-        self.notify_state_change();
     }
 
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
@@ -256,6 +242,19 @@ impl Peer {
             }
         }
         false
+    }
+
+    /// Accept an incoming TCP connection and transition FSM to OpenSent.
+    fn accept_connection(&mut self, tcp_tx: OwnedWriteHalf, tcp_rx: OwnedReadHalf) {
+        debug!("TcpConnectionAccepted received", "peer_ip" => self.addr.to_string());
+        self.conn = Some(TcpConnection {
+            tx: tcp_tx,
+            rx: tcp_rx,
+        });
+        self.conn_type = ConnectionType::Incoming;
+        self.fsm.handle_event(&FsmEvent::ManualStart);
+        self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+        self.notify_state_change();
     }
 
     /// Handle Connect state - attempt TCP connection.
