@@ -1279,4 +1279,36 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn test_get_idle_hold_time() {
+        // (idle_hold_secs, damping, down_count, expected_secs)
+        let cases = [
+            (Some(30), true, 0, Some(30)),   // No downs -> base
+            (Some(30), true, 1, Some(60)),   // 1 down -> 30*2
+            (Some(30), true, 2, Some(120)),  // 2 downs -> 30*4, capped at 120
+            (Some(30), true, 3, Some(120)),  // 3 downs -> 30*8=240, capped at 120
+            (Some(30), false, 5, Some(30)),  // Damping disabled -> base
+            (Some(10), true, 1, Some(20)),   // 10*2
+            (Some(10), true, 3, Some(80)),   // 10*8
+            (Some(10), true, 6, Some(120)),  // 10*64=640, capped at 120
+            (Some(10), true, 10, Some(120)), // exp capped at 6 -> 10*64=640, capped at 120
+            (None, true, 0, None),           // Disabled -> None
+            (None, true, 5, None),           // Disabled with damping -> still None
+        ];
+        for (idle, damp, count, expected) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Idle).await;
+            peer.config.idle_hold_time_secs = idle;
+            peer.config.damp_peer_oscillations = damp;
+            peer.consecutive_down_count = count;
+            assert_eq!(
+                peer.get_idle_hold_time(),
+                expected.map(Duration::from_secs),
+                "idle={:?}, damp={}, count={}",
+                idle,
+                damp,
+                count
+            );
+        }
+    }
 }

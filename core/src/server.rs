@@ -28,7 +28,6 @@ use crate::rib::rib_loc::LocRib;
 use crate::{error, info};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -39,9 +38,6 @@ pub enum ConnectionType {
     Incoming,
     Outgoing,
 }
-
-/// Maximum idle hold time when damping (RFC 4271 8.1.1 example uses 120s)
-const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 
 /// Administrative state of a peer, controls auto-reconnect behavior.
 /// Follows GoBGP's approach: only reconnect when Up.
@@ -161,8 +157,6 @@ pub struct PeerInfo {
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     /// Per-peer session configuration
     pub config: PeerConfig,
-    /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
-    pub consecutive_down_count: u32,
 }
 
 impl PeerInfo {
@@ -183,7 +177,6 @@ impl PeerInfo {
             state: BgpState::Idle,
             peer_tx,
             config,
-            consecutive_down_count: 0,
         }
     }
 
@@ -200,19 +193,6 @@ impl PeerInfo {
 
     pub fn policy_out(&self) -> Option<&Policy> {
         self.export_policy.as_ref()
-    }
-
-    /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
-    /// Returns None if automatic restart is disabled.
-    pub fn get_idle_hold_time(&self) -> Option<Duration> {
-        let cfg = &self.config;
-        let base = Duration::from_secs(cfg.idle_hold_time_secs?);
-        if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
-            return Some(base);
-        }
-        let exp = self.consecutive_down_count.min(6);
-        let backoff = base * 2u32.pow(exp);
-        Some(backoff.min(MAX_IDLE_HOLD_TIME))
     }
 }
 
@@ -528,7 +508,6 @@ impl BgpServer {
                     peer.asn = Some(asn);
                     peer.import_policy = Some(Policy::default_in(self.config.asn));
                     peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
-                    peer.consecutive_down_count = 0; // Reset damping on stable connection
                     info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
@@ -571,7 +550,6 @@ impl BgpServer {
                 if peer.configured {
                     // Configured peer: update state, Peer task handles reconnection internally
                     peer.state = BgpState::Idle;
-                    peer.consecutive_down_count += 1;
                     info!("peer session ended", "peer_ip" => &peer_ip);
                 } else {
                     // Unconfigured peer: stop task and remove entirely
@@ -923,21 +901,8 @@ impl BgpServer {
 mod tests {
     use super::*;
 
-    fn peer_info(idle_hold_time_secs: Option<u64>, damp: bool, down_count: u32) -> PeerInfo {
-        let config = PeerConfig {
-            address: String::new(),
-            idle_hold_time_secs,
-            damp_peer_oscillations: damp,
-            allow_automatic_stop: true,
-            passive_mode: false,
-            delay_open_time_secs: None,
-            max_prefix: None,
-            send_notification_without_open: false,
-            collision_detect_established_state: false,
-        };
-        let mut entry = PeerInfo::new(None, true, config, None);
-        entry.consecutive_down_count = down_count;
-        entry
+    fn peer_info() -> PeerInfo {
+        PeerInfo::new(None, true, PeerConfig::default(), None)
     }
 
     fn make_server(accept_unconfigured_peers: bool) -> BgpServer {
@@ -965,36 +930,7 @@ mod tests {
 
         // Configured peer -> accept regardless of accept_unconfigured_peers
         let mut server = make_server(false);
-        server.peers.insert(peer_ip, peer_info(Some(30), true, 0));
+        server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
-    }
-
-    #[test]
-    fn test_get_idle_hold_time() {
-        // (idle_hold, damping, down_count, expected)
-        let cases = [
-            (Some(30), true, 0, Some(30)),   // No downs -> base
-            (Some(30), true, 1, Some(60)),   // 1 down -> 30*2
-            (Some(30), true, 2, Some(120)),  // 2 downs -> 30*4, capped at 120
-            (Some(30), true, 3, Some(120)),  // 3 downs -> 30*8=240, capped at 120
-            (Some(30), false, 5, Some(30)),  // Damping disabled -> base
-            (Some(10), true, 1, Some(20)),   // 10*2
-            (Some(10), true, 3, Some(80)),   // 10*8
-            (Some(10), true, 6, Some(120)),  // 10*64=640, capped at 120
-            (Some(10), true, 10, Some(120)), // exp capped at 6 -> 10*64=640, capped at 120
-            (None, true, 0, None),           // Disabled -> None
-            (None, true, 5, None),           // Disabled with damping -> still None
-        ];
-        for (idle, damp, count, expected) in cases {
-            let peer = peer_info(idle, damp, count);
-            assert_eq!(
-                peer.get_idle_hold_time(),
-                expected.map(Duration::from_secs),
-                "idle={:?}, damp={}, count={}",
-                idle,
-                damp,
-                count
-            );
-        }
     }
 }
