@@ -228,7 +228,8 @@ pub struct Fsm {
 }
 
 impl Fsm {
-    /// Create a new FSM in Connect state with local BGP configuration
+    /// Create a new FSM in Connect state with local BGP configuration.
+    /// Used when TCP connection is already established.
     pub fn new(
         local_asn: u16,
         local_hold_time: u16,
@@ -238,6 +239,25 @@ impl Fsm {
     ) -> Self {
         Fsm {
             state: BgpState::Connect,
+            timers: FsmTimers::new(delay_open_time),
+            local_asn,
+            local_hold_time,
+            local_bgp_id,
+            local_addr,
+        }
+    }
+
+    /// Create a new FSM in Idle state (RFC 4271 8.2.2).
+    /// Used when peer is configured but not yet started.
+    pub fn new_idle(
+        local_asn: u16,
+        local_hold_time: u16,
+        local_bgp_id: u32,
+        local_addr: Ipv4Addr,
+        delay_open_time: Option<Duration>,
+    ) -> Self {
+        Fsm {
+            state: BgpState::Idle,
             timers: FsmTimers::new(delay_open_time),
             local_asn,
             local_hold_time,

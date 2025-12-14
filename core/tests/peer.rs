@@ -703,7 +703,7 @@ async fn test_auto_reconnect() {
                 &server,
                 vec![Peer {
                     address: peer.address.clone(),
-                    asn: 0,
+                    asn: 65002, // Preserved from previous session
                     state: BgpState::OpenSent as i32,
                     admin_state: AdminState::Up.into(),
                     dynamic: false,

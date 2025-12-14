@@ -36,12 +36,23 @@ async fn test_add_peer_failure() {
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
 
-    // Add peer via gRPC (should fail - no peer listening at that address)
+    // Add peer via gRPC (succeeds, connection attempt is async)
     let result = server1
         .client
         .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000), None)
         .await;
-    assert!(result.is_err());
+    assert!(result.is_ok());
+
+    // Peer is added, will be in Active state (retrying connection)
+    poll_while(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Active as i32
+        },
+        std::time::Duration::from_secs(2),
+        "Peer should reach Active state",
+    )
+    .await;
 }
 
 #[tokio::test]
