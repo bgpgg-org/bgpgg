@@ -70,9 +70,9 @@ async fn test_peer_down() {
     server2.kill();
 
     // Poll for peer state change (configured peers kept in Idle, not removed)
-    // server1 connected to server2, so from server1's view, server2 is configured (dynamic=false)
+    // server1 connected to server2, so from server1's view, server2 is configured
     poll_until(
-        || async { verify_peers(&server1, vec![server2.to_peer(BgpState::Idle, false)]).await },
+        || async { verify_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await },
         "Timeout waiting for peer down detection",
     )
     .await;
@@ -161,32 +161,33 @@ async fn test_peer_down_four_node_mesh() {
 
     // Poll for all servers to detect Server4 is down (configured peers stay in Idle)
     // mesh_servers: lower index connects to higher index
+    // From connector's view: configured=true; from acceptor's view: configured=false
     poll_until(
         || async {
             verify_peers(
                 &server1,
                 vec![
-                    server2.to_peer(BgpState::Established, false),
-                    server3.to_peer(BgpState::Established, false),
-                    server4.to_peer(BgpState::Idle, false),
+                    server2.to_peer(BgpState::Established, true),
+                    server3.to_peer(BgpState::Established, true),
+                    server4.to_peer(BgpState::Idle, true),
                 ],
             )
             .await
                 && verify_peers(
                     &server2,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server3.to_peer(BgpState::Established, false),
-                        server4.to_peer(BgpState::Idle, false),
+                        server1.to_peer(BgpState::Established, false),
+                        server3.to_peer(BgpState::Established, true),
+                        server4.to_peer(BgpState::Idle, true),
                     ],
                 )
                 .await
                 && verify_peers(
                     &server3,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server2.to_peer(BgpState::Established, true),
-                        server4.to_peer(BgpState::Idle, false),
+                        server1.to_peer(BgpState::Established, false),
+                        server2.to_peer(BgpState::Established, false),
+                        server4.to_peer(BgpState::Idle, true),
                     ],
                 )
                 .await
@@ -494,12 +495,13 @@ async fn test_remove_peer_four_node_mesh() {
 
     // Verify Server1 no longer has Server4 as a peer
     // mesh_servers: lower index connects to higher index
+    // From connector's view: configured=true
     assert!(
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, false),
-                server3.to_peer(BgpState::Established, false),
+                server2.to_peer(BgpState::Established, true),
+                server3.to_peer(BgpState::Established, true),
             ],
         )
         .await
@@ -524,14 +526,15 @@ async fn test_peer_up() {
 
     // Verify both peers are still in Established state
     // chain_servers: server1 connected to server2
+    // From connector's view: configured=true; from acceptor's view: configured=false
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
     assert!(
         verify_peers(
-            &server1,
-            vec![server2.to_peer(BgpState::Established, false)],
+            &server2,
+            vec![server1.to_peer(BgpState::Established, false)],
         )
         .await
     );
-    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
 }
 
 #[tokio::test]
@@ -561,13 +564,14 @@ async fn test_peer_up_four_node_mesh() {
 
     // Verify all peers are still in Established state
     // mesh_servers: lower index connects to higher index
+    // From connector's view: configured=true; from acceptor's view: configured=false
     assert!(
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, false),
-                server3.to_peer(BgpState::Established, false),
-                server4.to_peer(BgpState::Established, false),
+                server2.to_peer(BgpState::Established, true),
+                server3.to_peer(BgpState::Established, true),
+                server4.to_peer(BgpState::Established, true),
             ],
         )
         .await
@@ -576,9 +580,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, false),
-                server4.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, false),
+                server3.to_peer(BgpState::Established, true),
+                server4.to_peer(BgpState::Established, true),
             ],
         )
         .await
@@ -587,9 +591,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, false),
+                server2.to_peer(BgpState::Established, false),
+                server4.to_peer(BgpState::Established, true),
             ],
         )
         .await
@@ -598,9 +602,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established, false),
+                server2.to_peer(BgpState::Established, false),
+                server3.to_peer(BgpState::Established, false),
             ],
         )
         .await
@@ -641,15 +645,13 @@ async fn test_peer_crash_and_recover() {
             .expect("Failed to re-add peer after crash");
 
         // Poll until re-established before next crash cycle
-        // server2 connects to server1: from server1's view server2 is dynamic, vice versa
+        // server1 had configured server2 originally, server2 just called add_peer for server1
+        // Both peers are configured from each other's view
         poll_until(
             || async {
                 verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                    && verify_peers(
-                        &server2,
-                        vec![server1.to_peer(BgpState::Established, false)],
-                    )
-                    .await
+                    && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
+                        .await
             },
             &format!(
                 "Timeout waiting for peers to re-establish after crash {}",
@@ -686,10 +688,10 @@ async fn test_auto_reconnect() {
         .await
         .unwrap();
 
-    // Accept first connection
+    // Accept first connection (server initiated connection to configured peer)
     let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
     )
     .await;
@@ -706,7 +708,7 @@ async fn test_auto_reconnect() {
                     asn: 65002, // Preserved from previous session
                     state: BgpState::OpenSent as i32,
                     admin_state: AdminState::Up.into(),
-                    dynamic: false,
+                    configured: true,
                 }],
             )
             .await
@@ -718,7 +720,7 @@ async fn test_auto_reconnect() {
     // Accept reconnection
     let peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for auto-reconnect",
     )
     .await;
@@ -753,10 +755,10 @@ async fn test_idle_hold_time_delay() {
         .await
         .unwrap();
 
-    // Accept first connection and establish
+    // Accept first connection and establish (server initiated connection to configured peer)
     let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
     )
     .await;
@@ -822,10 +824,10 @@ async fn test_allow_automatic_start_false() {
         .await
         .unwrap();
 
-    // Accept connection and establish
+    // Accept connection and establish (server initiated connection to configured peer)
     let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
     )
     .await;
@@ -843,7 +845,7 @@ async fn test_allow_automatic_start_false() {
                     asn: peer.asn as u32,
                     state: BgpState::Idle as i32,
                     admin_state: AdminState::Up.into(),
-                    dynamic: false,
+                    configured: true,
                 }],
             )
             .await
@@ -865,7 +867,7 @@ async fn test_allow_automatic_start_false() {
 }
 
 #[tokio::test]
-async fn test_dynamic_peer_removed_on_disconnect() {
+async fn test_unconfigured_peer_removed_on_disconnect() {
     use std::net::Ipv4Addr;
 
     let server = start_test_server(Config::new(
@@ -877,15 +879,15 @@ async fn test_dynamic_peer_removed_on_disconnect() {
     ))
     .await;
 
-    // FakePeer connects to the server - this is a dynamic/incoming peer
+    // FakePeer connects to the server - this is an unconfigured peer
     let fake_peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 90, &server).await;
 
-    // Verify peer is established (fake_peer connects to server, so dynamic=true)
+    // Verify peer is established (fake_peer connects without AddPeer, so configured=false)
     poll_until(
         || async {
             verify_peers(
                 &server,
-                vec![fake_peer.to_peer(BgpState::Established, true)],
+                vec![fake_peer.to_peer(BgpState::Established, false)],
             )
             .await
         },
@@ -893,13 +895,13 @@ async fn test_dynamic_peer_removed_on_disconnect() {
     )
     .await;
 
-    // Drop FakePeer to disconnect - dynamic peer should be removed entirely
+    // Drop FakePeer to disconnect - unconfigured peer should be removed entirely
     drop(fake_peer);
 
     // Verify peer is removed (not in Idle, but completely gone)
     poll_until(
         || async { verify_peers(&server, vec![]).await },
-        "Timeout waiting for dynamic peer removal",
+        "Timeout waiting for unconfigured peer removal",
     )
     .await;
 }
@@ -936,7 +938,7 @@ async fn test_damp_peer_oscillations() {
         let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
         poll_until(
             || async {
-                verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await
+                verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await
             },
             "Timeout waiting for Established",
         )

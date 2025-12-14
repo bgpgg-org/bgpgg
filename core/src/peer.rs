@@ -23,7 +23,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::fsm::{BgpState, Fsm, FsmEvent};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::{Path, RouteSource};
-use crate::server::{ServerOp, SessionConfig};
+use crate::server::{ConnectionType, ServerOp, SessionConfig};
 use crate::{debug, error, info, warn};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -109,6 +109,8 @@ pub struct Peer {
     connect_retry_secs: u64,
     /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
     consecutive_down_count: u32,
+    /// Connection type for collision detection
+    conn_type: ConnectionType,
 }
 
 impl Peer {
@@ -151,6 +153,7 @@ impl Peer {
             local_addr,
             connect_retry_secs,
             consecutive_down_count: 0,
+            conn_type: ConnectionType::Outgoing,
         }
     }
 
@@ -198,6 +201,7 @@ impl Peer {
             local_addr: SocketAddr::new(local_ip.into(), 0),
             connect_retry_secs,
             consecutive_down_count: 0,
+            conn_type: ConnectionType::Incoming,
         }
     }
 
@@ -790,6 +794,7 @@ impl Peer {
                 let _ = self.server_tx.send(ServerOp::OpenReceived {
                     peer_ip: self.addr.clone(),
                     bgp_id: open_msg.bgp_identifier,
+                    conn_type: self.conn_type,
                 });
                 self.handle_fsm_event(&FsmEvent::BgpOpenReceived {
                     peer_asn: open_msg.asn,
@@ -1021,6 +1026,7 @@ mod tests {
             local_addr: SocketAddr::new(local_ip.into(), 0),
             connect_retry_secs: 120,
             consecutive_down_count: 0,
+            conn_type: ConnectionType::Outgoing,
         }
     }
 

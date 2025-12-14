@@ -1026,7 +1026,7 @@ async fn test_update_no_nlri_valid() {
 
     // Peer should still be established (no NOTIFICATION sent)
     assert!(
-        verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await,
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await,
         "Peer should remain established after valid UPDATE with no NLRI"
     );
 }
@@ -1169,11 +1169,7 @@ async fn test_max_prefix_limit() {
         // Wait for peering to establish
         poll_until(
             || async {
-                verify_peers(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Established, false)],
-                )
-                .await
+                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
             },
             "Timeout waiting for peering",
         )
@@ -1208,7 +1204,7 @@ async fn test_max_prefix_limit() {
                             asn: server1.asn as u32,
                             state: BgpState::Idle.into(),
                             admin_state: AdminState::PrefixLimitExceeded.into(),
-                            dynamic: false,
+                            configured: true,
                         }],
                     )
                     .await
@@ -1221,11 +1217,7 @@ async fn test_max_prefix_limit() {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             assert!(
-                verify_peers(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Established, false)]
-                )
-                .await,
+                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await,
                 "Test case {}: peer should remain established",
                 name
             );
@@ -1269,7 +1261,7 @@ async fn test_remove_peer_sends_cease_notification() {
     let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
         "Timeout waiting for peer to establish",
     )
     .await;
@@ -1300,7 +1292,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
     let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
         "Timeout waiting for peer to establish",
     )
     .await;
@@ -1343,7 +1335,7 @@ async fn test_collision_local_lower_bgp_id() {
     .await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, true)]).await },
+        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await },
         "Timeout waiting for peer1 to reach OpenConfirm",
     )
     .await;
@@ -1371,7 +1363,7 @@ async fn test_collision_local_lower_bgp_id() {
 
     // Verify peer2 is Established (same address as peer1 since same IP)
     poll_until(
-        || async { verify_peers(&server, vec![peer2.to_peer(BgpState::Established, true)]).await },
+        || async { verify_peers(&server, vec![peer2.to_peer(BgpState::Established, false)]).await },
         "Timeout waiting for peer2 to reach Established",
     )
     .await;
@@ -1402,7 +1394,7 @@ async fn test_collision_local_higher_bgp_id() {
     .await;
 
     poll_until(
-        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, true)]).await },
+        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await },
         "Timeout waiting for peer1 to reach OpenConfirm",
     )
     .await;
@@ -1415,7 +1407,7 @@ async fn test_collision_local_higher_bgp_id() {
 
     // peer1 should still be in OpenConfirm (not closed)
     assert!(
-        verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, true)]).await,
+        verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await,
         "peer1 should still be in OpenConfirm"
     );
 }
@@ -1438,13 +1430,8 @@ async fn test_collision_ignored_in_established() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Original peer should still be Established (collision ignored by default)
-    assert!(
-        verify_peers(
-            &server1,
-            vec![server2.to_peer(BgpState::Established, false)],
-        )
-        .await
-    );
+    // server1 connected to server2 (configured from server1's view)
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
 }
 
 /// RFC 4271 8.1.1: SendNOTIFICATIONwithoutOPEN

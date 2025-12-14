@@ -34,6 +34,13 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
+/// TCP connection initiator for collision detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    Incoming,
+    Outgoing,
+}
+
 /// Per-peer session configuration.
 /// Includes RFC 4271 Section 8.1 optional attributes and other peer settings.
 #[derive(Debug, Clone)]
@@ -180,6 +187,7 @@ pub enum ServerOp {
     OpenReceived {
         peer_ip: String,
         bgp_id: u32,
+        conn_type: ConnectionType,
     },
     PeerUpdate {
         peer_ip: String,
@@ -200,8 +208,8 @@ pub enum ServerOp {
 /// The peer IP is the HashMap key.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    /// true if accepted from incoming connection, not explicitly configured
-    pub dynamic: bool,
+    /// true if explicitly configured, false if accepted via accept_unconfigured_peers
+    pub configured: bool,
     /// Port for reconnection (configured peers only)
     pub port: Option<u16>,
     pub asn: Option<u16>,
@@ -218,11 +226,11 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    /// Create a new configured (non-dynamic) peer entry.
+    /// Create a new configured peer entry.
     pub fn new_configured(port: u16, session_config: SessionConfig) -> Self {
         Self {
             admin_state: AdminState::Up,
-            dynamic: false,
+            configured: true,
             port: Some(port),
             asn: None,
             bgp_id: None,
@@ -309,13 +317,9 @@ impl BgpServer {
         is_configured || self.config.accept_unconfigured_peers
     }
 
-    /// RFC 4271 Section 6.8: Connection Collision Detection
-    ///
-    /// Returns true if new connection should be rejected, false if it should proceed.
-    /// If existing connection loses, it is closed automatically.
-    ///
-    /// - is_incoming: true for incoming (remote-initiated), false for outgoing (local-initiated)
-    fn should_reject_connection(&mut self, peer_ip: &str, is_incoming: bool) -> bool {
+    /// Resolve connection collision per RFC 4271 6.8.
+    /// Returns true if new connection should be rejected. Closes existing connection if it loses.
+    fn resolve_collision(&mut self, peer_ip: &str, conn_type: ConnectionType) -> bool {
         let Some(peer) = self.peers.get(peer_ip) else {
             return false; // No existing peer, accept
         };
@@ -338,10 +342,9 @@ impl BgpServer {
         // RFC 4271 6.8: Compare BGP Identifiers
         // local < remote: close local-initiated, keep remote-initiated
         // local >= remote: close remote-initiated, keep local-initiated
-        let dominated = if is_incoming {
-            peer.bgp_id.map_or(true, |id| self.local_bgp_id >= id)
-        } else {
-            peer.bgp_id.map_or(false, |id| self.local_bgp_id < id)
+        let dominated = match conn_type {
+            ConnectionType::Incoming => peer.bgp_id.map_or(true, |id| self.local_bgp_id >= id),
+            ConnectionType::Outgoing => peer.bgp_id.map_or(false, |id| self.local_bgp_id < id),
         };
 
         if dominated {
@@ -361,15 +364,8 @@ impl BgpServer {
         false // Accept new connection
     }
 
-    pub async fn run(mut self) {
-        info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
-
-        let listener = TcpListener::bind(&self.config.listen_addr).await.unwrap();
-        self.local_port = listener.local_addr().unwrap().port();
-
-        let local_addr = SocketAddr::new(self.local_addr.into(), 0);
-
-        // Initialize configured peers and spawn peer tasks
+    /// Initialize configured peers from config and spawn their tasks.
+    fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
         for peer_cfg in &self.config.peers.clone() {
             let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
                 error!("invalid peer address in config", "addr" => &peer_cfg.address);
@@ -379,25 +375,33 @@ impl BgpServer {
             let session_config = SessionConfig::from(peer_cfg);
             let passive = session_config.passive_mode;
 
-            // Create Peer task (starts in Idle state)
             let peer_tx = self.spawn_peer(
                 peer_ip.clone(),
                 peer_addr.port(),
                 session_config.clone(),
-                local_addr,
+                bind_addr,
             );
 
-            // Add peer entry
             let mut entry = PeerInfo::new_configured(peer_addr.port(), session_config);
             entry.peer_tx = Some(peer_tx.clone());
             self.peers.insert(peer_ip.clone(), entry);
 
-            // RFC 4271 Event 1: ManualStart - initiate connection (unless passive)
+            // RFC 4271 Event 1: ManualStart
             if !passive {
                 let _ = peer_tx.send(PeerOp::ManualStart);
             }
             info!("configured peer", "peer_ip" => &peer_ip, "passive" => passive);
         }
+    }
+
+    pub async fn run(mut self) {
+        info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
+
+        let listener = TcpListener::bind(&self.config.listen_addr).await.unwrap();
+        self.local_port = listener.local_addr().unwrap().port();
+
+        let bind_addr = SocketAddr::new(self.local_addr.into(), 0);
+        self.init_configured_peers(bind_addr);
 
         loop {
             tokio::select! {
@@ -408,7 +412,7 @@ impl BgpServer {
 
                 // Handle management requests
                 Some(req) = self.mgmt_rx.recv() => {
-                    self.handle_mgmt_op(req, local_addr).await;
+                    self.handle_mgmt_op(req, bind_addr).await;
                 }
 
                 // Handle server operations from peers
@@ -433,8 +437,6 @@ impl BgpServer {
 
         info!("new peer connection", "peer_ip" => &peer_ip);
 
-        // RFC 4271 8.1.1: AcceptConnectionsUnconfiguredPeers
-        // RFC 4486: SHOULD send CEASE/ConnectionRejected when rejecting.
         if !self.should_accept_peer(&peer_ip) {
             info!("rejecting unconfigured peer", "peer_ip" => &peer_ip);
             let notif = NotifcationMessage::new(
@@ -446,21 +448,20 @@ impl BgpServer {
         }
 
         // RFC 4271 Section 6.8: Connection Collision Detection
-        if self.should_reject_connection(&peer_ip, true) {
+        if self.resolve_collision(&peer_ip, ConnectionType::Incoming) {
             return;
         }
 
         // Check if we have a configured peer waiting for this connection
         let existing_config = self.peers.get(&peer_ip).map(|p| p.session_config.clone());
 
-        // Use configured peer's session_config if exists, but mark as dynamic (accepted connection)
+        // Use configured peer's session_config if exists
         if let Some(session_config) = existing_config {
             let (peer_tx, initial_state) =
                 self.spawn_peer_from_stream(stream, &peer_ip, session_config);
             let existing = self.peers.get_mut(&peer_ip).unwrap();
             existing.peer_tx = Some(peer_tx);
             existing.state = initial_state;
-            existing.dynamic = true; // Accepted connection, even for configured peer
             info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
             return;
         }
@@ -468,10 +469,10 @@ impl BgpServer {
         let (peer_tx, initial_state) =
             self.spawn_peer_from_stream(stream, &peer_ip, SessionConfig::default());
 
-        // Add dynamic peer (will be removed on disconnect)
+        // Add unconfigured peer (will be removed on disconnect)
         let entry = PeerInfo {
             admin_state: AdminState::Up,
-            dynamic: true,
+            configured: false,
             port: None,
             asn: None,
             bgp_id: None,
@@ -487,14 +488,14 @@ impl BgpServer {
         info!("peer added", "peer_ip" => &peer_ip, "state" => format!("{:?}", initial_state), "total_peers" => self.peers.len());
     }
 
-    async fn handle_mgmt_op(&mut self, req: MgmtOp, local_addr: SocketAddr) {
+    async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
         match req {
             MgmtOp::AddPeer {
                 addr,
                 session_config,
                 response,
             } => {
-                self.handle_add_peer(addr, session_config, response, local_addr)
+                self.handle_add_peer(addr, session_config, response, bind_addr)
                     .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
@@ -589,27 +590,30 @@ impl BgpServer {
                     error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
                 }
             }
-            ServerOp::OpenReceived { peer_ip, bgp_id } => {
-                self.handle_open_received(peer_ip, bgp_id);
+            ServerOp::OpenReceived {
+                peer_ip,
+                bgp_id,
+                conn_type,
+            } => {
+                self.handle_open_received(peer_ip, bgp_id, conn_type);
             }
             ServerOp::PeerDisconnected { peer_ip } => {
-                // Check if peer is configured or dynamic
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
 
-                if peer.dynamic {
-                    // Dynamic peer: stop task and remove entirely
-                    if let Some(peer_tx) = peer.peer_tx.take() {
-                        let _ = peer_tx.send(PeerOp::ManualStop);
-                    }
-                    self.peers.remove(&peer_ip);
-                    info!("dynamic peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
-                } else {
+                if peer.configured {
                     // Configured peer: update state, Peer task handles reconnection internally
                     peer.state = BgpState::Idle;
                     peer.consecutive_down_count += 1;
                     info!("peer session ended", "peer_ip" => &peer_ip);
+                } else {
+                    // Unconfigured peer: stop task and remove entirely
+                    if let Some(peer_tx) = peer.peer_tx.take() {
+                        let _ = peer_tx.send(PeerOp::ManualStop);
+                    }
+                    self.peers.remove(&peer_ip);
+                    info!("unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
                 }
 
                 // Notify Loc-RIB about disconnection and get affected prefixes
@@ -628,8 +632,12 @@ impl BgpServer {
         }
     }
 
-    /// Handle OPEN message received - store BGP ID (RFC 4271 Section 6.8)
-    fn handle_open_received(&mut self, peer_ip: String, bgp_id: u32) {
+    /// Handle OPEN message received - store BGP ID (RFC 4271 6.8)
+    ///
+    /// Note: Collision detection for incoming is handled in accept_peer.
+    /// Outgoing collision detection requires tracking parallel connections
+    /// which is not currently implemented.
+    fn handle_open_received(&mut self, peer_ip: String, bgp_id: u32, _conn_type: ConnectionType) {
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             peer.bgp_id = Some(bgp_id);
         }
@@ -640,7 +648,7 @@ impl BgpServer {
         addr: String,
         session_config: SessionConfig,
         response: oneshot::Sender<Result<(), String>>,
-        local_addr: SocketAddr,
+        bind_addr: SocketAddr,
     ) {
         info!("adding peer via request", "peer_addr" => &addr);
 
@@ -666,13 +674,13 @@ impl BgpServer {
             peer_ip.clone(),
             peer_addr.port(),
             session_config.clone(),
-            local_addr,
+            bind_addr,
         );
 
         // Add peer entry
         let entry = PeerInfo {
             admin_state: AdminState::Up,
-            dynamic: false,
+            configured: true,
             port: Some(peer_addr.port()),
             asn: None,
             bgp_id: None,
@@ -701,7 +709,7 @@ impl BgpServer {
         addr: String,
         port: u16,
         session_config: SessionConfig,
-        local_addr: SocketAddr,
+        bind_addr: SocketAddr,
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
@@ -713,7 +721,7 @@ impl BgpServer {
             self.config.asn,
             self.config.hold_time_secs as u16,
             self.local_bgp_id,
-            local_addr,
+            bind_addr,
             session_config,
             self.config.connect_retry_secs,
         );
@@ -892,7 +900,7 @@ impl BgpServer {
                     entry.asn,
                     entry.state,
                     entry.admin_state,
-                    entry.dynamic,
+                    entry.configured,
                 )
             })
             .collect();
@@ -925,7 +933,7 @@ impl BgpServer {
             entry.asn,
             entry.state,
             entry.admin_state,
-            entry.dynamic,
+            entry.configured,
             stats,
         )));
     }
@@ -998,7 +1006,7 @@ mod tests {
     fn peer_info(idle_hold_time_secs: Option<u64>, damp: bool, down_count: u32) -> PeerInfo {
         PeerInfo {
             admin_state: AdminState::Up,
-            dynamic: false,
+            configured: true,
             port: None,
             asn: None,
             bgp_id: None,

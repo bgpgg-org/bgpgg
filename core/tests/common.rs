@@ -60,13 +60,13 @@ impl Drop for TestServer {
 
 impl TestServer {
     /// Converts a TestServer to a Peer struct for use in test assertions
-    pub fn to_peer(&self, state: BgpState, dynamic: bool) -> Peer {
+    pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
             admin_state: AdminState::Up.into(),
-            dynamic,
+            configured,
         }
     }
 }
@@ -497,77 +497,77 @@ pub async fn setup_two_ases_with_ebgp(
 
     // Wait for all peerings to establish
     // Connection pattern: lower-indexed server connects to higher-indexed server
-    // From connector's view: dynamic=false; from acceptor's view: dynamic=true
+    // From connector's view: configured=true; from acceptor's view: configured=false
     poll_until(
         || async {
             // Island 1 full mesh (4 servers)
-            // S1 connected to S2, S3, S4
+            // S1 connected to S2, S3, S4 (all configured)
             verify_peers(
                 &server1,
                 vec![
-                    server2.to_peer(BgpState::Established, false),
-                    server3.to_peer(BgpState::Established, false),
-                    server4.to_peer(BgpState::Established, false),
+                    server2.to_peer(BgpState::Established, true),
+                    server3.to_peer(BgpState::Established, true),
+                    server4.to_peer(BgpState::Established, true),
                 ],
             )
             .await
-                // S2: S1 connected to us (dynamic), we connected to S3, S4
+                // S2: S1 connected to us (unconfigured), we connected to S3, S4 (configured)
                 && verify_peers(
                     &server2,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server3.to_peer(BgpState::Established, false),
-                        server4.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, false),
+                        server3.to_peer(BgpState::Established, true),
+                        server4.to_peer(BgpState::Established, true),
                     ],
                 )
                 .await
-                // S3: S1, S2 connected to us (dynamic), we connected to S4
+                // S3: S1, S2 connected to us (unconfigured), we connected to S4 (configured)
                 && verify_peers(
                     &server3,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server2.to_peer(BgpState::Established, true),
-                        server4.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, false),
+                        server2.to_peer(BgpState::Established, false),
+                        server4.to_peer(BgpState::Established, true),
                     ],
                 )
                 .await
-                // S4: S1, S2, S3 connected to us (dynamic), we connected to S5
+                // S4: S1, S2, S3 connected to us (unconfigured), we connected to S5 (configured)
                 && verify_peers(
                     &server4,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server2.to_peer(BgpState::Established, true),
-                        server3.to_peer(BgpState::Established, true),
-                        server5.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, false),
+                        server2.to_peer(BgpState::Established, false),
+                        server3.to_peer(BgpState::Established, false),
+                        server5.to_peer(BgpState::Established, true),
                     ],
                 )
                 .await
                 // Island 2 triangle (S5, S6, S7)
-                // S5: S4 connected to us (dynamic), we connected to S6, S7
+                // S5: S4 connected to us (unconfigured), we connected to S6, S7 (configured)
                 && verify_peers(
                     &server5,
                     vec![
-                        server4.to_peer(BgpState::Established, true),
-                        server6.to_peer(BgpState::Established, false),
-                        server7.to_peer(BgpState::Established, false),
+                        server4.to_peer(BgpState::Established, false),
+                        server6.to_peer(BgpState::Established, true),
+                        server7.to_peer(BgpState::Established, true),
                     ],
                 )
                 .await
-                // S6: S5 connected to us (dynamic), we connected to S7
+                // S6: S5 connected to us (unconfigured), we connected to S7 (configured)
                 && verify_peers(
                     &server6,
                     vec![
-                        server5.to_peer(BgpState::Established, true),
-                        server7.to_peer(BgpState::Established, false),
+                        server5.to_peer(BgpState::Established, false),
+                        server7.to_peer(BgpState::Established, true),
                     ],
                 )
                 .await
-                // S7: S5, S6 connected to us (all dynamic)
+                // S7: S5, S6 connected to us (all unconfigured)
                 && verify_peers(
                     &server7,
                     vec![
-                        server5.to_peer(BgpState::Established, true),
-                        server6.to_peer(BgpState::Established, true),
+                        server5.to_peer(BgpState::Established, false),
+                        server6.to_peer(BgpState::Established, false),
                     ],
                 )
                 .await
@@ -867,21 +867,21 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
 
     // Build expected peer states for verification
     // Connection pattern: server i connects to server i+1
-    // So from i's view: i+1 is configured (dynamic=false)
-    // From i+1's view: i is dynamic (dynamic=true)
+    // From i's view: i+1 is configured (we called AddPeer)
+    // From i+1's view: i is unconfigured (they didn't call AddPeer)
     poll_until(
         || async {
             for (i, server) in servers.iter().enumerate() {
                 let mut expected_peers = Vec::new();
 
-                // Previous server (if exists) - it connected to us
+                // Previous server (if exists) - they connected to us (unconfigured)
                 if i > 0 {
-                    expected_peers.push(servers[i - 1].to_peer(BgpState::Established, true));
+                    expected_peers.push(servers[i - 1].to_peer(BgpState::Established, false));
                 }
 
-                // Next server (if exists) - we connected to it
+                // Next server (if exists) - we connected to it (configured)
                 if i < servers.len() - 1 {
-                    expected_peers.push(servers[i + 1].to_peer(BgpState::Established, false));
+                    expected_peers.push(servers[i + 1].to_peer(BgpState::Established, true));
                 }
 
                 if !verify_peers(server, expected_peers).await {
@@ -935,7 +935,8 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
 
     // Build expected peer states for verification
     // Connection pattern: server i connects to server j where i < j
-    // So from i's view: j is configured (dynamic=false), from j's view: i is dynamic (dynamic=true)
+    // From i's view: j is configured (we called AddPeer)
+    // From j's view: i is unconfigured (they didn't call AddPeer)
     poll_until(
         || async {
             for (i, server) in servers.iter().enumerate() {
@@ -943,10 +944,11 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
 
                 for (j, other_server) in servers.iter().enumerate() {
                     if i != j {
-                        // If j < i, then j connected to us (dynamic=true)
-                        // If j > i, then we connected to j (dynamic=false)
-                        let dynamic = j < i;
-                        expected_peers.push(other_server.to_peer(BgpState::Established, dynamic));
+                        // If j < i, then j connected to us (unconfigured)
+                        // If j > i, then we connected to j (configured)
+                        let configured = j > i;
+                        expected_peers
+                            .push(other_server.to_peer(BgpState::Established, configured));
                     }
                 }
 
@@ -1071,13 +1073,13 @@ impl FakePeer {
         fake_peer
     }
 
-    pub fn to_peer(&self, state: BgpState, dynamic: bool) -> Peer {
+    pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
             address: self.address.clone(),
             asn: self.asn as u32,
             state: state.into(),
             admin_state: AdminState::Up.into(),
-            dynamic,
+            configured,
         }
     }
 
