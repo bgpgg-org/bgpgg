@@ -50,6 +50,8 @@ pub enum PeerOp {
     ManualStop,
     /// RFC 4271 Event 3: AutomaticStart - system automatically starts (non-passive)
     AutomaticStart,
+    /// RFC 4271 Event 4: ManualStart_with_PassiveTcpEstablishment
+    ManualStartPassive,
     /// RFC 4271 Event 5: AutomaticStartPassive - system automatically starts (passive)
     AutomaticStartPassive,
     /// Incoming TCP connection accepted - peer should transition to OpenSent
@@ -195,36 +197,48 @@ impl Peer {
         }
     }
 
-    /// Passive mode: wait for start event to transition to Active.
+    /// Passive mode: wait for start event or IdleHoldTimer to transition to Active.
+    /// RFC 4271 8.1.2: Event 7 (AutomaticStart_with_DampPeerOscillations_and_PassiveTcpEstablishment)
+    /// and Event 13 (IdleHoldTimer_Expires) apply to passive peers.
     async fn handle_idle_state_passive(&mut self) -> bool {
-        loop {
-            match self.peer_rx.recv().await {
-                Some(PeerOp::ManualStart) => {
-                    debug!("ManualStart received for passive peer", "peer_ip" => self.addr.to_string());
-                    self.manually_stopped = false;
-                    // Event 4: ManualStartPassive -> Active
-                    self.transition(&FsmEvent::ManualStartPassive);
-                    return false;
+        let idle_hold_time = self.get_idle_hold_time();
+        let auto_reconnect = idle_hold_time.is_some() && !self.manually_stopped;
+        let idle_hold_time = idle_hold_time.unwrap_or(Duration::ZERO);
+
+        tokio::select! {
+            op = self.peer_rx.recv() => {
+                match op {
+                    Some(PeerOp::ManualStart) | Some(PeerOp::ManualStartPassive) => {
+                        debug!("ManualStartPassive received", "peer_ip" => self.addr.to_string());
+                        self.manually_stopped = false;
+                        // Event 4: ManualStartPassive -> Active
+                        self.transition(&FsmEvent::ManualStartPassive);
+                    }
+                    Some(PeerOp::AutomaticStartPassive) => {
+                        debug!("AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
+                        self.transition(&FsmEvent::AutomaticStartPassive);
+                    }
+                    Some(PeerOp::Shutdown(_)) => return true,
+                    Some(PeerOp::GetStatistics(response)) => {
+                        let _ = response.send(self.statistics.clone());
+                    }
+                    Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                        // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                        debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                        drop(tcp_tx);
+                        drop(tcp_rx);
+                    }
+                    Some(_) => {}
+                    None => return true,
                 }
-                Some(PeerOp::AutomaticStartPassive) => {
-                    debug!("AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
-                    self.transition(&FsmEvent::AutomaticStartPassive);
-                    return false;
-                }
-                Some(PeerOp::Shutdown(_)) => return true,
-                Some(PeerOp::GetStatistics(response)) => {
-                    let _ = response.send(self.statistics.clone());
-                }
-                Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                    // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                    debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
-                    drop(tcp_tx);
-                    drop(tcp_rx);
-                }
-                Some(_) => {}
-                None => return true,
+            }
+            _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
+                // RFC 4271 Event 13: IdleHoldTimer_Expires -> Active
+                debug!("IdleHoldTimer expired, AutomaticStartPassive", "peer_ip" => self.addr.to_string());
+                self.transition(&FsmEvent::AutomaticStartPassive);
             }
         }
+        false
     }
 
     /// Non-passive mode: wait for ManualStart, AutomaticStart, or auto-reconnect timer.
@@ -513,6 +527,7 @@ impl Peer {
                             return false;
                         }
                         PeerOp::ManualStart
+                        | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart
                         | PeerOp::AutomaticStartPassive
                         | PeerOp::TcpConnectionAccepted { .. } => {

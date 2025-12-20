@@ -45,7 +45,7 @@ pub struct PeerConfig {
     #[serde(default)]
     pub address: String,
     /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
-    /// None disables automatic restart, Some(secs) enables with given delay.
+    /// None disables automatic restart. Some(0) = immediate restart. Some(n) = restart after n seconds.
     #[serde(default = "default_idle_hold_time")]
     pub idle_hold_time_secs: Option<u64>,
     #[serde(default = "default_damp_peer_oscillations")]

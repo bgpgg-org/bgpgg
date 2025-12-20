@@ -614,52 +614,111 @@ async fn test_peer_up_four_node_mesh() {
 #[tokio::test]
 async fn test_peer_crash_and_recover() {
     let hold_timer_secs = 3;
-    let crash_count = 5;
-    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
-    let server2_port = server1.bgp_port; // Server1's port that Server2 connects to
-    let server2_asn = server2.asn;
-    let server2_router_id = server2.client.router_id;
-    let server2_bind_ip = server2.address.clone();
+    // Server2 is stable (passive, won't crash) - its port never changes
+    // Server1 is active, will crash and recover
+    let mut server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
 
-    // Crash and recover the peer multiple times
-    for i in 0..crash_count {
-        // Kill Server2 (simulates crash)
-        server2.kill();
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
 
-        // Restart Server2 with same configuration
-        server2 = start_test_server(Config::new(
-            server2_asn,
-            &format!("{}:0", server2_bind_ip),
-            server2_router_id,
-            hold_timer_secs as u64,
-            true,
-        ))
-        .await;
-
-        // Server2 reconnects to Server1
-        server2
-            .client
-            .add_peer(format!("127.0.0.1:{}", server2_port), None)
-            .await
-            .expect("Failed to re-add peer after crash");
-
-        // Poll until re-established before next crash cycle
-        // server1 had configured server2 originally, server2 just called add_peer for server1
-        // Both peers are configured from each other's view
-        poll_until(
-            || async {
-                verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                    && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
-                        .await
-            },
-            &format!(
-                "Timeout waiting for peers to re-establish after crash {}",
-                i + 1
-            ),
+    // Server2: passive peer - waits for connections, idle_hold_time_secs=0 for immediate Active
+    server2
+        .client
+        .add_peer(
+            format!("127.0.0.1:{}", server1.bgp_port),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
         )
-        .await;
-    }
+        .await
+        .unwrap();
+
+    // Server1: active peer - initiates connection to server2
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for initial establishment
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
+                    .await
+        },
+        "Timeout waiting for initial peer establishment",
+    )
+    .await;
+
+    // Crash server1 (the active side)
+    server1.kill();
+
+    // Wait for server2's passive peer to be in Active (ready to accept connections)
+    poll_until(
+        || async {
+            let peers = server2.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Active as i32
+        },
+        "Timeout waiting for server2 peer to reach Active",
+    )
+    .await;
+
+    // Restart server1 - it gets a new port, but that's fine since it initiates
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
+
+    // Server1 adds peer pointing to server2 (whose port hasn't changed)
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for re-establishment
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
+                    .await
+        },
+        "Timeout waiting for peers to re-establish after crash",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1106,14 +1165,14 @@ async fn test_passive_mode() {
         .await
         .unwrap();
 
-    // Verify server does NOT initiate connection (stays in Idle for 2 seconds)
+    // Verify server does NOT initiate connection (stays in Active waiting for incoming)
     poll_while(
         || async {
             let peers = server.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+            peers.len() == 1 && peers[0].state == BgpState::Active as i32
         },
         std::time::Duration::from_secs(2),
-        "Passive peer should stay in Idle",
+        "Passive peer should stay in Active",
     )
     .await;
 
@@ -1161,13 +1220,14 @@ async fn test_delay_open() {
 
     let delay_secs = 3;
 
-    // Server2: long delay_open so it won't send OPEN first
+    // Add server2's peer FIRST (passive) - so it's ready when server1 connects
     server2
         .client
         .add_peer(
             format!("127.0.0.1:{}", server1.bgp_port),
             Some(SessionConfig {
                 delay_open_time_secs: Some(60),
+                passive_mode: Some(true),
                 ..Default::default()
             }),
         )
@@ -1176,7 +1236,7 @@ async fn test_delay_open() {
 
     let start = std::time::Instant::now();
 
-    // Server1 with delay_open connects to server2
+    // Now add server1's peer - it will connect to server2 which is already configured
     server1
         .client
         .add_peer(

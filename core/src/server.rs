@@ -325,15 +325,20 @@ impl BgpServer {
             let peer_ip = peer_addr.ip();
             let config = peer_cfg.clone();
             let passive = config.passive_mode;
+            let allow_auto_start = config.allow_automatic_start();
 
             let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
 
             let entry = PeerInfo::new(Some(peer_addr.port()), true, config, Some(peer_tx.clone()));
             self.peers.insert(peer_ip, entry);
 
-            // RFC 4271 Event 1: ManualStart
-            if !passive {
-                let _ = peer_tx.send(PeerOp::ManualStart);
+            // RFC 4271: AutomaticStart for configured peers (if allowed)
+            if allow_auto_start {
+                if passive {
+                    let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
+                } else {
+                    let _ = peer_tx.send(PeerOp::AutomaticStart);
+                }
             }
             info!("configured peer", "peer_ip" => peer_ip.to_string(), "passive" => passive);
         }
@@ -396,14 +401,21 @@ impl BgpServer {
 
     /// Accept an incoming TCP connection and create/update peer entry.
     fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
-        let (config, existed) = self
-            .peers
-            .get(&peer_ip)
-            .map(|p| (p.config.clone(), true))
-            .unwrap_or_default();
+        // Check if peer exists and has an active task
+        let (config, existed) = match self.peers.get(&peer_ip) {
+            Some(existing) => {
+                if let Some(peer_tx) = &existing.peer_tx {
+                    // Send connection to existing peer task
+                    let (tcp_rx, tcp_tx) = stream.into_split();
+                    let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
+                    return;
+                }
+                (existing.config.clone(), true)
+            }
+            None => (PeerConfig::default(), false),
+        };
 
         let Some(peer_tx) = self.spawn_peer_from_stream(stream, peer_ip, config.clone()) else {
-            // AllowAutomaticStart is false - connection rejected
             return;
         };
 
@@ -645,8 +657,10 @@ impl BgpServer {
             ),
         );
 
-        // RFC 4271 Event 1: ManualStart - initiate connection (unless passive)
-        if !config.passive_mode {
+        // RFC 4271: ManualStart for admin-added peers
+        if config.passive_mode {
+            let _ = peer_tx.send(PeerOp::ManualStartPassive);
+        } else {
             let _ = peer_tx.send(PeerOp::ManualStart);
         }
 
@@ -737,9 +751,13 @@ impl BgpServer {
 
         entry.admin_state = AdminState::Up;
 
-        // RFC 4271 Event 1: ManualStart - send to Peer task
+        // RFC 4271: ManualStart for admin-enabled peers
         if let Some(peer_tx) = &entry.peer_tx {
-            let _ = peer_tx.send(PeerOp::ManualStart);
+            if entry.config.passive_mode {
+                let _ = peer_tx.send(PeerOp::ManualStartPassive);
+            } else {
+                let _ = peer_tx.send(PeerOp::ManualStart);
+            }
         }
 
         let _ = response.send(Ok(()));
