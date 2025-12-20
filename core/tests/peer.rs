@@ -1079,6 +1079,16 @@ async fn test_damp_peer_oscillations() {
         peer.stream.shutdown().await.ok();
     }
 
+    // Wait for peer to reach Idle after second disconnect
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        "Timeout waiting for Idle after disconnect",
+    )
+    .await;
+
     // After 2 downs: idle_hold = 1s * 2^2 = 4s
     // Verify peer stays in Idle for 2s (proving backoff > base 1s)
     poll_while(
@@ -1201,7 +1211,7 @@ async fn test_passive_mode() {
 
 #[tokio::test]
 async fn test_delay_open() {
-    let mut server1 = start_test_server(Config::new(
+    let mut server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1209,38 +1219,17 @@ async fn test_delay_open() {
         false,
     ))
     .await;
-    let mut server2 = start_test_server(Config::new(
-        65002,
-        "127.0.0.2:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        false,
-    ))
-    .await;
 
-    let delay_secs = 3;
-
-    // Add server2's peer FIRST (passive) - so it's ready when server1 connects
-    server2
-        .client
-        .add_peer(
-            format!("127.0.0.1:{}", server1.bgp_port),
-            Some(SessionConfig {
-                delay_open_time_secs: Some(60),
-                passive_mode: Some(true),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
+    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let delay_secs: u64 = 3;
 
     let start = std::time::Instant::now();
 
-    // Now add server1's peer - it will connect to server2 which is already configured
-    server1
+    server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", server2.bgp_port),
+            format!("127.0.0.2:{}", port),
             Some(SessionConfig {
                 delay_open_time_secs: Some(delay_secs),
                 ..Default::default()
@@ -1249,15 +1238,19 @@ async fn test_delay_open() {
         .await
         .unwrap();
 
-    // Poll until OPEN is sent
+    // Accept connection - FakePeer won't send OPEN, so server's DelayOpenTimer runs
+    let _peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+
+    // Wait for server to send OPEN
     poll_until(
         || async {
-            let Ok((_, stats)) = server1.client.get_peer(server2.address.clone()).await else {
+            let Ok((_, stats)) = server.client.get_peer("127.0.0.2".to_string()).await
+            else {
                 return false;
             };
             stats.map_or(false, |s| s.open_sent > 0)
         },
-        "Timeout waiting for OPEN to be sent",
+        "Timeout waiting for OPEN",
     )
     .await;
 

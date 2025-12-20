@@ -29,7 +29,7 @@ use crate::server::{ConnectionType, ServerOp};
 use crate::{debug, error, info, warn};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -112,6 +112,8 @@ pub struct Peer {
     conn_type: ConnectionType,
     /// True if ManualStop was received - disables auto-reconnect until ManualStart
     manually_stopped: bool,
+    /// Timestamp when Established state was entered (for stability-based damping reset)
+    established_at: Option<Instant>,
 }
 
 impl Peer {
@@ -156,6 +158,7 @@ impl Peer {
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
+            established_at: None,
         }
     }
 
@@ -570,6 +573,7 @@ impl Peer {
     fn disconnect(&mut self) {
         self.conn = None;
         self.consecutive_down_count += 1;
+        self.established_at = None;
         // Reset timers for clean reconnect
         self.fsm.timers.stop_hold_timer();
         self.fsm.timers.stop_keepalive_timer();
@@ -676,12 +680,24 @@ impl Peer {
             // Received keepalive in OpenConfirm - entering Established
             (BgpState::OpenConfirm, BgpState::Established, FsmEvent::BgpKeepaliveReceived) => {
                 self.fsm.timers.reset_hold_timer();
+                self.established_at = Some(Instant::now());
             }
 
             // In Established - reset hold timer on keepalive/update
             (BgpState::Established, BgpState::Established, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Established, BgpState::Established, FsmEvent::BgpUpdateReceived) => {
                 self.fsm.timers.reset_hold_timer();
+                // Reset damping counter after connection stable for one hold period (RFC 4271 8.1.2)
+                if let Some(established_at) = self.established_at {
+                    let stability_threshold = self.fsm.timers.hold_time;
+                    if established_at.elapsed() >= stability_threshold
+                        && self.consecutive_down_count > 0
+                    {
+                        self.consecutive_down_count = 0;
+                        debug!("reset damping counter after stable connection",
+                            "peer_ip" => self.addr.to_string());
+                    }
+                }
             }
 
             // AutomaticStop: set admin state based on reason
@@ -751,8 +767,6 @@ impl Peer {
         } else {
             SessionType::Ebgp
         });
-        // Reset damping on stable connection
-        self.consecutive_down_count = 0;
 
         // Negotiate hold time: use minimum (RFC 4271).
         let hold_time = local_hold_time.min(peer_hold_time);
@@ -1095,6 +1109,7 @@ mod tests {
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
+            established_at: None,
         }
     }
 
