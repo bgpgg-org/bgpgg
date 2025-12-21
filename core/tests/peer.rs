@@ -746,7 +746,9 @@ async fn test_auto_reconnect() {
         .unwrap();
 
     // Accept first connection (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -775,7 +777,9 @@ async fn test_auto_reconnect() {
     .await;
 
     // Accept reconnection
-    let peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for auto-reconnect",
@@ -813,7 +817,9 @@ async fn test_idle_hold_time_delay() {
         .unwrap();
 
     // Accept first connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -882,7 +888,9 @@ async fn test_allow_automatic_start_false() {
         .unwrap();
 
     // Accept connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -1011,7 +1019,9 @@ async fn test_unconfigured_peer_removed_on_disconnect() {
     .await;
 
     // FakePeer connects to the server - this is an unconfigured peer
-    let fake_peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 90, &server).await;
+    let mut fake_peer = FakePeer::connect(None, &server).await;
+    fake_peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    fake_peer.handshake_keepalive().await;
 
     // Verify peer is established (fake_peer connects without AddPeer, so configured=false)
     poll_until(
@@ -1066,7 +1076,9 @@ async fn test_damp_peer_oscillations() {
 
     // 2 rapid connect/disconnect cycles to build up consecutive_down_count
     for _ in 0..2 {
-        let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+        let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.handshake_keepalive().await;
         poll_until(
             || async {
                 verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await
@@ -1114,14 +1126,9 @@ async fn test_reject_unconfigured_peer() {
     let server = start_test_server(config).await;
 
     // Configured peer from 127.0.0.2 should be accepted
-    let configured_peer = FakePeer::connect(
-        Some("127.0.0.2"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        &server,
-    )
-    .await;
+    let mut configured_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+    configured_peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    configured_peer.handshake_keepalive().await;
     poll_until(
         || async {
             verify_peers(
@@ -1135,7 +1142,7 @@ async fn test_reject_unconfigured_peer() {
     .await;
 
     // Unconfigured peer from 127.0.0.3 should be rejected
-    let mut unconfigured_peer = FakePeer::connect_raw(Some("127.0.0.3"), &server).await;
+    let mut unconfigured_peer = FakePeer::connect(Some("127.0.0.3"), &server).await;
     let notif = unconfigured_peer.read_notification().await;
     assert_eq!(
         notif.error(),
@@ -1185,14 +1192,9 @@ async fn test_passive_mode() {
     .await;
 
     // Remote peer connects - should be accepted and establish
-    let fake_peer = FakePeer::connect(
-        Some("127.0.0.2"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        &server,
-    )
-    .await;
+    let mut fake_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+    fake_peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    fake_peer.handshake_keepalive().await;
 
     poll_until(
         || async {
@@ -1237,7 +1239,9 @@ async fn test_delay_open() {
         .unwrap();
 
     // Accept connection - FakePeer won't send OPEN, so server's DelayOpenTimer runs
-    let _peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    let mut _peer = FakePeer::accept(&listener, 65002).await;
+    _peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    _peer.handshake_keepalive().await;
 
     // Wait for server to send OPEN
     poll_until(

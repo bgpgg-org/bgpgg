@@ -98,7 +98,9 @@ async fn test_invalid_marker() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Corrupt first byte of marker
     let mut corrupted_marker = BGP_MARKER;
@@ -139,8 +141,9 @@ async fn test_bad_message_length() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let wrong_length = u16::from_be_bytes(length);
         let msg = build_raw_open(
@@ -177,7 +180,9 @@ async fn test_keepalive_wrong_length() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // KEEPALIVE must be exactly 19 bytes, make it 20
     let msg = build_raw_keepalive(Some(20));
@@ -203,7 +208,9 @@ async fn test_notification_length_too_small() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
     // Create a message with type=3 (NOTIFICATION) and length=20
@@ -229,7 +236,9 @@ async fn test_invalid_message_type() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Create message with invalid type (99)
     let msg = build_raw_open(
@@ -265,7 +274,9 @@ async fn test_open_unsupported_version() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     let msg = build_raw_open(
         65002,
@@ -301,8 +312,9 @@ async fn test_open_unacceptable_hold_time() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let msg =
             OpenMessage::new(65002, hold_time, u32::from(Ipv4Addr::new(2, 2, 2, 2))).serialize();
@@ -342,8 +354,9 @@ async fn test_open_bad_bgp_identifier() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let msg = OpenMessage::new(65002, 300, bgp_id).serialize();
 
@@ -394,8 +407,9 @@ async fn test_update_missing_well_known_attribute() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
         let msg = build_raw_update(
@@ -433,7 +447,9 @@ async fn test_update_malformed_attribute_list() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Withdrawn route: 10.11.12.0/24 (prefix length byte followed by prefix bytes)
     let withdrawn_data = &[24, 10, 11, 12];
@@ -474,8 +490,9 @@ async fn test_update_attribute_flags_error_origin() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let malformed_attr =
             build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
@@ -509,7 +526,9 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Build MED attribute with WRONG flags (missing OPTIONAL bit)
     let wrong_flags = attr_flags::TRANSITIVE; // Should have OPTIONAL too
@@ -590,8 +609,9 @@ async fn test_update_attribute_length_error() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         // Build UPDATE with single malformed attribute (no alignment issues!)
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
@@ -624,7 +644,9 @@ async fn test_update_unrecognized_well_known_attribute() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Build an unrecognized well-known attribute (type 8, OPTIONAL=0)
     let unrecognized_attr = build_attr_bytes(attr_flags::TRANSITIVE, 8, 2, &[0xaa, 0xbb]);
@@ -650,7 +672,9 @@ async fn test_update_invalid_origin_attribute() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     let invalid_origin_attr =
         build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
@@ -697,8 +721,9 @@ async fn test_update_invalid_next_hop_attribute() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let invalid_next_hop_attr = build_attr_bytes(
             attr_flags::TRANSITIVE,
@@ -758,7 +783,9 @@ async fn test_next_hop_is_local_address_rejected() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Send UPDATE with NEXT_HOP = server's local address (127.0.0.1)
     let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
@@ -831,8 +858,9 @@ async fn test_update_malformed_as_path() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let nlri = &[24, 10, 11, 12];
         let msg = build_raw_update(
@@ -886,8 +914,9 @@ async fn test_update_optional_attribute_error() {
             true,
         ))
         .await;
-        let mut peer =
-            FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
+        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+        peer.handshake_keepalive().await;
 
         let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
         let nlri = &[24, 10, 11, 12];
@@ -931,14 +960,9 @@ async fn test_hold_timer_expiry() {
     .await;
 
     // FakePeer connects with same hold time but won't send keepalives
-    let mut fake_peer = FakePeer::connect(
-        None,
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        hold_timer_secs,
-        &server,
-    )
-    .await;
+    let mut fake_peer = FakePeer::connect(None, &server).await;
+    fake_peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), hold_timer_secs).await;
+    fake_peer.handshake_keepalive().await;
 
     // Verify peer is established
     poll_until(
@@ -974,7 +998,9 @@ async fn test_update_duplicate_attribute() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Send UPDATE with two ORIGIN attributes (duplicate)
     let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
@@ -998,7 +1024,9 @@ async fn test_update_no_nlri_valid() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // UPDATE with valid attributes but no NLRI
     let msg = build_raw_update(
@@ -1042,7 +1070,9 @@ async fn test_update_multicast_nlri_ignored() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     // Send UPDATE with multicast NLRI (224.0.0.0/24)
     let multicast_nlri = &[24, 224, 0, 0];
@@ -1093,8 +1123,8 @@ async fn test_fsm_error_update_in_openconfirm() {
     .await;
 
     // Connect and exchange OPEN only - server ends up in OpenConfirm
-    let mut peer =
-        FakePeer::connect_open_only(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
 
     // Send UPDATE while server is in OpenConfirm (should trigger FSM Error)
     let msg = build_raw_update(
@@ -1259,7 +1289,9 @@ async fn test_remove_peer_sends_cease_notification() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
@@ -1290,7 +1322,9 @@ async fn test_disable_peer_sends_admin_shutdown() {
         true,
     ))
     .await;
-    let mut peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 300, &server).await;
+    let mut peer = FakePeer::connect(None, &server).await;
+    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
+    peer.handshake_keepalive().await;
 
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
@@ -1326,14 +1360,8 @@ async fn test_collision_local_lower_bgp_id() {
     .await;
 
     // Peer 1: connect and reach OpenConfirm
-    let mut peer1 = FakePeer::connect_open_only(
-        Some("127.0.0.3"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        300,
-        &server,
-    )
-    .await;
+    let mut peer1 = FakePeer::connect(Some("127.0.0.3"), &server).await;
+    peer1.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
 
     poll_until(
         || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await },
@@ -1342,14 +1370,8 @@ async fn test_collision_local_lower_bgp_id() {
     .await;
 
     // Peer 2: collision - since local < remote, existing (peer1) closed, new (peer2) wins
-    let mut peer2 = FakePeer::connect_open_only(
-        Some("127.0.0.3"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        300,
-        &server,
-    )
-    .await;
+    let mut peer2 = FakePeer::connect(Some("127.0.0.3"), &server).await;
+    peer2.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300).await;
 
     // Verify peer1 received NOTIFICATION with ConnectionCollisionResolution
     let notif = peer1.read_notification().await;
@@ -1384,8 +1406,8 @@ async fn test_collision_openconfirm() {
             start_test_server(Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true)).await;
 
         // Peer 1: connect and reach OpenConfirm
-        let mut peer1 =
-            FakePeer::connect_open_only(Some("127.0.0.3"), 65002, peer_bgp_id, 300, &server).await;
+        let mut peer1 = FakePeer::connect(Some("127.0.0.3"), &server).await;
+        peer1.handshake_open(65002, peer_bgp_id, 300).await;
 
         poll_until(
             || async {
@@ -1396,7 +1418,7 @@ async fn test_collision_openconfirm() {
         .await;
 
         // Peer 2: collision from same IP
-        let mut peer2 = FakePeer::connect_raw(Some("127.0.0.3"), &server).await;
+        let mut peer2 = FakePeer::connect(Some("127.0.0.3"), &server).await;
 
         if existing_kept {
             // local >= remote -> existing kept, new rejected
@@ -1479,7 +1501,7 @@ async fn test_collision_deferred() {
         let server = start_test_server(config).await;
 
         // Accept server's outbound connection (server sends OPEN, but we don't read it yet)
-        let mut peer = FakePeer::accept_raw(&listener, 65002).await;
+        let mut peer = FakePeer::accept(&listener, 65002).await;
 
         // Server is in OpenSent (sent OPEN, waiting for response)
         poll_until(
@@ -1560,7 +1582,7 @@ async fn test_send_notification_without_open() {
         });
         let server = start_test_server(config).await;
 
-        let mut peer = FakePeer::connect_raw(None, &server).await;
+        let mut peer = FakePeer::connect(None, &server).await;
 
         // Send invalid marker before OPEN is sent (delay_open delays it)
         let mut corrupted_marker = BGP_MARKER;

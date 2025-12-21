@@ -990,7 +990,7 @@ pub struct FakePeer {
 
 impl FakePeer {
     /// Connect TCP only. Use local_ip to bind to specific address.
-    pub async fn connect_raw(local_ip: Option<&str>, peer: &TestServer) -> Self {
+    pub async fn connect(local_ip: Option<&str>, peer: &TestServer) -> Self {
         use std::net::SocketAddr;
         use tokio::net::TcpSocket;
 
@@ -1013,27 +1013,46 @@ impl FakePeer {
         }
     }
 
-    /// Connect and exchange OPENs only (server ends up in OpenConfirm).
-    pub async fn connect_open_only(
-        local_ip: Option<&str>,
-        local_asn: u16,
-        local_router_id: Ipv4Addr,
-        hold_time: u16,
-        peer: &TestServer,
-    ) -> Self {
-        let mut fake_peer = Self::connect_raw(local_ip, peer).await;
-        fake_peer.asn = local_asn;
+    /// Accept TCP connection only (no BGP handshake).
+    pub async fn accept(listener: &TcpListener, local_asn: u16) -> Self {
+        let (stream, _) = listener.accept().await.unwrap();
+        let address = stream.local_addr().unwrap().ip().to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: local_asn,
+        }
+    }
+
+    /// Exchange OPEN messages with peer (ends up in OpenConfirm state).
+    /// For outgoing connections: sends OPEN then reads OPEN.
+    pub async fn handshake_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+        self.asn = asn;
 
         // Send our OPEN
-        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
-        fake_peer
-            .stream
+        let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
+        self.stream
             .write_all(&open.serialize())
             .await
             .expect("Failed to send OPEN");
 
-        // Read their OPEN (server transitions to OpenConfirm after receiving our OPEN)
-        let msg = read_bgp_message(&mut fake_peer.stream)
+        // Read their OPEN
+        let msg = read_bgp_message(&mut self.stream)
+            .await
+            .expect("Failed to read OPEN");
+        match msg {
+            BgpMessage::Open(_) => {}
+            _ => panic!("Expected OPEN message"),
+        }
+    }
+
+    /// Exchange OPEN messages for accepted connections (ends up in OpenConfirm state).
+    /// For incoming connections: reads OPEN then sends OPEN.
+    pub async fn accept_handshake_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+        self.asn = asn;
+
+        // Read their OPEN (they connected, they send first)
+        let msg = read_bgp_message(&mut self.stream)
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1041,36 +1060,29 @@ impl FakePeer {
             _ => panic!("Expected OPEN message"),
         }
 
-        fake_peer
+        // Send our OPEN
+        let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
+        self.stream
+            .write_all(&open.serialize())
+            .await
+            .expect("Failed to send OPEN");
     }
 
-    /// Connect and complete full BGP handshake.
-    pub async fn connect(
-        local_ip: Option<&str>,
-        local_asn: u16,
-        local_router_id: Ipv4Addr,
-        hold_time: u16,
-        peer: &TestServer,
-    ) -> Self {
-        let mut fake_peer =
-            Self::connect_open_only(local_ip, local_asn, local_router_id, hold_time, peer).await;
-
+    /// Exchange KEEPALIVE messages to complete handshake (reaches Established state).
+    pub async fn handshake_keepalive(&mut self) {
         let keepalive = KeepAliveMessage {};
-        fake_peer
-            .stream
+        self.stream
             .write_all(&keepalive.serialize())
             .await
             .expect("Failed to send KEEPALIVE");
 
-        let msg = read_bgp_message(&mut fake_peer.stream)
+        let msg = read_bgp_message(&mut self.stream)
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
             BgpMessage::KeepAlive(_) => {}
             _ => panic!("Expected KEEPALIVE message during handshake"),
         }
-
-        fake_peer
     }
 
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
@@ -1133,68 +1145,6 @@ impl FakePeer {
         }
     }
 
-    /// Accept TCP connection only (no BGP handshake).
-    pub async fn accept_raw(listener: &TcpListener, local_asn: u16) -> Self {
-        let (stream, _) = listener.accept().await.unwrap();
-        let address = stream.local_addr().unwrap().ip().to_string();
-        FakePeer {
-            stream,
-            address,
-            asn: local_asn,
-        }
-    }
-
-    /// Accept connection and exchange OPENs only (peer ends up in OpenConfirm).
-    /// Does NOT send KEEPALIVE, allowing tests to send unexpected messages.
-    pub async fn accept_open_only(
-        listener: &TcpListener,
-        local_asn: u16,
-        local_router_id: Ipv4Addr,
-        hold_time: u16,
-    ) -> Self {
-        let (mut stream, _) = listener.accept().await.unwrap();
-
-        // Read their OPEN (they connected, they send first)
-        let msg = read_bgp_message(&mut stream).await.unwrap();
-        match msg {
-            BgpMessage::Open(_) => {}
-            _ => panic!("Expected OPEN message"),
-        }
-
-        // Send our OPEN
-        let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
-        stream.write_all(&open.serialize()).await.unwrap();
-
-        let address = stream.local_addr().unwrap().ip().to_string();
-        FakePeer {
-            stream,
-            address,
-            asn: local_asn,
-        }
-    }
-
-    /// Accept connection and complete full BGP handshake
-    pub async fn accept(
-        listener: &TcpListener,
-        local_asn: u16,
-        local_router_id: Ipv4Addr,
-        hold_time: u16,
-    ) -> Self {
-        let mut peer =
-            Self::accept_open_only(listener, local_asn, local_router_id, hold_time).await;
-
-        // KEEPALIVE exchange - same as connect()
-        let keepalive = KeepAliveMessage {};
-        peer.stream.write_all(&keepalive.serialize()).await.unwrap();
-
-        let msg = read_bgp_message(&mut peer.stream).await.unwrap();
-        match msg {
-            BgpMessage::KeepAlive(_) => {}
-            _ => panic!("Expected KEEPALIVE message"),
-        }
-
-        peer
-    }
 
     /// Initiate new connection to server from same IP as this peer.
     /// Returns raw TcpStream (no OPEN sent).
