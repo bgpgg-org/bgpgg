@@ -214,7 +214,7 @@ impl Peer {
         tokio::select! {
             op = self.peer_rx.recv() => {
                 match op {
-                    Some(PeerOp::ManualStart) | Some(PeerOp::ManualStartPassive) => {
+                    Some(PeerOp::ManualStartPassive) => {
                         debug!("ManualStartPassive received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
                         // Event 4: ManualStartPassive -> Active
