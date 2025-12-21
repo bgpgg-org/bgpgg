@@ -185,7 +185,7 @@ impl Peer {
                     self.handle_active_state().await;
                 }
                 BgpState::OpenSent | BgpState::OpenConfirm | BgpState::Established => {
-                    if self.handle_connected_state().await {
+                    if self.handle_open_and_established().await {
                         return; // Shutdown requested
                     }
                 }
@@ -335,12 +335,9 @@ impl Peer {
                 op = self.peer_rx.recv() => {
                     match op {
                         Some(PeerOp::ManualStop) => {
-                            // RFC 4271 8.2.2: Drop TCP, release resources, reset counter, stop timer
-                            self.disconnect();
-                            self.manually_stopped = true;
-                            self.fsm.reset_connect_retry_counter();
-                            self.fsm.timers.stop_connect_retry();
-                            self.transition(&FsmEvent::ManualStop);
+                            if let Err(e) = self.handle_fsm_event(&FsmEvent::ManualStop).await {
+                                error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            }
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                             self.accept_connection(tcp_tx, tcp_rx).await;
@@ -442,6 +439,36 @@ impl Peer {
         }
     }
 
+    /// Handle Active state - listen for incoming connections.
+    async fn handle_active_state(&mut self) {
+        if self.fsm.timers.delay_open_timer_running() {
+            self.handle_active_delay_open_wait().await;
+        } else {
+            // Wait for incoming connection
+            let retry_time = Duration::from_secs(self.connect_retry_secs);
+
+            tokio::select! {
+                _ = tokio::time::sleep(retry_time) => {
+                    debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
+                    self.transition(&FsmEvent::ConnectRetryTimerExpires);
+                }
+                op = self.peer_rx.recv() => {
+                    match op {
+                        Some(PeerOp::ManualStop) => {
+                            if let Err(e) = self.handle_fsm_event(&FsmEvent::ManualStop).await {
+                                error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            }
+                        }
+                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                            self.accept_connection(tcp_tx, tcp_rx).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// Wait for DelayOpen timer in Active state (RFC 4271 8.2.2).
     /// Does not monitor ConnectRetryTimer.
     async fn handle_active_delay_open_wait(&mut self) {
@@ -506,38 +533,9 @@ impl Peer {
         }
     }
 
-    /// Handle Active state - listen for incoming connections.
-    async fn handle_active_state(&mut self) {
-        if self.fsm.timers.delay_open_timer_running() {
-            self.handle_active_delay_open_wait().await;
-        } else {
-            // Wait for incoming connection
-            let retry_time = Duration::from_secs(self.connect_retry_secs);
-
-            tokio::select! {
-                _ = tokio::time::sleep(retry_time) => {
-                    debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
-                    self.transition(&FsmEvent::ConnectRetryTimerExpires);
-                }
-                op = self.peer_rx.recv() => {
-                    match op {
-                        Some(PeerOp::ManualStop) => {
-                            self.manually_stopped = true;
-                            self.transition(&FsmEvent::ManualStop);
-                        }
-                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            self.accept_connection(tcp_tx, tcp_rx).await;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
     /// Handle connected states (OpenSent, OpenConfirm, Established).
     /// Returns true if shutdown requested.
-    async fn handle_connected_state(&mut self) -> bool {
+    async fn handle_open_and_established(&mut self) -> bool {
         let peer_ip = self.addr;
 
         // Timer interval for hold/keepalive checks
@@ -595,14 +593,9 @@ impl Peer {
                         }
                         PeerOp::ManualStop => {
                             info!("ManualStop received", "peer_ip" => peer_ip.to_string());
-                            self.manually_stopped = true;
-                            let notif = NotifcationMessage::new(
-                                BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
-                                Vec::new(),
-                            );
-                            let _ = self.send_notification(notif).await;
-                            self.disconnect();
-                            self.transition(&FsmEvent::ManualStop);
+                            if let Err(e) = self.handle_fsm_event(&FsmEvent::ManualStop).await {
+                                error!("failed to handle ManualStop", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            }
                             return false;
                         }
                         PeerOp::ManualStart
@@ -720,14 +713,46 @@ impl Peer {
                 self.fsm.timers.start_connect_retry();
             }
 
-            // RFC 4271 8.2.2: ManualStop in Connect or Active state
-            (BgpState::Connect, BgpState::Idle, FsmEvent::ManualStop)
-            | (BgpState::Active, BgpState::Idle, FsmEvent::ManualStop) => {
+            // RFC 4271 8.2.2: ManualStop in Connect state
+            (BgpState::Connect, BgpState::Idle, FsmEvent::ManualStop) => {
+                self.disconnect();
+                self.manually_stopped = true;
+                self.fsm.reset_connect_retry_counter();
+                self.fsm.timers.stop_connect_retry();
+            }
+
+            // RFC 4271 8.2.2: ManualStop in Active state
+            (BgpState::Active, BgpState::Idle, FsmEvent::ManualStop) => {
+                // Conditionally send NOTIFICATION if DelayOpenTimer is running
+                if self.fsm.timers.delay_open_timer_running()
+                    && self.config.send_notification_without_open
+                {
+                    let notif = NotifcationMessage::new(
+                        BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+                        Vec::new(),
+                    );
+                    let _ = self.send_notification(notif).await;
+                }
                 self.disconnect();
                 self.manually_stopped = true;
                 self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
+            }
+
+            // RFC 4271 8.2.2: ManualStop in session states - send CEASE notification
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::ManualStop)
+            | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::ManualStop)
+            | (BgpState::Established, BgpState::Idle, FsmEvent::ManualStop) => {
+                self.manually_stopped = true;
+                let notif = NotifcationMessage::new(
+                    BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+                    Vec::new(),
+                );
+                let _ = self.send_notification(notif).await;
+                self.disconnect();
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
             }
 
             // DelayOpenTimer expires -> send OPEN
