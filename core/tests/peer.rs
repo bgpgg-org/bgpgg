@@ -1273,3 +1273,93 @@ async fn test_delay_open() {
         "OPEN sent before delay_open_time elapsed"
     );
 }
+
+/// Test ManualStop transitions to Idle from any state (RFC 4271 8.2.2)
+#[tokio::test]
+async fn test_manual_stop() {
+    let test_cases = vec![
+        (BgpState::Connect, Some(60)),
+        (BgpState::OpenSent, None),
+        (BgpState::OpenConfirm, None),
+        (BgpState::Established, None),
+    ];
+
+    for (starting_state, delay_open_time_secs) in test_cases {
+        let mut server = start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            300,
+            true,
+        ))
+        .await;
+
+        let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        server
+            .client
+            .add_peer(
+                format!("127.0.0.2:{}", port),
+                delay_open_time_secs.map(|secs| SessionConfig {
+                    delay_open_time_secs: Some(secs),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut fake_peer = FakePeer::accept(&listener, 65002).await;
+
+        // Move peer to the target state
+        match starting_state {
+            BgpState::Connect => {
+                // DelayOpen keeps server in Connect
+            }
+            BgpState::OpenSent => {
+                // Server sends OPEN and enters OpenSent
+            }
+            BgpState::OpenConfirm => {
+                fake_peer
+                    .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
+                    .await;
+            }
+            BgpState::Established => {
+                fake_peer
+                    .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
+                    .await;
+                fake_peer.handshake_keepalive().await;
+            }
+            _ => continue,
+        }
+
+        // Wait for peer to reach starting state
+        poll_until(
+            || async {
+                let peers = server.client.get_peers().await.unwrap_or_default();
+                peers.len() == 1 && peers[0].state == starting_state as i32
+            },
+            &format!("Timeout waiting for {:?}", starting_state),
+        )
+        .await;
+
+        // Send ManualStop
+        server
+            .client
+            .disable_peer(fake_peer.address.clone())
+            .await
+            .expect("Failed to disable peer");
+
+        // Verify transition to Idle
+        poll_until(
+            || async {
+                let peers = server.client.get_peers().await.unwrap_or_default();
+                peers.len() == 1
+                    && peers[0].state == BgpState::Idle as i32
+                    && peers[0].admin_state == AdminState::Down as i32
+            },
+            &format!("ManualStop from {:?} -> Idle", starting_state),
+        )
+        .await;
+    }
+}

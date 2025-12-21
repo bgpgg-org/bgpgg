@@ -331,7 +331,11 @@ impl Peer {
                 op = self.peer_rx.recv() => {
                     match op {
                         Some(PeerOp::ManualStop) => {
+                            // RFC 4271 8.2.2: Drop TCP, release resources, reset counter, stop timer
+                            self.disconnect();
                             self.manually_stopped = true;
+                            self.fsm.reset_connect_retry_counter();
+                            self.fsm.timers.stop_connect_retry();
                             self.transition(&FsmEvent::ManualStop);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
@@ -415,7 +419,11 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStop) => {
+                        // RFC 4271 8.2.2: Drop TCP, release resources, reset counter, stop timer
+                        self.disconnect();
                         self.manually_stopped = true;
+                        self.fsm.reset_connect_retry_counter();
+                        self.fsm.timers.stop_connect_retry();
                         self.fsm.timers.stop_delay_open_timer();
                         self.transition(&FsmEvent::ManualStop);
                     }
