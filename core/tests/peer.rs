@@ -20,7 +20,6 @@ use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -614,52 +613,109 @@ async fn test_peer_up_four_node_mesh() {
 #[tokio::test]
 async fn test_peer_crash_and_recover() {
     let hold_timer_secs = 3;
-    let crash_count = 5;
-    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
-    let server2_port = server1.bgp_port; // Server1's port that Server2 connects to
-    let server2_asn = server2.asn;
-    let server2_router_id = server2.client.router_id;
-    let server2_bind_ip = server2.address.clone();
+    // Server2 is stable (passive, won't crash) - its port never changes
+    // Server1 is active, will crash and recover
+    let mut server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
 
-    // Crash and recover the peer multiple times
-    for i in 0..crash_count {
-        // Kill Server2 (simulates crash)
-        server2.kill();
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
 
-        // Restart Server2 with same configuration
-        server2 = start_test_server(Config::new(
-            server2_asn,
-            &format!("{}:0", server2_bind_ip),
-            server2_router_id,
-            hold_timer_secs as u64,
-            true,
-        ))
-        .await;
-
-        // Server2 reconnects to Server1
-        server2
-            .client
-            .add_peer(format!("127.0.0.1:{}", server2_port), None)
-            .await
-            .expect("Failed to re-add peer after crash");
-
-        // Poll until re-established before next crash cycle
-        // server1 had configured server2 originally, server2 just called add_peer for server1
-        // Both peers are configured from each other's view
-        poll_until(
-            || async {
-                verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                    && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
-                        .await
-            },
-            &format!(
-                "Timeout waiting for peers to re-establish after crash {}",
-                i + 1
-            ),
+    // Server2: passive peer - waits for connections, idle_hold_time_secs=0 for immediate Active
+    server2
+        .client
+        .add_peer(
+            format!("127.0.0.1:{}", server1.bgp_port),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
         )
-        .await;
-    }
+        .await
+        .unwrap();
+
+    // Server1: active peer - initiates connection to server2
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for initial establishment
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+        },
+        "Timeout waiting for initial peer establishment",
+    )
+    .await;
+
+    // Crash server1 (the active side)
+    server1.kill();
+
+    // Wait for server2's passive peer to be in Active (ready to accept connections)
+    poll_until(
+        || async {
+            let peers = server2.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Active as i32
+        },
+        "Timeout waiting for server2 peer to reach Active",
+    )
+    .await;
+
+    // Restart server1 - it gets a new port, but that's fine since it initiates
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
+
+    // Server1 adds peer pointing to server2 (whose port hasn't changed)
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for re-establishment
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+        },
+        "Timeout waiting for peers to re-establish after crash",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -672,8 +728,8 @@ async fn test_auto_reconnect() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
@@ -689,7 +745,10 @@ async fn test_auto_reconnect() {
         .unwrap();
 
     // Accept first connection (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.accept().await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -697,7 +756,7 @@ async fn test_auto_reconnect() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     poll_until(
         || async {
@@ -718,7 +777,10 @@ async fn test_auto_reconnect() {
     .await;
 
     // Accept reconnection
-    let peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.accept().await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for auto-reconnect",
@@ -737,8 +799,8 @@ async fn test_idle_hold_time_delay() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     let idle_hold_secs = 2u64;
 
@@ -756,7 +818,10 @@ async fn test_idle_hold_time_delay() {
         .unwrap();
 
     // Accept first connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.accept().await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -764,7 +829,7 @@ async fn test_idle_hold_time_delay() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     // First wait for state to become Idle (server processed disconnect)
     poll_until(
@@ -808,8 +873,8 @@ async fn test_allow_automatic_start_false() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // Add peer with automatic restart disabled (idle_hold_time_secs=None)
     server
@@ -825,7 +890,10 @@ async fn test_allow_automatic_start_false() {
         .unwrap();
 
     // Accept connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.accept().await;
+    peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    peer.handshake_keepalive().await;
     poll_until(
         || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
         "Timeout waiting for Established",
@@ -833,7 +901,7 @@ async fn test_allow_automatic_start_false() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     // Wait for peer to go Idle (ASN preserved from previous session)
     poll_until(
@@ -954,7 +1022,11 @@ async fn test_unconfigured_peer_removed_on_disconnect() {
     .await;
 
     // FakePeer connects to the server - this is an unconfigured peer
-    let fake_peer = FakePeer::connect(None, 65002, Ipv4Addr::new(2, 2, 2, 2), 90, &server).await;
+    let mut fake_peer = FakePeer::connect(None, &server).await;
+    fake_peer
+        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    fake_peer.handshake_keepalive().await;
 
     // Verify peer is established (fake_peer connects without AddPeer, so configured=false)
     poll_until(
@@ -990,8 +1062,8 @@ async fn test_damp_peer_oscillations() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // idle_hold_time=1s, damping=true. After 2 downs: 1s * 2^2 = 4s
     server
@@ -1009,7 +1081,10 @@ async fn test_damp_peer_oscillations() {
 
     // 2 rapid connect/disconnect cycles to build up consecutive_down_count
     for _ in 0..2 {
-        let mut peer = FakePeer::accept(&listener, 65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+        peer.accept().await;
+        peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+            .await;
+        peer.handshake_keepalive().await;
         poll_until(
             || async {
                 verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await
@@ -1017,8 +1092,18 @@ async fn test_damp_peer_oscillations() {
             "Timeout waiting for Established",
         )
         .await;
-        peer.stream.shutdown().await.ok();
+        peer.stream.as_mut().unwrap().shutdown().await.ok();
     }
+
+    // Wait for peer to reach Idle after second disconnect
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+        },
+        "Timeout waiting for Idle after disconnect",
+    )
+    .await;
 
     // After 2 downs: idle_hold = 1s * 2^2 = 4s
     // Verify peer stays in Idle for 2s (proving backoff > base 1s)
@@ -1047,14 +1132,11 @@ async fn test_reject_unconfigured_peer() {
     let server = start_test_server(config).await;
 
     // Configured peer from 127.0.0.2 should be accepted
-    let configured_peer = FakePeer::connect(
-        Some("127.0.0.2"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        &server,
-    )
-    .await;
+    let mut configured_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+    configured_peer
+        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    configured_peer.handshake_keepalive().await;
     poll_until(
         || async {
             verify_peers(
@@ -1068,7 +1150,7 @@ async fn test_reject_unconfigured_peer() {
     .await;
 
     // Unconfigured peer from 127.0.0.3 should be rejected
-    let mut unconfigured_peer = FakePeer::connect_raw(Some("127.0.0.3"), &server).await;
+    let mut unconfigured_peer = FakePeer::connect(Some("127.0.0.3"), &server).await;
     let notif = unconfigured_peer.read_notification().await;
     assert_eq!(
         notif.error(),
@@ -1106,26 +1188,23 @@ async fn test_passive_mode() {
         .await
         .unwrap();
 
-    // Verify server does NOT initiate connection (stays in Idle for 2 seconds)
+    // Verify server does NOT initiate connection (stays in Active waiting for incoming)
     poll_while(
         || async {
             let peers = server.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+            peers.len() == 1 && peers[0].state == BgpState::Active as i32
         },
         std::time::Duration::from_secs(2),
-        "Passive peer should stay in Idle",
+        "Passive peer should stay in Active",
     )
     .await;
 
     // Remote peer connects - should be accepted and establish
-    let fake_peer = FakePeer::connect(
-        Some("127.0.0.2"),
-        65002,
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        &server,
-    )
-    .await;
+    let mut fake_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+    fake_peer
+        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    fake_peer.handshake_keepalive().await;
 
     poll_until(
         || async {
@@ -1142,7 +1221,7 @@ async fn test_passive_mode() {
 
 #[tokio::test]
 async fn test_delay_open() {
-    let mut server1 = start_test_server(Config::new(
+    let mut server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1150,37 +1229,17 @@ async fn test_delay_open() {
         false,
     ))
     .await;
-    let mut server2 = start_test_server(Config::new(
-        65002,
-        "127.0.0.2:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        false,
-    ))
-    .await;
 
-    let delay_secs = 3;
-
-    // Server2: long delay_open so it won't send OPEN first
-    server2
-        .client
-        .add_peer(
-            format!("127.0.0.1:{}", server1.bgp_port),
-            Some(SessionConfig {
-                delay_open_time_secs: Some(60),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
+    let mut _peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = _peer.port();
+    let delay_secs: u64 = 3;
 
     let start = std::time::Instant::now();
 
-    // Server1 with delay_open connects to server2
-    server1
+    server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", server2.bgp_port),
+            format!("127.0.0.2:{}", port),
             Some(SessionConfig {
                 delay_open_time_secs: Some(delay_secs),
                 ..Default::default()
@@ -1189,15 +1248,22 @@ async fn test_delay_open() {
         .await
         .unwrap();
 
-    // Poll until OPEN is sent
+    // Accept connection - FakePeer won't send OPEN, so server's DelayOpenTimer runs
+    _peer.accept().await;
+    _peer
+        .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+    _peer.handshake_keepalive().await;
+
+    // Wait for server to send OPEN
     poll_until(
         || async {
-            let Ok((_, stats)) = server1.client.get_peer(server2.address.clone()).await else {
+            let Ok((_, stats)) = server.client.get_peer("127.0.0.2".to_string()).await else {
                 return false;
             };
             stats.map_or(false, |s| s.open_sent > 0)
         },
-        "Timeout waiting for OPEN to be sent",
+        "Timeout waiting for OPEN",
     )
     .await;
 
@@ -1205,4 +1271,94 @@ async fn test_delay_open() {
         start.elapsed().as_secs() >= delay_secs,
         "OPEN sent before delay_open_time elapsed"
     );
+}
+
+/// Test ManualStop transitions to Idle from any state (RFC 4271 8.2.2)
+#[tokio::test]
+async fn test_manual_stop() {
+    let test_cases = vec![
+        (BgpState::Connect, Some(60)),
+        (BgpState::OpenSent, None),
+        (BgpState::OpenConfirm, None),
+        (BgpState::Established, None),
+    ];
+
+    for (starting_state, delay_open_time_secs) in test_cases {
+        let mut server = start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            300,
+            true,
+        ))
+        .await;
+
+        let mut fake_peer = FakePeer::new("127.0.0.2:0", 65002).await;
+        let port = fake_peer.port();
+
+        server
+            .client
+            .add_peer(
+                format!("127.0.0.2:{}", port),
+                delay_open_time_secs.map(|secs| SessionConfig {
+                    delay_open_time_secs: Some(secs),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+
+        fake_peer.accept().await;
+
+        // Move peer to the target state
+        match starting_state {
+            BgpState::Connect => {
+                // DelayOpen keeps server in Connect
+            }
+            BgpState::OpenSent => {
+                // Server sends OPEN and enters OpenSent
+            }
+            BgpState::OpenConfirm => {
+                fake_peer
+                    .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
+                    .await;
+            }
+            BgpState::Established => {
+                fake_peer
+                    .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
+                    .await;
+                fake_peer.handshake_keepalive().await;
+            }
+            _ => continue,
+        }
+
+        // Wait for peer to reach starting state
+        poll_until(
+            || async {
+                let peers = server.client.get_peers().await.unwrap_or_default();
+                peers.len() == 1 && peers[0].state == starting_state as i32
+            },
+            &format!("Timeout waiting for {:?}", starting_state),
+        )
+        .await;
+
+        // Send ManualStop
+        server
+            .client
+            .disable_peer(fake_peer.address.clone())
+            .await
+            .expect("Failed to disable peer");
+
+        // Verify transition to Idle
+        poll_until(
+            || async {
+                let peers = server.client.get_peers().await.unwrap_or_default();
+                peers.len() == 1
+                    && peers[0].state == BgpState::Idle as i32
+                    && peers[0].admin_state == AdminState::Down as i32
+            },
+            &format!("ManualStop from {:?} -> Idle", starting_state),
+        )
+        .await;
+    }
 }
