@@ -224,6 +224,9 @@ pub struct Fsm {
     /// FSM timers
     pub timers: FsmTimers,
 
+    /// ConnectRetryCounter (RFC 4271 8.2.2)
+    pub connect_retry_counter: u32,
+
     /// Local BGP configuration
     local_asn: u16,
     local_hold_time: u16,
@@ -243,6 +246,7 @@ impl Fsm {
         Fsm {
             state: BgpState::Idle,
             timers: FsmTimers::new(delay_open_time),
+            connect_retry_counter: 0,
             local_asn,
             local_hold_time,
             local_bgp_id,
@@ -262,6 +266,7 @@ impl Fsm {
         Fsm {
             state,
             timers: FsmTimers::default(),
+            connect_retry_counter: 0,
             local_asn,
             local_hold_time,
             local_bgp_id,
@@ -292,6 +297,11 @@ impl Fsm {
     /// Get local address
     pub fn local_addr(&self) -> Ipv4Addr {
         self.local_addr
+    }
+
+    /// Reset ConnectRetryCounter to zero (RFC 4271 8.2.2)
+    pub fn reset_connect_retry_counter(&mut self) {
+        self.connect_retry_counter = 0;
     }
 
     /// Handle an event and return (new_state, error).
@@ -712,5 +722,16 @@ mod tests {
             );
             assert_eq!(new_state, BgpState::Idle);
         }
+    }
+
+    #[test]
+    fn test_reset_connect_retry_counter() {
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+
+        fsm.connect_retry_counter = 5;
+        assert_eq!(fsm.connect_retry_counter, 5);
+
+        fsm.reset_connect_retry_counter();
+        assert_eq!(fsm.connect_retry_counter, 0);
     }
 }

@@ -1145,7 +1145,6 @@ impl FakePeer {
         }
     }
 
-
     /// Initiate new connection to server from same IP as this peer.
     /// Returns raw TcpStream (no OPEN sent).
     pub async fn connect_to(&self, server: &TestServer) -> TcpStream {

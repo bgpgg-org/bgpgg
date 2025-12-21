@@ -631,6 +631,12 @@ impl Peer {
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
+            // RFC 4271 8.2.2: Initialize resources and start ConnectRetryTimer when leaving Idle
+            (BgpState::Idle, BgpState::Connect, _) | (BgpState::Idle, BgpState::Active, _) => {
+                self.fsm.reset_connect_retry_counter();
+                self.fsm.timers.start_connect_retry();
+            }
+
             // Entering OpenSent - send OPEN message
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed)
             | (BgpState::Active, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
@@ -1429,6 +1435,43 @@ mod tests {
                 idle,
                 damp,
                 count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_retry_timer_started_on_idle_transition() {
+        let test_cases = vec![
+            (FsmEvent::ManualStart, BgpState::Connect),
+            (FsmEvent::AutomaticStart, BgpState::Connect),
+            (FsmEvent::ManualStartPassive, BgpState::Active),
+            (FsmEvent::AutomaticStartPassive, BgpState::Active),
+        ];
+
+        for (event, expected_state) in test_cases {
+            let mut peer = create_test_peer_with_state(BgpState::Idle).await;
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should not be started initially"
+            );
+
+            peer.handle_fsm_event(&event).await.unwrap();
+
+            assert_eq!(
+                peer.state(),
+                expected_state,
+                "State should transition to {:?}",
+                expected_state
+            );
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 0,
+                "ConnectRetryCounter should be set to 0 after {:?}",
+                event
+            );
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_some(),
+                "ConnectRetryTimer should be started after {:?}",
+                event
             );
         }
     }
