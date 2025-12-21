@@ -336,7 +336,14 @@ impl Fsm {
             (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
             }
-            (BgpState::Connect, FsmEvent::TcpConnectionFails) => (BgpState::Active, None),
+            // RFC 4271 8.2.2 Event 18: If DelayOpenTimer running -> Active, else -> Idle
+            (BgpState::Connect, FsmEvent::TcpConnectionFails) => {
+                if self.timers.delay_open_timer_running() {
+                    (BgpState::Active, None)
+                } else {
+                    (BgpState::Idle, None)
+                }
+            }
             // RFC 4271 8.2.1.3: OPEN received while DelayOpenTimer running -> send OPEN
             (BgpState::Connect, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
 
@@ -463,15 +470,26 @@ mod tests {
 
     #[test]
     fn test_connection_failure_handling() {
-        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        {
+            // RFC 4271 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
+            let mut fsm =
+                Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            fsm.handle_event(&FsmEvent::TcpConnectionFails);
+            assert_eq!(fsm.state(), BgpState::Idle);
+        }
 
-        // Connect -> Active (connection failed)
-        fsm.handle_event(&FsmEvent::TcpConnectionFails);
-        assert_eq!(fsm.state(), BgpState::Active);
+        {
+            // RFC 4271 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
+            let mut fsm =
+                Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            fsm.timers.start_delay_open_timer();
+            fsm.handle_event(&FsmEvent::TcpConnectionFails);
+            assert_eq!(fsm.state(), BgpState::Active);
 
-        // Active -> Connect (retry)
-        fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
-        assert_eq!(fsm.state(), BgpState::Connect);
+            // Active -> Connect (retry)
+            fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
+            assert_eq!(fsm.state(), BgpState::Connect);
+        }
     }
 
     #[test]
@@ -519,11 +537,6 @@ mod tests {
                 BgpState::Connect,
                 FsmEvent::TcpConnectionConfirmed,
                 BgpState::OpenSent,
-            ),
-            (
-                BgpState::Connect,
-                FsmEvent::TcpConnectionFails,
-                BgpState::Active,
             ),
             // DelayOpen: Connect + DelayOpenTimerExpires -> OpenSent
             (

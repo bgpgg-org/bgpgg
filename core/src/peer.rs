@@ -299,7 +299,23 @@ impl Peer {
                 self.disconnect();
             }
         } else {
-            // No connection, attempt outgoing TCP connection
+            // No connection - first check if incoming connection is already queued
+            // This prevents race where both peers connect simultaneously
+            if let Ok(op) = self.peer_rx.try_recv() {
+                match op {
+                    PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
+                        self.accept_connection(tcp_tx, tcp_rx).await;
+                        return;
+                    }
+                    PeerOp::ManualStop => {
+                        self.try_process_event(&FsmEvent::ManualStop).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // No queued incoming, attempt outgoing TCP connection
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
             tokio::select! {
@@ -621,16 +637,20 @@ impl Peer {
 
     /// Disconnect TCP and transition FSM.
     fn disconnect(&mut self) {
+        let had_connection = self.conn.is_some();
         self.conn = None;
-        self.consecutive_down_count += 1;
         self.established_at = None;
         // Reset timers for clean reconnect
         self.fsm.timers.stop_hold_timer();
         self.fsm.timers.stop_keepalive_timer();
         self.fsm.timers.stop_delay_open_timer();
-        let _ = self
-            .server_tx
-            .send(ServerOp::PeerDisconnected { peer_ip: self.addr });
+        // Only send PeerDisconnected if we actually had a connection
+        if had_connection {
+            self.consecutive_down_count += 1;
+            let _ = self
+                .server_tx
+                .send(ServerOp::PeerDisconnected { peer_ip: self.addr });
+        }
     }
 
     /// Compute idle hold time with DampPeerOscillations backoff (RFC 4271 8.1.1).
@@ -683,6 +703,20 @@ impl Peer {
                 self.disconnect();
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
+            }
+
+            // RFC 4271 8.2.2 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
+            (BgpState::Connect, BgpState::Active, FsmEvent::TcpConnectionFails) => {
+                self.disconnect();
+                self.fsm.timers.stop_delay_open_timer();
+                self.fsm.timers.start_connect_retry();
+            }
+
+            // RFC 4271 8.2.2 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
+            (BgpState::Connect, BgpState::Idle, FsmEvent::TcpConnectionFails) => {
+                self.disconnect();
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.reset_connect_retry_counter();
             }
 
             // RFC 4271 8.2.2: ManualStop in Connect state
@@ -1665,6 +1699,40 @@ mod tests {
             assert!(peer.conn.is_none());
             assert!(peer.fsm.timers.hold_timer_started.is_none());
             assert!(peer.fsm.timers.keepalive_timer_started.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connection_fails_connect() {
+        {
+            // RFC 4271 8.2.2 Event 18: Without DelayOpenTimer -> Idle
+            let mut peer = create_test_peer_with_state(BgpState::Connect).await;
+            assert!(peer.conn.is_some());
+
+            peer.process_event(&FsmEvent::TcpConnectionFails)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.conn.is_none());
+            assert!(peer.fsm.timers.connect_retry_started.is_none());
+            assert_eq!(peer.fsm.connect_retry_counter, 0);
+        }
+
+        {
+            // RFC 4271 8.2.2 Event 18: With DelayOpenTimer running -> Active
+            let mut peer = create_test_peer_with_state(BgpState::Connect).await;
+            peer.fsm.timers.start_delay_open_timer();
+            assert!(peer.conn.is_some());
+
+            peer.process_event(&FsmEvent::TcpConnectionFails)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::Active);
+            assert!(peer.conn.is_none());
+            assert!(!peer.fsm.timers.delay_open_timer_running());
+            assert!(peer.fsm.timers.connect_retry_started.is_some());
         }
     }
 }
