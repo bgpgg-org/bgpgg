@@ -217,15 +217,11 @@ impl Peer {
                     Some(PeerOp::ManualStartPassive) => {
                         debug!("ManualStartPassive received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
-                        if let Err(e) = self.process_event(&FsmEvent::ManualStartPassive).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::ManualStartPassive).await;
                     }
                     Some(PeerOp::AutomaticStartPassive) => {
                         debug!("AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
-                        if let Err(e) = self.process_event(&FsmEvent::AutomaticStartPassive).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
                     }
                     Some(PeerOp::Shutdown(_)) => return true,
                     Some(PeerOp::GetStatistics(response)) => {
@@ -244,9 +240,7 @@ impl Peer {
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
                 // RFC 4271 Event 13: IdleHoldTimer_Expires -> Active
                 debug!("IdleHoldTimer expired, AutomaticStartPassive", "peer_ip" => self.addr.to_string());
-                if let Err(e) = self.process_event(&FsmEvent::AutomaticStartPassive).await {
-                    error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                }
+                self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
             }
         }
         false
@@ -264,15 +258,11 @@ impl Peer {
                     Some(PeerOp::ManualStart) => {
                         debug!("ManualStart received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
-                        if let Err(e) = self.process_event(&FsmEvent::ManualStart).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::ManualStart).await;
                     }
                     Some(PeerOp::AutomaticStart) => {
                         debug!("AutomaticStart received", "peer_ip" => self.addr.to_string());
-                        if let Err(e) = self.process_event(&FsmEvent::AutomaticStart).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::AutomaticStart).await;
                     }
                     Some(PeerOp::Shutdown(_)) => return true,
                     Some(PeerOp::GetStatistics(response)) => {
@@ -290,9 +280,7 @@ impl Peer {
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
                 debug!("IdleHoldTimer expired, AutomaticStart", "peer_ip" => self.addr.to_string());
-                if let Err(e) = self.process_event(&FsmEvent::AutomaticStart).await {
-                    error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                }
+                self.try_process_event(&FsmEvent::AutomaticStart).await;
             }
         }
         false
@@ -306,10 +294,7 @@ impl Peer {
             // Have connection, start DelayOpen or transition to OpenSent
             if self.config.delay_open_time_secs.is_some() {
                 self.fsm.timers.start_delay_open_timer();
-            } else if let Err(e) = self
-                .process_event(&FsmEvent::TcpConnectionConfirmed)
-                .await
-            {
+            } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
                 error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                 self.disconnect();
             }
@@ -335,24 +320,18 @@ impl Peer {
                         }
                         Err(e) => {
                             debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            if let Err(e) = self.process_event(&FsmEvent::TcpConnectionFails).await {
-                                error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            }
+                            self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                         }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
                     debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
-                    if let Err(e) = self.process_event(&FsmEvent::ConnectRetryTimerExpires).await {
-                        error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                    }
+                    self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
                     match op {
                         Some(PeerOp::ManualStop) => {
-                            if let Err(e) = self.process_event(&FsmEvent::ManualStop).await {
-                                error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            }
+                            self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                             self.accept_connection(tcp_tx, tcp_rx).await;
@@ -375,10 +354,7 @@ impl Peer {
         self.fsm.timers.stop_connect_retry();
         if self.config.delay_open_time_secs.is_some() {
             self.fsm.timers.start_delay_open_timer();
-        } else if let Err(e) = self
-            .process_event(&FsmEvent::TcpConnectionConfirmed)
-            .await
-        {
+        } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
             error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
             self.disconnect();
         }
@@ -416,9 +392,7 @@ impl Peer {
                         if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
                             let _ = self.send_notification(notif).await;
                         }
-                        if let Err(e) = self.process_event(&FsmEvent::TcpConnectionFails).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                         self.disconnect();
                     }
                 }
@@ -427,9 +401,7 @@ impl Peer {
                 // RFC 4271 8.2.2: Check ConnectRetryTimer first (Event 9 in Connect state)
                 if self.fsm.timers.connect_retry_expired() {
                     debug!("ConnectRetryTimer expired in Connect while DelayOpen running", "peer_ip" => self.addr.to_string());
-                    if let Err(e) = self.process_event(&FsmEvent::ConnectRetryTimerExpires).await {
-                        error!("failed to handle ConnectRetryTimer expiry", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                    }
+                    self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 } else if self.fsm.timers.delay_open_timer_expired() {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
@@ -441,9 +413,7 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStop) => {
-                        if let Err(e) = self.process_event(&FsmEvent::ManualStop).await {
-                            error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
@@ -467,16 +437,12 @@ impl Peer {
             tokio::select! {
                 _ = tokio::time::sleep(retry_time) => {
                     debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
-                    if let Err(e) = self.process_event(&FsmEvent::ConnectRetryTimerExpires).await {
-                        error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                    }
+                    self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
                     match op {
                         Some(PeerOp::ManualStop) => {
-                            if let Err(e) = self.process_event(&FsmEvent::ManualStop).await {
-                                error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            }
+                            self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                             self.accept_connection(tcp_tx, tcp_rx).await;
@@ -520,9 +486,7 @@ impl Peer {
                         if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
                             let _ = self.send_notification(notif).await;
                         }
-                        if let Err(e) = self.process_event(&FsmEvent::TcpConnectionFails).await {
-                            error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                         self.disconnect();
                     }
                 }
@@ -539,9 +503,7 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStop) => {
-                        if let Err(e) = self.process_event(&FsmEvent::ManualStop).await {
-                            error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        }
+                        self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
@@ -567,9 +529,7 @@ impl Peer {
                 Some(c) => c,
                 None => {
                     // Connection lost, transition back to Idle
-                    if let Err(e) = self.process_event(&FsmEvent::TcpConnectionFails).await {
-                        error!("failed to process event", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                    }
+                    self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                     return false;
                 }
             };
@@ -616,9 +576,7 @@ impl Peer {
                         }
                         PeerOp::ManualStop => {
                             info!("ManualStop received", "peer_ip" => peer_ip.to_string());
-                            if let Err(e) = self.process_event(&FsmEvent::ManualStop).await {
-                                error!("failed to handle ManualStop", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            }
+                            self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
                         }
                         PeerOp::ManualStart
@@ -711,10 +669,6 @@ impl Peer {
     async fn process_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
         let (new_state, fsm_error) = self.fsm.handle_event(event);
-
-        if new_state != old_state {
-            self.notify_state_change();
-        }
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
@@ -870,12 +824,9 @@ impl Peer {
             _ => {}
         }
 
-        // Notify server of state change whenever state transitions occur
+        // Notify server of state change after all actions complete
         if old_state != new_state {
-            let _ = self.server_tx.send(ServerOp::PeerStateChanged {
-                peer_ip: self.addr,
-                state: new_state,
-            });
+            self.notify_state_change();
         }
 
         // Send NOTIFICATION and return error if FSM returned an error
@@ -886,6 +837,16 @@ impl Peer {
         }
 
         Ok(())
+    }
+
+    /// Process FSM event and log any errors.
+    async fn try_process_event(&mut self, event: &FsmEvent) {
+        if let Err(e) = self.process_event(event).await {
+            error!("failed to process event",
+                "peer_ip" => self.addr.to_string(),
+                "event" => format!("{:?}", event),
+                "error" => e.to_string());
+        }
     }
 
     /// Send OPEN message to peer.
@@ -1042,12 +1003,10 @@ impl Peer {
                 self.process_event(&FsmEvent::BgpUpdateReceived).await?;
             }
             BgpMessage::KeepAlive(_) => {
-                self.process_event(&FsmEvent::BgpKeepaliveReceived)
-                    .await?;
+                self.process_event(&FsmEvent::BgpKeepaliveReceived).await?;
             }
             BgpMessage::Notification(_) => {
-                self.process_event(&FsmEvent::NotificationReceived)
-                    .await?;
+                self.process_event(&FsmEvent::NotificationReceived).await?;
             }
         }
 
