@@ -983,9 +983,10 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
 /// This allows sending raw/malformed BGP messages to test error handling.
 /// Use a long hold timer (e.g., 300s) to avoid needing KEEPALIVE management.
 pub struct FakePeer {
-    pub stream: TcpStream,
+    pub stream: Option<TcpStream>,
     pub address: String,
     pub asn: u16,
+    pub listener: Option<TcpListener>,
 }
 
 impl FakePeer {
@@ -1007,21 +1008,35 @@ impl FakePeer {
 
         let address = stream.local_addr().unwrap().ip().to_string();
         FakePeer {
-            stream,
+            stream: Some(stream),
             address,
             asn: 0,
+            listener: None,
         }
     }
 
-    /// Accept TCP connection only (no BGP handshake).
-    pub async fn accept(listener: &TcpListener, local_asn: u16) -> Self {
-        let (stream, _) = listener.accept().await.unwrap();
-        let address = stream.local_addr().unwrap().ip().to_string();
+    /// Create a FakePeer. Call accept() to accept the connection.
+    pub async fn new(bind_addr: &str, local_asn: u16) -> Self {
+        let listener = TcpListener::bind(bind_addr).await.unwrap();
+        let address = listener.local_addr().unwrap().ip().to_string();
         FakePeer {
-            stream,
+            stream: None,
             address,
             asn: local_asn,
+            listener: Some(listener),
         }
+    }
+
+    /// Get the port this FakePeer is listening on.
+    pub fn port(&self) -> u16 {
+        self.listener.as_ref().unwrap().local_addr().unwrap().port()
+    }
+
+    /// Accept a TCP connection on the listener (no BGP handshake).
+    pub async fn accept(&mut self) {
+        let listener = self.listener.as_ref().unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        self.stream = Some(stream);
     }
 
     /// Exchange OPEN messages with peer (ends up in OpenConfirm state).
@@ -1032,12 +1047,14 @@ impl FakePeer {
         // Send our OPEN
         let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
         self.stream
+            .as_mut()
+            .unwrap()
             .write_all(&open.serialize())
             .await
             .expect("Failed to send OPEN");
 
         // Read their OPEN
-        let msg = read_bgp_message(&mut self.stream)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap())
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1052,7 +1069,7 @@ impl FakePeer {
         self.asn = asn;
 
         // Read their OPEN (they connected, they send first)
-        let msg = read_bgp_message(&mut self.stream)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap())
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1063,6 +1080,8 @@ impl FakePeer {
         // Send our OPEN
         let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
         self.stream
+            .as_mut()
+            .unwrap()
             .write_all(&open.serialize())
             .await
             .expect("Failed to send OPEN");
@@ -1072,11 +1091,13 @@ impl FakePeer {
     pub async fn handshake_keepalive(&mut self) {
         let keepalive = KeepAliveMessage {};
         self.stream
+            .as_mut()
+            .unwrap()
             .write_all(&keepalive.serialize())
             .await
             .expect("Failed to send KEEPALIVE");
 
-        let msg = read_bgp_message(&mut self.stream)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap())
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
@@ -1098,6 +1119,8 @@ impl FakePeer {
     /// Send raw bytes to the peer
     pub async fn send_raw(&mut self, bytes: &[u8]) {
         self.stream
+            .as_mut()
+            .unwrap()
             .write_all(bytes)
             .await
             .expect("Failed to send raw bytes");
@@ -1107,6 +1130,8 @@ impl FakePeer {
     pub async fn send_keepalive(&mut self) {
         let keepalive = KeepAliveMessage {};
         self.stream
+            .as_mut()
+            .unwrap()
             .write_all(&keepalive.serialize())
             .await
             .expect("Failed to send KEEPALIVE");
@@ -1115,25 +1140,34 @@ impl FakePeer {
     /// Send an OPEN message
     pub async fn send_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
         let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
-        self.stream.write_all(&open.serialize()).await.unwrap();
+        self.stream
+            .as_mut()
+            .unwrap()
+            .write_all(&open.serialize())
+            .await
+            .unwrap();
     }
 
     /// Read and discard an OPEN message
     pub async fn read_open(&mut self) {
-        let msg = read_bgp_message(&mut self.stream).await.unwrap();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+            .await
+            .unwrap();
         assert!(matches!(msg, BgpMessage::Open(_)));
     }
 
     /// Read and discard a KEEPALIVE message
     pub async fn read_keepalive(&mut self) {
-        let msg = read_bgp_message(&mut self.stream).await.unwrap();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+            .await
+            .unwrap();
         assert!(matches!(msg, BgpMessage::KeepAlive(_)));
     }
 
     /// Read a NOTIFICATION message (skips any KEEPALIVEs)
     pub async fn read_notification(&mut self) -> NotifcationMessage {
         loop {
-            let msg = read_bgp_message(&mut self.stream)
+            let msg = read_bgp_message(self.stream.as_mut().unwrap())
                 .await
                 .expect("Failed to read message");
 

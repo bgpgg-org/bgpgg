@@ -1521,8 +1521,8 @@ async fn test_collision_deferred() {
 
     for (server_bgp_id, peer_bgp_id, outgoing_wins) in test_cases {
         // Peer listens at 127.0.0.3, server will connect to it
-        let listener = TcpListener::bind("127.0.0.3:0").await.unwrap();
-        let listener_addr = listener.local_addr().unwrap();
+        let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
+        let listener_addr = format!("127.0.0.3:{}", peer.port());
 
         let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true);
         config.peers.push(PeerConfig {
@@ -1532,7 +1532,7 @@ async fn test_collision_deferred() {
         let server = start_test_server(config).await;
 
         // Accept server's outbound connection (server sends OPEN, but we don't read it yet)
-        let mut peer = FakePeer::accept(&listener, 65002).await;
+        peer.accept().await;
 
         // Server is in OpenSent (sent OPEN, waiting for response)
         poll_until(
@@ -1572,9 +1572,10 @@ async fn test_collision_deferred() {
             // Complete handshake on incoming connection
             // Wrap incoming_stream in FakePeer to use helper methods
             let mut incoming_peer = FakePeer {
-                stream: incoming_stream,
+                stream: Some(incoming_stream),
                 address: "127.0.0.3".to_string(),
                 asn: 65002,
+                listener: None,
             };
 
             incoming_peer.read_open().await;
@@ -1582,7 +1583,7 @@ async fn test_collision_deferred() {
             incoming_peer.read_keepalive().await;
             incoming_peer.send_keepalive().await;
 
-            incoming_stream = incoming_peer.stream;
+            incoming_stream = incoming_peer.stream.take().unwrap();
 
             // Incoming wins, session reaches Established
             poll_until(
@@ -1630,7 +1631,11 @@ async fn test_send_notification_without_open() {
         peer.send_raw(&msg).await;
 
         let mut buf = [0u8; 1];
-        let result = timeout(Duration::from_millis(100), peer.stream.read(&mut buf)).await;
+        let result = timeout(
+            Duration::from_millis(100),
+            peer.stream.as_mut().unwrap().read(&mut buf),
+        )
+        .await;
 
         if flag {
             assert!(result.is_ok(), "flag={}: should receive notification", flag);

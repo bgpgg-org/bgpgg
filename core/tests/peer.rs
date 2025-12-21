@@ -20,7 +20,6 @@ use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_peer_down() {
@@ -729,8 +728,8 @@ async fn test_auto_reconnect() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // Use idle_hold_time_secs=0 for fast test (no delay before reconnect)
     server
@@ -746,7 +745,7 @@ async fn test_auto_reconnect() {
         .unwrap();
 
     // Accept first connection (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept().await;
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
@@ -757,7 +756,7 @@ async fn test_auto_reconnect() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     poll_until(
         || async {
@@ -778,7 +777,7 @@ async fn test_auto_reconnect() {
     .await;
 
     // Accept reconnection
-    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept().await;
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
@@ -800,8 +799,8 @@ async fn test_idle_hold_time_delay() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     let idle_hold_secs = 2u64;
 
@@ -819,7 +818,7 @@ async fn test_idle_hold_time_delay() {
         .unwrap();
 
     // Accept first connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept().await;
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
@@ -830,7 +829,7 @@ async fn test_idle_hold_time_delay() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     // First wait for state to become Idle (server processed disconnect)
     poll_until(
@@ -874,8 +873,8 @@ async fn test_allow_automatic_start_false() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // Add peer with automatic restart disabled (idle_hold_time_secs=None)
     server
@@ -891,7 +890,7 @@ async fn test_allow_automatic_start_false() {
         .unwrap();
 
     // Accept connection and establish (server initiated connection to configured peer)
-    let mut peer = FakePeer::accept(&listener, 65002).await;
+    peer.accept().await;
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
@@ -902,7 +901,7 @@ async fn test_allow_automatic_start_false() {
     .await;
 
     // Disconnect
-    peer.stream.shutdown().await.ok();
+    peer.stream.as_mut().unwrap().shutdown().await.ok();
 
     // Wait for peer to go Idle (ASN preserved from previous session)
     poll_until(
@@ -1063,8 +1062,8 @@ async fn test_damp_peer_oscillations() {
         true,
     ))
     .await;
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
 
     // idle_hold_time=1s, damping=true. After 2 downs: 1s * 2^2 = 4s
     server
@@ -1082,7 +1081,7 @@ async fn test_damp_peer_oscillations() {
 
     // 2 rapid connect/disconnect cycles to build up consecutive_down_count
     for _ in 0..2 {
-        let mut peer = FakePeer::accept(&listener, 65002).await;
+        peer.accept().await;
         peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
             .await;
         peer.handshake_keepalive().await;
@@ -1093,7 +1092,7 @@ async fn test_damp_peer_oscillations() {
             "Timeout waiting for Established",
         )
         .await;
-        peer.stream.shutdown().await.ok();
+        peer.stream.as_mut().unwrap().shutdown().await.ok();
     }
 
     // Wait for peer to reach Idle after second disconnect
@@ -1231,8 +1230,8 @@ async fn test_delay_open() {
     ))
     .await;
 
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let mut _peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = _peer.port();
     let delay_secs: u64 = 3;
 
     let start = std::time::Instant::now();
@@ -1250,7 +1249,7 @@ async fn test_delay_open() {
         .unwrap();
 
     // Accept connection - FakePeer won't send OPEN, so server's DelayOpenTimer runs
-    let mut _peer = FakePeer::accept(&listener, 65002).await;
+    _peer.accept().await;
     _peer
         .accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
@@ -1294,8 +1293,8 @@ async fn test_manual_stop() {
         ))
         .await;
 
-        let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let mut fake_peer = FakePeer::new("127.0.0.2:0", 65002).await;
+        let port = fake_peer.port();
 
         server
             .client
@@ -1309,7 +1308,7 @@ async fn test_manual_stop() {
             .await
             .unwrap();
 
-        let mut fake_peer = FakePeer::accept(&listener, 65002).await;
+        fake_peer.accept().await;
 
         // Move peer to the target state
         match starting_state {
