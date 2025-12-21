@@ -413,25 +413,18 @@ impl Peer {
                     }
                 } else if self.fsm.timers.delay_open_timer_expired() {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
-                    self.fsm.timers.stop_delay_open_timer();
-                    if let Err(e) = self.send_open().await {
+                    if let Err(e) = self.handle_fsm_event(&FsmEvent::DelayOpenTimerExpires).await {
                         error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.disconnect();
-                    } else {
-                        self.transition(&FsmEvent::DelayOpenTimerExpires);
                     }
                 }
             }
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStop) => {
-                        // RFC 4271 8.2.2: Drop TCP, release resources, reset counter, stop timer
-                        self.disconnect();
-                        self.manually_stopped = true;
-                        self.fsm.reset_connect_retry_counter();
-                        self.fsm.timers.stop_connect_retry();
-                        self.fsm.timers.stop_delay_open_timer();
-                        self.transition(&FsmEvent::ManualStop);
+                        if let Err(e) = self.handle_fsm_event(&FsmEvent::ManualStop).await {
+                            error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        }
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
@@ -484,25 +477,18 @@ impl Peer {
             _ = timer_interval.tick() => {
                 if self.fsm.timers.delay_open_timer_expired() {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
-                    self.fsm.timers.stop_delay_open_timer();
-                    if let Err(e) = self.send_open().await {
+                    if let Err(e) = self.handle_fsm_event(&FsmEvent::DelayOpenTimerExpires).await {
                         error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.disconnect();
-                    } else {
-                        self.transition(&FsmEvent::DelayOpenTimerExpires);
                     }
                 }
             }
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStop) => {
-                        // RFC 4271 8.2.2: Drop TCP, release resources, reset counter, stop timer
-                        self.disconnect();
-                        self.manually_stopped = true;
-                        self.fsm.reset_connect_retry_counter();
-                        self.fsm.timers.stop_connect_retry();
-                        self.fsm.timers.stop_delay_open_timer();
-                        self.transition(&FsmEvent::ManualStop);
+                        if let Err(e) = self.handle_fsm_event(&FsmEvent::ManualStop).await {
+                            error!("failed to handle ManualStop", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        }
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
@@ -727,6 +713,23 @@ impl Peer {
                 self.disconnect();
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
+            }
+
+            // RFC 4271 8.2.2: ManualStop in Connect or Active state
+            (BgpState::Connect, BgpState::Idle, FsmEvent::ManualStop)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::ManualStop) => {
+                self.disconnect();
+                self.manually_stopped = true;
+                self.fsm.reset_connect_retry_counter();
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.timers.stop_delay_open_timer();
+            }
+
+            // DelayOpenTimer expires -> send OPEN
+            (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::Active, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
+                self.fsm.timers.stop_delay_open_timer();
+                self.send_open().await?;
             }
 
             // Entering OpenSent - send OPEN message
