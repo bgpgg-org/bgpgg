@@ -30,7 +30,6 @@ use bgpgg::grpc::proto::{
 };
 use std::net::Ipv4Addr;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 
 // Build raw OPEN message with optional custom version, marker, length, and message type

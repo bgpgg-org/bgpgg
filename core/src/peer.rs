@@ -38,6 +38,9 @@ use tokio::sync::{mpsc, oneshot};
 /// RFC 4271 8.1.1: Maximum IdleHoldTime for DampPeerOscillations backoff.
 const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 
+/// RFC 4271 8.2.2: Initial HoldTimer value when entering OpenSent state (4 minutes suggested).
+const INITIAL_HOLD_TIME: Duration = Duration::from_secs(240);
+
 /// Operations that can be sent to a peer task
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
@@ -310,6 +313,7 @@ impl Peer {
                             info!("TCP connection established", "peer_ip" => self.addr.to_string());
                             let (rx, tx) = stream.into_split();
                             self.conn = Some(TcpConnection { tx, rx });
+                            self.fsm.timers.stop_connect_retry();
 
                             if self.config.delay_open_time_secs.is_some() {
                                 self.fsm.timers.start_delay_open_timer();
@@ -356,6 +360,7 @@ impl Peer {
             rx: tcp_rx,
         });
         self.conn_type = ConnectionType::Incoming;
+        self.fsm.timers.stop_connect_retry();
         if self.config.delay_open_time_secs.is_some() {
             self.fsm.timers.start_delay_open_timer();
         } else if let Err(e) = self
@@ -729,12 +734,16 @@ impl Peer {
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires)
             | (BgpState::Active, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
                 self.fsm.timers.stop_delay_open_timer();
+                self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
+                self.fsm.timers.start_hold_timer();
                 self.send_open().await?;
             }
 
             // Entering OpenSent - send OPEN message
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed)
             | (BgpState::Active, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
+                self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
+                self.fsm.timers.start_hold_timer();
                 self.send_open().await?;
             }
 

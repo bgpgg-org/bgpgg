@@ -192,6 +192,11 @@ impl FsmTimers {
         self.keepalive_time = Duration::from_secs((hold_time as u64) / 3);
     }
 
+    /// Set initial hold time (RFC 4271: 4 minutes suggested for OpenSent state)
+    pub fn set_initial_hold_time(&mut self, hold_time: Duration) {
+        self.hold_time = hold_time;
+    }
+
     /// Check if DelayOpen timer has expired
     pub fn delay_open_timer_expired(&self) -> bool {
         match (self.delay_open_timer_started, self.delay_open_time) {
