@@ -1100,6 +1100,24 @@ impl FakePeer {
             .expect("Failed to send KEEPALIVE");
     }
 
+    /// Send an OPEN message
+    pub async fn send_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+        let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
+        self.stream.write_all(&open.serialize()).await.unwrap();
+    }
+
+    /// Read and discard an OPEN message
+    pub async fn read_open(&mut self) {
+        let msg = read_bgp_message(&mut self.stream).await.unwrap();
+        assert!(matches!(msg, BgpMessage::Open(_)));
+    }
+
+    /// Read and discard a KEEPALIVE message
+    pub async fn read_keepalive(&mut self) {
+        let msg = read_bgp_message(&mut self.stream).await.unwrap();
+        assert!(matches!(msg, BgpMessage::KeepAlive(_)));
+    }
+
     /// Read a NOTIFICATION message (skips any KEEPALIVEs)
     pub async fn read_notification(&mut self) -> NotifcationMessage {
         loop {
@@ -1112,6 +1130,17 @@ impl FakePeer {
                 BgpMessage::KeepAlive(_) => continue, // Skip KEEPALIVEs sent by peer
                 _ => panic!("Expected NOTIFICATION, got unexpected message type"),
             }
+        }
+    }
+
+    /// Accept TCP connection only (no BGP handshake).
+    pub async fn accept_raw(listener: &TcpListener, local_asn: u16) -> Self {
+        let (stream, _) = listener.accept().await.unwrap();
+        let address = stream.local_addr().unwrap().ip().to_string();
+        FakePeer {
+            stream,
+            address,
+            asn: local_asn,
         }
     }
 
@@ -1165,6 +1194,23 @@ impl FakePeer {
         }
 
         peer
+    }
+
+    /// Initiate new connection to server from same IP as this peer.
+    /// Returns raw TcpStream (no OPEN sent).
+    pub async fn connect_to(&self, server: &TestServer) -> TcpStream {
+        use std::net::SocketAddr;
+        use tokio::net::TcpSocket;
+
+        let local_addr: SocketAddr = format!("{}:0", self.address).parse().unwrap();
+        let server_addr: SocketAddr = format!("{}:{}", server.address, server.bgp_port)
+            .parse()
+            .unwrap();
+
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.bind(local_addr).unwrap();
+        socket.connect(server_addr).await.unwrap()
     }
 }
 

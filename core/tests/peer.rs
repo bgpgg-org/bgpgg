@@ -666,8 +666,7 @@ async fn test_peer_crash_and_recover() {
     poll_until(
         || async {
             verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
-                    .await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
         },
         "Timeout waiting for initial peer establishment",
     )
@@ -713,8 +712,7 @@ async fn test_peer_crash_and_recover() {
     poll_until(
         || async {
             verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)])
-                    .await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
         },
         "Timeout waiting for peers to re-establish after crash",
     )
@@ -1244,8 +1242,7 @@ async fn test_delay_open() {
     // Wait for server to send OPEN
     poll_until(
         || async {
-            let Ok((_, stats)) = server.client.get_peer("127.0.0.2".to_string()).await
-            else {
+            let Ok((_, stats)) = server.client.get_peer("127.0.0.2".to_string()).await else {
                 return false;
             };
             stats.map_or(false, |s| s.open_sent > 0)

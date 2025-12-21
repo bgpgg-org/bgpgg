@@ -30,6 +30,7 @@ use bgpgg::grpc::proto::{
 };
 use std::net::Ipv4Addr;
 use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 
 // Build raw OPEN message with optional custom version, marker, length, and message type
@@ -1369,47 +1370,68 @@ async fn test_collision_local_lower_bgp_id() {
     .await;
 }
 
-/// RFC 4271 Section 6.8: Connection Collision Detection
-/// local >= remote -> keep existing, reject new
+/// RFC 4271 Section 6.8: Connection Collision Detection in OpenConfirm state
 #[tokio::test]
-async fn test_collision_local_higher_bgp_id() {
-    // Server BGP ID 2.2.2.2 (higher than peer's 1.1.1.1)
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        300,
-        true,
-    ))
-    .await;
+async fn test_collision_openconfirm() {
+    let test_cases = vec![
+        // (server_bgp_id, peer_bgp_id, existing_kept)
+        (Ipv4Addr::new(2, 2, 2, 2), Ipv4Addr::new(1, 1, 1, 1), true), // local >= remote -> keep existing
+        (Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(3, 3, 3, 3), false), // local < remote -> accept new
+    ];
 
-    // Peer 1: connect and reach OpenConfirm
-    let peer1 = FakePeer::connect_open_only(
-        Some("127.0.0.3"),
-        65002,
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        &server,
-    )
-    .await;
+    for (server_bgp_id, peer_bgp_id, existing_kept) in test_cases {
+        let server =
+            start_test_server(Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true)).await;
 
-    poll_until(
-        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await },
-        "Timeout waiting for peer1 to reach OpenConfirm",
-    )
-    .await;
+        // Peer 1: connect and reach OpenConfirm
+        let mut peer1 =
+            FakePeer::connect_open_only(Some("127.0.0.3"), 65002, peer_bgp_id, 300, &server).await;
 
-    // Peer 2: collision - since local >= remote, existing (peer1) kept, new (peer2) rejected
-    let _peer2 = FakePeer::connect_raw(Some("127.0.0.3"), &server).await;
+        poll_until(
+            || async {
+                verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await
+            },
+            "Timeout waiting for peer1 to reach OpenConfirm",
+        )
+        .await;
 
-    // Give server time to process and reject
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Peer 2: collision from same IP
+        let mut peer2 = FakePeer::connect_raw(Some("127.0.0.3"), &server).await;
 
-    // peer1 should still be in OpenConfirm (not closed)
-    assert!(
-        verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await,
-        "peer1 should still be in OpenConfirm"
-    );
+        if existing_kept {
+            // local >= remote -> existing kept, new rejected
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            assert!(
+                verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await,
+                "peer1 should still be in OpenConfirm"
+            );
+        } else {
+            // local < remote -> existing closed, new accepted
+            // peer1 receives NOTIFICATION
+            let notif = peer1.read_notification().await;
+            assert_eq!(
+                notif.error(),
+                &BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution)
+            );
+
+            // Complete handshake on peer2
+            peer2.read_open().await;
+            peer2.send_open(65002, peer_bgp_id, 300).await;
+            peer2.read_keepalive().await;
+            peer2.send_keepalive().await;
+
+            // Verify peer2 reaches Established
+            poll_until(
+                || async {
+                    let peers = server.client.get_peers().await.unwrap();
+                    peers.len() == 1 && peers[0].state == BgpState::Established as i32
+                },
+                "Timeout waiting for peer2 to reach Established",
+            )
+            .await;
+        }
+    }
 }
 
 /// RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
@@ -1432,6 +1454,96 @@ async fn test_collision_ignored_in_established() {
     // Original peer should still be Established (collision ignored by default)
     // server1 connected to server2 (configured from server1's view)
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
+}
+
+/// RFC 4271 6.8: Deferred collision detection for outgoing connections
+/// When server has outgoing in OpenSent (no BGP ID), incoming is deferred until OPEN received.
+#[tokio::test]
+async fn test_collision_deferred() {
+    let test_cases = vec![
+        // (server_bgp_id, peer_bgp_id, outgoing_wins)
+        (Ipv4Addr::new(2, 2, 2, 2), Ipv4Addr::new(1, 1, 1, 1), true), // outgoing wins
+        (Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(3, 3, 3, 3), false), // incoming wins
+    ];
+
+    for (server_bgp_id, peer_bgp_id, outgoing_wins) in test_cases {
+        // Peer listens at 127.0.0.3, server will connect to it
+        let listener = TcpListener::bind("127.0.0.3:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+
+        let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true);
+        config.peers.push(PeerConfig {
+            address: listener_addr.to_string(),
+            ..Default::default()
+        });
+        let server = start_test_server(config).await;
+
+        // Accept server's outbound connection (server sends OPEN, but we don't read it yet)
+        let mut peer = FakePeer::accept_raw(&listener, 65002).await;
+
+        // Server is in OpenSent (sent OPEN, waiting for response)
+        poll_until(
+            || async {
+                let peers = server.client.get_peers().await.unwrap();
+                peers.len() == 1 && peers[0].state == BgpState::OpenSent as i32
+            },
+            "Timeout waiting for OpenSent",
+        )
+        .await;
+
+        // Same peer initiates connection to server - triggers deferred collision (no BGP ID yet)
+        let mut incoming_stream = peer.connect_to(&server).await;
+
+        // Now exchange OPENs on first connection - server learns BGP ID and resolves collision
+        peer.read_open().await;
+        peer.send_open(65002, peer_bgp_id, 300).await;
+
+        if outgoing_wins {
+            // Complete handshake on outgoing connection
+            peer.send_keepalive().await;
+            peer.read_keepalive().await;
+
+            // Outgoing wins, collision dropped, session reaches Established
+            poll_until(
+                || async {
+                    let peers = server.client.get_peers().await.unwrap();
+                    peers.len() == 1 && peers[0].state == BgpState::Established as i32
+                },
+                "Timeout waiting for Established (outgoing wins)",
+            )
+            .await;
+
+            drop(incoming_stream);
+        } else {
+            // Incoming wins - server closes outgoing (peer gets NOTIFICATION), switches to incoming
+            // Complete handshake on incoming connection
+            // Wrap incoming_stream in FakePeer to use helper methods
+            let mut incoming_peer = FakePeer {
+                stream: incoming_stream,
+                address: "127.0.0.3".to_string(),
+                asn: 65002,
+            };
+
+            incoming_peer.read_open().await;
+            incoming_peer.send_open(65002, peer_bgp_id, 300).await;
+            incoming_peer.read_keepalive().await;
+            incoming_peer.send_keepalive().await;
+
+            incoming_stream = incoming_peer.stream;
+
+            // Incoming wins, session reaches Established
+            poll_until(
+                || async {
+                    let peers = server.client.get_peers().await.unwrap();
+                    peers.len() == 1 && peers[0].state == BgpState::Established as i32
+                },
+                "Timeout waiting for Established (incoming wins)",
+            )
+            .await;
+
+            drop(incoming_stream);
+        }
+    }
 }
 
 /// RFC 4271 8.1.1: SendNOTIFICATIONwithoutOPEN
