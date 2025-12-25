@@ -499,7 +499,7 @@ impl Peer {
     /// Process FSM event, transition state, and execute associated actions.
     pub(super) async fn process_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
         let old_state = self.fsm.state();
-        let (new_state, fsm_error) = self.fsm.handle_event(event);
+        let new_state = self.fsm.handle_event(event);
 
         // Handle state-specific actions based on transitions
         match (old_state, new_state, event) {
@@ -642,6 +642,7 @@ impl Peer {
                     peer_ip: self.addr,
                     state: admin_state,
                 });
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "automatic stop"));
             }
 
             // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
@@ -652,6 +653,10 @@ impl Peer {
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "update message error",
+                ));
             }
 
             // DelayOpenTimer expires -> send OPEN
@@ -734,6 +739,36 @@ impl Peer {
                 }
             }
 
+            // RFC 4271 6.6: FSM Error - Event 9 in OpenConfirm
+            (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::ConnectRetryTimerExpires) => {
+                let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
+                let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+            }
+
+            // RFC 4271 6.6: FSM Error - Event 27 in OpenConfirm
+            (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+                let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
+                let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+            }
+
+            // RFC 4271 6.6: FSM Error - Event 9 in Established
+            (BgpState::Established, BgpState::Idle, FsmEvent::ConnectRetryTimerExpires) => {
+                let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
+                let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+            }
+
             // AutomaticStop: set admin state based on reason
             (_, BgpState::Idle, FsmEvent::AutomaticStop(subcode)) => {
                 let admin_state = match subcode {
@@ -754,26 +789,6 @@ impl Peer {
         // Notify server of state change after all actions complete
         if old_state != new_state {
             self.notify_state_change();
-        }
-
-        // Send NOTIFICATION for FSM errors that don't have specific handlers
-        // UpdateMsgErr and AutomaticStop in session states already sent their notifications
-        if let Some(error) = fsm_error {
-            let already_sent = matches!(
-                (old_state, event),
-                (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(_))
-                    | (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_))
-                    | (BgpState::Established, FsmEvent::BgpUpdateMsgErr(_))
-                    | (BgpState::OpenSent, FsmEvent::AutomaticStop(_))
-                    | (BgpState::OpenConfirm, FsmEvent::AutomaticStop(_))
-                    | (BgpState::Established, FsmEvent::AutomaticStop(_))
-            );
-
-            if !already_sent {
-                let notif = NotifcationMessage::new(error, vec![]);
-                let _ = self.send_notification(notif).await;
-            }
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
         }
 
         Ok(())
