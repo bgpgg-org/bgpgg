@@ -699,6 +699,7 @@ impl Peer {
             // Entering OpenSent - send OPEN message
             (BgpState::Connect, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed)
             | (BgpState::Active, BgpState::OpenSent, FsmEvent::TcpConnectionConfirmed) => {
+                self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
                 self.fsm.timers.start_hold_timer();
                 self.send_open().await?;
@@ -1281,6 +1282,92 @@ mod tests {
         assert!(peer.fsm.timers.hold_timer_started.is_some());
         // Verify OPEN sent
         assert_eq!(peer.statistics.open_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connection_success_connect() {
+        // RFC 4271 8.2.2 Event 16/17 in Connect state
+        let cases = vec![
+            // (delay_open_secs, expected_state)
+            (None, BgpState::OpenSent),   // DelayOpen = FALSE
+            (Some(5), BgpState::Connect), // DelayOpen = TRUE (stays in Connect)
+        ];
+
+        for (delay_open, expected_state) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Connect).await;
+            peer.fsm.timers.start_connect_retry();
+            peer.config.delay_open_time_secs = delay_open;
+
+            if delay_open.is_none() {
+                // DelayOpen = FALSE: triggers TcpConnectionConfirmed
+                peer.process_event(&FsmEvent::TcpConnectionConfirmed)
+                    .await
+                    .unwrap();
+
+                assert_eq!(peer.state(), expected_state);
+                assert!(
+                    peer.fsm.timers.connect_retry_started.is_none(),
+                    "RFC 4271: ConnectRetryTimer must be stopped"
+                );
+                assert!(peer.fsm.timers.hold_timer_started.is_some());
+                assert_eq!(peer.statistics.open_sent, 1);
+            } else {
+                // DelayOpen = TRUE: simulate accept_connection() behavior
+                peer.fsm.timers.stop_connect_retry();
+                peer.fsm.timers.start_delay_open_timer();
+
+                assert_eq!(peer.state(), expected_state);
+                assert!(
+                    peer.fsm.timers.connect_retry_started.is_none(),
+                    "RFC 4271: ConnectRetryTimer must be stopped"
+                );
+                assert!(peer.fsm.timers.delay_open_timer_running());
+                assert_eq!(peer.statistics.open_sent, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connection_success_active() {
+        // RFC 4271 8.2.2 Event 16/17 in Active state
+        let cases = vec![
+            // (delay_open_secs, expected_state)
+            (None, BgpState::OpenSent),  // DelayOpen = FALSE
+            (Some(5), BgpState::Active), // DelayOpen = TRUE (stays in Active)
+        ];
+
+        for (delay_open, expected_state) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Active).await;
+            peer.fsm.timers.start_connect_retry();
+            peer.config.delay_open_time_secs = delay_open;
+
+            if delay_open.is_none() {
+                // DelayOpen = FALSE: triggers TcpConnectionConfirmed
+                peer.process_event(&FsmEvent::TcpConnectionConfirmed)
+                    .await
+                    .unwrap();
+
+                assert_eq!(peer.state(), expected_state);
+                assert!(
+                    peer.fsm.timers.connect_retry_started.is_none(),
+                    "RFC 4271: ConnectRetryTimer must be stopped"
+                );
+                assert!(peer.fsm.timers.hold_timer_started.is_some());
+                assert_eq!(peer.statistics.open_sent, 1);
+            } else {
+                // DelayOpen = TRUE: simulate accept_connection() behavior
+                peer.fsm.timers.stop_connect_retry();
+                peer.fsm.timers.start_delay_open_timer();
+
+                assert_eq!(peer.state(), expected_state);
+                assert!(
+                    peer.fsm.timers.connect_retry_started.is_none(),
+                    "RFC 4271: ConnectRetryTimer must be stopped"
+                );
+                assert!(peer.fsm.timers.delay_open_timer_running());
+                assert_eq!(peer.statistics.open_sent, 0);
+            }
+        }
     }
 
     #[tokio::test]
