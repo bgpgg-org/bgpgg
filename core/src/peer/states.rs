@@ -703,6 +703,12 @@ impl Peer {
                 self.fsm.timers.stop_keepalive_timer();
             }
 
+            // RFC 4271 Event 18: TcpConnectionFails in OpenSent
+            (BgpState::OpenSent, BgpState::Active, FsmEvent::TcpConnectionFails) => {
+                self.disconnect(true);
+                self.fsm.timers.start_connect_retry();
+            }
+
             // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
             (BgpState::OpenSent, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
             | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
@@ -783,6 +789,9 @@ impl Peer {
                 BgpState::OpenConfirm,
                 &FsmEvent::BgpOpenWithDelayOpenTimer(params),
             ) => {
+                // RFC 4271 8.2.2: Reset DelayOpenTimer and ConnectRetryTimer to zero
+                self.fsm.timers.stop_delay_open_timer();
+                self.fsm.timers.stop_connect_retry();
                 self.enter_open_confirm(
                     params.peer_asn,
                     params.peer_hold_time,
@@ -1758,5 +1767,80 @@ mod tests {
         );
         // Verify KEEPALIVE was still sent (RFC requires it)
         assert_eq!(peer.statistics.keepalive_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn test_opensent_tcp_connection_fails() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+        peer.fsm.timers.start_hold_timer();
+        assert!(peer.conn.is_some());
+        assert!(peer.fsm.timers.connect_retry_started.is_none());
+
+        peer.process_event(&FsmEvent::TcpConnectionFails)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Active, "should transition to Active");
+        assert!(peer.conn.is_none(), "BGP connection should be closed");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_some(),
+            "ConnectRetryTimer should be restarted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_opensent_open_received_hold_time_negotiation() {
+        // RFC 4271: Negotiated hold time = min(local, peer)
+        let cases = vec![
+            // (local_hold, peer_hold, expected_negotiated, expected_keepalive)
+            (180, 180, 180, 60),  // Equal values
+            (180, 90, 90, 30),    // Peer proposes lower -> use peer's
+            (90, 180, 90, 30),    // Local is lower -> use local's
+            (240, 120, 120, 40),  // Different non-zero values
+            (180, 0, 0, 0),       // Peer proposes zero -> no timers
+            (0, 180, 0, 0),       // Local is zero -> no timers
+        ];
+
+        for (local_hold, peer_hold, expected_hold, expected_keepalive) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+            peer.fsm.timers.start_connect_retry();
+            peer.fsm.timers.start_delay_open_timer();
+
+            peer.process_event(&FsmEvent::BgpOpenReceived(BgpOpenParams {
+                peer_asn: 65001,
+                peer_hold_time: peer_hold,
+                peer_bgp_id: 0x02020202,
+                local_asn: 65000,
+                local_hold_time: local_hold,
+            }))
+            .await
+            .unwrap();
+
+            assert_eq!(peer.state(), BgpState::OpenConfirm);
+            assert!(peer.fsm.timers.delay_open_timer_started.is_none(), "DelayOpenTimer should be reset");
+            assert!(peer.fsm.timers.connect_retry_started.is_none(), "ConnectRetryTimer should be reset");
+            assert_eq!(peer.statistics.keepalive_sent, 1, "KEEPALIVE should be sent");
+
+            // RFC 4271: negotiated hold time = min(local, peer)
+            assert_eq!(
+                peer.fsm.timers.hold_time.as_secs(), expected_hold,
+                "Hold time negotiation failed for local={}, peer={}", local_hold, peer_hold
+            );
+
+            // RFC 4271: keepalive interval = hold_time / 3
+            assert_eq!(
+                peer.fsm.timers.keepalive_time.as_secs(), expected_keepalive,
+                "Keepalive time should be 1/3 of hold time for local={}, peer={}", local_hold, peer_hold
+            );
+
+            // RFC 4271: If hold_time is zero, timers should NOT be started
+            if expected_hold == 0 {
+                assert!(peer.fsm.timers.hold_timer_started.is_none(), "HoldTimer should NOT start when hold_time=0");
+                assert!(peer.fsm.timers.keepalive_timer_started.is_none(), "KeepaliveTimer should NOT start when hold_time=0");
+            } else {
+                assert!(peer.fsm.timers.hold_timer_started.is_some(), "HoldTimer should start when hold_time>0");
+                assert!(peer.fsm.timers.keepalive_timer_started.is_some(), "KeepaliveTimer should start when hold_time>0");
+            }
+        }
     }
 }
