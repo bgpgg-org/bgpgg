@@ -523,6 +523,11 @@ impl Peer {
                 self.fsm.timers.start_connect_retry();
             }
 
+            // RFC 4271 8.2.2: ConnectRetryTimer expires in Active state
+            (BgpState::Active, BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => {
+                self.fsm.timers.start_connect_retry();
+            }
+
             // RFC 4271 8.2.2 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
             (BgpState::Connect, BgpState::Active, FsmEvent::TcpConnectionFails) => {
                 self.disconnect(true);
@@ -1078,19 +1083,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_stop_active() {
-        let mut peer = create_test_peer_with_state(BgpState::Active).await;
-        peer.fsm.connect_retry_counter = 3;
-        peer.fsm.timers.start_connect_retry();
-        peer.fsm.timers.start_delay_open_timer();
+        let cases = vec![
+            // (delay_open_running, send_notif_config, expected_notif_count)
+            (true, true, 1),
+            (true, false, 0),
+            (false, true, 0),
+            (false, false, 0),
+        ];
 
-        peer.process_event(&FsmEvent::ManualStop).await.unwrap();
+        for (delay_open_running, send_notif_config, expected_notif) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Active).await;
+            peer.fsm.connect_retry_counter = 3;
+            peer.fsm.timers.start_connect_retry();
+            peer.config.send_notification_without_open = send_notif_config;
 
-        assert_eq!(peer.state(), BgpState::Idle);
-        assert!(peer.manually_stopped);
-        assert_eq!(peer.fsm.connect_retry_counter, 0);
-        assert!(peer.fsm.timers.connect_retry_started.is_none());
-        assert!(peer.fsm.timers.delay_open_timer_started.is_none());
-        assert!(peer.conn.is_none());
+            if delay_open_running {
+                peer.fsm.timers.start_delay_open_timer();
+            }
+
+            peer.process_event(&FsmEvent::ManualStop).await.unwrap();
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.manually_stopped);
+            assert_eq!(peer.fsm.connect_retry_counter, 0);
+            assert!(peer.fsm.timers.connect_retry_started.is_none());
+            assert!(peer.fsm.timers.delay_open_timer_started.is_none());
+            assert!(peer.conn.is_none());
+            assert_eq!(
+                peer.statistics.notification_sent, expected_notif,
+                "delay_open={}, send_notif_config={}",
+                delay_open_running, send_notif_config
+            );
+        }
     }
 
     #[tokio::test]
@@ -1114,6 +1138,25 @@ mod tests {
             assert!(peer.fsm.timers.hold_timer_started.is_none());
             assert!(peer.fsm.timers.keepalive_timer_started.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_connect_retry_timer_expires_active() {
+        let mut peer = create_test_peer_with_state(BgpState::Active).await;
+        peer.fsm.timers.start_connect_retry();
+        let timer_before = peer.fsm.timers.connect_retry_started;
+
+        peer.process_event(&FsmEvent::ConnectRetryTimerExpires)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Connect);
+        let timer_after = peer.fsm.timers.connect_retry_started;
+        assert!(timer_after.is_some(), "ConnectRetryTimer should be running");
+        assert_ne!(
+            timer_before, timer_after,
+            "ConnectRetryTimer should be restarted with new timestamp"
+        );
     }
 
     #[tokio::test]

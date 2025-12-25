@@ -690,11 +690,7 @@ mod tests {
                 }),
                 BgpState::OpenConfirm,
             ),
-            (
-                BgpState::OpenSent,
-                FsmEvent::NotifMsg,
-                BgpState::Idle,
-            ),
+            (BgpState::OpenSent, FsmEvent::NotifMsg, BgpState::Idle),
             // From OpenConfirm
             (BgpState::OpenConfirm, FsmEvent::ManualStop, BgpState::Idle),
             (
@@ -722,11 +718,7 @@ mod tests {
                 FsmEvent::BgpKeepaliveReceived,
                 BgpState::Established,
             ),
-            (
-                BgpState::OpenConfirm,
-                FsmEvent::NotifMsg,
-                BgpState::Idle,
-            ),
+            (BgpState::OpenConfirm, FsmEvent::NotifMsg, BgpState::Idle),
             // From Established
             (BgpState::Established, FsmEvent::ManualStop, BgpState::Idle),
             (
@@ -759,11 +751,7 @@ mod tests {
                 FsmEvent::BgpUpdateReceived,
                 BgpState::Established,
             ),
-            (
-                BgpState::Established,
-                FsmEvent::NotifMsg,
-                BgpState::Idle,
-            ),
+            (BgpState::Established, FsmEvent::NotifMsg, BgpState::Idle),
         ];
 
         for (initial_state, event, expected_state) in test_cases {
