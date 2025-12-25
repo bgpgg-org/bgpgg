@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
-use super::{Peer, PeerOp, TcpConnection};
+use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
 use crate::server::ConnectionType;
 use crate::{debug, error, info};
-use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -497,7 +496,7 @@ impl Peer {
     }
 
     /// Process FSM event, transition state, and execute associated actions.
-    pub(super) async fn process_event(&mut self, event: &FsmEvent) -> Result<(), io::Error> {
+    pub(super) async fn process_event(&mut self, event: &FsmEvent) -> Result<(), PeerError> {
         let old_state = self.fsm.state();
         let new_state = self.fsm.handle_event(event);
 
@@ -642,7 +641,7 @@ impl Peer {
                     peer_ip: self.addr,
                     state: admin_state,
                 });
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "automatic stop"));
+                return Err(PeerError::AutomaticStop(subcode.clone()));
             }
 
             // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
@@ -653,10 +652,7 @@ impl Peer {
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "update message error",
-                ));
+                return Err(PeerError::UpdateError);
             }
 
             // DelayOpenTimer expires -> send OPEN
@@ -746,7 +742,7 @@ impl Peer {
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+                return Err(PeerError::FsmError);
             }
 
             // RFC 4271 6.6: FSM Error - Event 27 in OpenConfirm
@@ -756,7 +752,7 @@ impl Peer {
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+                return Err(PeerError::FsmError);
             }
 
             // RFC 4271 6.6: FSM Error - Event 9 in Established
@@ -766,7 +762,7 @@ impl Peer {
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
+                return Err(PeerError::FsmError);
             }
 
             // AutomaticStop: set admin state based on reason

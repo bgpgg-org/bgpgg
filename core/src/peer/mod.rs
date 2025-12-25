@@ -32,6 +32,45 @@ mod updates;
 // Re-export FSM types so they can be used from outside the peer module
 pub use fsm::{BgpState, Fsm, FsmEvent, FsmTimers};
 
+/// Errors that can occur during peer FSM event processing
+#[derive(Debug)]
+pub enum PeerError {
+    /// FSM protocol error - unexpected event in current state
+    FsmError,
+    /// Automatic stop requested with cease subcode
+    AutomaticStop(CeaseSubcode),
+    /// BGP UPDATE message validation error
+    UpdateError,
+    /// I/O error during message send/receive
+    IoError(std::io::Error),
+}
+
+impl std::fmt::Display for PeerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerError::FsmError => write!(f, "FSM protocol error"),
+            PeerError::AutomaticStop(subcode) => write!(f, "automatic stop: {:?}", subcode),
+            PeerError::UpdateError => write!(f, "UPDATE message error"),
+            PeerError::IoError(e) => write!(f, "I/O error: {}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for PeerError {
+    fn from(e: std::io::Error) -> Self {
+        PeerError::IoError(e)
+    }
+}
+
+impl From<PeerError> for std::io::Error {
+    fn from(e: PeerError) -> Self {
+        match e {
+            PeerError::IoError(io_err) => io_err,
+            _ => std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        }
+    }
+}
+
 /// RFC 4271 8.1.1: Maximum IdleHoldTime for DampPeerOscillations backoff.
 const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 

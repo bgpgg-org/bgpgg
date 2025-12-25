@@ -234,8 +234,8 @@ impl Peer {
                         self.process_event(&FsmEvent::AutomaticStop(
                             CeaseSubcode::MaxPrefixesReached,
                         ))
-                        .await
-                        .map(|_| None)
+                        .await?;
+                        Ok(None)
                     } else {
                         warn!("max prefix exceeded but allow_automatic_stop=false, continuing",
                               "peer_ip" => self.addr.to_string());
@@ -246,8 +246,8 @@ impl Peer {
                     // RFC 4271 Event 28: UpdateMsgErr
                     let notif = NotifcationMessage::new(bgp_error, vec![]);
                     self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
-                        .await
-                        .map(|_| None)
+                        .await?;
+                    Ok(None)
                 }
             }
         } else {
