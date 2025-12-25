@@ -17,7 +17,7 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
 
 /// BGP FSM states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,10 @@ pub enum FsmEvent {
     /// TCP connection is confirmed, ready to send OPEN
     TcpConnectionConfirmed,
     TcpConnectionFails,
+    /// Event 21: BGP Message Header Error - carries NOTIFICATION to send
+    BgpHeaderErr(NotifcationMessage),
+    /// Event 22: BGP OPEN Message Error - carries NOTIFICATION to send
+    BgpOpenMsgErr(NotifcationMessage),
     /// Carries peer parameters from received OPEN
     BgpOpenReceived {
         peer_asn: u16,
@@ -309,6 +313,11 @@ impl Fsm {
         self.connect_retry_counter = 0;
     }
 
+    /// Increment ConnectRetryCounter (RFC 4271 8.2.2)
+    pub fn increment_connect_retry_counter(&mut self) {
+        self.connect_retry_counter += 1;
+    }
+
     /// Handle an event and return (new_state, error).
     ///
     /// Returns an error when an unexpected event occurs per RFC 4271 Section 6.6.
@@ -346,6 +355,11 @@ impl Fsm {
             }
             // RFC 4271 8.2.1.3: OPEN received while DelayOpenTimer running -> send OPEN
             (BgpState::Connect, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
+            // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
+            (BgpState::Connect, FsmEvent::BgpHeaderErr(_)) => (BgpState::Idle, None),
+            (BgpState::Connect, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
+            // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
+            (BgpState::Connect, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -356,6 +370,11 @@ impl Fsm {
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
             }
+            // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
+            (BgpState::Active, FsmEvent::BgpHeaderErr(_)) => (BgpState::Idle, None),
+            (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
+            // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
+            (BgpState::Active, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, FsmEvent::ManualStop) => (BgpState::Idle, None),

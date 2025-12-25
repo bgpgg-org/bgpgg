@@ -18,7 +18,7 @@ use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MessageHeaderError {
     ConnectionNotSynchronized = 1,
     BadMessageLength = 2,
@@ -62,7 +62,7 @@ impl From<u8> for OpenMessageError {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum UpdateMessageError {
     MalformedAttributeList = 1,
     UnrecognizedWellKnownAttribute = 2,
@@ -97,7 +97,7 @@ impl From<u8> for UpdateMessageError {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BgpError {
     MessageHeaderError(MessageHeaderError),
     OpenMessageError(OpenMessageError),
@@ -256,7 +256,7 @@ impl BgpError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct NotifcationMessage {
     error: BgpError,
     data: Vec<u8>,
