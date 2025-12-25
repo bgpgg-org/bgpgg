@@ -15,7 +15,7 @@
 use crate::bgp::msg_update::{AsPathSegmentType, Origin};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
-use crate::fsm::BgpState;
+use crate::peer::BgpState;
 use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};
 use std::net::Ipv4Addr;

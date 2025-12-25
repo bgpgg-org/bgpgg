@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::fsm::BgpState;
+use crate::peer::BgpState;
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
