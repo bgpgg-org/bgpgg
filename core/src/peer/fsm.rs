@@ -81,7 +81,10 @@ pub enum FsmEvent {
     BgpUpdateReceived,
     /// Event 28: UPDATE Message Error - carries NOTIFICATION to send
     BgpUpdateMsgErr(NotifcationMessage),
-    NotificationReceived,
+    /// Event 24: NotifMsgVerErr - NOTIFICATION with version error
+    NotifMsgVerErr,
+    /// Event 25: NotifMsg - NOTIFICATION without version error
+    NotifMsg,
 }
 
 /// BGP FSM timers
@@ -381,9 +384,11 @@ impl Fsm {
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Connect, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
             (BgpState::Connect, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,
-            // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
-            (BgpState::Connect, FsmEvent::NotificationReceived) => BgpState::Idle,
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 25-28) -> Idle (no NOTIFICATION)
+            // RFC 4271 Event 24: NOTIFICATION with version error -> Idle
+            (BgpState::Connect, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
+            // RFC 4271 Event 25: NOTIFICATION without version error -> Idle
+            (BgpState::Connect, FsmEvent::NotifMsg) => BgpState::Idle,
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 26-28) -> Idle (no NOTIFICATION)
             (BgpState::Connect, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, FsmEvent::KeepaliveTimerExpires)
@@ -399,9 +404,11 @@ impl Fsm {
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Active, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
             (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,
-            // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
-            (BgpState::Active, FsmEvent::NotificationReceived) => BgpState::Idle,
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Active state -> Idle (no NOTIFICATION)
+            // RFC 4271 Event 24: NOTIFICATION with version error -> Idle
+            (BgpState::Active, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
+            // RFC 4271 Event 25: NOTIFICATION without version error -> Idle
+            (BgpState::Active, FsmEvent::NotifMsg) => BgpState::Idle,
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 26-28) in Active state -> Idle (no NOTIFICATION)
             (BgpState::Active, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, FsmEvent::KeepaliveTimerExpires)
@@ -419,7 +426,8 @@ impl Fsm {
             (BgpState::OpenSent, FsmEvent::BgpOpenReceived(_)) => BgpState::OpenConfirm,
             (BgpState::OpenSent, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => BgpState::OpenConfirm,
             (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
-            (BgpState::OpenSent, FsmEvent::NotificationReceived) => BgpState::Idle,
+            (BgpState::OpenSent, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
+            (BgpState::OpenSent, FsmEvent::NotifMsg) => BgpState::Idle,
 
             // ===== OpenConfirm State =====
             (BgpState::OpenConfirm, FsmEvent::ManualStop) => BgpState::Idle,
@@ -429,7 +437,8 @@ impl Fsm {
             (BgpState::OpenConfirm, FsmEvent::TcpConnectionFails) => BgpState::Idle,
             (BgpState::OpenConfirm, FsmEvent::BgpKeepaliveReceived) => BgpState::Established,
             (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
-            (BgpState::OpenConfirm, FsmEvent::NotificationReceived) => BgpState::Idle,
+            (BgpState::OpenConfirm, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
+            (BgpState::OpenConfirm, FsmEvent::NotifMsg) => BgpState::Idle,
             // RFC 4271 6.6: Events 9, 27 in OpenConfirm -> FSM Error
             (BgpState::OpenConfirm, FsmEvent::ConnectRetryTimerExpires)
             | (BgpState::OpenConfirm, FsmEvent::BgpUpdateReceived) => BgpState::Idle,
@@ -443,7 +452,8 @@ impl Fsm {
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived) => BgpState::Established,
             (BgpState::Established, FsmEvent::BgpUpdateReceived) => BgpState::Established,
             (BgpState::Established, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
-            (BgpState::Established, FsmEvent::NotificationReceived) => BgpState::Idle,
+            (BgpState::Established, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
+            (BgpState::Established, FsmEvent::NotifMsg) => BgpState::Idle,
             // RFC 4271 6.6: Event 9 in Established -> FSM Error
             (BgpState::Established, FsmEvent::ConnectRetryTimerExpires) => BgpState::Idle,
 
@@ -682,7 +692,7 @@ mod tests {
             ),
             (
                 BgpState::OpenSent,
-                FsmEvent::NotificationReceived,
+                FsmEvent::NotifMsg,
                 BgpState::Idle,
             ),
             // From OpenConfirm
@@ -714,7 +724,7 @@ mod tests {
             ),
             (
                 BgpState::OpenConfirm,
-                FsmEvent::NotificationReceived,
+                FsmEvent::NotifMsg,
                 BgpState::Idle,
             ),
             // From Established
@@ -751,7 +761,7 @@ mod tests {
             ),
             (
                 BgpState::Established,
-                FsmEvent::NotificationReceived,
+                FsmEvent::NotifMsg,
                 BgpState::Idle,
             ),
         ];

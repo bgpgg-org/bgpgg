@@ -26,6 +26,18 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 const INITIAL_HOLD_TIME: Duration = Duration::from_secs(240);
 
 impl Peer {
+    /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
+    pub(super) async fn handle_notification_received(&mut self, notif: &NotifcationMessage) {
+        let event = if notif.is_version_error() {
+            debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
+            FsmEvent::NotifMsgVerErr
+        } else {
+            debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
+            FsmEvent::NotifMsg
+        };
+        self.try_process_event(&event).await;
+    }
+
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
     /// Returns true if shutdown requested.
     pub(super) async fn handle_idle_state(&mut self) -> bool {
@@ -235,10 +247,8 @@ impl Peer {
                             self.disconnect(true);
                         }
                     }
-                    Ok(BgpMessage::Notification(_)) => {
-                        // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running
-                        debug!("NOTIFICATION received while DelayOpen running", "peer_ip" => self.addr.to_string());
-                        self.try_process_event(&FsmEvent::NotificationReceived).await;
+                    Ok(BgpMessage::Notification(notif)) => {
+                        self.handle_notification_received(&notif).await;
                     }
                     Ok(_) => {
                         error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
@@ -342,10 +352,8 @@ impl Peer {
                             self.disconnect(true);
                         }
                     }
-                    Ok(BgpMessage::Notification(_)) => {
-                        // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running
-                        debug!("NOTIFICATION received while DelayOpen running", "peer_ip" => self.addr.to_string());
-                        self.try_process_event(&FsmEvent::NotificationReceived).await;
+                    Ok(BgpMessage::Notification(notif)) => {
+                        self.handle_notification_received(&notif).await;
                     }
                     Ok(_) => {
                         error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
@@ -542,9 +550,10 @@ impl Peer {
                 self.fsm.increment_connect_retry_counter();
             }
 
-            // RFC 4271 Event 24: NOTIFICATION received -> Idle
-            (BgpState::Connect, BgpState::Idle, FsmEvent::NotificationReceived)
-            | (BgpState::Active, BgpState::Idle, FsmEvent::NotificationReceived) => {
+            // RFC 4271 Event 24: NOTIFICATION with version error -> Idle
+            // Behavior depends on DelayOpenTimer state
+            (BgpState::Connect, BgpState::Idle, FsmEvent::NotifMsgVerErr)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
                 self.fsm.timers.stop_connect_retry();
                 let delay_open_was_running = self.fsm.timers.delay_open_timer_running();
                 self.fsm.timers.stop_delay_open_timer();
@@ -553,6 +562,16 @@ impl Peer {
                 if !delay_open_was_running {
                     self.fsm.increment_connect_retry_counter();
                 }
+            }
+
+            // RFC 4271 Event 25: NOTIFICATION without version error -> Idle
+            // Always increments counter and applies damping
+            (BgpState::Connect, BgpState::Idle, FsmEvent::NotifMsg)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::NotifMsg) => {
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.timers.stop_delay_open_timer();
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
             }
 
             // RFC 4271 8.2.2: ManualStop in Connect state
@@ -932,16 +951,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_notification_received_in_connect_active() {
-        // RFC 4271 Event 24: NOTIFICATION behavior depends on DelayOpenTimer state
-        // (state, delay_open_running, expected_down_count, expected_counter)
+        // RFC 4271 Event 24 vs Event 25: NOTIFICATION behavior
+        // Event 24 (version error): depends on DelayOpenTimer
+        // Event 25 (non-version error): always increments and damps
         let cases = vec![
-            (BgpState::Connect, true, 0, 0), // DelayOpenTimer running -> no damping
-            (BgpState::Connect, false, 1, 1), // DelayOpenTimer not running -> apply damping
-            (BgpState::Active, true, 0, 0),  // DelayOpenTimer running -> no damping
-            (BgpState::Active, false, 1, 1), // DelayOpenTimer not running -> apply damping
+            // (state, event, delay_open_running, expected_down_count, expected_counter)
+            (BgpState::Connect, FsmEvent::NotifMsgVerErr, true, 0, 0),
+            (BgpState::Connect, FsmEvent::NotifMsgVerErr, false, 1, 1),
+            (BgpState::Connect, FsmEvent::NotifMsg, true, 1, 1),
+            (BgpState::Connect, FsmEvent::NotifMsg, false, 1, 1),
+            (BgpState::Active, FsmEvent::NotifMsgVerErr, true, 0, 0),
+            (BgpState::Active, FsmEvent::NotifMsgVerErr, false, 1, 1),
+            (BgpState::Active, FsmEvent::NotifMsg, true, 1, 1),
+            (BgpState::Active, FsmEvent::NotifMsg, false, 1, 1),
         ];
 
-        for (state, delay_open_running, expected_down_count, expected_counter) in cases {
+        for (state, event, delay_open_running, expected_down_count, expected_counter) in cases {
             let mut peer = create_test_peer_with_state(state).await;
             peer.fsm.timers.start_connect_retry();
             if delay_open_running {
@@ -949,9 +974,7 @@ mod tests {
             }
             peer.config.damp_peer_oscillations = true;
 
-            peer.process_event(&FsmEvent::NotificationReceived)
-                .await
-                .unwrap();
+            peer.process_event(&event).await.unwrap();
 
             assert_eq!(peer.state(), BgpState::Idle);
             assert!(peer.conn.is_none());
@@ -959,13 +982,13 @@ mod tests {
             assert!(!peer.fsm.timers.delay_open_timer_running());
             assert_eq!(
                 peer.consecutive_down_count, expected_down_count,
-                "{:?}, delay_open={}: damping",
-                state, delay_open_running
+                "{:?}, {:?}, delay_open={}",
+                state, event, delay_open_running
             );
             assert_eq!(
                 peer.fsm.connect_retry_counter, expected_counter,
-                "{:?}, delay_open={}: counter",
-                state, delay_open_running
+                "{:?}, {:?}, delay_open={}",
+                state, event, delay_open_running
             );
         }
     }

@@ -306,6 +306,14 @@ impl NotifcationMessage {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
+
+    /// RFC 4271 Event 24: Check if this is a version error NOTIFICATION
+    pub fn is_version_error(&self) -> bool {
+        matches!(
+            self.error,
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber)
+        )
+    }
 }
 
 impl Message for NotifcationMessage {
@@ -526,5 +534,38 @@ mod tests {
             result.error(),
             &BgpError::MessageHeaderError(MessageHeaderError::Unknown(99))
         );
+    }
+
+    #[test]
+    fn test_is_version_error() {
+        // Version error should return true
+        let notif = NotifcationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+        assert!(notif.is_version_error());
+
+        // Other OPEN errors should return false
+        let notif = NotifcationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::BadPeerAs),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
+
+        // Non-OPEN errors should return false
+        let notif = NotifcationMessage::new(
+            BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
+
+        let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+        assert!(!notif.is_version_error());
+
+        let notif = NotifcationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
     }
 }

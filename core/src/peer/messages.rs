@@ -219,8 +219,9 @@ impl Peer {
             BgpMessage::KeepAlive(_) => {
                 self.process_event(&FsmEvent::BgpKeepaliveReceived).await?;
             }
-            BgpMessage::Notification(_) => {
-                self.process_event(&FsmEvent::NotificationReceived).await?;
+            BgpMessage::Notification(notif) => {
+                self.handle_notification_received(notif).await;
+                return Ok(None);
             }
         }
 
