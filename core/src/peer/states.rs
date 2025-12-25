@@ -978,8 +978,18 @@ mod tests {
 
             assert_eq!(peer.state(), BgpState::Idle);
             assert!(peer.conn.is_none(), "TCP connection should be dropped");
-            assert!(peer.fsm.timers.connect_retry_started.is_none());
-            assert_eq!(peer.fsm.connect_retry_counter, 1);
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should be stopped (set to zero)"
+            );
+            assert!(
+                !peer.fsm.timers.delay_open_timer_running(),
+                "DelayOpenTimer should be stopped"
+            );
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 1,
+                "ConnectRetryCounter should be incremented"
+            );
             assert_eq!(peer.statistics.notification_sent, expected_notif);
             assert_eq!(
                 peer.consecutive_down_count,
