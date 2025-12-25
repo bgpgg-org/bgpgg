@@ -718,6 +718,44 @@ impl Peer {
                 self.fsm.increment_connect_retry_counter();
             }
 
+            // RFC 4271 Event 24: NOTIFICATION with version error in OpenSent
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
+                self.fsm.timers.stop_connect_retry();
+                self.disconnect(false);
+            }
+
+            // RFC 4271 Event 25: NOTIFICATION without version error in OpenSent
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::NotifMsg) => {
+                let _ = self
+                    .send_notification(NotifcationMessage::new(
+                        BgpError::FiniteStateMachineError,
+                        vec![],
+                    ))
+                    .await;
+                self.fsm.timers.stop_connect_retry();
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+            }
+
+            // RFC 4271 6.6: FSM Error - Events 9, 11-13, 26-27 in OpenSent
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)
+            | (BgpState::OpenSent, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::OpenSent, BgpState::Idle, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::OpenSent, BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::OpenSent, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::OpenSent, BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+                let _ = self
+                    .send_notification(NotifcationMessage::new(
+                        BgpError::FiniteStateMachineError,
+                        vec![],
+                    ))
+                    .await;
+                self.fsm.timers.stop_connect_retry();
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+                return Err(PeerError::FsmError);
+            }
+
             // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
             (BgpState::OpenSent, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
             | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
@@ -1940,6 +1978,55 @@ mod tests {
                 "{}: NOTIFICATION should be sent",
                 error_name
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_opensent_notification_received() {
+        let cases = vec![(FsmEvent::NotifMsgVerErr, 0, 0), (FsmEvent::NotifMsg, 1, 1)];
+
+        for (event, expected_down_count, expected_counter) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+            peer.fsm.timers.start_connect_retry();
+            peer.config.damp_peer_oscillations = true;
+
+            peer.process_event(&event).await.unwrap();
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.conn.is_none());
+            assert!(peer.fsm.timers.connect_retry_started.is_none());
+            assert_eq!(peer.consecutive_down_count, expected_down_count);
+            assert_eq!(peer.fsm.connect_retry_counter, expected_counter);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_opensent_fsm_errors() {
+        let events = vec![
+            FsmEvent::ConnectRetryTimerExpires,
+            FsmEvent::KeepaliveTimerExpires,
+            FsmEvent::DelayOpenTimerExpires,
+            FsmEvent::IdleHoldTimerExpires,
+            FsmEvent::BgpKeepaliveReceived,
+            FsmEvent::BgpUpdateReceived,
+        ];
+
+        for event in events {
+            let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+            peer.fsm.timers.start_connect_retry();
+            peer.config.damp_peer_oscillations = true;
+            peer.statistics.open_sent = 1;
+
+            let result = peer.process_event(&event).await;
+
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), PeerError::FsmError));
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.conn.is_none());
+            assert!(peer.fsm.timers.connect_retry_started.is_none());
+            assert_eq!(peer.fsm.connect_retry_counter, 1);
+            assert_eq!(peer.consecutive_down_count, 1);
+            assert_eq!(peer.statistics.notification_sent, 1);
         }
     }
 }

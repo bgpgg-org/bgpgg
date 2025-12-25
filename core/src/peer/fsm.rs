@@ -435,6 +435,13 @@ impl Fsm {
             (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
             (BgpState::OpenSent, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
             (BgpState::OpenSent, FsmEvent::NotifMsg) => BgpState::Idle,
+            // RFC 4271 6.6: Events 9, 11-13, 26-27 in OpenSent -> FSM Error
+            (BgpState::OpenSent, FsmEvent::ConnectRetryTimerExpires)
+            | (BgpState::OpenSent, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::OpenSent, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::OpenSent, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::OpenSent, FsmEvent::BgpUpdateReceived) => BgpState::Idle,
 
             // ===== OpenConfirm State =====
             (BgpState::OpenConfirm, FsmEvent::ManualStop) => BgpState::Idle,
