@@ -147,6 +147,7 @@ impl Peer {
                 local_bgp_id,
                 local_ip,
                 config.get_delay_open_time(),
+                config.passive_mode,
             ),
             conn: None,
             asn: None,
@@ -238,9 +239,9 @@ impl Peer {
                 }
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
-                // RFC 4271 Event 13: IdleHoldTimer_Expires -> Active
-                debug!("IdleHoldTimer expired, AutomaticStartPassive", "peer_ip" => self.addr.to_string());
-                self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
+                // RFC 4271 Event 13: IdleHoldTimer_Expires
+                debug!("IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
             }
         }
         false
@@ -279,8 +280,9 @@ impl Peer {
                 }
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
-                debug!("IdleHoldTimer expired, AutomaticStart", "peer_ip" => self.addr.to_string());
-                self.try_process_event(&FsmEvent::AutomaticStart).await;
+                // RFC 4271 Event 13: IdleHoldTimer_Expires
+                debug!("IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
             }
         }
         false
@@ -779,16 +781,18 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 19, 25-26) in Connect/Active -> Idle
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-26) in Connect/Active -> Idle
             (BgpState::Connect, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateReceived)
             | (BgpState::Active, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
@@ -858,23 +862,29 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
                 self.send_open().await?;
-                self.enter_open_confirm(params.peer_asn, params.peer_hold_time, params.local_asn, params.local_hold_time)
-                    .await?;
+                self.enter_open_confirm(
+                    params.peer_asn,
+                    params.peer_hold_time,
+                    params.local_asn,
+                    params.local_hold_time,
+                )
+                .await?;
             }
 
             // Entering OpenConfirm from OpenSent - send KEEPALIVE
-            (
-                BgpState::OpenSent,
-                BgpState::OpenConfirm,
-                &FsmEvent::BgpOpenReceived(params),
-            )
+            (BgpState::OpenSent, BgpState::OpenConfirm, &FsmEvent::BgpOpenReceived(params))
             | (
                 BgpState::OpenSent,
                 BgpState::OpenConfirm,
                 &FsmEvent::BgpOpenWithDelayOpenTimer(params),
             ) => {
-                self.enter_open_confirm(params.peer_asn, params.peer_hold_time, params.local_asn, params.local_hold_time)
-                    .await?;
+                self.enter_open_confirm(
+                    params.peer_asn,
+                    params.peer_hold_time,
+                    params.local_asn,
+                    params.local_hold_time,
+                )
+                .await?;
             }
 
             // In OpenConfirm or Established - handle keepalive timer expiry
@@ -1322,7 +1332,7 @@ mod tests {
         Peer {
             addr: addr.ip(),
             port: addr.port(),
-            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip),
+            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
             conn: Some(TcpConnection {
                 tx: tcp_tx,
                 rx: tcp_rx,
@@ -1984,6 +1994,7 @@ mod tests {
             FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
             FsmEvent::HoldTimerExpires,
             FsmEvent::KeepaliveTimerExpires,
+            FsmEvent::IdleHoldTimerExpires,
             FsmEvent::BgpOpenReceived(BgpOpenParams {
                 peer_asn: 65001,
                 peer_hold_time: 180,

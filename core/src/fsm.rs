@@ -58,10 +58,14 @@ pub enum FsmEvent {
     AutomaticStop(CeaseSubcode),
     /// Event 9: ConnectRetryTimerExpires
     ConnectRetryTimerExpires,
+    /// Event 10: HoldTimer_Expires
     HoldTimerExpires,
+    /// Event 11: KeepaliveTimer_Expires
     KeepaliveTimerExpires,
     /// Event 12: DelayOpenTimerExpires (RFC 4271 8.1.3)
     DelayOpenTimerExpires,
+    /// Event 13: IdleHoldTimer_Expires
+    IdleHoldTimerExpires,
     /// TCP connection is confirmed, ready to send OPEN
     TcpConnectionConfirmed,
     TcpConnectionFails,
@@ -247,6 +251,10 @@ pub struct Fsm {
     local_hold_time: u16,
     local_bgp_id: u32,
     local_addr: Ipv4Addr,
+
+    /// Passive mode: if true, wait for incoming connections (Active state)
+    /// if false, initiate connections (Connect state)
+    passive_mode: bool,
 }
 
 impl Fsm {
@@ -257,6 +265,7 @@ impl Fsm {
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
         delay_open_time: Option<Duration>,
+        passive_mode: bool,
     ) -> Self {
         Fsm {
             state: BgpState::Idle,
@@ -266,6 +275,7 @@ impl Fsm {
             local_hold_time,
             local_bgp_id,
             local_addr,
+            passive_mode,
         }
     }
 
@@ -277,6 +287,7 @@ impl Fsm {
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: Ipv4Addr,
+        passive_mode: bool,
     ) -> Self {
         Fsm {
             state,
@@ -286,6 +297,7 @@ impl Fsm {
             local_hold_time,
             local_bgp_id,
             local_addr,
+            passive_mode,
         }
     }
 
@@ -340,6 +352,14 @@ impl Fsm {
             (BgpState::Idle, FsmEvent::ManualStartPassive) => (BgpState::Active, None),
             // Event 5: AutomaticStartPassive -> Active (RFC 4271 8.2.2)
             (BgpState::Idle, FsmEvent::AutomaticStartPassive) => (BgpState::Active, None),
+            // Event 13: IdleHoldTimer expires
+            (BgpState::Idle, FsmEvent::IdleHoldTimerExpires) => {
+                if self.passive_mode {
+                    (BgpState::Active, None)
+                } else {
+                    (BgpState::Connect, None)
+                }
+            }
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -367,10 +387,11 @@ impl Fsm {
             (BgpState::Connect, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Connect, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 25-26) -> Idle (no NOTIFICATION)
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 25-26) -> Idle (no NOTIFICATION)
             (BgpState::Connect, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Connect, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Connect, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Connect, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
 
@@ -385,10 +406,11 @@ impl Fsm {
             (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Active, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 19, 25-26) in Active state -> Idle (no NOTIFICATION)
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-26) in Active state -> Idle (no NOTIFICATION)
             (BgpState::Active, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Active, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Active, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Active, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Active, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
@@ -468,13 +490,27 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let fsm = Fsm::with_state(
+            BgpState::Connect,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
     #[test]
     fn test_tcp_connection_confirmed() {
-        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::with_state(
+            BgpState::Connect,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
 
         // Connect -> OpenSent
         let (new_state, error) = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -485,7 +521,14 @@ mod tests {
 
     #[test]
     fn test_successful_connection_establishment() {
-        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::with_state(
+            BgpState::Connect,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
 
         // Connect -> OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -511,16 +554,28 @@ mod tests {
     fn test_connection_failure_handling() {
         {
             // RFC 4271 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
-            let mut fsm =
-                Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            let mut fsm = Fsm::with_state(
+                BgpState::Connect,
+                65000,
+                180,
+                0x01010101,
+                TEST_LOCAL_ADDR,
+                false,
+            );
             fsm.handle_event(&FsmEvent::TcpConnectionFails);
             assert_eq!(fsm.state(), BgpState::Idle);
         }
 
         {
             // RFC 4271 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
-            let mut fsm =
-                Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            let mut fsm = Fsm::with_state(
+                BgpState::Connect,
+                65000,
+                180,
+                0x01010101,
+                TEST_LOCAL_ADDR,
+                false,
+            );
             fsm.timers.start_delay_open_timer();
             fsm.handle_event(&FsmEvent::TcpConnectionFails);
             assert_eq!(fsm.state(), BgpState::Active);
@@ -533,7 +588,14 @@ mod tests {
 
     #[test]
     fn test_hold_timer_expiry() {
-        let mut fsm = Fsm::with_state(BgpState::Connect, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+        let mut fsm = Fsm::with_state(
+            BgpState::Connect,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
 
         // Move to OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -717,7 +779,14 @@ mod tests {
         ];
 
         for (initial_state, event, expected_state) in test_cases {
-            let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            let mut fsm = Fsm::with_state(
+                initial_state,
+                65000,
+                180,
+                0x01010101,
+                TEST_LOCAL_ADDR,
+                false,
+            );
             let (new_state, error) = fsm.handle_event(&event);
 
             // AutomaticStop returns Cease error only in OpenSent/OpenConfirm/Established
@@ -780,7 +849,14 @@ mod tests {
         ];
 
         for (initial_state, event, expected_error) in test_cases {
-            let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
+            let mut fsm = Fsm::with_state(
+                initial_state,
+                65000,
+                180,
+                0x01010101,
+                TEST_LOCAL_ADDR,
+                false,
+            );
             let (new_state, error) = fsm.handle_event(&event);
 
             assert_eq!(
@@ -794,12 +870,27 @@ mod tests {
 
     #[test]
     fn test_reset_connect_retry_counter() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None);
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, false);
 
         fsm.connect_retry_counter = 5;
         assert_eq!(fsm.connect_retry_counter, 5);
 
         fsm.reset_connect_retry_counter();
         assert_eq!(fsm.connect_retry_counter, 0);
+    }
+
+    #[test]
+    fn test_idle_hold_timer_expires() {
+        // Passive mode: Idle -> Active
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, true);
+        let (new_state, error) = fsm.handle_event(&FsmEvent::IdleHoldTimerExpires);
+        assert_eq!(new_state, BgpState::Active);
+        assert!(error.is_none());
+
+        // Active mode: Idle -> Connect
+        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, false);
+        let (new_state, error) = fsm.handle_event(&FsmEvent::IdleHoldTimerExpires);
+        assert_eq!(new_state, BgpState::Connect);
+        assert!(error.is_none());
     }
 }
