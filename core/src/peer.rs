@@ -781,7 +781,7 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-26) in Connect/Active -> Idle
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect/Active -> Idle
             (BgpState::Connect, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
@@ -789,13 +789,15 @@ impl Peer {
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
-            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
                 self.disconnect(true);
@@ -831,6 +833,39 @@ impl Peer {
                     Vec::new(),
                 );
                 let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
+            }
+
+            // RFC 4271 Event 8: AutomaticStop in session states - send CEASE notification
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::AutomaticStop(ref subcode))
+            | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::AutomaticStop(ref subcode))
+            | (BgpState::Established, BgpState::Idle, FsmEvent::AutomaticStop(ref subcode)) => {
+                let notif = NotifcationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
+                let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
+
+                // Set admin state based on the cease reason
+                let admin_state = match subcode {
+                    CeaseSubcode::MaxPrefixesReached => {
+                        crate::server::AdminState::PrefixLimitReached
+                    }
+                    _ => crate::server::AdminState::Down,
+                };
+                let _ = self.server_tx.send(ServerOp::SetAdminState {
+                    peer_ip: self.addr,
+                    state: admin_state,
+                });
+            }
+
+            // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
+            | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif))
+            | (BgpState::Established, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif)) => {
+                let _ = self.send_notification(notif.clone()).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
@@ -938,10 +973,23 @@ impl Peer {
             self.notify_state_change();
         }
 
-        // Send NOTIFICATION and return error if FSM returned an error
+        // Send NOTIFICATION for FSM errors that don't have specific handlers
+        // UpdateMsgErr and AutomaticStop in session states already sent their notifications
         if let Some(error) = fsm_error {
-            let notif = NotifcationMessage::new(error, vec![]);
-            let _ = self.send_notification(notif).await;
+            let already_sent = matches!(
+                (old_state, event),
+                (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(_))
+                    | (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_))
+                    | (BgpState::Established, FsmEvent::BgpUpdateMsgErr(_))
+                    | (BgpState::OpenSent, FsmEvent::AutomaticStop(_))
+                    | (BgpState::OpenConfirm, FsmEvent::AutomaticStop(_))
+                    | (BgpState::Established, FsmEvent::AutomaticStop(_))
+            );
+
+            if !already_sent {
+                let notif = NotifcationMessage::new(error, vec![]);
+                let _ = self.send_notification(notif).await;
+            }
             return Err(io::Error::new(io::ErrorKind::InvalidData, "FSM error"));
         }
 
@@ -1147,12 +1195,11 @@ impl Peer {
                     }
                 }
                 Err(bgp_error) => {
+                    // RFC 4271 Event 28: UpdateMsgErr
                     let notif = NotifcationMessage::new(bgp_error, vec![]);
-                    let _ = self.send_notification(notif).await;
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "UPDATE message validation failed",
-                    ))
+                    self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
+                        .await
+                        .map(|_| None)
                 }
             }
         } else {
@@ -1301,6 +1348,7 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg::Message;
+    use crate::bgp::msg_notification::UpdateMessageError;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
     use crate::config::MaxPrefixSetting;
     use tokio::io::AsyncReadExt;
@@ -1989,7 +2037,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_active_other_events() {
-        // RFC 4271 8.2.2: Any other events in Connect/Active -> Idle with cleanup
+        // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect/Active -> Idle with cleanup
         let events = vec![
             FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
             FsmEvent::HoldTimerExpires,
@@ -2004,6 +2052,10 @@ mod tests {
             }),
             FsmEvent::BgpKeepaliveReceived,
             FsmEvent::BgpUpdateReceived,
+            FsmEvent::BgpUpdateMsgErr(NotifcationMessage::new(
+                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                vec![],
+            )),
         ];
 
         for state in [BgpState::Connect, BgpState::Active] {
@@ -2019,6 +2071,38 @@ mod tests {
                 assert!(peer.fsm.timers.delay_open_timer_started.is_none());
                 assert!(peer.conn.is_none());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_msg_err_in_session_states() {
+        // RFC 4271 Event 28: UpdateMsgErr in session states should send NOTIFICATION
+        for state in [
+            BgpState::OpenSent,
+            BgpState::OpenConfirm,
+            BgpState::Established,
+        ] {
+            let mut peer = create_test_peer_with_state(state).await;
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            peer.config.send_notification_without_open = true;
+
+            let notif = NotifcationMessage::new(
+                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                vec![],
+            );
+
+            // Process the event - should send NOTIFICATION and transition to Idle
+            peer.process_event(&FsmEvent::BgpUpdateMsgErr(notif.clone()))
+                .await
+                .unwrap_err(); // Should return error
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.fsm.timers.hold_timer_started.is_none());
+            assert!(peer.fsm.timers.keepalive_timer_started.is_none());
+            assert!(peer.conn.is_none());
+            // Verify notification was sent (check statistics)
+            assert_eq!(peer.statistics.notification_sent, 1);
         }
     }
 }

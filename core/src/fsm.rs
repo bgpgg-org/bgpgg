@@ -79,6 +79,8 @@ pub enum FsmEvent {
     BgpOpenMsgErr(NotifcationMessage),
     BgpKeepaliveReceived,
     BgpUpdateReceived,
+    /// Event 28: UPDATE Message Error - carries NOTIFICATION to send
+    BgpUpdateMsgErr(NotifcationMessage),
     NotificationReceived,
 }
 
@@ -387,13 +389,14 @@ impl Fsm {
             (BgpState::Connect, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Connect, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 25-26) -> Idle (no NOTIFICATION)
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 25-28) -> Idle (no NOTIFICATION)
             (BgpState::Connect, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Connect, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Connect, FsmEvent::BgpKeepaliveReceived)
-            | (BgpState::Connect, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
+            | (BgpState::Connect, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Connect, FsmEvent::BgpUpdateMsgErr(_)) => (BgpState::Idle, None),
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -406,14 +409,15 @@ impl Fsm {
             (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Active, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-26) in Active state -> Idle (no NOTIFICATION)
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Active state -> Idle (no NOTIFICATION)
             (BgpState::Active, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Active, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Active, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Active, FsmEvent::BgpKeepaliveReceived)
-            | (BgpState::Active, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
+            | (BgpState::Active, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Active, FsmEvent::BgpUpdateMsgErr(_)) => (BgpState::Idle, None),
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -425,6 +429,9 @@ impl Fsm {
             (BgpState::OpenSent, FsmEvent::BgpOpenReceived(_)) => (BgpState::OpenConfirm, None),
             (BgpState::OpenSent, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => {
                 (BgpState::OpenConfirm, None)
+            }
+            (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(notif)) => {
+                (BgpState::Idle, Some(notif.error().clone()))
             }
             (BgpState::OpenSent, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
 
@@ -440,6 +447,9 @@ impl Fsm {
             (BgpState::OpenConfirm, FsmEvent::TcpConnectionFails) => (BgpState::Idle, None),
             (BgpState::OpenConfirm, FsmEvent::BgpKeepaliveReceived) => {
                 (BgpState::Established, None)
+            }
+            (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(notif)) => {
+                (BgpState::Idle, Some(notif.error().clone()))
             }
             (BgpState::OpenConfirm, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
             // RFC 4271 6.6: Events 9, 27 in OpenConfirm -> FSM Error
@@ -462,6 +472,9 @@ impl Fsm {
                 (BgpState::Established, None)
             }
             (BgpState::Established, FsmEvent::BgpUpdateReceived) => (BgpState::Established, None),
+            (BgpState::Established, FsmEvent::BgpUpdateMsgErr(notif)) => {
+                (BgpState::Idle, Some(notif.error().clone()))
+            }
             (BgpState::Established, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
             // RFC 4271 6.6: Event 9 in Established -> FSM Error
             (BgpState::Established, FsmEvent::ConnectRetryTimerExpires) => {
@@ -892,5 +905,40 @@ mod tests {
         let (new_state, error) = fsm.handle_event(&FsmEvent::IdleHoldTimerExpires);
         assert_eq!(new_state, BgpState::Connect);
         assert!(error.is_none());
+    }
+
+    #[test]
+    fn test_update_msg_err() {
+        use crate::bgp::msg_notification::{NotifcationMessage, UpdateMessageError};
+
+        let notif = NotifcationMessage::new(
+            BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+            vec![],
+        );
+
+        // Connect/Active states: UpdateMsgErr -> Idle (no NOTIFICATION)
+        for state in [BgpState::Connect, BgpState::Active] {
+            let mut fsm = Fsm::with_state(state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR, false);
+            let (new_state, error) = fsm.handle_event(&FsmEvent::BgpUpdateMsgErr(notif.clone()));
+            assert_eq!(new_state, BgpState::Idle);
+            assert!(error.is_none());
+        }
+
+        // Session states: UpdateMsgErr -> Idle (send NOTIFICATION)
+        for state in [
+            BgpState::OpenSent,
+            BgpState::OpenConfirm,
+            BgpState::Established,
+        ] {
+            let mut fsm = Fsm::with_state(state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR, false);
+            let (new_state, error) = fsm.handle_event(&FsmEvent::BgpUpdateMsgErr(notif.clone()));
+            assert_eq!(new_state, BgpState::Idle);
+            assert_eq!(
+                error,
+                Some(BgpError::UpdateMessageError(
+                    UpdateMessageError::MalformedAttributeList
+                ))
+            );
+        }
     }
 }
