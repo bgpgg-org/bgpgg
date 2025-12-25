@@ -595,7 +595,7 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect/Active -> Idle
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect -> Idle
             (BgpState::Connect, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
@@ -603,8 +603,21 @@ impl Peer {
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateReceived)
-            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_))
-            | (BgpState::Active, BgpState::Idle, FsmEvent::AutomaticStop(_))
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
+                // RFC 4271: If ConnectRetryTimer is running, stop and reset it
+                if self.fsm.timers.connect_retry_started.is_some() {
+                    self.fsm.timers.stop_connect_retry();
+                }
+                // RFC 4271: If DelayOpenTimer is running, stop and reset it
+                if self.fsm.timers.delay_open_timer_running() {
+                    self.fsm.timers.stop_delay_open_timer();
+                }
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+            }
+
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Active -> Idle
+            (BgpState::Active, BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Active, BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Active, BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
@@ -612,8 +625,8 @@ impl Peer {
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateReceived)
             | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
+                // RFC 4271: Sets ConnectRetryTimer to zero (unconditional)
                 self.fsm.timers.stop_connect_retry();
-                self.fsm.timers.stop_delay_open_timer();
                 self.disconnect(true);
                 self.fsm.increment_connect_retry_counter();
             }
@@ -1446,7 +1459,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_active_other_events() {
-        // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect/Active -> Idle with cleanup
         let events = vec![
             FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
             FsmEvent::HoldTimerExpires,
@@ -1467,11 +1479,24 @@ mod tests {
             )),
         ];
 
-        for state in [BgpState::Connect, BgpState::Active] {
+        // (state, start_connect_retry_timer, start_delay_open_timer)
+        let cases = vec![
+            (BgpState::Connect, true, true),
+            (BgpState::Connect, false, false),
+            (BgpState::Active, true, true),
+            (BgpState::Active, false, false),
+        ];
+
+        for (state, start_connect_retry_timer, start_delay_open_timer) in cases {
             for event in &events {
                 let mut peer = create_test_peer_with_state(state).await;
-                peer.fsm.timers.start_connect_retry();
-                peer.fsm.timers.start_delay_open_timer();
+                if start_connect_retry_timer {
+                    peer.fsm.timers.start_connect_retry();
+                }
+                if start_delay_open_timer {
+                    peer.fsm.timers.start_delay_open_timer();
+                }
+                peer.config.damp_peer_oscillations = true;
 
                 peer.process_event(event).await.unwrap();
 
@@ -1479,6 +1504,8 @@ mod tests {
                 assert!(peer.fsm.timers.connect_retry_started.is_none());
                 assert!(peer.fsm.timers.delay_open_timer_started.is_none());
                 assert!(peer.conn.is_none());
+                assert_eq!(peer.fsm.connect_retry_counter, 1);
+                assert_eq!(peer.consecutive_down_count, 1);
             }
         }
     }
