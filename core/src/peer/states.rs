@@ -477,10 +477,7 @@ impl Peer {
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
                         error!("hold timer expired", "peer_ip" => peer_ip.to_string());
-                        let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
-                        let _ = self.send_notification(notif).await;
-                        self.fsm.handle_event(&FsmEvent::HoldTimerExpires);
-                        self.disconnect(true);
+                        self.try_process_event(&FsmEvent::HoldTimerExpires).await;
                         return false;
                     }
 
@@ -691,6 +688,19 @@ impl Peer {
                     state: admin_state,
                 });
                 return Err(PeerError::AutomaticStop(subcode.clone()));
+            }
+
+            // RFC 4271 Event 10: HoldTimer_Expires in session states
+            (BgpState::OpenSent, BgpState::Idle, FsmEvent::HoldTimerExpires)
+            | (BgpState::OpenConfirm, BgpState::Idle, FsmEvent::HoldTimerExpires)
+            | (BgpState::Established, BgpState::Idle, FsmEvent::HoldTimerExpires) => {
+                let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+                let _ = self.send_notification(notif).await;
+                self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
+                self.fsm.timers.stop_hold_timer();
+                self.fsm.timers.stop_keepalive_timer();
             }
 
             // RFC 4271 Event 28: UpdateMsgErr in session states - send UPDATE error notification
@@ -1590,6 +1600,43 @@ mod tests {
             assert_eq!(
                 peer.statistics.notification_sent, 1,
                 "NOTIFICATION with Cease should be sent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hold_timer_expires_in_session_states() {
+        for state in [
+            BgpState::OpenSent,
+            BgpState::OpenConfirm,
+            BgpState::Established,
+        ] {
+            let mut peer = create_test_peer_with_state(state).await;
+            peer.fsm.connect_retry_counter = 1;
+            peer.fsm.timers.start_connect_retry();
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            peer.statistics.open_sent = 1;
+
+            peer.process_event(&FsmEvent::HoldTimerExpires)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should be set to zero"
+            );
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 2,
+                "ConnectRetryCounter should be incremented"
+            );
+            assert!(peer.conn.is_none(), "TCP connection should be dropped");
+            assert!(peer.fsm.timers.hold_timer_started.is_none());
+            assert!(peer.fsm.timers.keepalive_timer_started.is_none());
+            assert_eq!(
+                peer.statistics.notification_sent, 1,
+                "NOTIFICATION with HoldTimerExpired should be sent"
             );
         }
     }
