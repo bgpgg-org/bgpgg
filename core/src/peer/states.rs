@@ -542,6 +542,14 @@ impl Peer {
                 self.fsm.reset_connect_retry_counter();
             }
 
+            // RFC 4271 8.2.2 Event 18: TcpConnectionFails in Active -> Idle
+            (BgpState::Active, BgpState::Idle, FsmEvent::TcpConnectionFails) => {
+                self.disconnect(true);
+                self.fsm.timers.stop_delay_open_timer();
+                self.fsm.timers.start_connect_retry();
+                self.fsm.increment_connect_retry_counter();
+            }
+
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Connect, BgpState::Idle, FsmEvent::BgpHeaderErr(ref notif))
             | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpOpenMsgErr(ref notif))
@@ -1466,5 +1474,36 @@ mod tests {
             // Verify notification was sent (check statistics)
             assert_eq!(peer.statistics.notification_sent, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_connection_fails_active() {
+        let mut peer = create_test_peer_with_state(BgpState::Active).await;
+        peer.fsm.timers.start_delay_open_timer();
+        peer.config.damp_peer_oscillations = true;
+        assert!(peer.conn.is_some());
+
+        peer.process_event(&FsmEvent::TcpConnectionFails)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            !peer.fsm.timers.delay_open_timer_running(),
+            "DelayOpenTimer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_some(),
+            "ConnectRetryTimer should be restarted"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 1,
+            "ConnectRetryCounter should be incremented"
+        );
+        assert_eq!(
+            peer.consecutive_down_count, 1,
+            "DampPeerOscillations should increment consecutive_down_count"
+        );
     }
 }
