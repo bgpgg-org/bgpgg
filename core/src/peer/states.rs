@@ -679,9 +679,17 @@ impl Peer {
                 return Err(PeerError::UpdateError);
             }
 
-            // DelayOpenTimer expires -> send OPEN
-            (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires)
-            | (BgpState::Active, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
+            // DelayOpenTimer expires in Connect -> send OPEN (no ConnectRetryTimer stop)
+            (BgpState::Connect, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
+                self.fsm.timers.stop_delay_open_timer();
+                self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
+                self.fsm.timers.start_hold_timer();
+                self.send_open().await?;
+            }
+
+            // DelayOpenTimer expires in Active -> send OPEN (stop ConnectRetryTimer)
+            (BgpState::Active, BgpState::OpenSent, FsmEvent::DelayOpenTimerExpires) => {
+                self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
                 self.fsm.timers.start_hold_timer();
@@ -1221,6 +1229,58 @@ mod tests {
         // Verify OPEN and KEEPALIVE messages were sent
         assert_eq!(peer.statistics.open_sent, 1);
         assert_eq!(peer.statistics.keepalive_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn test_delay_open_timer_expires_connect() {
+        // RFC 4271 8.2.2 Event 12 in Connect state
+        let mut peer = create_test_peer_with_state(BgpState::Connect).await;
+        peer.fsm.timers.start_connect_retry();
+        peer.fsm.timers.start_delay_open_timer();
+        assert_eq!(peer.statistics.open_sent, 0);
+
+        peer.process_event(&FsmEvent::DelayOpenTimerExpires)
+            .await
+            .unwrap();
+
+        // Verify state transition
+        assert_eq!(peer.state(), BgpState::OpenSent);
+        // Verify timers: DelayOpenTimer stopped, ConnectRetryTimer NOT stopped
+        assert!(!peer.fsm.timers.delay_open_timer_running());
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_some(),
+            "RFC 4271: ConnectRetryTimer should NOT be stopped in Connect state"
+        );
+        // Verify HoldTimer started
+        assert!(peer.fsm.timers.hold_timer_started.is_some());
+        // Verify OPEN sent
+        assert_eq!(peer.statistics.open_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn test_delay_open_timer_expires_active() {
+        // RFC 4271 8.2.2 Event 12 in Active state
+        let mut peer = create_test_peer_with_state(BgpState::Active).await;
+        peer.fsm.timers.start_connect_retry();
+        peer.fsm.timers.start_delay_open_timer();
+        assert_eq!(peer.statistics.open_sent, 0);
+
+        peer.process_event(&FsmEvent::DelayOpenTimerExpires)
+            .await
+            .unwrap();
+
+        // Verify state transition
+        assert_eq!(peer.state(), BgpState::OpenSent);
+        // Verify timers: Both DelayOpenTimer and ConnectRetryTimer stopped
+        assert!(!peer.fsm.timers.delay_open_timer_running());
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "RFC 4271: ConnectRetryTimer MUST be stopped in Active state"
+        );
+        // Verify HoldTimer started
+        assert!(peer.fsm.timers.hold_timer_started.is_some());
+        // Verify OPEN sent
+        assert_eq!(peer.statistics.open_sent, 1);
     }
 
     #[tokio::test]

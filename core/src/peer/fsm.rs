@@ -400,6 +400,7 @@ impl Fsm {
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => BgpState::Idle,
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
+            (BgpState::Active, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Active, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
@@ -656,6 +657,11 @@ mod tests {
                 BgpState::Active,
                 FsmEvent::ConnectRetryTimerExpires,
                 BgpState::Connect,
+            ),
+            (
+                BgpState::Active,
+                FsmEvent::DelayOpenTimerExpires,
+                BgpState::OpenSent,
             ),
             (
                 BgpState::Active,
