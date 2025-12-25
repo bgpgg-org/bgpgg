@@ -404,6 +404,8 @@ impl Fsm {
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
             // RFC 4271 Event 18: TcpConnectionFails -> Idle
             (BgpState::Active, FsmEvent::TcpConnectionFails) => BgpState::Idle,
+            // RFC 4271 Event 20: BGPOpen with DelayOpenTimer running -> OpenConfirm
+            (BgpState::Active, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => BgpState::OpenConfirm,
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Active, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
             (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,

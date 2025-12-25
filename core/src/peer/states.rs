@@ -731,6 +731,24 @@ impl Peer {
                 .await?;
             }
 
+            // Received OPEN while in Active with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 Event 20)
+            (
+                BgpState::Active,
+                BgpState::OpenConfirm,
+                &FsmEvent::BgpOpenWithDelayOpenTimer(params),
+            ) => {
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.timers.stop_delay_open_timer();
+                self.send_open().await?;
+                self.enter_open_confirm(
+                    params.peer_asn,
+                    params.peer_hold_time,
+                    params.local_asn,
+                    params.local_hold_time,
+                )
+                .await?;
+            }
+
             // Entering OpenConfirm from OpenSent - send KEEPALIVE
             (BgpState::OpenSent, BgpState::OpenConfirm, &FsmEvent::BgpOpenReceived(params))
             | (
@@ -1238,6 +1256,17 @@ mod tests {
         // Verify OPEN and KEEPALIVE messages were sent
         assert_eq!(peer.statistics.open_sent, 1);
         assert_eq!(peer.statistics.keepalive_sent, 1);
+        // RFC 4271: If hold time is non-zero, timers should be started
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_some(),
+            "HoldTimer should be started for non-zero hold time"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_some(),
+            "KeepaliveTimer should be started for non-zero hold time"
+        );
+        assert_eq!(peer.fsm.timers.hold_time.as_secs(), 180);
+        assert_eq!(peer.fsm.timers.keepalive_time.as_secs(), 60);
     }
 
     #[tokio::test]
@@ -1505,5 +1534,93 @@ mod tests {
             peer.consecutive_down_count, 1,
             "DampPeerOscillations should increment consecutive_down_count"
         );
+    }
+
+    #[tokio::test]
+    async fn test_open_received_in_active_stops_timers() {
+        let mut peer = create_test_peer_with_state(BgpState::Active).await;
+        peer.fsm.timers.start_connect_retry();
+        peer.fsm.timers.start_delay_open_timer();
+        assert!(peer.fsm.timers.connect_retry_started.is_some());
+        assert!(peer.fsm.timers.delay_open_timer_running());
+        assert_eq!(peer.statistics.open_sent, 0);
+        assert_eq!(peer.statistics.keepalive_sent, 0);
+
+        peer.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+            peer_asn: 65001,
+            peer_hold_time: 180,
+            peer_bgp_id: 0x02020202,
+            local_asn: 65000,
+            local_hold_time: 180,
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(peer.state(), BgpState::OpenConfirm);
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be stopped"
+        );
+        assert!(
+            !peer.fsm.timers.delay_open_timer_running(),
+            "DelayOpenTimer should be stopped"
+        );
+        assert_eq!(peer.statistics.open_sent, 1, "OPEN should be sent");
+        assert_eq!(
+            peer.statistics.keepalive_sent, 1,
+            "KEEPALIVE should be sent"
+        );
+        // RFC 4271: If hold time is non-zero, timers should be started
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_some(),
+            "HoldTimer should be started for non-zero hold time"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_some(),
+            "KeepaliveTimer should be started for non-zero hold time"
+        );
+        assert_eq!(peer.fsm.timers.hold_time.as_secs(), 180);
+        assert_eq!(peer.fsm.timers.keepalive_time.as_secs(), 60);
+    }
+
+    #[tokio::test]
+    async fn test_open_received_in_active_hold_time_zero() {
+        let mut peer = create_test_peer_with_state(BgpState::Active).await;
+        peer.fsm.timers.start_connect_retry();
+        peer.fsm.timers.start_delay_open_timer();
+
+        peer.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+            peer_asn: 65001,
+            peer_hold_time: 0,
+            peer_bgp_id: 0x02020202,
+            local_asn: 65000,
+            local_hold_time: 180,
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(peer.state(), BgpState::OpenConfirm);
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be stopped"
+        );
+        assert!(
+            !peer.fsm.timers.delay_open_timer_running(),
+            "DelayOpenTimer should be stopped"
+        );
+        // Verify hold time negotiated to zero (min of 0 and 180)
+        assert_eq!(peer.fsm.timers.hold_time.as_secs(), 0);
+        assert_eq!(peer.fsm.timers.keepalive_time.as_secs(), 0);
+        // RFC 4271: If hold time is zero, timers should NOT be started
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "HoldTimer should NOT be started for zero hold time"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "KeepaliveTimer should NOT be started for zero hold time"
+        );
+        // Verify KEEPALIVE was still sent (RFC requires it)
+        assert_eq!(peer.statistics.keepalive_sent, 1);
     }
 }
