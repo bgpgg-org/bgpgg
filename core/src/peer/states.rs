@@ -674,6 +674,8 @@ impl Peer {
                 let notif = NotifcationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
 
@@ -1551,6 +1553,44 @@ mod tests {
             assert!(peer.conn.is_none());
             // Verify notification was sent (check statistics)
             assert_eq!(peer.statistics.notification_sent, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_automatic_stop_in_session_states() {
+        for state in [
+            BgpState::OpenSent,
+            BgpState::OpenConfirm,
+            BgpState::Established,
+        ] {
+            let mut peer = create_test_peer_with_state(state).await;
+            peer.fsm.connect_retry_counter = 2;
+            peer.fsm.timers.start_connect_retry();
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            peer.statistics.open_sent = 1;
+
+            let result = peer
+                .process_event(&FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached))
+                .await;
+            assert!(result.is_err(), "AutomaticStop should return error");
+
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should be set to zero"
+            );
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 3,
+                "ConnectRetryCounter should be incremented"
+            );
+            assert!(peer.conn.is_none(), "TCP connection should be dropped");
+            assert!(peer.fsm.timers.hold_timer_started.is_none());
+            assert!(peer.fsm.timers.keepalive_timer_started.is_none());
+            assert_eq!(
+                peer.statistics.notification_sent, 1,
+                "NOTIFICATION with Cease should be sent"
+            );
         }
     }
 
