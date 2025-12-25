@@ -661,6 +661,8 @@ impl Peer {
                 );
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
             }
@@ -1185,6 +1187,8 @@ mod tests {
 
         for state in test_cases {
             let mut peer = create_test_peer_with_state(state).await;
+            peer.fsm.connect_retry_counter = 5;
+            peer.fsm.timers.start_connect_retry();
             peer.fsm.timers.start_hold_timer();
             peer.fsm.timers.start_keepalive_timer();
 
@@ -1193,6 +1197,14 @@ mod tests {
             assert_eq!(peer.state(), BgpState::Idle);
             assert!(peer.manually_stopped);
             assert!(peer.conn.is_none());
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 0,
+                "ConnectRetryCounter should be reset to 0"
+            );
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should be stopped"
+            );
             assert!(peer.fsm.timers.hold_timer_started.is_none());
             assert!(peer.fsm.timers.keepalive_timer_started.is_none());
         }
