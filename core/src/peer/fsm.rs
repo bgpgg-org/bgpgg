@@ -430,6 +430,8 @@ impl Fsm {
             (BgpState::OpenSent, FsmEvent::TcpConnectionFails) => BgpState::Active,
             (BgpState::OpenSent, FsmEvent::BgpOpenReceived(_)) => BgpState::OpenConfirm,
             (BgpState::OpenSent, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => BgpState::OpenConfirm,
+            (BgpState::OpenSent, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
+            (BgpState::OpenSent, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,
             (BgpState::OpenSent, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
             (BgpState::OpenSent, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
             (BgpState::OpenSent, FsmEvent::NotifMsg) => BgpState::Idle,
