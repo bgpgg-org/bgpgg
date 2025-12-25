@@ -30,6 +30,16 @@ pub enum BgpState {
     Established,
 }
 
+/// Parameters from received BGP OPEN message
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BgpOpenParams {
+    pub peer_asn: u16,
+    pub peer_hold_time: u16,
+    pub peer_bgp_id: u32,
+    pub local_asn: u16,
+    pub local_hold_time: u16,
+}
+
 /// BGP FSM events as defined in RFC 4271 Section 8.1
 /// Events now carry necessary data for the FSM to send messages
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,18 +65,14 @@ pub enum FsmEvent {
     /// TCP connection is confirmed, ready to send OPEN
     TcpConnectionConfirmed,
     TcpConnectionFails,
+    /// Event 19: BGPOpen - OPEN message received (generic)
+    BgpOpenReceived(BgpOpenParams),
+    /// Event 20: BGPOpen with DelayOpenTimer running
+    BgpOpenWithDelayOpenTimer(BgpOpenParams),
     /// Event 21: BGP Message Header Error - carries NOTIFICATION to send
     BgpHeaderErr(NotifcationMessage),
     /// Event 22: BGP OPEN Message Error - carries NOTIFICATION to send
     BgpOpenMsgErr(NotifcationMessage),
-    /// Carries peer parameters from received OPEN
-    BgpOpenReceived {
-        peer_asn: u16,
-        peer_hold_time: u16,
-        peer_bgp_id: u32,
-        local_asn: u16,
-        local_hold_time: u16,
-    },
     BgpKeepaliveReceived,
     BgpUpdateReceived,
     NotificationReceived,
@@ -337,9 +343,6 @@ impl Fsm {
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::Connect, FsmEvent::AutomaticStop(subcode)) => {
-                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
-            }
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Connect, FsmEvent::DelayOpenTimerExpires) => (BgpState::OpenSent, None),
             (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => {
@@ -353,19 +356,26 @@ impl Fsm {
                     (BgpState::Idle, None)
                 }
             }
-            // RFC 4271 8.2.1.3: OPEN received while DelayOpenTimer running -> send OPEN
-            (BgpState::Connect, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
+            // RFC 4271 8.2.2 Event 19: BGPOpen without DelayOpenTimer -> Idle (any other event)
+            (BgpState::Connect, FsmEvent::BgpOpenReceived(_)) => (BgpState::Idle, None),
+            // RFC 4271 8.2.2 Event 20: BGPOpen with DelayOpenTimer running -> OpenConfirm
+            (BgpState::Connect, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => {
+                (BgpState::OpenConfirm, None)
+            }
             // RFC 4271 Events 21, 22: BGP header/OPEN message errors -> Idle
             (BgpState::Connect, FsmEvent::BgpHeaderErr(_)) => (BgpState::Idle, None),
             (BgpState::Connect, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Connect, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 25-26) -> Idle (no NOTIFICATION)
+            (BgpState::Connect, FsmEvent::AutomaticStop(_))
+            | (BgpState::Connect, FsmEvent::HoldTimerExpires)
+            | (BgpState::Connect, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Connect, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Connect, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => (BgpState::Idle, None),
-            (BgpState::Active, FsmEvent::AutomaticStop(subcode)) => {
-                (BgpState::Idle, Some(BgpError::Cease(subcode.clone())))
-            }
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => (BgpState::Connect, None),
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => {
                 (BgpState::OpenSent, None)
@@ -375,6 +385,13 @@ impl Fsm {
             (BgpState::Active, FsmEvent::BgpOpenMsgErr(_)) => (BgpState::Idle, None),
             // RFC 4271 Event 24: NOTIFICATION received with DelayOpenTimer running -> Idle
             (BgpState::Active, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 19, 25-26) in Active state -> Idle (no NOTIFICATION)
+            (BgpState::Active, FsmEvent::AutomaticStop(_))
+            | (BgpState::Active, FsmEvent::HoldTimerExpires)
+            | (BgpState::Active, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Active, FsmEvent::BgpOpenReceived(_))
+            | (BgpState::Active, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Active, FsmEvent::BgpUpdateReceived) => (BgpState::Idle, None),
 
             // ===== OpenSent State =====
             (BgpState::OpenSent, FsmEvent::ManualStop) => (BgpState::Idle, None),
@@ -383,7 +400,10 @@ impl Fsm {
             }
             (BgpState::OpenSent, FsmEvent::HoldTimerExpires) => (BgpState::Idle, None),
             (BgpState::OpenSent, FsmEvent::TcpConnectionFails) => (BgpState::Active, None),
-            (BgpState::OpenSent, FsmEvent::BgpOpenReceived { .. }) => (BgpState::OpenConfirm, None),
+            (BgpState::OpenSent, FsmEvent::BgpOpenReceived(_)) => (BgpState::OpenConfirm, None),
+            (BgpState::OpenSent, FsmEvent::BgpOpenWithDelayOpenTimer(_)) => {
+                (BgpState::OpenConfirm, None)
+            }
             (BgpState::OpenSent, FsmEvent::NotificationReceived) => (BgpState::Idle, None),
 
             // ===== OpenConfirm State =====
@@ -472,13 +492,13 @@ mod tests {
         assert_eq!(fsm.state(), BgpState::OpenSent);
 
         // OpenSent -> OpenConfirm
-        fsm.handle_event(&FsmEvent::BgpOpenReceived {
+        fsm.handle_event(&FsmEvent::BgpOpenReceived(BgpOpenParams {
             peer_asn: 65001,
             peer_hold_time: 180,
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-        });
+        }));
         assert_eq!(fsm.state(), BgpState::OpenConfirm);
 
         // OpenConfirm -> Established
@@ -563,16 +583,16 @@ mod tests {
                 FsmEvent::DelayOpenTimerExpires,
                 BgpState::OpenSent,
             ),
-            // DelayOpen: Connect + BgpOpenReceived -> OpenConfirm (peer sent OPEN first)
+            // DelayOpen: Connect + BgpOpenWithDelayOpenTimer -> OpenConfirm (peer sent OPEN first)
             (
                 BgpState::Connect,
-                FsmEvent::BgpOpenReceived {
+                FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
                     peer_asn: 65001,
                     peer_hold_time: 180,
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
-                },
+                }),
                 BgpState::OpenConfirm,
             ),
             // From Active
@@ -611,13 +631,13 @@ mod tests {
             ),
             (
                 BgpState::OpenSent,
-                FsmEvent::BgpOpenReceived {
+                FsmEvent::BgpOpenReceived(BgpOpenParams {
                     peer_asn: 65001,
                     peer_hold_time: 180,
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
-                },
+                }),
                 BgpState::OpenConfirm,
             ),
             (
@@ -700,13 +720,24 @@ mod tests {
             let mut fsm = Fsm::with_state(initial_state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR);
             let (new_state, error) = fsm.handle_event(&event);
 
-            // AutomaticStop returns Cease error; others return None
+            // AutomaticStop returns Cease error only in OpenSent/OpenConfirm/Established
+            // In Connect/Active states, it returns None (no NOTIFICATION per RFC)
             if let FsmEvent::AutomaticStop(subcode) = &event {
-                assert_eq!(
-                    error,
-                    Some(BgpError::Cease(subcode.clone())),
-                    "AutomaticStop should return Cease error"
-                );
+                match initial_state {
+                    BgpState::OpenSent | BgpState::OpenConfirm | BgpState::Established => {
+                        assert_eq!(
+                            error,
+                            Some(BgpError::Cease(subcode.clone())),
+                            "AutomaticStop in session states should return Cease error"
+                        );
+                    }
+                    _ => {
+                        assert!(
+                            error.is_none(),
+                            "AutomaticStop in Connect/Active should not return error"
+                        );
+                    }
+                }
             } else {
                 assert!(
                     error.is_none(),

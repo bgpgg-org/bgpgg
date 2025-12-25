@@ -21,7 +21,7 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
 use crate::config::{MaxPrefixAction, PeerConfig};
-use crate::fsm::{BgpState, Fsm, FsmEvent};
+use crate::fsm::{BgpOpenParams, BgpState, Fsm, FsmEvent};
 use crate::net::create_and_bind_tcp_socket;
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::{Path, RouteSource};
@@ -388,13 +388,15 @@ impl Peer {
                     Ok(BgpMessage::Open(open)) => {
                         debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
-                        if let Err(e) = self.process_event(&FsmEvent::BgpOpenReceived {
-                            peer_asn: open.asn,
-                            peer_hold_time: open.hold_time,
-                            local_asn: self.fsm.local_asn(),
-                            local_hold_time: self.fsm.local_hold_time(),
-                            peer_bgp_id: open.bgp_identifier,
-                        }).await {
+                        if let Err(e) = self.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(
+                            BgpOpenParams {
+                                peer_asn: open.asn,
+                                peer_hold_time: open.hold_time,
+                                local_asn: self.fsm.local_asn(),
+                                local_hold_time: self.fsm.local_hold_time(),
+                                peer_bgp_id: open.bgp_identifier,
+                            }
+                        )).await {
                             error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                             self.disconnect(true);
                         }
@@ -493,13 +495,15 @@ impl Peer {
                     Ok(BgpMessage::Open(open)) => {
                         debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
-                        if let Err(e) = self.process_event(&FsmEvent::BgpOpenReceived {
-                            peer_asn: open.asn,
-                            peer_hold_time: open.hold_time,
-                            local_asn: self.fsm.local_asn(),
-                            local_hold_time: self.fsm.local_hold_time(),
-                            peer_bgp_id: open.bgp_identifier,
-                        }).await {
+                        if let Err(e) = self.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(
+                            BgpOpenParams {
+                                peer_asn: open.asn,
+                                peer_hold_time: open.hold_time,
+                                local_asn: self.fsm.local_asn(),
+                                local_hold_time: self.fsm.local_hold_time(),
+                                peer_bgp_id: open.bgp_identifier,
+                            }
+                        )).await {
                             error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                             self.disconnect(true);
                         }
@@ -775,6 +779,25 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 19, 25-26) in Connect/Active -> Idle
+            (BgpState::Connect, BgpState::Idle, FsmEvent::AutomaticStop(_))
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::HoldTimerExpires)
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Connect, BgpState::Idle, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::AutomaticStop(_))
+            | (BgpState::Active, BgpState::Idle, FsmEvent::HoldTimerExpires)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpOpenReceived(_))
+            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Active, BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.timers.stop_delay_open_timer();
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+            }
+
             // RFC 4271 8.2.2: ManualStop in Active state
             (BgpState::Active, BgpState::Idle, FsmEvent::ManualStop) => {
                 // Conditionally send NOTIFICATION if DelayOpenTimer is running
@@ -826,22 +849,16 @@ impl Peer {
                 self.send_open().await?;
             }
 
-            // Received OPEN while in Connect with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 8.2.1.3)
+            // Received OPEN while in Connect with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 Event 20)
             (
                 BgpState::Connect,
                 BgpState::OpenConfirm,
-                &FsmEvent::BgpOpenReceived {
-                    peer_asn,
-                    peer_hold_time,
-                    local_asn,
-                    local_hold_time,
-                    ..
-                },
+                &FsmEvent::BgpOpenWithDelayOpenTimer(params),
             ) => {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
                 self.send_open().await?;
-                self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
+                self.enter_open_confirm(params.peer_asn, params.peer_hold_time, params.local_asn, params.local_hold_time)
                     .await?;
             }
 
@@ -849,15 +866,14 @@ impl Peer {
             (
                 BgpState::OpenSent,
                 BgpState::OpenConfirm,
-                &FsmEvent::BgpOpenReceived {
-                    peer_asn,
-                    peer_hold_time,
-                    local_asn,
-                    local_hold_time,
-                    ..
-                },
+                &FsmEvent::BgpOpenReceived(params),
+            )
+            | (
+                BgpState::OpenSent,
+                BgpState::OpenConfirm,
+                &FsmEvent::BgpOpenWithDelayOpenTimer(params),
             ) => {
-                self.enter_open_confirm(peer_asn, peer_hold_time, local_asn, local_hold_time)
+                self.enter_open_confirm(params.peer_asn, params.peer_hold_time, params.local_asn, params.local_hold_time)
                     .await?;
             }
 
@@ -1082,13 +1098,13 @@ impl Peer {
                     bgp_id: open_msg.bgp_identifier,
                     conn_type: self.conn_type,
                 });
-                self.process_event(&FsmEvent::BgpOpenReceived {
+                self.process_event(&FsmEvent::BgpOpenReceived(BgpOpenParams {
                     peer_asn: open_msg.asn,
                     peer_hold_time: open_msg.hold_time,
                     peer_bgp_id: open_msg.bgp_identifier,
                     local_asn: self.fsm.local_asn(),
                     local_hold_time: self.fsm.local_hold_time(),
-                })
+                }))
                 .await?;
             }
             BgpMessage::Update(_) => {
@@ -1915,13 +1931,13 @@ mod tests {
         assert_eq!(peer.statistics.open_sent, 0);
         assert_eq!(peer.statistics.keepalive_sent, 0);
 
-        peer.process_event(&FsmEvent::BgpOpenReceived {
+        peer.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
             peer_asn: 65001,
             peer_hold_time: 180,
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-        })
+        }))
         .await
         .unwrap();
 
@@ -1939,13 +1955,13 @@ mod tests {
         // RFC 4271 8.2.2: When hold time is zero, timers should not be started
         let mut peer = create_test_peer_with_state(BgpState::Connect).await;
 
-        peer.process_event(&FsmEvent::BgpOpenReceived {
+        peer.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
             peer_asn: 65001,
             peer_hold_time: 0, // Peer wants no hold timer
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-        })
+        }))
         .await
         .unwrap();
 
@@ -1959,5 +1975,39 @@ mod tests {
         assert!(peer.fsm.timers.keepalive_timer_started.is_none());
         // Verify KEEPALIVE was still sent (RFC requires it)
         assert_eq!(peer.statistics.keepalive_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn test_connect_active_other_events() {
+        // RFC 4271 8.2.2: Any other events in Connect/Active -> Idle with cleanup
+        let events = vec![
+            FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
+            FsmEvent::HoldTimerExpires,
+            FsmEvent::KeepaliveTimerExpires,
+            FsmEvent::BgpOpenReceived(BgpOpenParams {
+                peer_asn: 65001,
+                peer_hold_time: 180,
+                peer_bgp_id: 0x02020202,
+                local_asn: 65000,
+                local_hold_time: 180,
+            }),
+            FsmEvent::BgpKeepaliveReceived,
+            FsmEvent::BgpUpdateReceived,
+        ];
+
+        for state in [BgpState::Connect, BgpState::Active] {
+            for event in &events {
+                let mut peer = create_test_peer_with_state(state).await;
+                peer.fsm.timers.start_connect_retry();
+                peer.fsm.timers.start_delay_open_timer();
+
+                peer.process_event(event).await.unwrap();
+
+                assert_eq!(peer.state(), BgpState::Idle);
+                assert!(peer.fsm.timers.connect_retry_started.is_none());
+                assert!(peer.fsm.timers.delay_open_timer_started.is_none());
+                assert!(peer.conn.is_none());
+            }
+        }
     }
 }
