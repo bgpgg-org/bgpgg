@@ -15,14 +15,11 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, NotifcationMessage};
 use crate::server::ConnectionType;
 use crate::{debug, error, info};
 use std::time::Duration;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-
-/// RFC 4271 8.2.2: Initial HoldTimer value when entering OpenSent state (4 minutes suggested).
-const INITIAL_HOLD_TIME: Duration = Duration::from_secs(240);
 
 impl Peer {
     /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
@@ -199,9 +196,9 @@ impl Peer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::bgp::msg_notification::UpdateMessageError;
+    use crate::bgp::msg_notification::{CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm};
@@ -211,7 +208,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
-    async fn create_test_peer_with_state(state: BgpState) -> Peer {
+    pub(crate) async fn create_test_peer_with_state(state: BgpState) -> Peer {
         // Create a test TCP connection
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

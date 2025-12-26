@@ -436,10 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_connection_success_active() {
-        let cases = vec![
-            (None, BgpState::OpenSent),
-            (Some(5), BgpState::Active),
-        ];
+        let cases = vec![(None, BgpState::OpenSent), (Some(5), BgpState::Active)];
 
         for (delay_open, expected_state) in cases {
             let mut peer = create_test_peer(BgpState::Active).await;

@@ -114,3 +114,34 @@ impl Peer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer::states::tests::create_test_peer_with_state;
+
+    #[tokio::test]
+    async fn test_openconfirm_ignores_start_events() {
+        let start_events = vec![
+            FsmEvent::ManualStart,
+            FsmEvent::AutomaticStart,
+            FsmEvent::ManualStartPassive,
+            FsmEvent::AutomaticStartPassive,
+        ];
+
+        for event in start_events {
+            let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            let initial_counter = peer.fsm.connect_retry_counter;
+
+            peer.process_event(&event).await.unwrap();
+
+            assert_eq!(peer.state(), BgpState::OpenConfirm);
+            assert!(peer.conn.is_some());
+            assert_eq!(peer.fsm.connect_retry_counter, initial_counter);
+            assert!(peer.fsm.timers.hold_timer_started.is_some());
+            assert!(peer.fsm.timers.keepalive_timer_started.is_some());
+        }
+    }
+}
