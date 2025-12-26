@@ -118,6 +118,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::CeaseSubcode;
     use crate::peer::states::tests::create_test_peer_with_state;
 
     #[tokio::test]
@@ -143,5 +144,100 @@ mod tests {
             assert!(peer.fsm.timers.hold_timer_started.is_some());
             assert!(peer.fsm.timers.keepalive_timer_started.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_manual_stop() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 5;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        peer.config.send_notification_without_open = true;
+
+        peer.process_event(&FsmEvent::ManualStop).await.unwrap();
+
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 0,
+            "ConnectRetryCounter should be zero"
+        );
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be zero"
+        );
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "Hold timer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "Keepalive timer should be stopped"
+        );
+        assert_eq!(
+            peer.statistics.notification_sent, 1,
+            "NOTIFICATION with Cease should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_automatic_stop() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 2;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        peer.config.send_notification_without_open = true;
+
+        let result = peer
+            .process_event(&FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached))
+            .await;
+
+        assert!(result.is_err(), "AutomaticStop should return error");
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 3,
+            "ConnectRetryCounter should be incremented by 1"
+        );
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "Hold timer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "Keepalive timer should be stopped"
+        );
+        assert_eq!(
+            peer.statistics.notification_sent, 1,
+            "NOTIFICATION with Cease should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_automatic_stop_with_damping() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 1;
+        peer.config.damp_peer_oscillations = true;
+        peer.consecutive_down_count = 0;
+        peer.config.send_notification_without_open = true;
+
+        let result = peer
+            .process_event(&FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 2,
+            "ConnectRetryCounter should be incremented"
+        );
+        assert_eq!(
+            peer.consecutive_down_count, 1,
+            "Peer oscillation damping should increment consecutive_down_count"
+        );
     }
 }
