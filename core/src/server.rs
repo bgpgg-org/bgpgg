@@ -17,8 +17,8 @@ use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
-use crate::fsm::BgpState;
 use crate::net::peer_ip;
+use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::propagate::{

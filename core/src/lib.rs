@@ -15,7 +15,6 @@
 pub mod bgp;
 pub mod config;
 pub mod events;
-pub mod fsm;
 pub mod grpc;
 pub mod log;
 pub mod net;

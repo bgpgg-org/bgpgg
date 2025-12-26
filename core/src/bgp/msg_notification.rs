@@ -18,7 +18,7 @@ use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MessageHeaderError {
     ConnectionNotSynchronized = 1,
     BadMessageLength = 2,
@@ -62,7 +62,7 @@ impl From<u8> for OpenMessageError {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum UpdateMessageError {
     MalformedAttributeList = 1,
     UnrecognizedWellKnownAttribute = 2,
@@ -97,7 +97,7 @@ impl From<u8> for UpdateMessageError {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BgpError {
     MessageHeaderError(MessageHeaderError),
     OpenMessageError(OpenMessageError),
@@ -256,7 +256,7 @@ impl BgpError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct NotifcationMessage {
     error: BgpError,
     data: Vec<u8>,
@@ -305,6 +305,14 @@ impl NotifcationMessage {
 
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    /// RFC 4271 Event 24: Check if this is a version error NOTIFICATION
+    pub fn is_version_error(&self) -> bool {
+        matches!(
+            self.error,
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber)
+        )
     }
 }
 
@@ -526,5 +534,38 @@ mod tests {
             result.error(),
             &BgpError::MessageHeaderError(MessageHeaderError::Unknown(99))
         );
+    }
+
+    #[test]
+    fn test_is_version_error() {
+        // Version error should return true
+        let notif = NotifcationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+        assert!(notif.is_version_error());
+
+        // Other OPEN errors should return false
+        let notif = NotifcationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::BadPeerAs),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
+
+        // Non-OPEN errors should return false
+        let notif = NotifcationMessage::new(
+            BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
+
+        let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+        assert!(!notif.is_version_error());
+
+        let notif = NotifcationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+        assert!(!notif.is_version_error());
     }
 }

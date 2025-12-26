@@ -16,7 +16,7 @@
 
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
-use crate::fsm::BgpState;
+use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
