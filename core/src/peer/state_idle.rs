@@ -133,57 +133,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::PeerConfig;
-    use crate::peer::{BgpState, Fsm};
-    use crate::rib::rib_in::AdjRibIn;
-    use crate::server::ConnectionType;
-    use std::net::{Ipv4Addr, SocketAddr};
-    use tokio::io::AsyncReadExt;
-    use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
-
-    async fn create_test_peer(state: BgpState) -> Peer {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                let (mut rx, _tx) = stream.into_split();
-                let mut buf = vec![0u8; 4096];
-                while rx.read(&mut buf).await.is_ok() {}
-            }
-        });
-
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (tcp_rx, tcp_tx) = client.into_split();
-
-        let (server_tx, _server_rx) = mpsc::unbounded_channel();
-        let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
-
-        let local_ip = Ipv4Addr::new(127, 0, 0, 1);
-        Peer {
-            addr: addr.ip(),
-            port: addr.port(),
-            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
-            conn: Some(super::super::TcpConnection {
-                tx: tcp_tx,
-                rx: tcp_rx,
-            }),
-            asn: Some(65001),
-            rib_in: AdjRibIn::new(),
-            session_type: Some(crate::peer::SessionType::Ebgp),
-            statistics: crate::peer::PeerStatistics::default(),
-            config: PeerConfig::default(),
-            peer_rx,
-            server_tx,
-            local_addr: SocketAddr::new(local_ip.into(), 0),
-            connect_retry_secs: 120,
-            consecutive_down_count: 0,
-            conn_type: ConnectionType::Outgoing,
-            manually_stopped: false,
-            established_at: None,
-        }
-    }
+    use crate::peer::states::tests::create_test_peer_with_state;
 
     #[tokio::test]
     async fn test_connect_retry_timer_started_on_idle_transition() {
@@ -195,7 +145,7 @@ mod tests {
         ];
 
         for (event, expected_state) in test_cases {
-            let mut peer = create_test_peer(BgpState::Idle).await;
+            let mut peer = create_test_peer_with_state(BgpState::Idle).await;
             assert!(
                 peer.fsm.timers.connect_retry_started.is_none(),
                 "ConnectRetryTimer should not be started initially"
