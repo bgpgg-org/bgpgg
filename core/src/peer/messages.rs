@@ -100,7 +100,10 @@ impl Peer {
         conn.tx.write_all(&keepalive_msg.serialize()).await?;
         self.statistics.keepalive_sent += 1;
         debug!("sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
-        self.fsm.timers.start_keepalive_timer();
+        // RFC 4271: Restart KeepaliveTimer unless negotiated HoldTime is zero
+        if self.fsm.timers.hold_time.as_secs() > 0 {
+            self.fsm.timers.start_keepalive_timer();
+        }
         Ok(())
     }
 
@@ -142,7 +145,10 @@ impl Peer {
             }
             BgpMessage::Update(_) => {
                 let delta = self.handle_message(message).await?;
-                self.fsm.timers.reset_hold_timer();
+                // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
+                if self.fsm.timers.hold_time.as_secs() > 0 {
+                    self.fsm.timers.reset_hold_timer();
+                }
 
                 if let Some((withdrawn, announced)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
@@ -155,7 +161,10 @@ impl Peer {
             }
             BgpMessage::KeepAlive(_) => {
                 let _ = self.handle_message(message).await;
-                self.fsm.timers.reset_hold_timer();
+                // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
+                if self.fsm.timers.hold_time.as_secs() > 0 {
+                    self.fsm.timers.reset_hold_timer();
+                }
                 Ok(())
             }
             BgpMessage::Open(_) => {
@@ -265,8 +274,10 @@ impl Peer {
         conn.tx.write_all(&update_msg.serialize()).await?;
         self.statistics.update_sent += 1;
         // RFC 4271: "Each time the local system sends a KEEPALIVE or UPDATE message,
-        // it restarts its KeepaliveTimer"
-        self.fsm.timers.reset_keepalive_timer();
+        // it restarts its KeepaliveTimer, unless the negotiated HoldTime value is zero"
+        if self.fsm.timers.hold_time.as_secs() > 0 {
+            self.fsm.timers.reset_keepalive_timer();
+        }
         Ok(())
     }
 }
