@@ -41,50 +41,52 @@ pub struct BgpOpenParams {
 }
 
 /// BGP FSM events as defined in RFC 4271 Section 8.1
-/// Events now carry necessary data for the FSM to send messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsmEvent {
     /// Event 1: ManualStart
     ManualStart,
     /// Event 2: ManualStop
     ManualStop,
-    /// Event 3: AutomaticStart - triggered when IdleHoldTimer expires
+    /// Event 3: AutomaticStart
     AutomaticStart,
     /// Event 4: ManualStart_with_PassiveTcpEstablishment
     ManualStartPassive,
     /// Event 5: AutomaticStart_with_PassiveTcpEstablishment
     AutomaticStartPassive,
-    /// Event 8: AutomaticStop - automatic stop based on implementation logic (e.g., max prefix)
+    /// Event 8: AutomaticStop
     AutomaticStop(CeaseSubcode),
-    /// Event 9: ConnectRetryTimerExpires
+    /// Event 9: ConnectRetryTimer_Expires
     ConnectRetryTimerExpires,
     /// Event 10: HoldTimer_Expires
     HoldTimerExpires,
     /// Event 11: KeepaliveTimer_Expires
     KeepaliveTimerExpires,
-    /// Event 12: DelayOpenTimerExpires (RFC 4271 8.1.3)
+    /// Event 12: DelayOpenTimer_Expires
     DelayOpenTimerExpires,
     /// Event 13: IdleHoldTimer_Expires
     IdleHoldTimerExpires,
-    /// TCP connection is confirmed, ready to send OPEN
+    /// Event 17: Tcp_CR_Acked
     TcpConnectionConfirmed,
+    /// Event 18: TcpConnectionFails
     TcpConnectionFails,
-    /// Event 19: BGPOpen - OPEN message received (generic)
+    /// Event 19: BGPOpen
     BgpOpenReceived(BgpOpenParams),
     /// Event 20: BGPOpen with DelayOpenTimer running
     BgpOpenWithDelayOpenTimer(BgpOpenParams),
-    /// Event 21: BGP Message Header Error - carries NOTIFICATION to send
+    /// Event 21: BGPHeaderErr
     BgpHeaderErr(NotifcationMessage),
-    /// Event 22: BGP OPEN Message Error - carries NOTIFICATION to send
+    /// Event 22: BGPOpenMsgErr
     BgpOpenMsgErr(NotifcationMessage),
-    BgpKeepaliveReceived,
-    BgpUpdateReceived,
-    /// Event 28: UPDATE Message Error - carries NOTIFICATION to send
-    BgpUpdateMsgErr(NotifcationMessage),
-    /// Event 24: NotifMsgVerErr - NOTIFICATION with version error
+    /// Event 24: NotifMsgVerErr
     NotifMsgVerErr,
-    /// Event 25: NotifMsg - NOTIFICATION without version error
+    /// Event 25: NotifMsg
     NotifMsg,
+    /// Event 26: KeepAliveMsg
+    BgpKeepaliveReceived,
+    /// Event 27: UpdateMsg
+    BgpUpdateReceived,
+    /// Event 28: UpdateMsgErr
+    BgpUpdateMsgErr(NotifcationMessage),
 }
 
 /// BGP FSM timers
