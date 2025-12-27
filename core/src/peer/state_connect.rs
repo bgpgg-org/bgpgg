@@ -580,10 +580,7 @@ mod tests {
         ];
 
         // RFC 4271 Section 9: Events that cause FSM error (KEEPALIVE, UPDATE in Connect)
-        let events_fsm_error = vec![
-            FsmEvent::BgpKeepaliveReceived,
-            FsmEvent::BgpUpdateReceived,
-        ];
+        let events_fsm_error = vec![FsmEvent::BgpKeepaliveReceived, FsmEvent::BgpUpdateReceived];
 
         let cases = vec![(true, true), (false, false)];
 
