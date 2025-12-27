@@ -145,7 +145,10 @@ impl Peer {
             }
             BgpMessage::Update(_) => {
                 let delta = self.handle_message(message).await?;
-                self.fsm.timers.reset_hold_timer();
+                // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
+                if self.fsm.timers.hold_time.as_secs() > 0 {
+                    self.fsm.timers.reset_hold_timer();
+                }
 
                 if let Some((withdrawn, announced)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
@@ -158,7 +161,10 @@ impl Peer {
             }
             BgpMessage::KeepAlive(_) => {
                 let _ = self.handle_message(message).await;
-                self.fsm.timers.reset_hold_timer();
+                // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
+                if self.fsm.timers.hold_time.as_secs() > 0 {
+                    self.fsm.timers.reset_hold_timer();
+                }
                 Ok(())
             }
             BgpMessage::Open(_) => {

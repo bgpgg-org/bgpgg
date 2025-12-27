@@ -85,6 +85,8 @@ impl Peer {
             // RFC 4271 8.2.2: TcpConnectionFails in Established -> Idle
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
             }
@@ -92,6 +94,8 @@ impl Peer {
             // RFC 4271 8.2.2: NotifMsg in Established -> Idle
             (BgpState::Idle, FsmEvent::NotifMsg) | (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
             }
@@ -102,7 +106,10 @@ impl Peer {
 
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Established, FsmEvent::BgpUpdateReceived) => {
-                self.fsm.timers.reset_hold_timer();
+                // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
+                if self.fsm.timers.hold_time.as_secs() > 0 {
+                    self.fsm.timers.reset_hold_timer();
+                }
                 if let Some(established_at) = self.established_at {
                     let stability_threshold = self.fsm.timers.hold_time;
                     if established_at.elapsed() >= stability_threshold
@@ -324,49 +331,88 @@ mod tests {
 
     #[tokio::test]
     async fn test_established_keepalive_received() {
-        // RFC 4271 8.2.2: KeepAliveMsg -> reset HoldTimer, stay Established
-        let mut peer = create_test_peer_with_state(BgpState::Established).await;
-        peer.fsm.timers.start_hold_timer();
-        peer.fsm.timers.start_keepalive_timer();
-        peer.consecutive_down_count = 3;
-        peer.config.damp_peer_oscillations = true;
+        // RFC 4271 8.2.2: KeepAliveMsg -> reset HoldTimer if non-zero, stay Established
+        let test_cases = vec![
+            (180, true),  // (hold_time, should_reset_hold_timer)
+            (0, false),   // hold_time=0 should not reset hold timer
+        ];
 
-        // Set established_at to simulate stable connection
-        peer.established_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(200));
+        for (hold_time, should_reset) in test_cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.fsm.timers.set_negotiated_hold_time(hold_time);
+            if hold_time > 0 {
+                peer.fsm.timers.start_hold_timer();
+                peer.fsm.timers.start_keepalive_timer();
+            }
+            peer.consecutive_down_count = 3;
+            peer.config.damp_peer_oscillations = true;
 
-        peer.process_event(&FsmEvent::BgpKeepaliveReceived)
-            .await
-            .unwrap();
+            // Set established_at to simulate stable connection
+            peer.established_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(200));
 
-        assert_eq!(peer.state(), BgpState::Established);
-        assert!(peer.conn.is_some(), "TCP connection should remain");
-        assert!(
-            peer.fsm.timers.hold_timer_started.is_some(),
-            "Hold timer should be reset"
-        );
-        assert_eq!(
-            peer.consecutive_down_count, 0,
-            "Damping counter should be reset after stable connection"
-        );
+            peer.process_event(&FsmEvent::BgpKeepaliveReceived)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::Established);
+            assert!(peer.conn.is_some(), "TCP connection should remain");
+
+            if should_reset {
+                assert!(
+                    peer.fsm.timers.hold_timer_started.is_some(),
+                    "Hold timer should be reset when hold_time > 0"
+                );
+            } else {
+                assert!(
+                    peer.fsm.timers.hold_timer_started.is_none(),
+                    "Hold timer should NOT be reset when hold_time is zero"
+                );
+            }
+
+            if hold_time > 0 {
+                assert_eq!(
+                    peer.consecutive_down_count, 0,
+                    "Damping counter should be reset after stable connection"
+                );
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_established_update_received() {
-        // RFC 4271 8.2.2: UpdateMsg -> reset HoldTimer, stay Established
-        let mut peer = create_test_peer_with_state(BgpState::Established).await;
-        peer.fsm.timers.start_hold_timer();
-        peer.fsm.timers.start_keepalive_timer();
+        // RFC 4271 8.2.2: UpdateMsg -> reset HoldTimer if non-zero, stay Established
+        let test_cases = vec![
+            (180, true),  // (hold_time, should_reset_hold_timer)
+            (0, false),   // hold_time=0 should not reset hold timer
+        ];
 
-        peer.process_event(&FsmEvent::BgpUpdateReceived)
-            .await
-            .unwrap();
+        for (hold_time, should_reset) in test_cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.fsm.timers.set_negotiated_hold_time(hold_time);
+            if hold_time > 0 {
+                peer.fsm.timers.start_hold_timer();
+                peer.fsm.timers.start_keepalive_timer();
+            }
 
-        assert_eq!(peer.state(), BgpState::Established);
-        assert!(peer.conn.is_some(), "TCP connection should remain");
-        assert!(
-            peer.fsm.timers.hold_timer_started.is_some(),
-            "Hold timer should be reset"
-        );
+            peer.process_event(&FsmEvent::BgpUpdateReceived)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::Established);
+            assert!(peer.conn.is_some(), "TCP connection should remain");
+
+            if should_reset {
+                assert!(
+                    peer.fsm.timers.hold_timer_started.is_some(),
+                    "Hold timer should be reset when hold_time > 0"
+                );
+            } else {
+                assert!(
+                    peer.fsm.timers.hold_timer_started.is_none(),
+                    "Hold timer should NOT be reset when hold_time is zero"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -419,6 +465,14 @@ mod tests {
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
         assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 3,
+            "ConnectRetryCounter should be incremented"
+        );
+        assert!(
             peer.fsm.timers.hold_timer_started.is_none(),
             "Hold timer should be stopped"
         );
@@ -436,6 +490,7 @@ mod tests {
     async fn test_established_notification_received() {
         // RFC 4271 8.2.2: NotifMsg -> Idle
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
+        peer.fsm.connect_retry_counter = 1;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
 
@@ -443,6 +498,14 @@ mod tests {
 
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 2,
+            "ConnectRetryCounter should be incremented"
+        );
         assert!(
             peer.fsm.timers.hold_timer_started.is_none(),
             "Hold timer should be stopped"
