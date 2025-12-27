@@ -175,7 +175,7 @@ impl Peer {
 
             let sleep_future = match next_send_time {
                 Some(instant) => tokio::time::sleep_until(instant.into()),
-                None => tokio::time::sleep(Duration::from_secs(86400)), // Far future
+                None => tokio::time::sleep(Duration::from_secs(u64::MAX / 2)),
             };
 
             tokio::select! {

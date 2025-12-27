@@ -553,4 +553,36 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_openconfirm_transition_to_established() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+
+        peer.process_event(&FsmEvent::BgpKeepaliveReceived)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Established);
+        assert!(peer.established_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_keepalive_received() {
+        use std::time::Duration;
+
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.timers.start_hold_timer();
+        let hold_start = peer.fsm.timers.hold_timer_started;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        peer.process_event(&FsmEvent::BgpKeepaliveReceived)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Established);
+        assert!(peer.fsm.timers.hold_timer_started > hold_start);
+    }
 }

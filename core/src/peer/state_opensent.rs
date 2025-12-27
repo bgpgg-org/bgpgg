@@ -292,4 +292,43 @@ mod tests {
             assert_eq!(peer.statistics.notification_sent, 1);
         }
     }
+
+    #[tokio::test]
+    async fn test_opensent_ignores_start_events() {
+        let start_events = vec![
+            FsmEvent::ManualStart,
+            FsmEvent::AutomaticStart,
+            FsmEvent::ManualStartPassive,
+            FsmEvent::AutomaticStartPassive,
+        ];
+
+        for event in start_events {
+            let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+            let initial_counter = peer.fsm.connect_retry_counter;
+
+            peer.process_event(&event).await.unwrap();
+
+            assert_eq!(peer.state(), BgpState::OpenSent);
+            assert_eq!(peer.fsm.connect_retry_counter, initial_counter);
+            assert!(peer.conn.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_opensent_automatic_stop_damping() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;
+        peer.config.damp_peer_oscillations = true;
+        peer.consecutive_down_count = 0;
+        peer.fsm.connect_retry_counter = 1;
+        peer.config.send_notification_without_open = true;
+
+        let result = peer
+            .process_event(&FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert_eq!(peer.consecutive_down_count, 1);
+        assert_eq!(peer.fsm.connect_retry_counter, 2);
+    }
 }

@@ -31,7 +31,6 @@ mod state_active;
 mod state_connect;
 mod state_established;
 mod state_idle;
-mod state_open;
 mod state_openconfirm;
 mod state_opensent;
 mod states;
