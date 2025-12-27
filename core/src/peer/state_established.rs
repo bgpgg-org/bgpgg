@@ -77,6 +77,8 @@ impl Peer {
             (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif)) => {
                 let _ = self.send_notification(notif.clone()).await;
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
                 return Err(PeerError::UpdateError);
@@ -122,10 +124,18 @@ impl Peer {
                 }
             }
 
-            (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires) => {
+            // RFC 4271 8.2.2: FSM errors - Events 9, 12-13, 20-22 -> send FSM error NOTIFICATION
+            (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)
+            | (BgpState::Idle, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::Idle, FsmEvent::BgpOpenWithDelayOpenTimer(_))
+            | (BgpState::Idle, FsmEvent::BgpHeaderErr(_))
+            | (BgpState::Idle, FsmEvent::BgpOpenMsgErr(_)) => {
                 let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
                 return Err(PeerError::FsmError);
@@ -141,6 +151,7 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{CeaseSubcode, UpdateMessageError};
+    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
 
     #[tokio::test]
@@ -289,8 +300,8 @@ mod tests {
     async fn test_established_keepalive_timer_expires() {
         // RFC 4271 8.2.2: KeepaliveTimer_Expires -> send KEEPALIVE, stay Established
         let test_cases = vec![
-            (180, true),  // (hold_time, should_restart_timer)
-            (0, false),   // hold_time=0 should not restart timer
+            (180, true), // (hold_time, should_restart_timer)
+            (0, false),  // hold_time=0 should not restart timer
         ];
 
         for (hold_time, should_restart) in test_cases {
@@ -333,8 +344,8 @@ mod tests {
     async fn test_established_keepalive_received() {
         // RFC 4271 8.2.2: KeepAliveMsg -> reset HoldTimer if non-zero, stay Established
         let test_cases = vec![
-            (180, true),  // (hold_time, should_reset_hold_timer)
-            (0, false),   // hold_time=0 should not reset hold timer
+            (180, true), // (hold_time, should_reset_hold_timer)
+            (0, false),  // hold_time=0 should not reset hold timer
         ];
 
         for (hold_time, should_reset) in test_cases {
@@ -348,7 +359,8 @@ mod tests {
             peer.config.damp_peer_oscillations = true;
 
             // Set established_at to simulate stable connection
-            peer.established_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(200));
+            peer.established_at =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(200));
 
             peer.process_event(&FsmEvent::BgpKeepaliveReceived)
                 .await
@@ -382,8 +394,8 @@ mod tests {
     async fn test_established_update_received() {
         // RFC 4271 8.2.2: UpdateMsg -> reset HoldTimer if non-zero, stay Established
         let test_cases = vec![
-            (180, true),  // (hold_time, should_reset_hold_timer)
-            (0, false),   // hold_time=0 should not reset hold timer
+            (180, true), // (hold_time, should_reset_hold_timer)
+            (0, false),  // hold_time=0 should not reset hold timer
         ];
 
         for (hold_time, should_reset) in test_cases {
@@ -419,6 +431,7 @@ mod tests {
     async fn test_established_update_msg_error() {
         // RFC 4271 8.2.2: UpdateMsgErr -> send NOTIFICATION, -> Idle
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
+        peer.fsm.connect_retry_counter = 3;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
         peer.config.send_notification_without_open = true;
@@ -433,6 +446,14 @@ mod tests {
         assert!(result.is_err(), "UpdateMsgErr should return error");
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 4,
+            "ConnectRetryCounter should be incremented"
+        );
         assert!(
             peer.fsm.timers.hold_timer_started.is_none(),
             "Hold timer should be stopped"
@@ -520,6 +541,7 @@ mod tests {
     async fn test_established_fsm_error_connect_retry_timer() {
         // RFC 4271 6.6: Event 9 (ConnectRetryTimerExpires) in Established -> FSM Error
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
+        peer.fsm.connect_retry_counter = 1;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
         peer.config.send_notification_without_open = true;
@@ -531,6 +553,14 @@ mod tests {
         assert!(result.is_err(), "FSM error should return error");
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 2,
+            "ConnectRetryCounter should be incremented"
+        );
         assert!(
             peer.fsm.timers.hold_timer_started.is_none(),
             "Hold timer should be stopped"
@@ -556,7 +586,8 @@ mod tests {
 
         // Set established_at to simulate stable connection (longer than hold_time)
         let hold_time = peer.fsm.timers.hold_time;
-        peer.established_at = Some(std::time::Instant::now() - hold_time - std::time::Duration::from_secs(1));
+        peer.established_at =
+            Some(std::time::Instant::now() - hold_time - std::time::Duration::from_secs(1));
 
         peer.process_event(&FsmEvent::BgpKeepaliveReceived)
             .await
@@ -588,5 +619,67 @@ mod tests {
             peer.consecutive_down_count, 3,
             "Damping counter should NOT be reset before stability threshold"
         );
+    }
+
+    #[tokio::test]
+    async fn test_established_fsm_errors() {
+        // RFC 4271: Events 12-13, 20-22 in Established -> FSM Error
+        let events = vec![
+            FsmEvent::DelayOpenTimerExpires,
+            FsmEvent::IdleHoldTimerExpires,
+            FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                peer_asn: 65001,
+                peer_hold_time: 180,
+                peer_bgp_id: 0x02020202,
+                local_asn: 65000,
+                local_hold_time: 180,
+            }),
+            FsmEvent::BgpHeaderErr(NotifcationMessage::new(
+                BgpError::MessageHeaderError(
+                    crate::bgp::msg_notification::MessageHeaderError::BadMessageLength,
+                ),
+                vec![],
+            )),
+            FsmEvent::BgpOpenMsgErr(NotifcationMessage::new(
+                BgpError::OpenMessageError(
+                    crate::bgp::msg_notification::OpenMessageError::UnsupportedVersionNumber,
+                ),
+                vec![],
+            )),
+        ];
+
+        for event in events {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.fsm.connect_retry_counter = 3;
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            peer.config.send_notification_without_open = true;
+
+            let result = peer.process_event(&event).await;
+
+            assert!(result.is_err(), "FSM error should return error");
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.conn.is_none(), "TCP connection should be dropped");
+            assert!(
+                peer.fsm.timers.connect_retry_started.is_none(),
+                "ConnectRetryTimer should be set to zero"
+            );
+            assert_eq!(
+                peer.fsm.connect_retry_counter, 4,
+                "ConnectRetryCounter should be incremented"
+            );
+            assert!(
+                peer.fsm.timers.hold_timer_started.is_none(),
+                "Hold timer should be stopped"
+            );
+            assert!(
+                peer.fsm.timers.keepalive_timer_started.is_none(),
+                "Keepalive timer should be stopped"
+            );
+            assert_eq!(
+                peer.statistics.notification_sent, 1,
+                "NOTIFICATION should be sent"
+            );
+        }
     }
 }

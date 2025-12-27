@@ -487,8 +487,13 @@ impl Fsm {
             // RFC 4271 8.2.2: Event 24, 25 (NotifMsg) -> Idle
             (BgpState::Established, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
             (BgpState::Established, FsmEvent::NotifMsg) => BgpState::Idle,
-            // RFC 4271 6.6: Event 9 (ConnectRetryTimerExpires) in Established -> FSM Error
-            (BgpState::Established, FsmEvent::ConnectRetryTimerExpires) => BgpState::Idle,
+            // RFC 4271 6.6: Events 9, 12-13, 20-22 in Established -> FSM Error
+            (BgpState::Established, FsmEvent::ConnectRetryTimerExpires)
+            | (BgpState::Established, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::Established, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::Established, FsmEvent::BgpOpenWithDelayOpenTimer(_))
+            | (BgpState::Established, FsmEvent::BgpHeaderErr(_))
+            | (BgpState::Established, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,
 
             // Default: Invalid event for current state, stay in same state
             _ => self.state,
@@ -507,6 +512,7 @@ impl Fsm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
 
     const TEST_LOCAL_ADDR: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 
@@ -759,10 +765,26 @@ mod tests {
             (BgpState::OpenConfirm, FsmEvent::NotifMsg, BgpState::Idle),
             // From Established
             // RFC 4271 8.2.2: Events 1, 3-7 (Start events) are ignored in Established state
-            (BgpState::Established, FsmEvent::ManualStart, BgpState::Established),
-            (BgpState::Established, FsmEvent::AutomaticStart, BgpState::Established),
-            (BgpState::Established, FsmEvent::ManualStartPassive, BgpState::Established),
-            (BgpState::Established, FsmEvent::AutomaticStartPassive, BgpState::Established),
+            (
+                BgpState::Established,
+                FsmEvent::ManualStart,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                FsmEvent::AutomaticStart,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                FsmEvent::ManualStartPassive,
+                BgpState::Established,
+            ),
+            (
+                BgpState::Established,
+                FsmEvent::AutomaticStartPassive,
+                BgpState::Established,
+            ),
             // RFC 4271 8.2.2: Event 2 (ManualStop) -> Idle
             (BgpState::Established, FsmEvent::ManualStop, BgpState::Idle),
             (
@@ -829,6 +851,37 @@ mod tests {
             (BgpState::OpenConfirm, FsmEvent::ConnectRetryTimerExpires),
             // Established + ConnectRetryTimerExpires -> Idle (Event 9)
             (BgpState::Established, FsmEvent::ConnectRetryTimerExpires),
+            // Established + DelayOpenTimerExpires -> Idle (Event 12)
+            (BgpState::Established, FsmEvent::DelayOpenTimerExpires),
+            // Established + IdleHoldTimerExpires -> Idle (Event 13)
+            (BgpState::Established, FsmEvent::IdleHoldTimerExpires),
+            // Established + BgpOpen -> Idle (Event 20)
+            (
+                BgpState::Established,
+                FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                    peer_asn: 65001,
+                    peer_hold_time: 180,
+                    peer_bgp_id: 0x02020202,
+                    local_asn: 65000,
+                    local_hold_time: 180,
+                }),
+            ),
+            // Established + BgpHeaderErr -> Idle (Event 21)
+            (
+                BgpState::Established,
+                FsmEvent::BgpHeaderErr(NotifcationMessage::new(
+                    BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+                    vec![],
+                )),
+            ),
+            // Established + BgpOpenMsgErr -> Idle (Event 22)
+            (
+                BgpState::Established,
+                FsmEvent::BgpOpenMsgErr(NotifcationMessage::new(
+                    BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+                    vec![],
+                )),
+            ),
         ];
 
         for (initial_state, event) in test_cases {

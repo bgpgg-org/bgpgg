@@ -261,8 +261,8 @@ mod tests {
     #[tokio::test]
     async fn test_openconfirm_keepalive_timer_expires() {
         let test_cases = vec![
-            (180, true),  // (hold_time, should_restart_timer)
-            (0, false),   // hold_time=0 should not restart timer
+            (180, true), // (hold_time, should_restart_timer)
+            (0, false),  // hold_time=0 should not restart timer
         ];
 
         for (hold_time, should_restart) in test_cases {
@@ -404,9 +404,7 @@ mod tests {
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
 
-        peer.process_event(&FsmEvent::NotifMsgVerErr)
-            .await
-            .unwrap();
+        peer.process_event(&FsmEvent::NotifMsgVerErr).await.unwrap();
 
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
@@ -521,7 +519,9 @@ mod tests {
             }),
             FsmEvent::BgpUpdateReceived,
             FsmEvent::BgpUpdateMsgErr(NotifcationMessage::new(
-                BgpError::UpdateMessageError(crate::bgp::msg_notification::UpdateMessageError::MalformedAttributeList),
+                BgpError::UpdateMessageError(
+                    crate::bgp::msg_notification::UpdateMessageError::MalformedAttributeList,
+                ),
                 vec![],
             )),
         ];
