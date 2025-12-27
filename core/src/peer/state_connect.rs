@@ -15,7 +15,7 @@
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
-use crate::bgp::msg_notification::{BgpError, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::{debug, error, info};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -131,7 +131,7 @@ impl Peer {
                     Err(e) => {
                         debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         // RFC 4271 Events 21, 22: Determine error type and send appropriate event
-                        let event = if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                        let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                             match notif.error() {
                                 BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
                                 BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),
@@ -242,7 +242,7 @@ impl Peer {
             (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
                 let _ = self
-                    .send_notification(NotifcationMessage::new(
+                    .send_notification(NotificationMessage::new(
                         BgpError::FiniteStateMachineError,
                         vec![],
                     ))
@@ -342,7 +342,7 @@ mod tests {
             peer.config.send_notification_without_open = send_notif;
             peer.config.damp_peer_oscillations = true;
             let initial_down_count = peer.consecutive_down_count;
-            let notif = NotifcationMessage::new(error.clone(), vec![]);
+            let notif = NotificationMessage::new(error.clone(), vec![]);
             let event = match error {
                 BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
                 BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),
@@ -573,7 +573,7 @@ mod tests {
                 local_asn: 65000,
                 local_hold_time: 180,
             }),
-            FsmEvent::BgpUpdateMsgErr(NotifcationMessage::new(
+            FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(
                 BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
                 vec![],
             )),

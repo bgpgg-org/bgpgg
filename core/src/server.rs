@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::msg::Message;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
@@ -27,10 +27,35 @@ use crate::propagate::{
 use crate::rib::rib_loc::LocRib;
 use crate::{error, info};
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+
+/// Errors that can occur during server initialization or operation.
+#[derive(Debug)]
+pub enum ServerError {
+    InvalidListenAddr(String),
+    UnsupportedIPv6,
+    BindError(io::Error),
+    IoError(io::Error),
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerError::InvalidListenAddr(addr) => write!(f, "Invalid listen address: {}", addr),
+            ServerError::UnsupportedIPv6 => {
+                write!(f, "IPv6 listen addresses are not yet supported")
+            }
+            ServerError::BindError(e) => write!(f, "Failed to bind listener: {}", e),
+            ServerError::IoError(e) => write!(f, "I/O error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for ServerError {}
 
 /// TCP connection initiator for collision detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,18 +239,21 @@ pub struct BgpServer {
 }
 
 impl BgpServer {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self, ServerError> {
         let local_bgp_id = u32::from(config.router_id);
-        let sock_addr: SocketAddr = config.listen_addr.parse().expect("invalid listen_addr");
+        let sock_addr: SocketAddr = config
+            .listen_addr
+            .parse()
+            .map_err(|_| ServerError::InvalidListenAddr(config.listen_addr.clone()))?;
         let local_addr = match sock_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            std::net::IpAddr::V6(_) => panic!("IPv6 listen_addr not supported"),
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => return Err(ServerError::UnsupportedIPv6),
         };
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
 
-        BgpServer {
+        Ok(BgpServer {
             peers: HashMap::new(),
             loc_rib: LocRib::new(),
             config,
@@ -236,7 +264,7 @@ impl BgpServer {
             mgmt_rx,
             op_tx,
             op_rx,
-        }
+        })
     }
 
     /// Check if a peer should be accepted.
@@ -290,11 +318,13 @@ impl BgpServer {
         false // Accept new connection
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> Result<(), ServerError> {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
-        let listener = TcpListener::bind(&self.config.listen_addr).await.unwrap();
-        self.local_port = listener.local_addr().unwrap().port();
+        let listener = TcpListener::bind(&self.config.listen_addr)
+            .await
+            .map_err(ServerError::BindError)?;
+        self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
         let bind_addr = SocketAddr::new(self.local_addr.into(), 0);
         self.init_configured_peers(bind_addr);
@@ -387,7 +417,7 @@ impl BgpServer {
 
         if !self.should_accept_peer(peer_ip) {
             info!("rejecting unconfigured peer", "peer_ip" => peer_ip.to_string());
-            let notif = NotifcationMessage::new(
+            let notif = NotificationMessage::new(
                 BgpError::Cease(CeaseSubcode::ConnectionRejected),
                 Vec::new(),
             );
@@ -980,7 +1010,7 @@ mod tests {
             180,
             accept_unconfigured_peers,
         );
-        BgpServer::new(config)
+        BgpServer::new(config).expect("valid config")
     }
 
     #[test]

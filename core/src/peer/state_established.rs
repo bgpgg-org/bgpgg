@@ -15,7 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::{debug, error, info};
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ impl Peer {
             // RFC 4271 8.2.2: ManualStop in session states
             (BgpState::Idle, FsmEvent::ManualStop) => {
                 self.manually_stopped = true;
-                let notif = NotifcationMessage::new(
+                let notif = NotificationMessage::new(
                     BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
                     Vec::new(),
                 );
@@ -44,7 +44,7 @@ impl Peer {
 
             // RFC 4271 Event 8: AutomaticStop in session states
             (BgpState::Idle, FsmEvent::AutomaticStop(ref subcode)) => {
-                let notif = NotifcationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
+                let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_connect_retry();
@@ -67,7 +67,7 @@ impl Peer {
 
             // RFC 4271 Event 10: HoldTimer_Expires in session states
             (BgpState::Idle, FsmEvent::HoldTimerExpires) => {
-                let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+                let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_connect_retry();
@@ -133,7 +133,7 @@ impl Peer {
             | (BgpState::Idle, FsmEvent::BgpOpenWithDelayOpenTimer(_))
             | (BgpState::Idle, FsmEvent::BgpHeaderErr(_))
             | (BgpState::Idle, FsmEvent::BgpOpenMsgErr(_)) => {
-                let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
+                let notif = NotificationMessage::new(BgpError::FiniteStateMachineError, vec![]);
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_connect_retry();
@@ -190,7 +190,7 @@ impl Peer {
                         }
                         Err(e) => {
                             error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
-                            if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                            if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif).await;
                             }
                             self.disconnect(true);
@@ -224,7 +224,7 @@ impl Peer {
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!("shutdown requested", "peer_ip" => peer_ip.to_string());
-                            let notif = NotifcationMessage::new(BgpError::Cease(subcode), Vec::new());
+                            let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
@@ -572,7 +572,7 @@ mod tests {
         peer.fsm.timers.start_keepalive_timer();
         peer.config.send_notification_without_open = true;
 
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
             vec![],
         );
@@ -770,13 +770,13 @@ mod tests {
                 local_asn: 65000,
                 local_hold_time: 180,
             }),
-            FsmEvent::BgpHeaderErr(NotifcationMessage::new(
+            FsmEvent::BgpHeaderErr(NotificationMessage::new(
                 BgpError::MessageHeaderError(
                     crate::bgp::msg_notification::MessageHeaderError::BadMessageLength,
                 ),
                 vec![],
             )),
-            FsmEvent::BgpOpenMsgErr(NotifcationMessage::new(
+            FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
                 BgpError::OpenMessageError(
                     crate::bgp::msg_notification::OpenMessageError::UnsupportedVersionNumber,
                 ),

@@ -17,7 +17,7 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::bgp::msg_notification::{CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
 
 /// BGP FSM states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,9 +74,9 @@ pub enum FsmEvent {
     /// Event 20: BGPOpen with DelayOpenTimer running
     BgpOpenWithDelayOpenTimer(BgpOpenParams),
     /// Event 21: BGPHeaderErr
-    BgpHeaderErr(NotifcationMessage),
+    BgpHeaderErr(NotificationMessage),
     /// Event 22: BGPOpenMsgErr
-    BgpOpenMsgErr(NotifcationMessage),
+    BgpOpenMsgErr(NotificationMessage),
     /// Event 24: NotifMsgVerErr
     NotifMsgVerErr,
     /// Event 25: NotifMsg
@@ -86,7 +86,7 @@ pub enum FsmEvent {
     /// Event 27: UpdateMsg
     BgpUpdateReceived,
     /// Event 28: UpdateMsgErr
-    BgpUpdateMsgErr(NotifcationMessage),
+    BgpUpdateMsgErr(NotificationMessage),
 }
 
 /// BGP FSM timers
@@ -871,7 +871,7 @@ mod tests {
             // Established + BgpHeaderErr -> Idle (Event 21)
             (
                 BgpState::Established,
-                FsmEvent::BgpHeaderErr(NotifcationMessage::new(
+                FsmEvent::BgpHeaderErr(NotificationMessage::new(
                     BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
                     vec![],
                 )),
@@ -879,7 +879,7 @@ mod tests {
             // Established + BgpOpenMsgErr -> Idle (Event 22)
             (
                 BgpState::Established,
-                FsmEvent::BgpOpenMsgErr(NotifcationMessage::new(
+                FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
                     BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
                     vec![],
                 )),
@@ -933,9 +933,9 @@ mod tests {
 
     #[test]
     fn test_update_msg_err() {
-        use crate::bgp::msg_notification::{BgpError, NotifcationMessage, UpdateMessageError};
+        use crate::bgp::msg_notification::{BgpError, NotificationMessage, UpdateMessageError};
 
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
             vec![],
         );

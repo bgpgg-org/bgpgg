@@ -257,20 +257,20 @@ impl BgpError {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct NotifcationMessage {
+pub struct NotificationMessage {
     error: BgpError,
     data: Vec<u8>,
 }
 
-impl NotifcationMessage {
+impl NotificationMessage {
     pub fn new(error: BgpError, data: Vec<u8>) -> Self {
-        NotifcationMessage { error, data }
+        NotificationMessage { error, data }
     }
 
     pub fn from_parser_error(error: &ParserError) -> Option<Self> {
         match error {
             ParserError::BgpError { error, data } => {
-                Some(NotifcationMessage::new(error.clone(), data.clone()))
+                Some(NotificationMessage::new(error.clone(), data.clone()))
             }
             _ => None,
         }
@@ -281,7 +281,7 @@ impl NotifcationMessage {
         // so we log locally and return Unknown for malformed messages.
         if bytes.len() < 2 {
             warn!("received malformed NOTIFICATION message", "len" => bytes.len());
-            return NotifcationMessage {
+            return NotificationMessage {
                 error: BgpError::Unknown,
                 data: bytes,
             };
@@ -293,7 +293,7 @@ impl NotifcationMessage {
         let bgp_error = BgpError::new(err_code, err_sub_code);
         let data = &bytes[2..];
 
-        NotifcationMessage {
+        NotificationMessage {
             error: bgp_error,
             data: data.to_vec(),
         }
@@ -316,7 +316,7 @@ impl NotifcationMessage {
     }
 }
 
-impl Message for NotifcationMessage {
+impl Message for NotificationMessage {
     fn kind(&self) -> MessageType {
         MessageType::NOTIFICATION
     }
@@ -416,11 +416,11 @@ mod tests {
             0x01, // Attribute length
             0x02, // Attribute Value
         ];
-        let result = NotifcationMessage::from_bytes(input);
+        let result = NotificationMessage::from_bytes(input);
 
         assert_eq!(
             result,
-            NotifcationMessage {
+            NotificationMessage {
                 error: BgpError::UpdateMessageError(
                     UpdateMessageError::UnrecognizedWellKnownAttribute
                 ),
@@ -435,11 +435,11 @@ mod tests {
             0x02, // Error code
             0x04, // Error subcode
         ];
-        let result = NotifcationMessage::from_bytes(input);
+        let result = NotificationMessage::from_bytes(input);
 
         assert_eq!(
             result,
-            NotifcationMessage {
+            NotificationMessage {
                 error: BgpError::OpenMessageError(OpenMessageError::UnsupportedOptionalParameter),
                 data: vec![],
             }
@@ -451,7 +451,7 @@ mod tests {
         let error = BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength);
         let data = vec![0x00, 0x12];
 
-        let notif = NotifcationMessage::new(error, data.clone());
+        let notif = NotificationMessage::new(error, data.clone());
         assert_eq!(notif.data(), &data);
 
         let bytes = notif.to_bytes();
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(bytes[1], 2);
         assert_eq!(&bytes[2..], &data);
 
-        let decoded = NotifcationMessage::from_bytes(bytes);
+        let decoded = NotificationMessage::from_bytes(bytes);
         assert_eq!(decoded, notif);
     }
 
@@ -469,7 +469,7 @@ mod tests {
             error: BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
             data: Vec::new(),
         };
-        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+        let notif = NotificationMessage::from_parser_error(&parser_error).unwrap();
 
         assert_eq!(
             notif.error(),
@@ -484,7 +484,7 @@ mod tests {
             error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             data: vec![0x10, 0x01],
         };
-        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+        let notif = NotificationMessage::from_parser_error(&parser_error).unwrap();
 
         assert_eq!(
             notif.error(),
@@ -499,7 +499,7 @@ mod tests {
             error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
             data: vec![99],
         };
-        let notif = NotifcationMessage::from_parser_error(&parser_error).unwrap();
+        let notif = NotificationMessage::from_parser_error(&parser_error).unwrap();
 
         assert_eq!(
             notif.error(),
@@ -511,25 +511,25 @@ mod tests {
     #[test]
     fn test_from_parser_error_none() {
         let parser_error = ParserError::IoError("connection reset".to_string());
-        assert!(NotifcationMessage::from_parser_error(&parser_error).is_none());
+        assert!(NotificationMessage::from_parser_error(&parser_error).is_none());
     }
 
     #[test]
     fn test_from_bytes_malformed_too_short() {
-        let result = NotifcationMessage::from_bytes(vec![0x01]);
+        let result = NotificationMessage::from_bytes(vec![0x01]);
         assert_eq!(result.error(), &BgpError::Unknown);
         assert_eq!(result.data(), &[0x01]);
     }
 
     #[test]
     fn test_from_bytes_unknown_error_code() {
-        let result = NotifcationMessage::from_bytes(vec![99, 0]);
+        let result = NotificationMessage::from_bytes(vec![99, 0]);
         assert_eq!(result.error(), &BgpError::Unknown);
     }
 
     #[test]
     fn test_from_bytes_unknown_subcode() {
-        let result = NotifcationMessage::from_bytes(vec![1, 99]); // MessageHeaderError with unknown subcode
+        let result = NotificationMessage::from_bytes(vec![1, 99]); // MessageHeaderError with unknown subcode
         assert_eq!(
             result.error(),
             &BgpError::MessageHeaderError(MessageHeaderError::Unknown(99))
@@ -539,30 +539,30 @@ mod tests {
     #[test]
     fn test_is_version_error() {
         // Version error should return true
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
             vec![],
         );
         assert!(notif.is_version_error());
 
         // Other OPEN errors should return false
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::OpenMessageError(OpenMessageError::BadPeerAs),
             vec![],
         );
         assert!(!notif.is_version_error());
 
         // Non-OPEN errors should return false
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             vec![],
         );
         assert!(!notif.is_version_error());
 
-        let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+        let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
         assert!(!notif.is_version_error());
 
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
             vec![],
         );

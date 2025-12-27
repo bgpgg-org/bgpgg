@@ -19,8 +19,8 @@ use tokio::net::{TcpSocket, TcpStream};
 /// Extract IPv4 address from a SocketAddr, returns None for IPv6.
 pub fn ipv4_from_sockaddr(addr: SocketAddr) -> Option<Ipv4Addr> {
     match addr.ip() {
-        std::net::IpAddr::V4(ip) => Some(ip),
-        std::net::IpAddr::V6(_) => None,
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
     }
 }
 

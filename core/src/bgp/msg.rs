@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg_keepalive::KeepAliveMessage;
-use super::msg_notification::{BgpError, MessageHeaderError, NotifcationMessage};
+use super::msg_notification::{BgpError, MessageHeaderError, NotificationMessage};
 use super::msg_open::OpenMessage;
 use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
@@ -94,7 +94,7 @@ pub enum BgpMessage {
     Open(OpenMessage),
     Update(UpdateMessage),
     KeepAlive(KeepAliveMessage),
-    Notification(NotifcationMessage),
+    Notification(NotificationMessage),
 }
 
 impl BgpMessage {
@@ -112,7 +112,7 @@ impl BgpMessage {
             }
             MessageType::KEEPALIVE => Ok(BgpMessage::KeepAlive(KeepAliveMessage {})),
             MessageType::NOTIFICATION => {
-                let message = NotifcationMessage::from_bytes(bytes);
+                let message = NotificationMessage::from_bytes(bytes);
                 Ok(BgpMessage::Notification(message))
             }
         }

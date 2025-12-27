@@ -19,6 +19,8 @@ use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
 use std::collections::VecDeque;
+use std::fmt;
+use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -49,11 +51,11 @@ pub enum PeerError {
     /// BGP UPDATE message validation error
     UpdateError,
     /// I/O error during message send/receive
-    IoError(std::io::Error),
+    IoError(Error),
 }
 
-impl std::fmt::Display for PeerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PeerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PeerError::FsmError => write!(f, "FSM protocol error"),
             PeerError::AutomaticStop(subcode) => write!(f, "automatic stop: {:?}", subcode),
@@ -63,17 +65,17 @@ impl std::fmt::Display for PeerError {
     }
 }
 
-impl From<std::io::Error> for PeerError {
-    fn from(e: std::io::Error) -> Self {
+impl From<Error> for PeerError {
+    fn from(e: Error) -> Self {
         PeerError::IoError(e)
     }
 }
 
-impl From<PeerError> for std::io::Error {
+impl From<PeerError> for Error {
     fn from(e: PeerError) -> Self {
         match e {
             PeerError::IoError(io_err) => io_err,
-            _ => std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            _ => Error::new(ErrorKind::Other, e.to_string()),
         }
     }
 }
@@ -181,7 +183,7 @@ impl Peer {
         connect_retry_secs: u64,
     ) -> Self {
         let local_ip = match local_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
+            IpAddr::V4(ip) => ip,
             _ => Ipv4Addr::UNSPECIFIED,
         };
         Peer {

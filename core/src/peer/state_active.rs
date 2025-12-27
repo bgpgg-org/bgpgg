@@ -15,7 +15,7 @@
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::{debug, error};
 use std::time::Duration;
 
@@ -83,7 +83,7 @@ impl Peer {
                     }
                     Err(e) => {
                         debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        let event = if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                        let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                             match notif.error() {
                                 BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
                                 BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),
@@ -174,7 +174,7 @@ impl Peer {
             (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
                 let _ = self
-                    .send_notification(NotifcationMessage::new(
+                    .send_notification(NotificationMessage::new(
                         BgpError::FiniteStateMachineError,
                         vec![],
                     ))
@@ -202,7 +202,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_running()
                     && self.config.send_notification_without_open
                 {
-                    let notif = NotifcationMessage::new(
+                    let notif = NotificationMessage::new(
                         BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
                         Vec::new(),
                     );

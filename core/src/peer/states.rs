@@ -15,7 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::server::ConnectionType;
 use crate::{debug, error, info};
 use std::time::Duration;
@@ -52,7 +52,7 @@ impl Peer {
                         }
                         Err(e) => {
                             error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
-                            if let Some(notif) = NotifcationMessage::from_parser_error(&e) {
+                            if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif).await;
                             }
                             self.disconnect(true);
@@ -72,7 +72,7 @@ impl Peer {
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!("shutdown requested", "peer_ip" => peer_ip.to_string());
-                            let notif = NotifcationMessage::new(BgpError::Cease(subcode), Vec::new());
+                            let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
@@ -119,7 +119,7 @@ impl Peer {
     }
 
     /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
-    pub(super) async fn handle_notification_received(&mut self, notif: &NotifcationMessage) {
+    pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
         let event = if notif.is_version_error() {
             debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
             FsmEvent::NotifMsgVerErr
@@ -314,7 +314,7 @@ pub(super) mod tests {
             peer.fsm.timers.start_keepalive_timer();
             peer.config.send_notification_without_open = true;
 
-            let notif = NotifcationMessage::new(
+            let notif = NotificationMessage::new(
                 BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
                 vec![],
             );

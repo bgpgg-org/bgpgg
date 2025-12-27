@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 
 impl Peer {
     /// Handle OpenSent state transitions.
@@ -27,7 +27,7 @@ impl Peer {
             // RFC 4271 8.2.2: ManualStop in session states
             (BgpState::Idle, FsmEvent::ManualStop) => {
                 self.manually_stopped = true;
-                let notif = NotifcationMessage::new(
+                let notif = NotificationMessage::new(
                     BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
                     Vec::new(),
                 );
@@ -41,7 +41,7 @@ impl Peer {
 
             // RFC 4271 Event 8: AutomaticStop in session states
             (BgpState::Idle, FsmEvent::AutomaticStop(ref subcode)) => {
-                let notif = NotifcationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
+                let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_connect_retry();
@@ -64,7 +64,7 @@ impl Peer {
 
             // RFC 4271 Event 10: HoldTimer_Expires in session states
             (BgpState::Idle, FsmEvent::HoldTimerExpires) => {
-                let notif = NotifcationMessage::new(BgpError::HoldTimerExpired, vec![]);
+                let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
                 self.fsm.timers.stop_connect_retry();
@@ -93,7 +93,7 @@ impl Peer {
 
             (BgpState::Idle, FsmEvent::NotifMsg) => {
                 let _ = self
-                    .send_notification(NotifcationMessage::new(
+                    .send_notification(NotificationMessage::new(
                         BgpError::FiniteStateMachineError,
                         vec![],
                     ))
@@ -110,7 +110,7 @@ impl Peer {
             | (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
                 let _ = self
-                    .send_notification(NotifcationMessage::new(
+                    .send_notification(NotificationMessage::new(
                         BgpError::FiniteStateMachineError,
                         vec![],
                     ))
@@ -227,7 +227,7 @@ mod tests {
             peer.fsm.timers.start_connect_retry();
             peer.statistics.open_sent = 1;
 
-            let notif = NotifcationMessage::new(error, vec![]);
+            let notif = NotificationMessage::new(error, vec![]);
             let event = match notif.error() {
                 BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
                 BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),

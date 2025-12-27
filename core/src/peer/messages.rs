@@ -15,7 +15,7 @@
 use super::fsm::{BgpOpenParams, FsmEvent};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::utils::IpNetwork;
@@ -114,7 +114,7 @@ impl Peer {
     /// after OPEN has been sent.
     pub(super) async fn send_notification(
         &mut self,
-        notif_msg: NotifcationMessage,
+        notif_msg: NotificationMessage,
     ) -> Result<(), io::Error> {
         if !self.can_send_notification() {
             warn!("skipping NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
@@ -254,7 +254,7 @@ impl Peer {
                 }
                 Err(bgp_error) => {
                     // RFC 4271 Event 28: UpdateMsgErr
-                    let notif = NotifcationMessage::new(bgp_error, vec![]);
+                    let notif = NotificationMessage::new(bgp_error, vec![]);
                     self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
                         .await?;
                     Ok(None)
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_admin_shutdown_notification() {
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
             Vec::new(),
         );

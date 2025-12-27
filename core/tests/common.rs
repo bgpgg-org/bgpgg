@@ -16,7 +16,7 @@
 
 use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
-use bgpgg::bgp::msg_notification::NotifcationMessage;
+use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
@@ -133,7 +133,7 @@ pub async fn start_test_server(config: Config) -> TestServer {
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
 
-    let server = BgpServer::new(config);
+    let server = BgpServer::new(config).expect("valid server config");
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -1165,7 +1165,7 @@ impl FakePeer {
     }
 
     /// Read a NOTIFICATION message (skips any KEEPALIVEs)
-    pub async fn read_notification(&mut self) -> NotifcationMessage {
+    pub async fn read_notification(&mut self) -> NotificationMessage {
         loop {
             let msg = read_bgp_message(self.stream.as_mut().unwrap())
                 .await
