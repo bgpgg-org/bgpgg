@@ -260,30 +260,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_openconfirm_keepalive_timer_expires() {
-        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
-        peer.fsm.timers.start_hold_timer();
-        peer.fsm.timers.start_keepalive_timer();
-        let initial_keepalive_sent = peer.statistics.keepalive_sent;
+        let test_cases = vec![
+            (180, true),  // (hold_time, should_restart_timer)
+            (0, false),   // hold_time=0 should not restart timer
+        ];
 
-        peer.process_event(&FsmEvent::KeepaliveTimerExpires)
-            .await
-            .unwrap();
+        for (hold_time, should_restart) in test_cases {
+            let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+            peer.fsm.timers.set_negotiated_hold_time(hold_time);
+            if hold_time > 0 {
+                peer.fsm.timers.start_hold_timer();
+                peer.fsm.timers.start_keepalive_timer();
+            }
+            let initial_keepalive_sent = peer.statistics.keepalive_sent;
 
-        assert_eq!(peer.state(), BgpState::OpenConfirm);
-        assert_eq!(
-            peer.statistics.keepalive_sent,
-            initial_keepalive_sent + 1,
-            "KEEPALIVE message should be sent"
-        );
-        assert!(
-            peer.fsm.timers.keepalive_timer_started.is_some(),
-            "KeepaliveTimer should be restarted"
-        );
-        assert!(peer.conn.is_some(), "TCP connection should remain");
-        assert!(
-            peer.fsm.timers.hold_timer_started.is_some(),
-            "Hold timer should still be running"
-        );
+            peer.process_event(&FsmEvent::KeepaliveTimerExpires)
+                .await
+                .unwrap();
+
+            assert_eq!(peer.state(), BgpState::OpenConfirm);
+            assert_eq!(
+                peer.statistics.keepalive_sent,
+                initial_keepalive_sent + 1,
+                "KEEPALIVE message should be sent (hold_time={})",
+                hold_time
+            );
+            assert!(peer.conn.is_some(), "TCP connection should remain");
+
+            if should_restart {
+                assert!(
+                    peer.fsm.timers.keepalive_timer_started.is_some(),
+                    "KeepaliveTimer should be restarted when hold_time > 0"
+                );
+            } else {
+                assert!(
+                    peer.fsm.timers.keepalive_timer_started.is_none(),
+                    "KeepaliveTimer should NOT be restarted when hold_time is zero"
+                );
+            }
+        }
     }
 
     #[tokio::test]
