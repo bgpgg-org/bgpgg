@@ -16,119 +16,13 @@ use super::msg::{Message, MessageType};
 use super::msg_notification::{BgpError, OpenMessageError};
 use super::utils::{is_valid_unicast_ipv4, ParserError};
 
-const BGP_VERSION: u8 = 4;
+// Re-export public types
+pub use super::msg_open_types::OptionalParam;
 
-#[derive(Debug)]
-pub struct OpenMessage {
-    pub version: u8,
-    pub asn: u16,
-    pub hold_time: u16,
-    pub bgp_identifier: u32,
-    pub optional_params_len: u8,
-    pub optional_params: Vec<OptionalParam>,
-}
-
-#[derive(Debug, PartialEq)]
-enum BgpCapabiltyCode {
-    Multiprotocol = 1,
-    RouteRefresh = 2,
-    Unknown,
-}
-
-impl From<u8> for BgpCapabiltyCode {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => BgpCapabiltyCode::Multiprotocol,
-            2 => BgpCapabiltyCode::RouteRefresh,
-            _ => BgpCapabiltyCode::Unknown,
-        }
-    }
-}
-
-// https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-11
-#[derive(Debug, PartialEq)]
-#[repr(u8)]
-enum OptionalParamTypes {
-    Capabilities = 2, // RFC3392
-    Unknown(u8),
-}
-
-impl From<u8> for OptionalParamTypes {
-    fn from(value: u8) -> Self {
-        match value {
-            2 => OptionalParamTypes::Capabilities,
-            val => OptionalParamTypes::Unknown(val),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct OptionalParam {
-    param_type: OptionalParamTypes,
-    param_len: u8,
-    param_value: ParamVal,
-}
-
-#[derive(Debug, PartialEq)]
-enum ParamVal {
-    Capability(Capability),
-    Unknown(Vec<u8>),
-}
-
-#[derive(Debug, PartialEq)]
-struct Capability {
-    code: BgpCapabiltyCode,
-    len: u8,
-    val: Vec<u8>,
-}
-
-impl Capability {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.push(self.code.as_u8());
-        bytes.push(self.len);
-        bytes.extend_from_slice(&self.val);
-        bytes
-    }
-}
-
-impl BgpCapabiltyCode {
-    fn as_u8(&self) -> u8 {
-        match self {
-            BgpCapabiltyCode::Multiprotocol => 1,
-            BgpCapabiltyCode::RouteRefresh => 2,
-            BgpCapabiltyCode::Unknown => 0,
-        }
-    }
-}
-
-impl ParamVal {
-    fn to_bytes(&self) -> Vec<u8> {
-        match self {
-            ParamVal::Capability(cap) => cap.to_bytes(),
-            ParamVal::Unknown(data) => data.clone(),
-        }
-    }
-}
-
-impl OptionalParamTypes {
-    fn as_u8(&self) -> u8 {
-        match self {
-            OptionalParamTypes::Capabilities => 2,
-            OptionalParamTypes::Unknown(val) => *val,
-        }
-    }
-}
-
-impl OptionalParam {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.push(self.param_type.as_u8());
-        bytes.push(self.param_len);
-        bytes.extend_from_slice(&self.param_value.to_bytes());
-        bytes
-    }
-}
+use super::msg_open_types::{
+    BgpCapabiltyCode, Capability, OptionalParam as OptParam, OptionalParamTypes, ParamVal,
+    BGP_VERSION,
+};
 
 fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
     let mut cursor = 0;
@@ -212,6 +106,16 @@ fn validate_bgp_identifier(bgp_identifier: u32) -> Result<(), ParserError> {
         });
     }
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct OpenMessage {
+    pub version: u8,
+    pub asn: u16,
+    pub hold_time: u16,
+    pub bgp_identifier: u32,
+    pub optional_params_len: u8,
+    pub optional_params: Vec<OptionalParam>,
 }
 
 impl OpenMessage {
@@ -317,6 +221,7 @@ impl Message for OpenMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParamTypes, ParamVal};
 
     // RFC2858
     const CAPABILITY_MP_EXTENSION_PARAM: &[u8] = &[

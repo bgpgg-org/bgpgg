@@ -189,6 +189,104 @@ impl Peer {
                 "error" => e.to_string());
         }
     }
+
+    /// Stop session timers (hold timer and keepalive timer)
+    pub(super) fn stop_session_timers(&mut self) {
+        self.fsm.timers.stop_hold_timer();
+        self.fsm.timers.stop_keepalive_timer();
+    }
+
+    /// Transition to Idle on error - increments retry counter and stops all timers
+    pub(super) fn transition_to_idle_on_error(&mut self) {
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.increment_connect_retry_counter();
+        self.stop_session_timers();
+    }
+
+    /// Handle ManualStop event - sends admin shutdown notification and transitions to Idle
+    pub(super) async fn handle_manual_stop(&mut self) -> Result<(), PeerError> {
+        use crate::bgp::msg_notification::CeaseSubcode;
+
+        self.manually_stopped = true;
+        let notif = NotificationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            Vec::new(),
+        );
+        let _ = self.send_notification(notif).await;
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.reset_connect_retry_counter();
+        self.stop_session_timers();
+        Ok(())
+    }
+
+    /// Handle AutomaticStop event - sends cease notification and transitions to Idle
+    pub(super) async fn handle_automatic_stop(
+        &mut self,
+        subcode: &crate::bgp::msg_notification::CeaseSubcode,
+    ) -> Result<(), PeerError> {
+        use crate::server::{AdminState, ServerOp};
+
+        let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
+        let _ = self.send_notification(notif).await;
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.increment_connect_retry_counter();
+        self.stop_session_timers();
+
+        let admin_state = match subcode {
+            crate::bgp::msg_notification::CeaseSubcode::MaxPrefixesReached => {
+                AdminState::PrefixLimitReached
+            }
+            _ => AdminState::Down,
+        };
+        let _ = self.server_tx.send(ServerOp::SetAdminState {
+            peer_ip: self.addr,
+            state: admin_state,
+        });
+        Err(PeerError::AutomaticStop(subcode.clone()))
+    }
+
+    /// Handle HoldTimer expiration - sends hold timer expired notification and transitions to Idle
+    pub(super) async fn handle_hold_timer_expires(&mut self) -> Result<(), PeerError> {
+        let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
+        let _ = self.send_notification(notif).await;
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.increment_connect_retry_counter();
+        self.stop_session_timers();
+        Ok(())
+    }
+
+    /// Handle BGP message error (header or open message) - sends notification and transitions to Idle
+    pub(super) async fn handle_bgp_message_error(
+        &mut self,
+        notif: &NotificationMessage,
+        in_session_state: bool,
+    ) -> Result<(), PeerError> {
+        let _ = self.send_notification(notif.clone()).await;
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.increment_connect_retry_counter();
+        if in_session_state {
+            self.stop_session_timers();
+        }
+        Ok(())
+    }
+
+    /// Handle FSM error - sends FSM error notification and transitions to Idle
+    pub(super) async fn handle_fsm_error(&mut self, in_session: bool) -> Result<(), PeerError> {
+        let notif = NotificationMessage::new(BgpError::FiniteStateMachineError, vec![]);
+        let _ = self.send_notification(notif).await;
+        self.disconnect(true);
+        self.fsm.timers.stop_connect_retry();
+        self.fsm.increment_connect_retry_counter();
+        if in_session {
+            self.stop_session_timers();
+        }
+        Err(PeerError::FsmError)
+    }
 }
 
 #[cfg(test)]

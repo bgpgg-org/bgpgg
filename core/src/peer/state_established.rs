@@ -15,7 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::{debug, error, info};
 use std::time::{Duration, Instant};
 
@@ -29,79 +29,32 @@ impl Peer {
         match (new_state, event) {
             // RFC 4271 8.2.2: ManualStop in session states
             (BgpState::Idle, FsmEvent::ManualStop) => {
-                self.manually_stopped = true;
-                let notif = NotificationMessage::new(
-                    BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
-                    Vec::new(),
-                );
-                let _ = self.send_notification(notif).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.reset_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
+                self.handle_manual_stop().await?;
             }
 
             // RFC 4271 Event 8: AutomaticStop in session states
             (BgpState::Idle, FsmEvent::AutomaticStop(ref subcode)) => {
-                let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
-                let _ = self.send_notification(notif).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
-
-                let admin_state = match subcode {
-                    CeaseSubcode::MaxPrefixesReached => {
-                        crate::server::AdminState::PrefixLimitReached
-                    }
-                    _ => crate::server::AdminState::Down,
-                };
-                let _ = self.server_tx.send(crate::server::ServerOp::SetAdminState {
-                    peer_ip: self.addr,
-                    state: admin_state,
-                });
-                return Err(PeerError::AutomaticStop(subcode.clone()));
+                return self.handle_automatic_stop(subcode).await;
             }
 
             // RFC 4271 Event 10: HoldTimer_Expires in session states
             (BgpState::Idle, FsmEvent::HoldTimerExpires) => {
-                let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
-                let _ = self.send_notification(notif).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
+                self.handle_hold_timer_expires().await?;
             }
 
             (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif)) => {
-                let _ = self.send_notification(notif.clone()).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
+                self.handle_bgp_message_error(notif, true).await?;
                 return Err(PeerError::UpdateError);
             }
 
             // RFC 4271 8.2.2: TcpConnectionFails in Established -> Idle
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
+                self.transition_to_idle_on_error();
             }
 
             // RFC 4271 8.2.2: NotifMsg in Established -> Idle
             (BgpState::Idle, FsmEvent::NotifMsg) | (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
+                self.transition_to_idle_on_error();
             }
 
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => {
@@ -133,14 +86,7 @@ impl Peer {
             | (BgpState::Idle, FsmEvent::BgpOpenWithDelayOpenTimer(_))
             | (BgpState::Idle, FsmEvent::BgpHeaderErr(_))
             | (BgpState::Idle, FsmEvent::BgpOpenMsgErr(_)) => {
-                let notif = NotificationMessage::new(BgpError::FiniteStateMachineError, vec![]);
-                let _ = self.send_notification(notif).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_connect_retry();
-                self.fsm.increment_connect_retry_counter();
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
-                return Err(PeerError::FsmError);
+                return self.handle_fsm_error(true).await;
             }
 
             _ => {}

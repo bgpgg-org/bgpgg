@@ -23,6 +23,7 @@ pub mod policy;
 pub mod propagate;
 pub mod rib;
 pub mod server;
+pub mod server_ops;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {

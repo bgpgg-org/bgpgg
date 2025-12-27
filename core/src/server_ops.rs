@@ -1,0 +1,455 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::bgp::msg_notification::CeaseSubcode;
+use crate::bgp::msg_update::{AsPathSegment, Origin};
+use crate::bgp::utils::IpNetwork;
+use crate::config::PeerConfig;
+use crate::peer::{BgpState, PeerOp, PeerStatistics};
+use crate::policy::Policy;
+use crate::server::{AdminState, BgpServer, ConnectionType, MgmtOp, PeerInfo, ServerOp};
+use crate::{error, info};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tokio::sync::oneshot;
+
+impl BgpServer {
+    pub(crate) async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
+        match req {
+            MgmtOp::AddPeer {
+                addr,
+                config,
+                response,
+            } => {
+                self.handle_add_peer(addr, config, response, bind_addr)
+                    .await;
+            }
+            MgmtOp::RemovePeer { addr, response } => {
+                self.handle_remove_peer(addr, response).await;
+            }
+            MgmtOp::DisablePeer { addr, response } => {
+                self.handle_disable_peer(addr, response);
+            }
+            MgmtOp::EnablePeer { addr, response } => {
+                self.handle_enable_peer(addr, response);
+            }
+            MgmtOp::AddRoute {
+                prefix,
+                next_hop,
+                origin,
+                as_path,
+                local_pref,
+                med,
+                atomic_aggregate,
+                response,
+            } => {
+                self.handle_add_route(
+                    prefix,
+                    next_hop,
+                    origin,
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    response,
+                )
+                .await;
+            }
+            MgmtOp::RemoveRoute { prefix, response } => {
+                self.handle_remove_route(prefix, response).await;
+            }
+            MgmtOp::GetPeers { response } => {
+                self.handle_get_peers(response);
+            }
+            MgmtOp::GetPeer { addr, response } => {
+                self.handle_get_peer(addr, response).await;
+            }
+            MgmtOp::GetRoutes { response } => {
+                self.handle_get_routes(response);
+            }
+            MgmtOp::GetServerInfo { response } => {
+                let _ = response.send((self.local_addr, self.local_port));
+            }
+        }
+    }
+
+    pub(crate) async fn handle_server_op(&mut self, op: ServerOp) {
+        match op {
+            ServerOp::PeerStateChanged { peer_ip, state } => {
+                // Update session state
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.state = state;
+                    info!("peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                }
+            }
+            ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
+                // Update ASN and initialize policies
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.asn = Some(asn);
+                    peer.import_policy = Some(Policy::default_in(self.config.asn));
+                    peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
+                    info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                }
+            }
+            ServerOp::PeerUpdate {
+                peer_ip,
+                withdrawn,
+                announced,
+            } => {
+                let peer = self.peers.get(&peer_ip).expect("peer should exist");
+
+                if let Some(policy) = peer.policy_in() {
+                    let changed_prefixes = self.loc_rib.update_from_peer(
+                        peer_ip.clone(),
+                        withdrawn,
+                        announced,
+                        |prefix, path| policy.accept(prefix, path),
+                    );
+                    info!("UPDATE processing complete", "peer_ip" => &peer_ip);
+
+                    // Propagate changed routes to other peers
+                    if !changed_prefixes.is_empty() {
+                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
+                } else {
+                    error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
+                }
+            }
+            ServerOp::OpenReceived {
+                peer_ip,
+                bgp_id,
+                conn_type,
+            } => {
+                self.handle_open_received(peer_ip, bgp_id, conn_type);
+            }
+            ServerOp::PeerDisconnected { peer_ip } => {
+                let Some(peer) = self.peers.get_mut(&peer_ip) else {
+                    return;
+                };
+
+                if peer.configured {
+                    // Configured peer: update state, Peer task handles reconnection internally
+                    peer.state = BgpState::Idle;
+                    info!("peer session ended", "peer_ip" => &peer_ip);
+                } else {
+                    // Unconfigured peer: stop task and remove entirely
+                    if let Some(peer_tx) = peer.peer_tx.take() {
+                        let _ = peer_tx.send(PeerOp::ManualStop);
+                    }
+                    self.peers.remove(&peer_ip);
+                    info!("unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                }
+
+                // Notify Loc-RIB about disconnection and get affected prefixes
+                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip.clone());
+
+                // Propagate withdrawals to other peers
+                if !changed_prefixes.is_empty() {
+                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
+            }
+            ServerOp::SetAdminState { peer_ip, state } => {
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.admin_state = state;
+                }
+            }
+        }
+    }
+
+    /// Handle OPEN message received - store BGP ID and resolve deferred collisions (RFC 4271 6.8)
+    fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, conn_type: ConnectionType) {
+        if let Some(peer) = self.peers.get_mut(&peer_ip) {
+            peer.bgp_id = Some(bgp_id);
+        }
+
+        // RFC 4271 6.8: Resolve deferred collision if pending incoming exists
+        if conn_type == ConnectionType::Outgoing {
+            let pending = self
+                .peers
+                .get_mut(&peer_ip)
+                .and_then(|p| p.pending_incoming.take());
+            if let Some(pending_stream) = pending {
+                // Now we have BGP ID - reuse existing collision resolution logic
+                if self.resolve_collision(peer_ip, ConnectionType::Incoming) {
+                    // Outgoing wins - drop pending incoming
+                    info!("collision: outgoing wins, dropping pending incoming", "peer_ip" => peer_ip.to_string());
+                    drop(pending_stream);
+                } else {
+                    // Incoming wins - resolve_collision already closed outgoing
+                    info!("collision: incoming wins, switching connection", "peer_ip" => peer_ip.to_string());
+                    self.accept_incoming_connection(pending_stream, peer_ip);
+                }
+            }
+        }
+    }
+
+    async fn handle_add_peer(
+        &mut self,
+        addr: String,
+        config: PeerConfig,
+        response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
+    ) {
+        info!("adding peer via request", "peer_addr" => &addr);
+
+        // Parse peer address
+        let peer_addr = match addr.parse::<SocketAddr>() {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        let peer_ip = peer_addr.ip();
+
+        // Check if peer already exists
+        if self.peers.contains_key(&peer_ip) {
+            let _ = response.send(Err(format!("peer {} already exists", peer_ip)));
+            return;
+        }
+
+        // Create Peer and spawn task (runs forever in Idle state until ManualStart)
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
+
+        self.peers.insert(
+            peer_ip,
+            PeerInfo::new(
+                Some(peer_addr.port()),
+                true,
+                config.clone(),
+                Some(peer_tx.clone()),
+            ),
+        );
+
+        // RFC 4271: ManualStart for admin-added peers
+        if config.passive_mode {
+            let _ = peer_tx.send(PeerOp::ManualStartPassive);
+        } else {
+            let _ = peer_tx.send(PeerOp::ManualStart);
+        }
+
+        info!("peer added", "peer_ip" => peer_ip.to_string(), "passive" => config.passive_mode, "total_peers" => self.peers.len());
+        let _ = response.send(Ok(()));
+    }
+
+    async fn handle_remove_peer(
+        &mut self,
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        info!("removing peer via request", "peer_ip" => &addr);
+
+        // Parse the address to get IpAddr
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        // Remove entry from map
+        let entry = self.peers.remove(&peer_ip);
+
+        if entry.is_none() {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        }
+
+        // Send graceful shutdown notification if peer_tx is active
+        let entry = entry.unwrap();
+        if let Some(peer_tx) = entry.peer_tx {
+            let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+        }
+
+        // Notify Loc-RIB to remove routes from this peer
+        let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+
+        // Propagate route changes (withdrawals or new best paths) to all remaining peers
+        self.propagate_routes(
+            changed_prefixes,
+            None, // Don't exclude any peer since the removed peer is already gone
+        )
+        .await;
+
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        let Some(entry) = self.peers.get_mut(&peer_ip) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+
+        entry.admin_state = AdminState::Down;
+
+        // Stop active session if exists
+        if let Some(peer_tx) = &entry.peer_tx {
+            let _ = peer_tx.send(PeerOp::ManualStop);
+        }
+
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_enable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        let Some(entry) = self.peers.get_mut(&peer_ip) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+
+        entry.admin_state = AdminState::Up;
+
+        // RFC 4271: ManualStart for admin-enabled peers
+        if let Some(peer_tx) = &entry.peer_tx {
+            if entry.config.passive_mode {
+                let _ = peer_tx.send(PeerOp::ManualStartPassive);
+            } else {
+                let _ = peer_tx.send(PeerOp::ManualStart);
+            }
+        }
+
+        let _ = response.send(Ok(()));
+    }
+
+    async fn handle_add_route(
+        &mut self,
+        prefix: IpNetwork,
+        next_hop: Ipv4Addr,
+        origin: Origin,
+        as_path: Vec<AsPathSegment>,
+        local_pref: Option<u32>,
+        med: Option<u32>,
+        atomic_aggregate: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+
+        // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
+        self.loc_rib.add_local_route(
+            prefix,
+            next_hop,
+            origin,
+            as_path,
+            local_pref,
+            med,
+            atomic_aggregate,
+        );
+
+        // Propagate to all peers using the common propagation logic
+        self.propagate_routes(vec![prefix], None).await;
+
+        let _ = response.send(Ok(()));
+    }
+
+    async fn handle_remove_route(
+        &mut self,
+        prefix: IpNetwork,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        info!("removing route via request", "prefix" => format!("{:?}", prefix));
+
+        // Remove local route from Loc-RIB
+        let removed = self.loc_rib.remove_local_route(prefix);
+
+        // Only propagate if something was actually removed
+        if removed {
+            // Propagate to all peers using the common propagation logic
+            // This will automatically send withdrawal if no alternate path exists,
+            // or announce the new best path if an alternate path is available
+            self.propagate_routes(vec![prefix], None).await;
+        }
+
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_get_peers(
+        &self,
+        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState, AdminState, bool)>>,
+    ) {
+        let peers: Vec<(String, Option<u16>, BgpState, AdminState, bool)> = self
+            .peers
+            .iter()
+            .map(|(addr, entry)| {
+                (
+                    addr.to_string(),
+                    entry.asn,
+                    entry.state,
+                    entry.admin_state,
+                    entry.configured,
+                )
+            })
+            .collect();
+        let _ = response.send(peers);
+    }
+
+    async fn handle_get_peer(
+        &self,
+        addr: String,
+        response: oneshot::Sender<
+            Option<(
+                String,
+                Option<u16>,
+                BgpState,
+                AdminState,
+                bool,
+                PeerStatistics,
+            )>,
+        >,
+    ) {
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                let _ = response.send(None);
+                return;
+            }
+        };
+
+        let Some(entry) = self.peers.get(&peer_ip) else {
+            let _ = response.send(None);
+            return;
+        };
+
+        let stats = entry.get_statistics().await.unwrap_or_default();
+
+        let _ = response.send(Some((
+            addr,
+            entry.asn,
+            entry.state,
+            entry.admin_state,
+            entry.configured,
+            stats,
+        )));
+    }
+
+    fn handle_get_routes(&self, response: oneshot::Sender<Vec<crate::rib::Route>>) {
+        let routes = self.loc_rib.get_all_routes();
+        let _ = response.send(routes);
+    }
+}
