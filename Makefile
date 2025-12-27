@@ -1,9 +1,11 @@
-.PHONY: build clean run test fmt release setup
+.PHONY: all build clean run test fmt release setup
+
+all: build
 
 setup:
-	command -v protoc >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y protobuf-compiler
+	./script/setup-protoc.sh
 
-build: fmt
+build: setup
 	cargo build --release
 
 release:
@@ -12,10 +14,10 @@ release:
 clean:
 	cargo clean
 
-run:
+run: setup
 	cargo run
 
-test:
+test: setup
 	cargo test
 
 fmt:
