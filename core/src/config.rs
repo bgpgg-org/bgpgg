@@ -68,6 +68,10 @@ pub struct PeerConfig {
     /// Default false: collision detection is ignored when peer is in Established state.
     #[serde(default)]
     pub collision_detect_established_state: bool,
+    /// MinRouteAdvertisementIntervalTimer - minimum seconds between route advertisements (RFC 4271 9.2.1.1).
+    /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
+    #[serde(default)]
+    pub min_route_advertisement_interval_secs: Option<u64>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -110,6 +114,7 @@ impl Default for PeerConfig {
             max_prefix: None,
             send_notification_without_open: false,
             collision_detect_established_state: false,
+            min_route_advertisement_interval_secs: None,
         }
     }
 }

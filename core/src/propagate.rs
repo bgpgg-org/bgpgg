@@ -14,6 +14,7 @@
 
 //! Route propagation logic for BGP UPDATE messages
 
+use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::peer::BgpState;
@@ -251,7 +252,6 @@ pub fn send_announcements_to_peer(
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
-        let prefix_count = batch.prefixes.len();
         let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
         let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
         let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
@@ -273,17 +273,30 @@ pub fn send_announcements_to_peer(
             batch.path.origin,
             as_path_segments,
             next_hop,
-            batch.prefixes,
+            batch.prefixes.clone(),
             local_pref,
             med,
             atomic_aggregate,
             unknown_attrs,
         );
 
+        // RFC 4271 Section 9.2: Check message size before sending
+        let serialized = update_msg.serialize();
+        if serialized.len() > MAX_MESSAGE_SIZE as usize {
+            error!(
+                "UPDATE message exceeds maximum size, not advertising",
+                "peer_ip" => peer_addr.to_string(),
+                "prefix_count" => batch.prefixes.len(),
+                "size" => serialized.len(),
+                "max_size" => MAX_MESSAGE_SIZE
+            );
+            continue;
+        }
+
         if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
             error!("failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
         } else {
-            info!("propagated routes to peer", "count" => prefix_count, "peer_ip" => peer_addr.to_string());
+            info!("propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
         }
     }
 }
@@ -293,6 +306,7 @@ mod tests {
     use super::*;
     use crate::bgp::msg_update::Origin;
     use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::policy::Statement;
     use crate::rib::RouteSource;
     use std::collections::HashSet;
 
@@ -647,5 +661,58 @@ mod tests {
 
         // eBGP: send MED for local route
         assert_eq!(build_export_med(&local_path, 65001, 65002), Some(50));
+    }
+
+    #[test]
+    fn test_send_announcements_oversized_message() {
+        // RFC 4271 Section 9.2: Messages exceeding MAX_MESSAGE_SIZE must not be sent
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let peer_addr = test_ip(1);
+        let policy = Policy::new().add(Statement::new().then(crate::policy::action::Accept));
+
+        // Create huge AS_PATH to make UPDATE message exceed 4096 bytes
+        // Multiple AS_SEQUENCE segments with 255 ASNs each = ~4000 bytes total
+        let mut as_path = vec![];
+        for seg in 0..10 {
+            let mut asn_list = vec![];
+            for i in 0..255 {
+                asn_list.push(65000 + ((seg * 255 + i) % 536));
+            }
+            as_path.push(AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 255,
+                asn_list,
+            });
+        }
+
+        let path = make_path(
+            RouteSource::Ebgp(test_ip(2)),
+            as_path,
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        // Just one prefix, but huge AS_PATH should make UPDATE > 4096 bytes
+        let prefix = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let routes = vec![(prefix, path)];
+
+        // Send announcements - should skip due to size
+        send_announcements_to_peer(
+            peer_addr,
+            &tx,
+            &routes,
+            65000,
+            65001,
+            Ipv4Addr::new(1, 1, 1, 1),
+            &policy,
+        );
+
+        // Verify no message was sent
+        assert!(
+            rx.try_recv().is_err(),
+            "Oversized UPDATE should not be sent"
+        );
     }
 }

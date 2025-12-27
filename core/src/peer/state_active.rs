@@ -170,14 +170,27 @@ impl Peer {
                 self.fsm.increment_connect_retry_counter();
             }
 
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Active -> Idle
+            // RFC 4271 8.2.2: Events 26-27 (KeepAlive, Update) in Active -> FSM Error
+            (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+                let _ = self
+                    .send_notification(NotifcationMessage::new(
+                        BgpError::FiniteStateMachineError,
+                        vec![],
+                    ))
+                    .await;
+                self.fsm.timers.stop_connect_retry();
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+                return Err(PeerError::FsmError);
+            }
+
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 28) in Active -> Idle
             (BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Idle, FsmEvent::BgpOpenReceived(_))
-            | (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
-            | (BgpState::Idle, FsmEvent::BgpUpdateReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
                 self.fsm.timers.stop_connect_retry();
                 self.disconnect(true);

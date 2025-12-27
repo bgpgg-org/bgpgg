@@ -1362,3 +1362,116 @@ async fn test_manual_stop() {
         .await;
     }
 }
+
+/// Test MRAI (RFC 4271 9.2.1.1) per-peer rate limiting
+#[tokio::test]
+async fn test_mrai_rate_limiting() {
+    let test_cases = vec![
+        (0u64, 3), // MRAI=0: all UPDATEs sent immediately
+        (2u64, 3), // MRAI=2s: first sent, rest queued
+    ];
+
+    for (mrai_secs, num_routes) in test_cases {
+        let mut server1 = start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+            true,
+        ))
+        .await;
+        let server2 = start_test_server(Config::new(
+            65002,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+            true,
+        ))
+        .await;
+
+        server1
+            .client
+            .add_peer(
+                format!("{}:{}", server2.address, server2.bgp_port),
+                Some(SessionConfig {
+                    min_route_advertisement_interval_secs: Some(mrai_secs),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+
+        poll_until(
+            || async {
+                let peers = server1.client.get_peers().await.unwrap();
+                peers.len() == 1 && peers[0].state == BgpState::Established as i32
+            },
+            "Timeout waiting for Established",
+        )
+        .await;
+
+        let start_time = std::time::Instant::now();
+
+        // Rapidly announce multiple routes
+        for i in 0..num_routes {
+            server1
+                .client
+                .add_route(
+                    format!("10.{}.0.0/24", i),
+                    "192.168.1.1".to_string(),
+                    Origin::Igp,
+                    vec![],
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Poll until all routes propagate
+        poll_route_propagation(&[(
+            &server2,
+            (0..num_routes)
+                .map(|i| Route {
+                    prefix: format!("10.{}.0.0/24", i),
+                    paths: vec![build_path(
+                        vec![as_sequence(vec![65001])],
+                        &server1.address,
+                        server1.address.clone(),
+                        Origin::Igp,
+                        Some(100),
+                        None,
+                        false,
+                        vec![],
+                    )],
+                })
+                .collect(),
+        )])
+        .await;
+
+        let elapsed = start_time.elapsed();
+
+        // Verify MRAI timing constraint
+        if mrai_secs > 0 {
+            assert!(
+                elapsed.as_secs() >= mrai_secs,
+                "MRAI={}: routes propagated too early ({:?} < {}s)",
+                mrai_secs,
+                elapsed,
+                mrai_secs
+            );
+        }
+
+        // Verify all UPDATEs sent
+        poll_peer_stats(
+            &server1,
+            &server2.address,
+            ExpectedStats {
+                update_sent: Some(num_routes),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}

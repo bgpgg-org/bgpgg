@@ -22,42 +22,9 @@ use std::time::Duration;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 impl Peer {
-    /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
-    pub(super) async fn handle_notification_received(&mut self, notif: &NotifcationMessage) {
-        let event = if notif.is_version_error() {
-            debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsgVerErr
-        } else {
-            debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsg
-        };
-        self.try_process_event(&event).await;
-    }
-
-    /// Accept an incoming TCP connection in Connect or Active state.
-    pub(super) async fn accept_connection(
-        &mut self,
-        tcp_tx: OwnedWriteHalf,
-        tcp_rx: OwnedReadHalf,
-    ) {
-        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
-        self.conn = Some(TcpConnection {
-            tx: tcp_tx,
-            rx: tcp_rx,
-        });
-        self.conn_type = ConnectionType::Incoming;
-        self.fsm.timers.stop_connect_retry();
-        if self.config.delay_open_time_secs.is_some() {
-            self.fsm.timers.start_delay_open_timer();
-        } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-            error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-            self.disconnect(true);
-        }
-    }
-
-    /// Handle connected states (OpenSent, OpenConfirm, Established).
+    /// Handle OpenSent and OpenConfirm states
     /// Returns true if shutdown requested.
-    pub(super) async fn handle_open_and_established(&mut self) -> bool {
+    pub(super) async fn handle_open_states(&mut self) -> bool {
         let peer_ip = self.addr;
 
         // Timer interval for hold/keepalive checks
@@ -96,18 +63,14 @@ impl Peer {
 
                 Some(msg) = self.peer_rx.recv() => {
                     match msg {
-                        PeerOp::SendUpdate(update_msg) => {
-                            if let Err(e) = self.send_update(update_msg).await {
-                                error!("failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
-                                return false;
-                            }
+                        PeerOp::SendUpdate(_) => {
+                            // RFC violation: UPDATEs not allowed in OpenSent/OpenConfirm
+                            // Drop silently
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
                         }
                         PeerOp::Shutdown(subcode) => {
-                            // Server-initiated: kill task
                             info!("shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotifcationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
@@ -147,11 +110,44 @@ impl Peer {
                 }
             }
 
-            // Check if we transitioned out of connected states
+            // Check if we transitioned out of OpenSent/OpenConfirm
             match self.fsm.state() {
-                BgpState::OpenSent | BgpState::OpenConfirm | BgpState::Established => {}
+                BgpState::OpenSent | BgpState::OpenConfirm => {}
                 _ => return false,
             }
+        }
+    }
+
+    /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
+    pub(super) async fn handle_notification_received(&mut self, notif: &NotifcationMessage) {
+        let event = if notif.is_version_error() {
+            debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
+            FsmEvent::NotifMsgVerErr
+        } else {
+            debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
+            FsmEvent::NotifMsg
+        };
+        self.try_process_event(&event).await;
+    }
+
+    /// Accept an incoming TCP connection in Connect or Active state.
+    pub(super) async fn accept_connection(
+        &mut self,
+        tcp_tx: OwnedWriteHalf,
+        tcp_rx: OwnedReadHalf,
+    ) {
+        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
+        self.conn = Some(TcpConnection {
+            tx: tcp_tx,
+            rx: tcp_rx,
+        });
+        self.conn_type = ConnectionType::Incoming;
+        self.fsm.timers.stop_connect_retry();
+        if self.config.delay_open_time_secs.is_some() {
+            self.fsm.timers.start_delay_open_timer();
+        } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
+            error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+            self.disconnect(true);
         }
     }
 
@@ -198,12 +194,14 @@ impl Peer {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::bgp::msg_notification::{CeaseSubcode, UpdateMessageError};
+    use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm};
     use crate::rib::rib_in::AdjRibIn;
+    use std::collections::VecDeque;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
@@ -252,6 +250,9 @@ pub(super) mod tests {
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
             established_at: None,
+            mrai_interval: Duration::from_secs(0),
+            last_update_sent: None,
+            pending_updates: VecDeque::new(),
         }
     }
 

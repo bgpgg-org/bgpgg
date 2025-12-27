@@ -286,6 +286,9 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg::Message;
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+    use crate::peer::fsm::BgpState;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_admin_shutdown_notification() {
@@ -297,5 +300,98 @@ mod tests {
         assert_eq!(bytes[0], 6); // Cease error code
         assert_eq!(bytes[1], 2); // AdministrativeShutdown subcode
         assert_eq!(bytes.len(), 2); // No data
+    }
+
+    #[tokio::test]
+    async fn test_update_rejected_in_non_established_states() {
+        // RFC 4271 Section 9: "An UPDATE message may be received only in the Established state.
+        // Receiving an UPDATE message in any other state is an error."
+        use crate::peer::states::tests::create_test_peer_with_state;
+
+        let non_established_states = vec![
+            BgpState::Connect,
+            BgpState::Active,
+            BgpState::OpenSent,
+            BgpState::OpenConfirm,
+        ];
+
+        for state in non_established_states {
+            let mut peer = create_test_peer_with_state(state).await;
+            peer.config.send_notification_without_open = true;
+
+            let update = UpdateMessage::new(
+                Origin::IGP,
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Ipv4Addr::new(10, 0, 0, 1),
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            );
+
+            let result = peer.handle_message(BgpMessage::Update(update)).await;
+
+            assert!(
+                result.is_err(),
+                "UPDATE should cause error in {:?} state",
+                state
+            );
+            assert_eq!(
+                peer.state(),
+                BgpState::Idle,
+                "Peer should transition to Idle after UPDATE in {:?}",
+                state
+            );
+            assert_eq!(
+                peer.statistics.notification_sent, 1,
+                "FSM error NOTIFICATION should be sent in {:?}",
+                state
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_accepted_in_established() {
+        // RFC 4271 Section 9: UPDATE is processed normally in Established state
+        use crate::peer::states::tests::create_test_peer_with_state;
+
+        let mut peer = create_test_peer_with_state(BgpState::Established).await;
+        peer.fsm.timers.start_hold_timer();
+
+        let update = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![65001],
+            }],
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        );
+
+        let result = peer.handle_message(BgpMessage::Update(update)).await;
+
+        assert!(
+            result.is_ok(),
+            "UPDATE should be accepted in Established state"
+        );
+        assert_eq!(
+            peer.state(),
+            BgpState::Established,
+            "Peer should remain in Established state"
+        );
+        assert_eq!(
+            peer.statistics.notification_sent, 0,
+            "No NOTIFICATION should be sent for valid UPDATE"
+        );
     }
 }
