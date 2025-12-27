@@ -463,17 +463,31 @@ impl Fsm {
             | (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
 
             // ===== Established State =====
+            // RFC 4271 8.2.2: Events 1, 3-7 (Start events) are ignored in Established state
+            (BgpState::Established, FsmEvent::ManualStart)
+            | (BgpState::Established, FsmEvent::AutomaticStart)
+            | (BgpState::Established, FsmEvent::ManualStartPassive)
+            | (BgpState::Established, FsmEvent::AutomaticStartPassive) => BgpState::Established,
+            // RFC 4271 8.2.2: Event 2 (ManualStop) -> Idle
             (BgpState::Established, FsmEvent::ManualStop) => BgpState::Idle,
+            // RFC 4271 8.2.2: Event 8 (AutomaticStop) -> Idle
             (BgpState::Established, FsmEvent::AutomaticStop(_)) => BgpState::Idle,
+            // RFC 4271 8.2.2: Event 10 (HoldTimerExpires) -> Idle
             (BgpState::Established, FsmEvent::HoldTimerExpires) => BgpState::Idle,
+            // RFC 4271 8.2.2: Event 11 (KeepaliveTimerExpires) -> send KEEPALIVE, stay Established
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => BgpState::Established,
+            // RFC 4271 8.2.2: TcpConnectionFails -> Idle
             (BgpState::Established, FsmEvent::TcpConnectionFails) => BgpState::Idle,
+            // RFC 4271 8.2.2: Event 26 (KeepAliveMsg) -> reset HoldTimer, stay Established
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived) => BgpState::Established,
+            // RFC 4271 8.2.2: Event 27 (UpdateMsg) -> process UPDATE, reset HoldTimer, stay Established
             (BgpState::Established, FsmEvent::BgpUpdateReceived) => BgpState::Established,
+            // RFC 4271 8.2.2: Event 28 (UpdateMsgErr) -> send NOTIFICATION, -> Idle
             (BgpState::Established, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
+            // RFC 4271 8.2.2: Event 24, 25 (NotifMsg) -> Idle
             (BgpState::Established, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
             (BgpState::Established, FsmEvent::NotifMsg) => BgpState::Idle,
-            // RFC 4271 6.6: Event 9 in Established -> FSM Error
+            // RFC 4271 6.6: Event 9 (ConnectRetryTimerExpires) in Established -> FSM Error
             (BgpState::Established, FsmEvent::ConnectRetryTimerExpires) => BgpState::Idle,
 
             // Default: Invalid event for current state, stay in same state
@@ -744,6 +758,12 @@ mod tests {
             ),
             (BgpState::OpenConfirm, FsmEvent::NotifMsg, BgpState::Idle),
             // From Established
+            // RFC 4271 8.2.2: Events 1, 3-7 (Start events) are ignored in Established state
+            (BgpState::Established, FsmEvent::ManualStart, BgpState::Established),
+            (BgpState::Established, FsmEvent::AutomaticStart, BgpState::Established),
+            (BgpState::Established, FsmEvent::ManualStartPassive, BgpState::Established),
+            (BgpState::Established, FsmEvent::AutomaticStartPassive, BgpState::Established),
+            // RFC 4271 8.2.2: Event 2 (ManualStop) -> Idle
             (BgpState::Established, FsmEvent::ManualStop, BgpState::Idle),
             (
                 BgpState::Established,
