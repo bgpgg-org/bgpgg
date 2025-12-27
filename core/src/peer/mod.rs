@@ -18,6 +18,7 @@ use crate::config::PeerConfig;
 use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ mod state_active;
 mod state_connect;
 mod state_established;
 mod state_idle;
+mod state_open;
 mod state_openconfirm;
 mod state_opensent;
 mod states;
@@ -156,6 +158,12 @@ pub struct Peer {
     manually_stopped: bool,
     /// Timestamp when Established state was entered (for stability-based damping reset)
     established_at: Option<Instant>,
+    /// RFC 4271 9.2.1.1: Last time we sent an UPDATE
+    last_update_sent: Option<Instant>,
+    /// Queued UPDATE messages waiting for MRAI timer
+    pending_updates: VecDeque<UpdateMessage>,
+    /// MinRouteAdvertisementIntervalTimer from config
+    mrai_interval: Duration,
 }
 
 impl Peer {
@@ -193,6 +201,11 @@ impl Peer {
             rib_in: AdjRibIn::new(),
             session_type: None,
             statistics: PeerStatistics::default(),
+            mrai_interval: Duration::from_secs(
+                config.min_route_advertisement_interval_secs.unwrap_or(0),
+            ),
+            last_update_sent: None,
+            pending_updates: VecDeque::new(),
             config,
             peer_rx,
             server_tx,
@@ -224,8 +237,13 @@ impl Peer {
                 BgpState::Active => {
                     self.handle_active_state().await;
                 }
-                BgpState::OpenSent | BgpState::OpenConfirm | BgpState::Established => {
-                    if self.handle_open_and_established().await {
+                BgpState::OpenSent | BgpState::OpenConfirm => {
+                    if self.handle_open_states().await {
+                        return; // Shutdown requested
+                    }
+                }
+                BgpState::Established => {
+                    if self.handle_established().await {
                         return; // Shutdown requested
                     }
                 }
@@ -334,6 +352,9 @@ pub mod test_helpers {
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
             established_at: None,
+            mrai_interval: Duration::from_secs(0),
+            last_update_sent: None,
+            pending_updates: VecDeque::new(),
         }
     }
 }

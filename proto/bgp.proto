@@ -47,6 +47,7 @@ message SessionConfig {
     optional MaxPrefixSetting max_prefix = 6;
     optional bool send_notification_without_open = 7;  // Allow NOTIFICATION before OPEN (default: false)
     optional bool collision_detect_established_state = 8;  // Process collisions in Established (default: false)
+    optional uint64 min_route_advertisement_interval_secs = 9;  // MRAI timer (RFC 4271 9.2.1.1, default: 0)
 }
 
 // Add peer request/response

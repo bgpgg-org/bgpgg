@@ -68,6 +68,10 @@ pub struct PeerConfig {
     /// Default false: collision detection is ignored when peer is in Established state.
     #[serde(default)]
     pub collision_detect_established_state: bool,
+    /// MinRouteAdvertisementIntervalTimer - minimum seconds between route advertisements (RFC 4271 9.2.1.1).
+    /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
+    #[serde(default)]
+    pub min_route_advertisement_interval_secs: Option<u64>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -110,6 +114,7 @@ impl Default for PeerConfig {
             max_prefix: None,
             send_notification_without_open: false,
             collision_detect_established_state: false,
+            min_route_advertisement_interval_secs: None,
         }
     }
 }
@@ -129,6 +134,10 @@ pub struct Config {
     /// Security implications: see RFC 4272.
     #[serde(default)]
     pub accept_unconfigured_peers: bool,
+    /// MinASOriginationIntervalTimer - minimum seconds between originating routes from this AS (RFC 4271 9.2.1.2).
+    /// Default: 15 seconds.
+    #[serde(default = "default_min_as_origination_interval")]
+    pub min_as_origination_interval_secs: u64,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
 }
@@ -143,6 +152,10 @@ fn default_hold_time() -> u64 {
 
 fn default_connect_retry_time() -> u64 {
     30 // RFC suggests 120s, but 30s is more practical
+}
+
+fn default_min_as_origination_interval() -> u64 {
+    15
 }
 
 impl Config {
@@ -162,6 +175,7 @@ impl Config {
             hold_time_secs,
             connect_retry_secs: default_connect_retry_time(),
             accept_unconfigured_peers,
+            min_as_origination_interval_secs: default_min_as_origination_interval(),
             peers: Vec::new(),
         }
     }
@@ -196,6 +210,7 @@ impl Default for Config {
             hold_time_secs: default_hold_time(),
             connect_retry_secs: default_connect_retry_time(),
             accept_unconfigured_peers: false,
+            min_as_origination_interval_secs: default_min_as_origination_interval(),
             peers: Vec::new(),
         }
     }
