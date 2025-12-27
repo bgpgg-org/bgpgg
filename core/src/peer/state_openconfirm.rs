@@ -92,12 +92,14 @@ impl Peer {
                 self.fsm.timers.stop_keepalive_timer();
             }
 
-            (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif)) => {
+            (BgpState::Idle, FsmEvent::BgpHeaderErr(ref notif))
+            | (BgpState::Idle, FsmEvent::BgpOpenMsgErr(ref notif)) => {
                 let _ = self.send_notification(notif.clone()).await;
                 self.disconnect(true);
+                self.fsm.timers.stop_connect_retry();
+                self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
-                return Err(PeerError::UpdateError);
             }
 
             (BgpState::OpenConfirm, FsmEvent::KeepaliveTimerExpires) => {
@@ -109,16 +111,12 @@ impl Peer {
                 self.established_at = Some(Instant::now());
             }
 
-            (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires) => {
-                let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
-                let _ = self.send_notification(notif).await;
-                self.disconnect(true);
-                self.fsm.timers.stop_hold_timer();
-                self.fsm.timers.stop_keepalive_timer();
-                return Err(PeerError::FsmError);
-            }
-
-            (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+            (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)
+            | (BgpState::Idle, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::Idle, FsmEvent::BgpOpenWithDelayOpenTimer(_))
+            | (BgpState::Idle, FsmEvent::BgpUpdateReceived)
+            | (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
                 let notif = NotifcationMessage::new(BgpError::FiniteStateMachineError, vec![]);
                 let _ = self.send_notification(notif).await;
                 self.disconnect(true);
@@ -137,6 +135,7 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::CeaseSubcode;
+    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
 
     #[tokio::test]
@@ -404,5 +403,139 @@ mod tests {
             peer.fsm.connect_retry_counter, 5,
             "ConnectRetryCounter should NOT be incremented for version error"
         );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_bgp_header_error() {
+        use crate::bgp::msg_notification::MessageHeaderError;
+
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 1;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        peer.config.send_notification_without_open = true;
+
+        let notif = NotifcationMessage::new(
+            BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            vec![],
+        );
+
+        peer.process_event(&FsmEvent::BgpHeaderErr(notif))
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 2,
+            "ConnectRetryCounter should be incremented by 1"
+        );
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "Hold timer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "Keepalive timer should be stopped"
+        );
+        assert_eq!(
+            peer.statistics.notification_sent, 1,
+            "NOTIFICATION should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_bgp_open_msg_error() {
+        use crate::bgp::msg_notification::OpenMessageError;
+
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 3;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        peer.config.send_notification_without_open = true;
+
+        let notif = NotifcationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+
+        peer.process_event(&FsmEvent::BgpOpenMsgErr(notif))
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 4,
+            "ConnectRetryCounter should be incremented by 1"
+        );
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "Hold timer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "Keepalive timer should be stopped"
+        );
+        assert_eq!(
+            peer.statistics.notification_sent, 1,
+            "NOTIFICATION should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_fsm_errors() {
+        let events = vec![
+            FsmEvent::ConnectRetryTimerExpires,
+            FsmEvent::DelayOpenTimerExpires,
+            FsmEvent::IdleHoldTimerExpires,
+            FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                peer_asn: 65001,
+                peer_hold_time: 180,
+                peer_bgp_id: 0x02020202,
+                local_asn: 65000,
+                local_hold_time: 180,
+            }),
+            FsmEvent::BgpUpdateReceived,
+            FsmEvent::BgpUpdateMsgErr(NotifcationMessage::new(
+                BgpError::UpdateMessageError(crate::bgp::msg_notification::UpdateMessageError::MalformedAttributeList),
+                vec![],
+            )),
+        ];
+
+        for event in events {
+            let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+            peer.fsm.connect_retry_counter = 2;
+            peer.fsm.timers.start_hold_timer();
+            peer.fsm.timers.start_keepalive_timer();
+            peer.config.damp_peer_oscillations = true;
+            peer.config.send_notification_without_open = true;
+
+            let result = peer.process_event(&event).await;
+
+            assert!(result.is_err(), "FSM error should return error");
+            assert_eq!(peer.state(), BgpState::Idle);
+            assert!(peer.conn.is_none(), "TCP connection should be dropped");
+            assert!(
+                peer.fsm.timers.hold_timer_started.is_none(),
+                "Hold timer should be stopped"
+            );
+            assert!(
+                peer.fsm.timers.keepalive_timer_started.is_none(),
+                "Keepalive timer should be stopped"
+            );
+            assert_eq!(
+                peer.statistics.notification_sent, 1,
+                "NOTIFICATION should be sent"
+            );
+        }
     }
 }

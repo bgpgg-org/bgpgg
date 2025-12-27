@@ -450,12 +450,17 @@ impl Fsm {
             (BgpState::OpenConfirm, FsmEvent::KeepaliveTimerExpires) => BgpState::OpenConfirm,
             (BgpState::OpenConfirm, FsmEvent::TcpConnectionFails) => BgpState::Idle,
             (BgpState::OpenConfirm, FsmEvent::BgpKeepaliveReceived) => BgpState::Established,
-            (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
+            (BgpState::OpenConfirm, FsmEvent::BgpHeaderErr(_)) => BgpState::Idle,
+            (BgpState::OpenConfirm, FsmEvent::BgpOpenMsgErr(_)) => BgpState::Idle,
             (BgpState::OpenConfirm, FsmEvent::NotifMsgVerErr) => BgpState::Idle,
             (BgpState::OpenConfirm, FsmEvent::NotifMsg) => BgpState::Idle,
-            // RFC 4271 6.6: Events 9, 27 in OpenConfirm -> FSM Error
+            // RFC 4271 6.6: Events 9, 12-13, 20, 27-28 in OpenConfirm -> FSM Error
             (BgpState::OpenConfirm, FsmEvent::ConnectRetryTimerExpires)
-            | (BgpState::OpenConfirm, FsmEvent::BgpUpdateReceived) => BgpState::Idle,
+            | (BgpState::OpenConfirm, FsmEvent::DelayOpenTimerExpires)
+            | (BgpState::OpenConfirm, FsmEvent::IdleHoldTimerExpires)
+            | (BgpState::OpenConfirm, FsmEvent::BgpOpenWithDelayOpenTimer(_))
+            | (BgpState::OpenConfirm, FsmEvent::BgpUpdateReceived)
+            | (BgpState::OpenConfirm, FsmEvent::BgpUpdateMsgErr(_)) => BgpState::Idle,
 
             // ===== Established State =====
             (BgpState::Established, FsmEvent::ManualStop) => BgpState::Idle,
