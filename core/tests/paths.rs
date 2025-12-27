@@ -32,7 +32,7 @@ pub use common::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AsPathSegment, Origin, Route, UnknownAttribute};
+use bgpgg::grpc::proto::{AsPathSegment, BgpState, Origin, Route, UnknownAttribute};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -1162,6 +1162,164 @@ async fn test_unknown_optional_attribute_handling(
                 None,
                 false,
                 expected_unknown_attrs,
+            )],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_med_comparison_restricted_to_same_as() {
+    // RFC 4271 Section 9.1.2.2(c): MED is only comparable between routes
+    // from the same neighboring AS.
+    //
+    // Topology:  S1(AS65001, MED=100) ---\
+    //            S2(AS65001, MED=50)  ----+--- S4(AS65004)
+    //            S3(AS65002, MED=10)  ---/
+    //
+    // S4 receives three routes for 10.0.0.0/24:
+    // - From S1 (AS65001): MED=100
+    // - From S2 (AS65001): MED=50  <- wins among AS65001 routes
+    // - From S3 (AS65002): MED=10  <- lowest MED but different AS
+    //
+    // Expected winner: S2 (AS65001, MED=50)
+    // - S1 vs S2: same AS, MED compared -> S2 wins (50 < 100)
+    // - S2 vs S3: different AS, MED NOT compared -> falls to peer address -> S2 wins (127.0.0.2 < 127.0.0.3)
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+    let mut server2 = start_test_server(Config::new(
+        65001,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        true,
+    ))
+    .await;
+    let mut server3 = start_test_server(Config::new(
+        65002,
+        "127.0.0.3:0",
+        Ipv4Addr::new(3, 3, 3, 3),
+        90,
+        true,
+    ))
+    .await;
+    let server4 = start_test_server(Config::new(
+        65004,
+        "127.0.0.4:0",
+        Ipv4Addr::new(4, 4, 4, 4),
+        90,
+        true,
+    ))
+    .await;
+
+    // Connect S1, S2, S3 to S4 (star topology)
+    server1
+        .client
+        .add_peer(
+            format!("{}:{}", server4.address, server4.bgp_port),
+            None,
+        )
+        .await
+        .unwrap();
+    server2
+        .client
+        .add_peer(
+            format!("{}:{}", server4.address, server4.bgp_port),
+            None,
+        )
+        .await
+        .unwrap();
+    server3
+        .client
+        .add_peer(
+            format!("{}:{}", server4.address, server4.bgp_port),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Wait for all peers to establish
+    poll_until(
+        || async {
+            verify_peers(
+                &server4,
+                vec![
+                    server1.to_peer(BgpState::Established, false),
+                    server2.to_peer(BgpState::Established, false),
+                    server3.to_peer(BgpState::Established, false),
+                ],
+            )
+            .await
+        },
+        "Timeout waiting for peers to establish",
+    )
+    .await;
+
+    // All announce same prefix with different MEDs
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            Some(100),
+            false,
+        )
+        .await
+        .unwrap();
+
+    server2
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.2.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            Some(50),
+            false,
+        )
+        .await
+        .unwrap();
+
+    server3
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.3.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            Some(10),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // S4 should select S2's route (AS65001, MED=50)
+    // This proves: MED compared within AS65001 (S2 beat S1)
+    //              MED NOT compared across ASes (S2 beat S3 despite higher MED)
+    poll_route_propagation(&[(
+        &server4,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![as_sequence(vec![65001])],
+                &server2.address,
+                server2.address.clone(),
+                Origin::Igp,
+                Some(100),
+                Some(50),
+                false,
+                vec![],
             )],
         }],
     )])

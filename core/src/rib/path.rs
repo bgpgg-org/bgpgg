@@ -84,6 +84,21 @@ impl Path {
             })
             .sum()
     }
+
+    /// Determine neighboring AS per RFC 4271 Section 9.1.2.2(c)
+    /// Returns the first AS in the AS_PATH if present, None for locally originated routes
+    fn neighboring_as(&self) -> Option<u16> {
+        // Find first AS_SEQUENCE segment and return its first ASN
+        for segment in &self.as_path {
+            if segment.segment_type == AsPathSegmentType::AsSequence {
+                if !segment.asn_list.is_empty() {
+                    return Some(segment.asn_list[0]);
+                }
+            }
+        }
+        // Empty AS_PATH or no AS_SEQUENCE (locally originated or aggregated routes)
+        None
+    }
 }
 
 impl PartialOrd for Path {
@@ -123,14 +138,20 @@ impl Ord for Path {
         }
 
         // Step 4: Prefer the route with the lowest MULTI_EXIT_DISC (MED)
-        // Note: MED comparison should ideally only be done for routes from same neighboring AS
-        let self_med = self.med.unwrap_or(0);
-        let other_med = other.med.unwrap_or(0);
-        match other_med.cmp(&self_med) {
-            Ordering::Greater => return Ordering::Greater,
-            Ordering::Less => return Ordering::Less,
-            Ordering::Equal => {}
+        // RFC 4271 Section 9.1.2.2(c): MED is only comparable between routes
+        // learned from the same neighboring AS
+        let self_neighbor = self.neighboring_as();
+        let other_neighbor = other.neighboring_as();
+        if self_neighbor == other_neighbor {
+            let self_med = self.med.unwrap_or(0);
+            let other_med = other.med.unwrap_or(0);
+            match other_med.cmp(&self_med) {
+                Ordering::Greater => return Ordering::Greater,
+                Ordering::Less => return Ordering::Less,
+                Ordering::Equal => {}
+            }
         }
+        // If from different neighboring AS, skip MED comparison
 
         // Step 5: Prefer eBGP-learned routes over iBGP-learned routes
         match (&self.source, &other.source) {
@@ -338,5 +359,123 @@ mod tests {
         // Missing required attrs -> None
         let empty_update = UpdateMessage::new_withdraw(vec![]);
         assert!(Path::from_update_msg(&empty_update, source).is_none());
+    }
+
+    #[test]
+    fn test_neighboring_as() {
+        let tests = [
+            (
+                "AS_SEQUENCE with multiple ASNs",
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65002],
+                }],
+                Some(65001),
+            ),
+            ("empty AS_PATH", vec![], None),
+            (
+                "AS_SET then AS_SEQUENCE",
+                vec![
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSet,
+                        segment_len: 2,
+                        asn_list: vec![65001, 65002],
+                    },
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![65003],
+                    },
+                ],
+                Some(65003),
+            ),
+        ];
+
+        for (name, as_path, expected) in tests {
+            let mut path = make_base_path();
+            path.as_path = as_path;
+            assert_eq!(path.neighboring_as(), expected, "test case: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_med_comparison() {
+        let tests = [
+            (
+                "same AS - lower MED wins",
+                RouteSource::Ebgp(test_ip(1)),
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(50),
+                RouteSource::Ebgp(test_ip(1)),
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(100),
+                Ordering::Greater, // path1 wins due to lower MED
+            ),
+            (
+                "different AS - MED not compared",
+                RouteSource::Ebgp(test_ip(1)),
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(100),
+                RouteSource::Ebgp(test_ip(1)),
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65002],
+                }],
+                Some(10),
+                Ordering::Equal, // MED skipped, both eBGP from same peer
+            ),
+            (
+                "local routes - MED compared",
+                RouteSource::Local,
+                vec![],
+                Some(50),
+                RouteSource::Local,
+                vec![],
+                Some(100),
+                Ordering::Greater, // path1 wins due to lower MED
+            ),
+            (
+                "local vs external - MED not compared",
+                RouteSource::Local,
+                vec![],
+                Some(100),
+                RouteSource::Ebgp(test_ip(1)),
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(10),
+                Ordering::Greater, // path1 wins at step 5 (Local > eBGP)
+            ),
+        ];
+
+        for (name, src1, as_path1, med1, src2, as_path2, med2, expected) in tests {
+            let mut path1 = make_base_path();
+            path1.source = src1;
+            path1.as_path = as_path1;
+            path1.med = med1;
+
+            let mut path2 = make_base_path();
+            path2.source = src2;
+            path2.as_path = as_path2;
+            path2.med = med2;
+
+            assert_eq!(path1.cmp(&path2), expected, "test case: {}", name);
+        }
     }
 }
