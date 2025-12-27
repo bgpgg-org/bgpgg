@@ -16,9 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, TcpConnection};
 use crate::bgp::msg_notification::NotifcationMessage;
 use crate::server::ConnectionType;
-use crate::{debug, error, info};
-use std::collections::VecDeque;
-use std::time::Duration;
+use crate::{debug, error};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 impl Peer {
@@ -103,7 +101,9 @@ pub(super) mod tests {
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm};
     use crate::rib::rib_in::AdjRibIn;
+    use std::collections::VecDeque;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
