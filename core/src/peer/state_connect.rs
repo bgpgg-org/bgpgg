@@ -238,14 +238,32 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
-            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 25-28) in Connect -> Idle
+            // RFC 4271 8.2.2: Events 26-27 (KeepAlive, Update) in Connect -> FSM Error
+            (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
+            | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
+                let _ = self
+                    .send_notification(NotifcationMessage::new(
+                        BgpError::FiniteStateMachineError,
+                        vec![],
+                    ))
+                    .await;
+                if self.fsm.timers.connect_retry_started.is_some() {
+                    self.fsm.timers.stop_connect_retry();
+                }
+                if self.fsm.timers.delay_open_timer_running() {
+                    self.fsm.timers.stop_delay_open_timer();
+                }
+                self.disconnect(true);
+                self.fsm.increment_connect_retry_counter();
+                return Err(PeerError::FsmError);
+            }
+
+            // RFC 4271 8.2.2: Any other events (8, 10-11, 13, 19, 28) in Connect -> Idle
             (BgpState::Idle, FsmEvent::AutomaticStop(_))
             | (BgpState::Idle, FsmEvent::HoldTimerExpires)
             | (BgpState::Idle, FsmEvent::KeepaliveTimerExpires)
             | (BgpState::Idle, FsmEvent::IdleHoldTimerExpires)
             | (BgpState::Idle, FsmEvent::BgpOpenReceived(_))
-            | (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
-            | (BgpState::Idle, FsmEvent::BgpUpdateReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(_)) => {
                 if self.fsm.timers.connect_retry_started.is_some() {
                     self.fsm.timers.stop_connect_retry();
@@ -542,7 +560,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_other_events() {
-        let events = vec![
+        // Events that transition to Idle without FSM error
+        let events_no_error = vec![
             FsmEvent::AutomaticStop(CeaseSubcode::MaxPrefixesReached),
             FsmEvent::HoldTimerExpires,
             FsmEvent::KeepaliveTimerExpires,
@@ -554,18 +573,23 @@ mod tests {
                 local_asn: 65000,
                 local_hold_time: 180,
             }),
-            FsmEvent::BgpKeepaliveReceived,
-            FsmEvent::BgpUpdateReceived,
             FsmEvent::BgpUpdateMsgErr(NotifcationMessage::new(
                 BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
                 vec![],
             )),
         ];
 
+        // RFC 4271 Section 9: Events that cause FSM error (KEEPALIVE, UPDATE in Connect)
+        let events_fsm_error = vec![
+            FsmEvent::BgpKeepaliveReceived,
+            FsmEvent::BgpUpdateReceived,
+        ];
+
         let cases = vec![(true, true), (false, false)];
 
         for (start_connect_retry_timer, start_delay_open_timer) in cases {
-            for event in &events {
+            // Test events that don't cause FSM error
+            for event in &events_no_error {
                 let mut peer = create_test_peer_with_state(BgpState::Connect).await;
                 if start_connect_retry_timer {
                     peer.fsm.timers.start_connect_retry();
@@ -583,6 +607,30 @@ mod tests {
                 assert!(peer.conn.is_none());
                 assert_eq!(peer.fsm.connect_retry_counter, 1);
                 assert_eq!(peer.consecutive_down_count, 1);
+            }
+
+            // Test events that cause FSM error
+            for event in &events_fsm_error {
+                let mut peer = create_test_peer_with_state(BgpState::Connect).await;
+                if start_connect_retry_timer {
+                    peer.fsm.timers.start_connect_retry();
+                }
+                if start_delay_open_timer {
+                    peer.fsm.timers.start_delay_open_timer();
+                }
+                peer.config.damp_peer_oscillations = true;
+                peer.config.send_notification_without_open = true;
+
+                let result = peer.process_event(event).await;
+                assert!(result.is_err(), "FSM error expected for {:?}", event);
+
+                assert_eq!(peer.state(), BgpState::Idle);
+                assert!(peer.fsm.timers.connect_retry_started.is_none());
+                assert!(peer.fsm.timers.delay_open_timer_started.is_none());
+                assert!(peer.conn.is_none());
+                assert_eq!(peer.fsm.connect_retry_counter, 1);
+                assert_eq!(peer.consecutive_down_count, 1);
+                assert_eq!(peer.statistics.notification_sent, 1);
             }
         }
     }
