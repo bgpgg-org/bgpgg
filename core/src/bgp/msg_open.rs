@@ -140,16 +140,16 @@ fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
 
         let param_type = OptionalParamTypes::from(param_type_val);
 
-        cursor = cursor + 2;
+        cursor += 2;
 
         let param_value: ParamVal = match param_type {
             OptionalParamTypes::Capabilities => {
                 let code = bytes[cursor];
                 let len = bytes[cursor + 1] as usize;
-                cursor = cursor + 2;
+                cursor += 2;
 
                 let val = &bytes[cursor..cursor + len];
-                cursor = cursor + len;
+                cursor += len;
 
                 ParamVal::Capability(Capability {
                     code: BgpCapabiltyCode::from(code),
@@ -159,7 +159,7 @@ fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
             }
             _ => {
                 let val = &bytes[cursor..cursor + param_len];
-                cursor = cursor + param_len;
+                cursor += param_len;
 
                 ParamVal::Unknown(val.to_vec())
             }
@@ -172,7 +172,7 @@ fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
         })
     }
 
-    return params;
+    params
 }
 
 /// Validate BGP version (RFC 4271 Section 6.2)

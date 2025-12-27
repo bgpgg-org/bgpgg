@@ -30,24 +30,28 @@ pub struct LocRib {
 
 impl LocRib {
     fn add_route(&mut self, prefix: IpNetwork, path: Path) {
-        self.routes
-            .entry(prefix)
-            .and_modify(|route| {
+        use std::collections::hash_map::Entry;
+        match self.routes.entry(prefix) {
+            Entry::Occupied(mut entry) => {
+                let route = entry.get_mut();
                 // Check if we already have a path from this source, if so replace it
                 if let Some(existing_path) =
                     route.paths.iter_mut().find(|p| p.source == path.source)
                 {
-                    *existing_path = path.clone();
+                    *existing_path = path; // Move instead of clone
                 } else {
-                    route.paths.push(path.clone());
+                    route.paths.push(path); // Move instead of clone
                 }
                 // Keep paths sorted (best first)
                 route.paths.sort_by(|a, b| b.cmp(a));
-            })
-            .or_insert_with(|| Route {
-                prefix,
-                paths: vec![path],
-            });
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Route {
+                    prefix,
+                    paths: vec![path],
+                });
+            }
+        }
     }
 
     /// Remove paths from a specific peer for a given prefix.

@@ -177,12 +177,12 @@ fn parse_attr_type(
                 let total_attr_len = header_len + attr_len as usize;
                 let attr_data = bytes[..total_attr_len.min(bytes.len())].to_vec();
 
-                return Err(ParserError::BgpError {
+                Err(ParserError::BgpError {
                     error: BgpError::UpdateMessageError(
                         UpdateMessageError::UnrecognizedWellKnownAttribute,
                     ),
                     data: attr_data,
-                });
+                })
             } else {
                 // RFC 4271 Section 6.3: optional attributes (transitive or non-transitive)
                 // Return None to signal this should be stored as Unknown variant
@@ -437,11 +437,11 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::Origin(origin)
                 }
                 AttrType::AsPath => {
-                    let as_path = read_attr_as_path(&attr_data)?;
+                    let as_path = read_attr_as_path(attr_data)?;
                     PathAttrValue::AsPath(as_path)
                 }
                 AttrType::NextHop => {
-                    let next_hop = read_attr_next_hop(&attr_data);
+                    let next_hop = read_attr_next_hop(attr_data);
 
                     // RFC 4271: NEXT_HOP must be a valid IP host address
                     if let NextHopAddr::Ipv4(addr) = next_hop {
@@ -458,11 +458,11 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::NextHop(next_hop)
                 }
                 AttrType::MultiExtiDisc => {
-                    let multi_exit_disc = read_u32(&attr_data)?;
+                    let multi_exit_disc = read_u32(attr_data)?;
                     PathAttrValue::MultiExtiDisc(multi_exit_disc)
                 }
                 AttrType::LocalPref => {
-                    let local_pref = read_u32(&attr_data)?;
+                    let local_pref = read_u32(attr_data)?;
                     PathAttrValue::LocalPref(local_pref)
                 }
                 AttrType::AtomicAggregate => {
@@ -477,7 +477,7 @@ fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError>
                     PathAttrValue::AtomicAggregate
                 }
                 AttrType::Aggregator => {
-                    let aggregator = read_attr_aggregator(&attr_data);
+                    let aggregator = read_attr_aggregator(attr_data);
                     PathAttrValue::Aggregator(aggregator)
                 }
             }
@@ -550,13 +550,13 @@ fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
             IpNetwork::V4(net) => {
                 bytes.push(net.prefix_length);
                 let octets = net.address.octets();
-                let num_octets = ((net.prefix_length + 7) / 8) as usize;
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
                 bytes.extend_from_slice(&octets[..num_octets]);
             }
             IpNetwork::V6(net) => {
                 bytes.push(net.prefix_length);
                 let octets = net.address.octets();
-                let num_octets = ((net.prefix_length + 7) / 8) as usize;
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
                 bytes.extend_from_slice(&octets[..num_octets]);
             }
         }
@@ -709,6 +709,7 @@ fn validate_well_known_mandatory_attributes(
 }
 
 impl UpdateMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         origin: Origin,
         as_path_segments: Vec<AsPathSegment>,
@@ -791,7 +792,7 @@ impl UpdateMessage {
         &self.withdrawn_routes
     }
 
-    pub fn get_origin(&self) -> Option<Origin> {
+    pub fn origin(&self) -> Option<Origin> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::Origin(origin) = attr.value {
                 Some(origin)
@@ -801,7 +802,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_as_path(&self) -> Option<Vec<AsPathSegment>> {
+    pub fn as_path(&self) -> Option<Vec<AsPathSegment>> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 Some(as_path.segments.clone())
@@ -812,7 +813,7 @@ impl UpdateMessage {
     }
 
     /// Returns the leftmost AS in the AS_PATH attribute.
-    pub fn get_leftmost_as(&self) -> Option<u16> {
+    pub fn leftmost_as(&self) -> Option<u16> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 as_path.leftmost_as()
@@ -822,7 +823,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_next_hop(&self) -> Option<Ipv4Addr> {
+    pub fn next_hop(&self) -> Option<Ipv4Addr> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::NextHop(ref next_hop) = attr.value {
                 match next_hop {
@@ -835,7 +836,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_local_pref(&self) -> Option<u32> {
+    pub fn local_pref(&self) -> Option<u32> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::LocalPref(pref) = attr.value {
                 Some(pref)
@@ -845,7 +846,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_med(&self) -> Option<u32> {
+    pub fn med(&self) -> Option<u32> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::MultiExtiDisc(med) = attr.value {
                 Some(med)
@@ -855,13 +856,13 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_atomic_aggregate(&self) -> bool {
+    pub fn atomic_aggregate(&self) -> bool {
         self.path_attributes
             .iter()
             .any(|attr| attr.value == PathAttrValue::AtomicAggregate)
     }
 
-    pub fn get_unknown_attrs(&self) -> Vec<PathAttribute> {
+    pub fn unknown_attrs(&self) -> Vec<PathAttribute> {
         self.path_attributes
             .iter()
             .filter_map(|attr| {
@@ -1780,7 +1781,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_local_pref(), Some(200));
+        assert_eq!(msg.local_pref(), Some(200));
 
         let msg_no_pref = UpdateMessage::new(
             Origin::IGP,
@@ -1792,7 +1793,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_no_pref.get_local_pref(), None);
+        assert_eq!(msg_no_pref.local_pref(), None);
     }
 
     #[test]
@@ -1807,7 +1808,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_med(), Some(50));
+        assert_eq!(msg.med(), Some(50));
 
         let msg_no_med = UpdateMessage::new(
             Origin::IGP,
@@ -1819,7 +1820,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_no_med.get_med(), None);
+        assert_eq!(msg_no_med.med(), None);
     }
 
     #[test]
@@ -1847,12 +1848,12 @@ mod tests {
             let bytes = msg.to_bytes();
             let parsed = UpdateMessage::from_bytes(bytes).unwrap();
 
-            assert_eq!(parsed.get_origin(), Some(origin));
-            assert_eq!(parsed.get_as_path(), Some(vec![]));
-            assert_eq!(parsed.get_next_hop(), Some(Ipv4Addr::new(10, 0, 0, 1)));
-            assert_eq!(parsed.get_local_pref(), local_pref);
-            assert_eq!(parsed.get_med(), med);
-            assert_eq!(parsed.get_atomic_aggregate(), atomic_aggregate);
+            assert_eq!(parsed.origin(), Some(origin));
+            assert_eq!(parsed.as_path(), Some(vec![]));
+            assert_eq!(parsed.next_hop(), Some(Ipv4Addr::new(10, 0, 0, 1)));
+            assert_eq!(parsed.local_pref(), local_pref);
+            assert_eq!(parsed.med(), med);
+            assert_eq!(parsed.atomic_aggregate(), atomic_aggregate);
         }
     }
 
@@ -2284,7 +2285,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_leftmost_as(), Some(65001));
+        assert_eq!(msg.leftmost_as(), Some(65001));
 
         let msg_empty_path = UpdateMessage::new(
             Origin::IGP,
@@ -2296,7 +2297,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_empty_path.get_leftmost_as(), None);
+        assert_eq!(msg_empty_path.leftmost_as(), None);
     }
 
     #[test]

@@ -58,18 +58,18 @@ impl Path {
 
     /// Create a Path from an UPDATE message. Returns None if required attributes are missing.
     pub fn from_update_msg(update_msg: &UpdateMessage, source: RouteSource) -> Option<Self> {
-        let origin = update_msg.get_origin()?;
-        let as_path = update_msg.get_as_path()?;
-        let next_hop = update_msg.get_next_hop()?;
+        let origin = update_msg.origin()?;
+        let as_path = update_msg.as_path()?;
+        let next_hop = update_msg.next_hop()?;
         Some(Path {
             origin,
             as_path,
             next_hop,
             source,
-            local_pref: update_msg.get_local_pref(),
-            med: update_msg.get_med(),
-            atomic_aggregate: update_msg.get_atomic_aggregate(),
-            unknown_attrs: update_msg.get_unknown_attrs(),
+            local_pref: update_msg.local_pref(),
+            med: update_msg.med(),
+            atomic_aggregate: update_msg.atomic_aggregate(),
+            unknown_attrs: update_msg.unknown_attrs(),
         })
     }
 

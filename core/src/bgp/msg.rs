@@ -151,7 +151,7 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
 }
 
 fn validate_marker(header: &[u8]) -> Result<(), ParserError> {
-    if &header[0..16] != &BGP_MARKER {
+    if header[0..16] != BGP_MARKER {
         return Err(ParserError::BgpError {
             error: BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
             data: Vec::new(),

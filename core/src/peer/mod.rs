@@ -194,7 +194,7 @@ impl Peer {
                 local_hold_time,
                 local_bgp_id,
                 local_ip,
-                config.get_delay_open_time(),
+                config.delay_open_time(),
                 config.passive_mode,
             ),
             conn: None,

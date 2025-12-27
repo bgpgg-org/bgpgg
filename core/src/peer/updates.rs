@@ -31,7 +31,7 @@ impl Peer {
         // RFC 4271 Section 6.3: For eBGP, check that leftmost AS in AS_PATH equals peer AS.
         // If mismatch, MUST set error subcode to MalformedASPath.
         if self.session_type == Some(SessionType::Ebgp) {
-            if let Some(leftmost_as) = update_msg.get_leftmost_as() {
+            if let Some(leftmost_as) = update_msg.leftmost_as() {
                 if let Some(peer_asn) = self.asn {
                     if leftmost_as != peer_asn {
                         warn!("AS_PATH first AS does not match peer AS",

@@ -92,7 +92,7 @@ fn default_passive_mode() -> bool {
 
 impl PeerConfig {
     /// Returns the DelayOpenTime as a Duration, or None if disabled.
-    pub fn get_delay_open_time(&self) -> Option<Duration> {
+    pub fn delay_open_time(&self) -> Option<Duration> {
         self.delay_open_time_secs.map(Duration::from_secs)
     }
 
@@ -178,7 +178,7 @@ impl Config {
     }
 
     /// Get the local bind address for outgoing connections (IP with port 0)
-    pub fn get_local_addr(&self) -> Result<SocketAddr, String> {
+    pub fn local_addr(&self) -> Result<SocketAddr, String> {
         let local_ip = self
             .listen_addr
             .split(':')

@@ -80,7 +80,7 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
             });
         }
 
-        let byte_len: usize = (prefix_length as usize + 7) / 8;
+        let byte_len: usize = (prefix_length as usize).div_ceil(8);
 
         if cursor + byte_len > bytes.len() {
             return Err(ParserError::BgpError {
@@ -90,9 +90,7 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
         }
 
         let mut ip_buffer = [0; 4];
-        for i in 0..byte_len {
-            ip_buffer[i] = bytes[cursor + i];
-        }
+        ip_buffer[..byte_len].copy_from_slice(&bytes[cursor..(byte_len + cursor)]);
 
         let net = Ipv4Net {
             address: Ipv4Addr::from(ip_buffer),
