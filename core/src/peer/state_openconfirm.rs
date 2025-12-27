@@ -240,4 +240,68 @@ mod tests {
             "Peer oscillation damping should increment consecutive_down_count"
         );
     }
+
+    #[tokio::test]
+    async fn test_openconfirm_keepalive_timer_expires() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        let initial_keepalive_sent = peer.statistics.keepalive_sent;
+
+        peer.process_event(&FsmEvent::KeepaliveTimerExpires)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::OpenConfirm);
+        assert_eq!(
+            peer.statistics.keepalive_sent,
+            initial_keepalive_sent + 1,
+            "KEEPALIVE message should be sent"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_some(),
+            "KeepaliveTimer should be restarted"
+        );
+        assert!(peer.conn.is_some(), "TCP connection should remain");
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_some(),
+            "Hold timer should still be running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openconfirm_hold_timer_expires() {
+        let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
+        peer.fsm.connect_retry_counter = 3;
+        peer.fsm.timers.start_hold_timer();
+        peer.fsm.timers.start_keepalive_timer();
+        peer.config.send_notification_without_open = true;
+
+        peer.process_event(&FsmEvent::HoldTimerExpires)
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state(), BgpState::Idle);
+        assert_eq!(
+            peer.statistics.notification_sent, 1,
+            "NOTIFICATION with HoldTimerExpired should be sent"
+        );
+        assert!(
+            peer.fsm.timers.connect_retry_started.is_none(),
+            "ConnectRetryTimer should be set to zero"
+        );
+        assert_eq!(
+            peer.fsm.connect_retry_counter, 4,
+            "ConnectRetryCounter should be incremented by 1"
+        );
+        assert!(peer.conn.is_none(), "TCP connection should be dropped");
+        assert!(
+            peer.fsm.timers.hold_timer_started.is_none(),
+            "Hold timer should be stopped"
+        );
+        assert!(
+            peer.fsm.timers.keepalive_timer_started.is_none(),
+            "Keepalive timer should be stopped"
+        );
+    }
 }
