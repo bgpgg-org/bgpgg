@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::grpc::proto::{MaxPrefixAction, MaxPrefixSetting, SessionConfig};
+use bgpgg::grpc::proto::{AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, SessionConfig};
 use bgpgg::grpc::BgpClient;
 
 use crate::PeerCommands;
@@ -25,6 +25,7 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
     match cmd {
         PeerCommands::Add {
             address,
+            remote_as: _,
             max_prefix_limit,
             max_prefix_action,
         } => {
@@ -39,15 +40,47 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                 ..Default::default()
             });
             match client.add_peer(address, config).await {
-                Ok(message) => println!("✓ {}", message),
-                Err(e) => println!("✗ {}", e.message()),
+                Ok(message) => println!("{}", message),
+                Err(e) => eprintln!("Error: {}", e.message()),
             }
         }
 
-        PeerCommands::Remove { address } => match client.remove_peer(address).await {
-            Ok(message) => println!("✓ {}", message),
-            Err(e) => println!("✗ {}", e.message()),
+        PeerCommands::Del { address } => match client.remove_peer(address).await {
+            Ok(message) => println!("{}", message),
+            Err(e) => eprintln!("Error: {}", e.message()),
         },
+
+        PeerCommands::Show { address } => {
+            let (peer_opt, stats_opt) = client.get_peer(address.clone()).await?;
+
+            match (peer_opt, stats_opt) {
+                (Some(peer), Some(stats)) => {
+                    println!("Peer: {}", address);
+                    println!("  ASN:         {}", peer.asn);
+                    println!("  State:       {}", format_state(peer.state()));
+                    println!("  Admin State: {}", format_admin_state(peer.admin_state()));
+                    println!(
+                        "  Configured:  {}",
+                        if peer.configured { "yes" } else { "no" }
+                    );
+                    println!();
+                    println!("Statistics:");
+                    println!("  Messages Sent:");
+                    println!("    OPEN:         {}", stats.open_sent);
+                    println!("    KEEPALIVE:    {}", stats.keepalive_sent);
+                    println!("    UPDATE:       {}", stats.update_sent);
+                    println!("    NOTIFICATION: {}", stats.notification_sent);
+                    println!("  Messages Received:");
+                    println!("    OPEN:         {}", stats.open_received);
+                    println!("    KEEPALIVE:    {}", stats.keepalive_received);
+                    println!("    UPDATE:       {}", stats.update_received);
+                    println!("    NOTIFICATION: {}", stats.notification_received);
+                }
+                _ => {
+                    eprintln!("Peer not found: {}", address);
+                }
+            }
+        }
 
         PeerCommands::List => {
             let peers = client.get_peers().await?;
@@ -59,11 +92,40 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                 println!("{}", "-".repeat(60));
 
                 for peer in peers {
-                    println!("{:<30} {:<10} {:<15}", peer.address, peer.asn, peer.state);
+                    let asn_str = if peer.asn == 0 {
+                        "-".to_string()
+                    } else {
+                        peer.asn.to_string()
+                    };
+                    println!(
+                        "{:<30} {:<10} {:<15}",
+                        peer.address,
+                        asn_str,
+                        format_state(peer.state())
+                    );
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn format_state(state: BgpState) -> &'static str {
+    match state {
+        BgpState::Idle => "Idle",
+        BgpState::Connect => "Connect",
+        BgpState::Active => "Active",
+        BgpState::OpenSent => "OpenSent",
+        BgpState::OpenConfirm => "OpenConfirm",
+        BgpState::Established => "Established",
+    }
+}
+
+fn format_admin_state(state: AdminState) -> &'static str {
+    match state {
+        AdminState::Up => "Up",
+        AdminState::Down => "Down",
+        AdminState::PrefixLimitExceeded => "PrefixLimitExceeded",
+    }
 }

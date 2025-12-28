@@ -51,7 +51,8 @@ fn test_peer_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Peer management commands"));
     assert!(stdout.contains("add"));
-    assert!(stdout.contains("remove"));
+    assert!(stdout.contains("del"));
+    assert!(stdout.contains("show"));
     assert!(stdout.contains("list"));
 }
 
@@ -83,8 +84,8 @@ fn test_peer_add_missing_address() {
 }
 
 #[test]
-fn test_peer_remove_missing_address() {
-    let output = run_cli(&["peer", "remove"]);
+fn test_peer_del_missing_address() {
+    let output = run_cli(&["peer", "del"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
