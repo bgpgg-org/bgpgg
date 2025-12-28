@@ -351,6 +351,7 @@ mod tests {
             Some(50),
             true,
             vec![],
+            vec![],
         );
         let path = Path::from_update_msg(&update, source);
         assert!(path.is_some());

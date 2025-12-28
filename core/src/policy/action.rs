@@ -78,6 +78,61 @@ impl Action for Accept {
     }
 }
 
+/// Community modification operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommunityOp {
+    Add(Vec<u32>),
+    Remove(Vec<u32>),
+    Replace(Vec<u32>),
+}
+
+/// Set community attribute
+#[derive(Debug, Clone)]
+pub struct SetCommunity {
+    pub operation: CommunityOp,
+}
+
+impl SetCommunity {
+    pub fn add(communities: Vec<u32>) -> Self {
+        Self {
+            operation: CommunityOp::Add(communities),
+        }
+    }
+
+    pub fn remove(communities: Vec<u32>) -> Self {
+        Self {
+            operation: CommunityOp::Remove(communities),
+        }
+    }
+
+    pub fn replace(communities: Vec<u32>) -> Self {
+        Self {
+            operation: CommunityOp::Replace(communities),
+        }
+    }
+}
+
+impl Action for SetCommunity {
+    fn apply(&self, path: &mut Path) -> bool {
+        match &self.operation {
+            CommunityOp::Add(to_add) => {
+                for &comm in to_add {
+                    if !path.communities.contains(&comm) {
+                        path.communities.push(comm);
+                    }
+                }
+            }
+            CommunityOp::Remove(to_remove) => {
+                path.communities.retain(|comm| !to_remove.contains(comm));
+            }
+            CommunityOp::Replace(new_communities) => {
+                path.communities = new_communities.clone();
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +175,41 @@ mod tests {
     #[test]
     fn test_accept() {
         assert!(Accept.apply(&mut create_path(RouteSource::Ebgp(test_ip()))));
+    }
+
+    #[test]
+    fn test_set_community_add() {
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
+        path.communities = vec![100, 200];
+
+        assert!(SetCommunity::add(vec![300, 400]).apply(&mut path));
+        assert_eq!(path.communities, vec![100, 200, 300, 400]);
+    }
+
+    #[test]
+    fn test_set_community_add_no_duplicates() {
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
+        path.communities = vec![100, 200];
+
+        assert!(SetCommunity::add(vec![200, 300]).apply(&mut path));
+        assert_eq!(path.communities, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn test_set_community_remove() {
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
+        path.communities = vec![100, 200, 300];
+
+        assert!(SetCommunity::remove(vec![100, 300]).apply(&mut path));
+        assert_eq!(path.communities, vec![200]);
+    }
+
+    #[test]
+    fn test_set_community_replace() {
+        let mut path = create_path(RouteSource::Ebgp(test_ip()));
+        path.communities = vec![100, 200, 300];
+
+        assert!(SetCommunity::replace(vec![400, 500]).apply(&mut path));
+        assert_eq!(path.communities, vec![400, 500]);
     }
 }

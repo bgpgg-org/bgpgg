@@ -37,6 +37,7 @@ impl UpdateMessage {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        communities: Vec<u32>,
         unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         let mut path_attributes = vec![
@@ -74,6 +75,13 @@ impl UpdateMessage {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::AtomicAggregate,
+            });
+        }
+
+        if !communities.is_empty() {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Communities(communities),
             });
         }
 
@@ -1611,6 +1619,7 @@ mod tests {
             None,
             false,
             vec![],
+            vec![],
         );
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -1622,6 +1631,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
         );
         assert_eq!(msg_no_pref.local_pref(), None);
@@ -1638,6 +1648,7 @@ mod tests {
             Some(50),
             false,
             vec![],
+            vec![],
         );
         assert_eq!(msg.med(), Some(50));
 
@@ -1649,6 +1660,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
         );
         assert_eq!(msg_no_med.med(), None);
@@ -1673,6 +1685,7 @@ mod tests {
                 local_pref,
                 med,
                 atomic_aggregate,
+                vec![],
                 vec![],
             );
 
@@ -2115,6 +2128,7 @@ mod tests {
             None,
             false,
             vec![],
+            vec![],
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -2126,6 +2140,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
         );
         assert_eq!(msg_empty_path.leftmost_as(), None);

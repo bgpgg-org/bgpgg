@@ -97,6 +97,24 @@ impl Condition for RouteTypeCondition {
     }
 }
 
+/// Match routes with specific community value
+#[derive(Debug, Clone)]
+pub struct CommunityCondition {
+    pub community: u32,
+}
+
+impl CommunityCondition {
+    pub fn new(community: u32) -> Self {
+        Self { community }
+    }
+}
+
+impl Condition for CommunityCondition {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
+        path.communities.contains(&self.community)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +188,20 @@ mod tests {
 
         let local_path = create_path(RouteSource::Local);
         assert!(local.matches(&test_prefix(), &local_path));
+    }
+
+    #[test]
+    fn test_community_condition() {
+        let condition = CommunityCondition::new(65001);
+        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+
+        path.communities = vec![65001, 65002];
+        assert!(condition.matches(&test_prefix(), &path));
+
+        path.communities = vec![65002, 65003];
+        assert!(!condition.matches(&test_prefix(), &path));
+
+        path.communities = vec![];
+        assert!(!condition.matches(&test_prefix(), &path));
     }
 }

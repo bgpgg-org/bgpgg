@@ -167,6 +167,7 @@ mod tests {
                 None,
                 false,
                 vec![],
+                vec![],
             );
 
             let result = peer.handle_update(update);
@@ -279,6 +280,7 @@ mod tests {
                     None,
                     false,
                     vec![],
+                    vec![],
                 );
                 peer.handle_update(initial_update).unwrap();
             }
@@ -304,6 +306,7 @@ mod tests {
                 None,
                 None,
                 false,
+                vec![],
                 vec![],
             );
 
