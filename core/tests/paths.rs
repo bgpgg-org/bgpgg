@@ -31,6 +31,7 @@ mod common;
 pub use common::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::bgp::msg_update_types::{community, well_known_communities};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AsPathSegment, BgpState, Origin, Route, UnknownAttribute};
 use std::net::Ipv4Addr;
@@ -1357,6 +1358,12 @@ async fn test_med_comparison_restricted_to_same_as() {
 async fn test_normal_community_propagation() {
     let (mut server1, server2) = setup_two_peered_servers(None).await;
 
+    let communities = vec![
+        community::from_asn_value(65001, 100),
+        community::from_asn_value(65001, 200),
+        community::from_asn_value(65001, 300),
+    ];
+
     server1
         .client
         .add_route(
@@ -1367,7 +1374,7 @@ async fn test_normal_community_propagation() {
             None,
             None,
             false,
-            vec![100, 200, 300],
+            communities.clone(),
         )
         .await
         .expect("Failed to add route");
@@ -1385,7 +1392,7 @@ async fn test_normal_community_propagation() {
                 None,
                 false,
                 vec![],
-                vec![100, 200, 300],
+                communities,
             )],
         }],
     )])
@@ -1407,7 +1414,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![0xFFFFFF02], // NO_ADVERTISE
+            vec![well_known_communities::NO_ADVERTISE],
         )
         .await
         .expect("Failed to add route");
@@ -1422,7 +1429,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![0xFFFFFF01], // NO_EXPORT
+            vec![well_known_communities::NO_EXPORT],
         )
         .await
         .expect("Failed to add route");
@@ -1437,7 +1444,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![0xFFFFFF03], // NO_EXPORT_SUBCONFED
+            vec![well_known_communities::NO_EXPORT_SUBCONFED],
         )
         .await
         .expect("Failed to add route");
