@@ -524,12 +524,8 @@ mod tests {
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
 
-    const PATH_ATTR_ORIGIN_EGP: &[u8] = &[
-        PathAttrFlag::TRANSITIVE,
-        AttrType::Origin as u8,
-        0x01,
-        1,
-    ];
+    const PATH_ATTR_ORIGIN_EGP: &[u8] =
+        &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 1];
 
     const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
         PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
@@ -561,12 +557,7 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_origin_invalid_value() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::Origin as u8,
-            0x01,
-            0x03,
-        ];
+        let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
         match read_path_attribute(input) {
             Err(ParserError::BgpError { error, data }) => {

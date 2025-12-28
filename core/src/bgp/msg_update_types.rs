@@ -53,7 +53,6 @@ pub mod attr_type_code {
     pub const COMMUNITIES: u8 = 8;
 }
 
-
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum PathAttrValue {
     Origin(Origin),
@@ -247,4 +246,3 @@ pub struct Aggregator {
     // TODO: support IPv6?
     pub(super) ip_addr: Ipv4Addr,
 }
-

@@ -289,7 +289,6 @@ impl Message for UpdateMessage {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

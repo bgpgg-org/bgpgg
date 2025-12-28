@@ -30,8 +30,8 @@
 mod common;
 pub use common::*;
 
-use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::bgp::community;
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AsPathSegment, BgpState, Origin, Route, UnknownAttribute};
 use std::net::Ipv4Addr;
