@@ -16,6 +16,10 @@ use super::msg_notification::{BgpError, UpdateMessageError};
 use super::utils::ParserError;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+// Re-export community functions and constants
+pub use super::community::{asn, from_asn_value, value};
+pub use super::community::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct PathAttrFlag(pub u8);
 
@@ -49,30 +53,6 @@ pub mod attr_type_code {
     pub const COMMUNITIES: u8 = 8;
 }
 
-/// Helper functions for BGP community values.
-/// RFC 1997: community = (ASN << 16) | value
-pub mod community {
-    /// Create a community value from ASN and local value (ASN:value format).
-    pub const fn from_asn_value(asn: u16, value: u16) -> u32 {
-        ((asn as u32) << 16) | (value as u32)
-    }
-
-    /// Extract ASN from a community value (high 16 bits).
-    pub const fn asn(community: u32) -> u16 {
-        (community >> 16) as u16
-    }
-
-    /// Extract local value from a community value (low 16 bits).
-    pub const fn value(community: u32) -> u16 {
-        community as u16
-    }
-}
-
-pub mod well_known_communities {
-    pub const NO_EXPORT: u32 = 0xFFFFFF01;
-    pub const NO_ADVERTISE: u32 = 0xFFFFFF02;
-    pub const NO_EXPORT_SUBCONFED: u32 = 0xFFFFFF03;
-}
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum PathAttrValue {
@@ -268,42 +248,3 @@ pub struct Aggregator {
     pub(super) ip_addr: Ipv4Addr,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::community::*;
-    use super::well_known_communities::*;
-
-    #[test]
-    fn test_community_from_asn_value() {
-        assert_eq!(from_asn_value(1, 100), 0x00010064);
-        assert_eq!(from_asn_value(65001, 200), 0xFDE900C8);
-        assert_eq!(from_asn_value(0, 1), 0x00000001);
-        assert_eq!(from_asn_value(65535, 65535), 0xFFFFFFFF);
-    }
-
-    #[test]
-    fn test_community_asn() {
-        assert_eq!(asn(0x00010064), 1);
-        assert_eq!(asn(0xFDE900C8), 65001);
-        assert_eq!(asn(NO_EXPORT), 0xFFFF);
-        assert_eq!(asn(NO_ADVERTISE), 0xFFFF);
-    }
-
-    #[test]
-    fn test_community_value() {
-        assert_eq!(value(0x00010064), 100);
-        assert_eq!(value(0xFDE900C8), 200);
-        assert_eq!(value(NO_EXPORT), 0xFF01);
-        assert_eq!(value(NO_ADVERTISE), 0xFF02);
-    }
-
-    #[test]
-    fn test_community_roundtrip() {
-        let test_cases = [(1, 100), (65001, 200), (0, 1), (65535, 65535)];
-        for (test_asn, test_value) in test_cases {
-            let community = from_asn_value(test_asn, test_value);
-            assert_eq!(asn(community), test_asn);
-            assert_eq!(value(community), test_value);
-        }
-    }
-}

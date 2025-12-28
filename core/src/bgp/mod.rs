@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod community;
 pub mod msg;
 pub mod msg_keepalive;
 pub mod msg_notification;
 pub mod msg_open;
 pub mod msg_open_types;
 pub mod msg_update;
+mod msg_update_codec;
 pub mod msg_update_types;
 pub mod utils;

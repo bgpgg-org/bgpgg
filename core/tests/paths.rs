@@ -31,7 +31,7 @@ mod common;
 pub use common::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
-use bgpgg::bgp::msg_update_types::{community, well_known_communities};
+use bgpgg::bgp::community;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AsPathSegment, BgpState, Origin, Route, UnknownAttribute};
 use std::net::Ipv4Addr;
@@ -1414,7 +1414,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![well_known_communities::NO_ADVERTISE],
+            vec![community::NO_ADVERTISE],
         )
         .await
         .expect("Failed to add route");
@@ -1429,7 +1429,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![well_known_communities::NO_EXPORT],
+            vec![community::NO_EXPORT],
         )
         .await
         .expect("Failed to add route");
@@ -1444,7 +1444,7 @@ async fn test_well_known_communities() {
             None,
             None,
             false,
-            vec![well_known_communities::NO_EXPORT_SUBCONFED],
+            vec![community::NO_EXPORT_SUBCONFED],
         )
         .await
         .expect("Failed to add route");
