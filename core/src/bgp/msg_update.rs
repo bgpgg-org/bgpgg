@@ -194,6 +194,16 @@ impl UpdateMessage {
             .collect()
     }
 
+    pub fn communities(&self) -> Option<Vec<u32>> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::Communities(ref communities) = attr.value {
+                Some(communities.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;
@@ -324,6 +334,7 @@ pub(crate) fn validate_attribute_length(
         AttrType::AtomicAggregate => attr_len == 0,
         AttrType::Aggregator => attr_len == 6,
         AttrType::AsPath => true, // Variable length
+        AttrType::Communities => attr_len.is_multiple_of(4), // Must be multiple of 4
     };
 
     if !valid {
@@ -490,6 +501,24 @@ pub(crate) fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
     Aggregator { asn, ip_addr }
 }
 
+pub(crate) fn read_attr_communities(bytes: &[u8]) -> Result<Vec<u32>, ParserError> {
+    // Length must be multiple of 4 (each community is 4 octets)
+    if !bytes.len().is_multiple_of(4) {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            data: Vec::new(),
+        });
+    }
+
+    let mut communities = Vec::new();
+    for chunk in bytes.chunks_exact(4) {
+        let community = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        communities.push(community);
+    }
+
+    Ok(communities)
+}
+
 pub(crate) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
@@ -575,6 +604,10 @@ pub(crate) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
                 AttrType::Aggregator => {
                     let aggregator = read_attr_aggregator(attr_data);
                     PathAttrValue::Aggregator(aggregator)
+                }
+                AttrType::Communities => {
+                    let communities = read_attr_communities(attr_data)?;
+                    PathAttrValue::Communities(communities)
                 }
             }
         }
@@ -692,6 +725,13 @@ pub(crate) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             agg_bytes.extend_from_slice(&agg.ip_addr.octets());
             agg_bytes
         }
+        PathAttrValue::Communities(communities) => {
+            let mut comm_bytes = Vec::new();
+            for &community in communities {
+                comm_bytes.extend_from_slice(&community.to_be_bytes());
+            }
+            comm_bytes
+        }
         PathAttrValue::Unknown { data, .. } => data.clone(),
     };
 
@@ -711,6 +751,7 @@ pub(crate) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::LocalPref(_) => AttrType::LocalPref as u8,
         PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
         PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
+        PathAttrValue::Communities(_) => AttrType::Communities as u8,
         PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
     bytes.push(attr_type);
@@ -1948,9 +1989,9 @@ mod tests {
 
     #[test]
     fn test_unrecognized_well_known_attribute() {
-        // Well-known attribute (OPTIONAL=0) with unrecognized type code 8
+        // Well-known attribute (OPTIONAL=0) with unrecognized type code 9
         let flags = PathAttrFlag::TRANSITIVE;
-        let attr_type = 8u8;
+        let attr_type = 9u8; // Type code 9 is unrecognized (8 is now COMMUNITIES)
         let attr_len = 2u8;
         let attr_value = vec![0xaa, 0xbb];
 
@@ -2104,5 +2145,184 @@ mod tests {
             }
             _ => panic!("Expected MalformedAttributeList error for duplicate attribute"),
         }
+    }
+
+    // Communities attribute tests
+    const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
+        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Flags
+        AttrType::Communities as u8,                       // Type code: 8
+        0x08,                                              // Length: 8 bytes (2 communities)
+        0x00,
+        0x01,
+        0x00,
+        0x64, // Community 1: 1:100 (AS 1, value 100)
+        0xFF,
+        0xFF,
+        0xFF,
+        0x01, // Community 2: NO_EXPORT
+    ];
+
+    const PATH_ATTR_COMMUNITIES_EMPTY: &[u8] = &[
+        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+        AttrType::Communities as u8,
+        0x00, // Length: 0
+    ];
+
+    const PATH_ATTR_COMMUNITIES_WELL_KNOWN: &[u8] = &[
+        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+        AttrType::Communities as u8,
+        0x0c, // Length: 12 bytes (3 communities)
+        0xFF,
+        0xFF,
+        0xFF,
+        0x01, // NO_EXPORT
+        0xFF,
+        0xFF,
+        0xFF,
+        0x02, // NO_ADVERTISE
+        0xFF,
+        0xFF,
+        0xFF,
+        0x03, // NO_EXPORT_SUBCONFED
+    ];
+
+    #[test]
+    fn test_read_path_attribute_communities() {
+        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_TWO).unwrap();
+
+        assert_eq!(
+            attr,
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Communities(vec![0x00010064, 0xFFFFFF01]),
+            }
+        );
+        assert_eq!(offset, 11); // 3-byte header + 8 bytes data
+    }
+
+    #[test]
+    fn test_read_path_attribute_communities_empty() {
+        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY).unwrap();
+
+        assert_eq!(
+            attr,
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Communities(vec![]),
+            }
+        );
+        assert_eq!(offset, 3); // 3-byte header only
+    }
+
+    #[test]
+    fn test_read_path_attribute_communities_well_known() {
+        let (attr, _) = read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN).unwrap();
+
+        if let PathAttrValue::Communities(communities) = attr.value {
+            assert_eq!(communities.len(), 3);
+            assert_eq!(communities[0], 0xFFFFFF01); // NO_EXPORT
+            assert_eq!(communities[1], 0xFFFFFF02); // NO_ADVERTISE
+            assert_eq!(communities[2], 0xFFFFFF03); // NO_EXPORT_SUBCONFED
+        } else {
+            panic!("Expected Communities attribute");
+        }
+    }
+
+    #[test]
+    fn test_read_path_attribute_communities_invalid_length() {
+        // Length not multiple of 4
+        let input: &[u8] = &[
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::Communities as u8,
+            0x03, // Invalid length: 3 bytes (not multiple of 4)
+            0x00,
+            0x01,
+            0x00,
+        ];
+
+        match read_path_attribute(input) {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
+                );
+            }
+            _ => panic!("Expected OptionalAttributeError for invalid communities length"),
+        }
+    }
+
+    #[test]
+    fn test_write_path_attribute_communities() {
+        let attr = PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::Communities(vec![0x00010064, 0xFFFFFF01]),
+        };
+
+        let bytes = write_path_attribute(&attr);
+        assert_eq!(bytes, PATH_ATTR_COMMUNITIES_TWO);
+    }
+
+    #[test]
+    fn test_write_path_attribute_communities_empty() {
+        let attr = PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::Communities(vec![]),
+        };
+
+        let bytes = write_path_attribute(&attr);
+        assert_eq!(bytes, PATH_ATTR_COMMUNITIES_EMPTY);
+    }
+
+    #[test]
+    fn test_communities_roundtrip() {
+        // Test parsing and serializing communities
+        let original_communities = vec![0x00010064, 0xFFFFFF01, 0xFFFFFF02];
+        let attr = PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::Communities(original_communities.clone()),
+        };
+
+        let bytes = write_path_attribute(&attr);
+        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
+
+        if let PathAttrValue::Communities(communities) = parsed_attr.value {
+            assert_eq!(communities, original_communities);
+        } else {
+            panic!("Expected Communities attribute after roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_update_message_with_communities() {
+        let body = build_update_body(
+            &[
+                PATH_ATTR_ORIGIN_IGP,
+                PATH_ATTR_AS_PATH_EMPTY,
+                PATH_ATTR_NEXT_HOP,
+                PATH_ATTR_COMMUNITIES_TWO,
+            ],
+            NLRI_SINGLE,
+        );
+
+        let msg = UpdateMessage::from_bytes(body).unwrap();
+
+        assert_eq!(msg.origin(), Some(Origin::IGP));
+        assert_eq!(msg.communities(), Some(vec![0x00010064, 0xFFFFFF01]));
+    }
+
+    #[test]
+    fn test_update_message_without_communities() {
+        let body = build_update_body(
+            &[
+                PATH_ATTR_ORIGIN_IGP,
+                PATH_ATTR_AS_PATH_EMPTY,
+                PATH_ATTR_NEXT_HOP,
+            ],
+            NLRI_SINGLE,
+        );
+
+        let msg = UpdateMessage::from_bytes(body).unwrap();
+
+        assert_eq!(msg.communities(), None);
     }
 }

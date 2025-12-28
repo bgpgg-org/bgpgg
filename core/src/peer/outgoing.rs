@@ -326,6 +326,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         }
     }
@@ -620,6 +621,7 @@ mod tests {
             local_pref: Some(200),
             med: None,
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -641,6 +643,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -659,6 +662,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 

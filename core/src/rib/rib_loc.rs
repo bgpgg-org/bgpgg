@@ -176,6 +176,7 @@ impl LocRib {
             local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
             med,
             atomic_aggregate,
+            communities: vec![],
             unknown_attrs: vec![],
         });
 

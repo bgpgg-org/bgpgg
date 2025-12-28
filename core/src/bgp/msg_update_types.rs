@@ -46,6 +46,13 @@ pub mod attr_type_code {
     pub const LOCAL_PREF: u8 = 5;
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
+    pub const COMMUNITIES: u8 = 8;
+}
+
+pub mod well_known_communities {
+    pub const NO_EXPORT: u32 = 0xFFFFFF01;
+    pub const NO_ADVERTISE: u32 = 0xFFFFFF02;
+    pub const NO_EXPORT_SUBCONFED: u32 = 0xFFFFFF03;
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
@@ -57,6 +64,7 @@ pub enum PathAttrValue {
     LocalPref(u32),
     AtomicAggregate,
     Aggregator(Aggregator),
+    Communities(Vec<u32>),
     Unknown {
         type_code: u8,
         flags: u8,
@@ -88,6 +96,7 @@ impl PathAttribute {
             PathAttrValue::LocalPref(_) => attr_type_code::LOCAL_PREF,
             PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
             PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
+            PathAttrValue::Communities(_) => attr_type_code::COMMUNITIES,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
     }
@@ -102,6 +111,7 @@ pub(crate) enum AttrType {
     LocalPref = 5,
     AtomicAggregate = 6,
     Aggregator = 7,
+    Communities = 8,
 }
 
 impl TryFrom<u8> for AttrType {
@@ -116,6 +126,7 @@ impl TryFrom<u8> for AttrType {
             5 => Ok(AttrType::LocalPref),
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
+            8 => Ok(AttrType::Communities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
                 data: Vec::new(),
@@ -134,6 +145,7 @@ impl AttrType {
             AttrType::LocalPref => PathAttrFlag::TRANSITIVE,
             AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
             AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::Communities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
 
@@ -149,7 +161,10 @@ impl AttrType {
     }
 
     pub(super) fn is_optional(&self) -> bool {
-        matches!(self, AttrType::MultiExtiDisc | AttrType::Aggregator)
+        matches!(
+            self,
+            AttrType::MultiExtiDisc | AttrType::Aggregator | AttrType::Communities
+        )
     }
 }
 

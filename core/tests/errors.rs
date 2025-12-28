@@ -661,8 +661,8 @@ async fn test_update_unrecognized_well_known_attribute() {
         .await;
     peer.handshake_keepalive().await;
 
-    // Build an unrecognized well-known attribute (type 8, OPTIONAL=0)
-    let unrecognized_attr = build_attr_bytes(attr_flags::TRANSITIVE, 8, 2, &[0xaa, 0xbb]);
+    // Build an unrecognized well-known attribute (type 9, OPTIONAL=0)
+    let unrecognized_attr = build_attr_bytes(attr_flags::TRANSITIVE, 9, 2, &[0xaa, 0xbb]);
     let msg = build_raw_update(&[], &[&unrecognized_attr], &[], None);
 
     peer.send_raw(&msg).await;
@@ -672,7 +672,7 @@ async fn test_update_unrecognized_well_known_attribute() {
         notif.error(),
         &BgpError::UpdateMessageError(UpdateMessageError::UnrecognizedWellKnownAttribute)
     );
-    assert_eq!(notif.data(), &[attr_flags::TRANSITIVE, 8, 2, 0xaa, 0xbb]);
+    assert_eq!(notif.data(), &[attr_flags::TRANSITIVE, 9, 2, 0xaa, 0xbb]);
 }
 
 #[tokio::test]
