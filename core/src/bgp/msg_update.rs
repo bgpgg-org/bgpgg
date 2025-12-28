@@ -12,703 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Re-export public types
+pub use super::msg_update_types::{
+    attr_flags, attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, NextHopAddr,
+    Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+};
+
 use super::msg::{Message, MessageType};
 use super::msg_notification::{BgpError, UpdateMessageError};
+use super::msg_update_types::AttrType;
 use super::utils::{is_valid_unicast_ipv4, parse_nlri_list, read_u32, IpNetwork, ParserError};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
-const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
-const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub struct PathAttrFlag(u8);
-
-impl PathAttrFlag {
-    pub const OPTIONAL: u8 = 1 << 7;
-    pub const TRANSITIVE: u8 = 1 << 6;
-    pub const PARTIAL: u8 = 1 << 5;
-    pub const EXTENDED_LENGTH: u8 = 1 << 4;
-
-    fn extended_len(&self) -> bool {
-        self.0 & Self::EXTENDED_LENGTH != 0
-    }
-}
-
-// Public constants for use in tests
-pub mod attr_flags {
-    pub const OPTIONAL: u8 = 1 << 7;
-    pub const TRANSITIVE: u8 = 1 << 6;
-    pub const PARTIAL: u8 = 1 << 5;
-    pub const EXTENDED_LENGTH: u8 = 1 << 4;
-}
-
-pub mod attr_type_code {
-    pub const ORIGIN: u8 = 1;
-    pub const AS_PATH: u8 = 2;
-    pub const NEXT_HOP: u8 = 3;
-    pub const MULTI_EXIT_DISC: u8 = 4;
-    pub const LOCAL_PREF: u8 = 5;
-    pub const ATOMIC_AGGREGATE: u8 = 6;
-    pub const AGGREGATOR: u8 = 7;
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub enum PathAttrValue {
-    Origin(Origin),
-    AsPath(AsPath),
-    NextHop(NextHopAddr),
-    MultiExtiDisc(u32),
-    LocalPref(u32),
-    AtomicAggregate,
-    Aggregator(Aggregator),
-    Unknown {
-        type_code: u8,
-        flags: u8,
-        data: Vec<u8>,
-    },
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub struct PathAttribute {
-    flags: PathAttrFlag,
-    pub value: PathAttrValue,
-}
-
-impl PathAttribute {
-    pub fn is_unknown_transitive(&self) -> bool {
-        if let PathAttrValue::Unknown { flags, .. } = &self.value {
-            flags & attr_flags::TRANSITIVE != 0
-        } else {
-            false
-        }
-    }
-
-    fn type_code(&self) -> u8 {
-        match &self.value {
-            PathAttrValue::Origin(_) => attr_type_code::ORIGIN,
-            PathAttrValue::AsPath(_) => attr_type_code::AS_PATH,
-            PathAttrValue::NextHop(_) => attr_type_code::NEXT_HOP,
-            PathAttrValue::MultiExtiDisc(_) => attr_type_code::MULTI_EXIT_DISC,
-            PathAttrValue::LocalPref(_) => attr_type_code::LOCAL_PREF,
-            PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
-            PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
-            PathAttrValue::Unknown { type_code, .. } => *type_code,
-        }
-    }
-}
-
-#[repr(u8)]
-enum AttrType {
-    Origin = 1,
-    AsPath = 2,
-    NextHop = 3,
-    MultiExtiDisc = 4,
-    LocalPref = 5,
-    AtomicAggregate = 6,
-    Aggregator = 7,
-}
-
-impl TryFrom<u8> for AttrType {
-    type Error = ParserError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(AttrType::Origin),
-            2 => Ok(AttrType::AsPath),
-            3 => Ok(AttrType::NextHop),
-            4 => Ok(AttrType::MultiExtiDisc),
-            5 => Ok(AttrType::LocalPref),
-            6 => Ok(AttrType::AtomicAggregate),
-            7 => Ok(AttrType::Aggregator),
-            _ => Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
-                data: Vec::new(),
-            }),
-        }
-    }
-}
-
-impl AttrType {
-    fn expected_flags(&self) -> u8 {
-        match self {
-            AttrType::Origin => PathAttrFlag::TRANSITIVE,
-            AttrType::AsPath => PathAttrFlag::TRANSITIVE,
-            AttrType::NextHop => PathAttrFlag::TRANSITIVE,
-            AttrType::MultiExtiDisc => PathAttrFlag::OPTIONAL,
-            AttrType::LocalPref => PathAttrFlag::TRANSITIVE,
-            AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
-            AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
-        }
-    }
-
-    fn is_well_known(&self) -> bool {
-        matches!(
-            self,
-            AttrType::Origin
-                | AttrType::AsPath
-                | AttrType::NextHop
-                | AttrType::LocalPref
-                | AttrType::AtomicAggregate
-        )
-    }
-
-    fn is_optional(&self) -> bool {
-        matches!(self, AttrType::MultiExtiDisc | AttrType::Aggregator)
-    }
-}
-
-/// Parse attribute type and handle unrecognized attributes per RFC 4271 Section 6.3.
-/// Returns Ok(Some(AttrType)) for known attributes, Ok(None) for unknown optional attributes,
-/// and Err for unknown well-known attributes.
-fn parse_attr_type(
-    bytes: &[u8],
-    flags: u8,
-    attr_type_code: u8,
-    attr_len: u16,
-) -> Result<Option<AttrType>, ParserError> {
-    match AttrType::try_from(attr_type_code) {
-        Ok(attr_type) => Ok(Some(attr_type)),
-        Err(_) => {
-            // Unrecognized well-known attribute (OPTIONAL=0)
-            // RFC 4271 Section 6.3: return error with full attribute data
-            if flags & PathAttrFlag::OPTIONAL == 0 {
-                let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
-                let header_len = if extended_len { 4 } else { 3 };
-                let total_attr_len = header_len + attr_len as usize;
-                let attr_data = bytes[..total_attr_len.min(bytes.len())].to_vec();
-
-                return Err(ParserError::BgpError {
-                    error: BgpError::UpdateMessageError(
-                        UpdateMessageError::UnrecognizedWellKnownAttribute,
-                    ),
-                    data: attr_data,
-                });
-            } else {
-                // RFC 4271 Section 6.3: optional attributes (transitive or non-transitive)
-                // Return None to signal this should be stored as Unknown variant
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn validate_attribute_flags(
-    flags: u8,
-    attr_type: &AttrType,
-    attr_type_code: u8,
-    attr_len: u16,
-) -> Result<(), ParserError> {
-    let expected = attr_type.expected_flags();
-    let mask = PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE;
-
-    // Validate Optional and Transitive bits match the attribute type
-    if (flags & mask) != expected {
-        let mut data = vec![flags, attr_type_code];
-        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
-            data.extend_from_slice(&attr_len.to_be_bytes());
-        } else {
-            data.push(attr_len as u8);
-        }
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-            data,
-        });
-    }
-
-    // Partial bit must be 0 for well-known attributes
-    if attr_type.is_well_known() && (flags & PathAttrFlag::PARTIAL != 0) {
-        let mut data = vec![flags, attr_type_code];
-        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
-            data.extend_from_slice(&attr_len.to_be_bytes());
-        } else {
-            data.push(attr_len as u8);
-        }
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-            data,
-        });
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum Origin {
-    IGP = 0,
-    EGP = 1,
-    INCOMPLETE = 2,
-}
-
-impl TryFrom<u8> for Origin {
-    type Error = ParserError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Origin::IGP),
-            1 => Ok(Origin::EGP),
-            2 => Ok(Origin::INCOMPLETE),
-            _ => Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute),
-                data: Vec::new(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct AsPathSegment {
-    pub segment_type: AsPathSegmentType,
-    pub segment_len: u8,
-    pub asn_list: Vec<u16>,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum AsPathSegmentType {
-    AsSet = 1,
-    AsSequence = 2,
-}
-
-impl TryFrom<u8> for AsPathSegmentType {
-    type Error = ParserError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(AsPathSegmentType::AsSet),
-            2 => Ok(AsPathSegmentType::AsSequence),
-            _ => Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
-                data: Vec::new(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub enum NextHopAddr {
-    Ipv4(Ipv4Addr),
-    // TODO: support IPv6
-    #[allow(dead_code)]
-    Ipv6(Ipv6Addr),
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub struct AsPath {
-    segments: Vec<AsPathSegment>,
-}
-
-impl AsPath {
-    /// Returns the leftmost AS in the AS_PATH (first AS of the first segment).
-    /// Per RFC 4271, this is the AS that most recently added itself to the path.
-    pub fn leftmost_as(&self) -> Option<u16> {
-        self.segments
-            .first()
-            .and_then(|seg| seg.asn_list.first().copied())
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
-pub struct Aggregator {
-    asn: u16,
-    // TODO: support IPv6?
-    ip_addr: Ipv4Addr,
-}
-
-fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
-    let mut segments = vec![];
-    let mut cursor = 0;
-
-    while cursor < bytes.len() {
-        // Calculate total bytes needed for this segment (header + ASN data)
-        let segment_size = 2 + (bytes.get(cursor + 1).copied().unwrap_or(0) as usize * 2);
-
-        if cursor + segment_size > bytes.len() {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
-                data: Vec::new(),
-            });
-        }
-
-        let segment_type = AsPathSegmentType::try_from(bytes[cursor])?;
-        let segment_len = bytes[cursor + 1];
-
-        let asn_list = (0..segment_len)
-            .map(|i| {
-                let pos = cursor + 2 + (i as usize * 2);
-                u16::from_be_bytes([bytes[pos], bytes[pos + 1]])
-            })
-            .collect();
-
-        segments.push(AsPathSegment {
-            segment_type,
-            segment_len,
-            asn_list,
-        });
-
-        cursor += segment_size;
-    }
-
-    Ok(AsPath { segments })
-}
-
-fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
-    // Length already validated by validate_attribute_length
-    NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
-}
-
-fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
-    // Length already validated by validate_attribute_length
-    let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
-
-    Aggregator { asn, ip_addr }
-}
-
-fn validate_attribute_length(
-    attr_type: &AttrType,
-    attr_len: u16,
-    attr_bytes: &[u8],
-) -> Result<(), ParserError> {
-    let valid = match attr_type {
-        AttrType::Origin => attr_len == 1,
-        AttrType::NextHop => attr_len == 4, // Only IPv4 per RFC 4271
-        AttrType::MultiExtiDisc => attr_len == 4,
-        AttrType::LocalPref => attr_len == 4,
-        AttrType::AtomicAggregate => attr_len == 0,
-        AttrType::Aggregator => attr_len == 6,
-        AttrType::AsPath => true, // Variable length
-    };
-
-    if !valid {
-        // RFC 4271 Section 6.3: for recognized optional attributes, use OptionalAttributeError
-        let error = if attr_type.is_optional() {
-            UpdateMessageError::OptionalAttributeError
-        } else {
-            UpdateMessageError::AttributeLengthError
-        };
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(error),
-            data: attr_bytes.to_vec(),
-        });
-    }
-
-    Ok(())
-}
-
-fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
-    let attribute_flag = PathAttrFlag(bytes[0]);
-    let attr_type_code = bytes[1];
-
-    let attr_len = match attribute_flag.extended_len() {
-        true => u16::from_be_bytes([bytes[2], bytes[3]]),
-        false => bytes[2] as u16,
-    };
-
-    let attr_type_opt = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
-
-    let attr_val = match attr_type_opt {
-        Some(attr_type) => {
-            // Known attribute - validate and parse normally
-            validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
-
-            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-            let attr_total_len = offset + attr_len as usize;
-            let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
-
-            validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
-
-            let attr_data = &bytes[offset..offset + attr_len as usize];
-
-            match attr_type {
-                AttrType::Origin => {
-                    let value = bytes[offset];
-                    let origin = match value {
-                        0 => Origin::IGP,
-                        1 => Origin::EGP,
-                        2 => Origin::INCOMPLETE,
-                        _ => {
-                            return Err(ParserError::BgpError {
-                                error: BgpError::UpdateMessageError(
-                                    UpdateMessageError::InvalidOriginAttribute,
-                                ),
-                                data: attr_bytes.to_vec(),
-                            });
-                        }
-                    };
-                    PathAttrValue::Origin(origin)
-                }
-                AttrType::AsPath => {
-                    let as_path = read_attr_as_path(&attr_data)?;
-                    PathAttrValue::AsPath(as_path)
-                }
-                AttrType::NextHop => {
-                    let next_hop = read_attr_next_hop(&attr_data);
-
-                    // RFC 4271: NEXT_HOP must be a valid IP host address
-                    if let NextHopAddr::Ipv4(addr) = next_hop {
-                        if !is_valid_unicast_ipv4(u32::from(addr)) {
-                            return Err(ParserError::BgpError {
-                                error: BgpError::UpdateMessageError(
-                                    UpdateMessageError::InvalidNextHopAttribute,
-                                ),
-                                data: attr_bytes.to_vec(),
-                            });
-                        }
-                    }
-
-                    PathAttrValue::NextHop(next_hop)
-                }
-                AttrType::MultiExtiDisc => {
-                    let multi_exit_disc = read_u32(&attr_data)?;
-                    PathAttrValue::MultiExtiDisc(multi_exit_disc)
-                }
-                AttrType::LocalPref => {
-                    let local_pref = read_u32(&attr_data)?;
-                    PathAttrValue::LocalPref(local_pref)
-                }
-                AttrType::AtomicAggregate => {
-                    if attr_len > 0 {
-                        return Err(ParserError::BgpError {
-                            error: BgpError::UpdateMessageError(
-                                UpdateMessageError::AttributeLengthError,
-                            ),
-                            data: Vec::new(),
-                        });
-                    }
-                    PathAttrValue::AtomicAggregate
-                }
-                AttrType::Aggregator => {
-                    let aggregator = read_attr_aggregator(&attr_data);
-                    PathAttrValue::Aggregator(aggregator)
-                }
-            }
-        }
-        None => {
-            // Unknown optional attribute
-            // RFC 4271 Section 6.3: set PARTIAL bit for transitive, store raw data
-            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-            let data = bytes[offset..offset + attr_len as usize].to_vec();
-
-            let mut flags = attribute_flag.0;
-            if flags & PathAttrFlag::TRANSITIVE != 0 {
-                flags |= PathAttrFlag::PARTIAL;
-            }
-
-            PathAttrValue::Unknown {
-                type_code: attr_type_code,
-                flags,
-                data,
-            }
-        }
-    };
-
-    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-    let total_offset = offset + attr_len as usize;
-
-    // Update PathAttribute flags if PARTIAL bit was set for unknown transitive
-    let final_flags = match &attr_val {
-        PathAttrValue::Unknown { flags, .. } => PathAttrFlag(*flags),
-        _ => attribute_flag,
-    };
-
-    let attribute = PathAttribute {
-        flags: final_flags,
-        value: attr_val,
-    };
-
-    Ok((attribute, total_offset as u8))
-}
-
-fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
-    use std::collections::HashSet;
-
-    let mut cursor = 0;
-    let mut path_attributes: Vec<PathAttribute> = Vec::new();
-    let mut seen_type_codes: HashSet<u8> = HashSet::new();
-
-    while cursor < bytes.len() {
-        let (attribute, offset) = read_path_attribute(&bytes[cursor..])?;
-        cursor += offset as usize;
-
-        let type_code = attribute.type_code();
-        if !seen_type_codes.insert(type_code) {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-                data: Vec::new(),
-            });
-        }
-
-        path_attributes.push(attribute);
-    }
-
-    Ok(path_attributes)
-}
-
-fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for network in nlri_list {
-        match network {
-            IpNetwork::V4(net) => {
-                bytes.push(net.prefix_length);
-                let octets = net.address.octets();
-                let num_octets = ((net.prefix_length + 7) / 8) as usize;
-                bytes.extend_from_slice(&octets[..num_octets]);
-            }
-            IpNetwork::V6(net) => {
-                bytes.push(net.prefix_length);
-                let octets = net.address.octets();
-                let num_octets = ((net.prefix_length + 7) / 8) as usize;
-                bytes.extend_from_slice(&octets[..num_octets]);
-            }
-        }
-    }
-    bytes
-}
-
-fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
-    let mut bytes = Vec::new();
-
-    // Serialize attribute value first to determine length
-    let attr_value_bytes = match &attr.value {
-        PathAttrValue::Origin(origin) => {
-            vec![*origin as u8]
-        }
-        PathAttrValue::AsPath(as_path) => {
-            let mut path_bytes = Vec::new();
-            for segment in &as_path.segments {
-                path_bytes.push(segment.segment_type as u8);
-                path_bytes.push(segment.segment_len);
-                for asn in &segment.asn_list {
-                    path_bytes.extend_from_slice(&asn.to_be_bytes());
-                }
-            }
-            path_bytes
-        }
-        PathAttrValue::NextHop(next_hop) => match next_hop {
-            NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
-            NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
-        },
-        PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
-        PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),
-        PathAttrValue::AtomicAggregate => vec![],
-        PathAttrValue::Aggregator(agg) => {
-            let mut agg_bytes = Vec::new();
-            agg_bytes.extend_from_slice(&agg.asn.to_be_bytes());
-            agg_bytes.extend_from_slice(&agg.ip_addr.octets());
-            agg_bytes
-        }
-        PathAttrValue::Unknown { data, .. } => data.clone(),
-    };
-
-    // Write flags (Unknown stores its own flags)
-    let flags = match &attr.value {
-        PathAttrValue::Unknown { flags, .. } => *flags,
-        _ => attr.flags.0,
-    };
-    bytes.push(flags);
-
-    // Write attribute type (Unknown stores its own type)
-    let attr_type = match &attr.value {
-        PathAttrValue::Origin(_) => AttrType::Origin as u8,
-        PathAttrValue::AsPath(_) => AttrType::AsPath as u8,
-        PathAttrValue::NextHop(_) => AttrType::NextHop as u8,
-        PathAttrValue::MultiExtiDisc(_) => AttrType::MultiExtiDisc as u8,
-        PathAttrValue::LocalPref(_) => AttrType::LocalPref as u8,
-        PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
-        PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
-        PathAttrValue::Unknown { type_code, .. } => *type_code,
-    };
-    bytes.push(attr_type);
-
-    // Write length (use extended_len from Unknown's flags if applicable)
-    let attr_len = attr_value_bytes.len();
-    let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
-    if extended_len {
-        bytes.extend_from_slice(&(attr_len as u16).to_be_bytes());
-    } else {
-        bytes.push(attr_len as u8);
-    }
-
-    // Write attribute value
-    bytes.extend_from_slice(&attr_value_bytes);
-
-    bytes
-}
-
-fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for attr in path_attributes {
-        bytes.extend_from_slice(&write_path_attribute(attr));
-    }
-    bytes
-}
-
-fn validate_update_message_lengths(
-    withdrawn_routes_len: usize,
-    total_path_attributes_len: usize,
-    body_length: usize,
-) -> Result<(), ParserError> {
-    // RFC 4271 Section 6.3: If Withdrawn Routes Length + Total Attribute Length + 23
-    // exceeds the message Length, then Error Subcode MUST be set to Malformed Attribute List.
-    // Since we work with body (message_length - 19), check becomes:
-    // withdrawn_routes_len + total_path_attributes_len + 4 > body_length
-    let length_fields_size = WITHDRAWN_ROUTES_LENGTH_SIZE + TOTAL_ATTR_LENGTH_SIZE;
-    let claimed_size = withdrawn_routes_len + total_path_attributes_len + length_fields_size;
-
-    if claimed_size > body_length {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-            data: Vec::new(),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_well_known_mandatory_attributes(
-    path_attributes: &[PathAttribute],
-    has_nlri: bool,
-) -> Result<(), ParserError> {
-    // RFC 4271 Section 5: well-known mandatory attributes MUST be included
-    // in every UPDATE message that contains NLRI
-    if !has_nlri {
-        return Ok(());
-    }
-
-    let has_origin = path_attributes
-        .iter()
-        .any(|attr| matches!(attr.value, PathAttrValue::Origin(_)));
-    let has_as_path = path_attributes
-        .iter()
-        .any(|attr| matches!(attr.value, PathAttrValue::AsPath(_)));
-    let has_next_hop = path_attributes
-        .iter()
-        .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
-
-    if !has_origin {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::ORIGIN],
-        });
-    }
-
-    if !has_as_path {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::AS_PATH],
-        });
-    }
-
-    if !has_next_hop {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::NEXT_HOP],
-        });
-    }
-
-    Ok(())
-}
+pub(super) const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
+pub(super) const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
 
 impl UpdateMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         origin: Origin,
         as_path_segments: Vec<AsPathSegment>,
@@ -791,7 +111,7 @@ impl UpdateMessage {
         &self.withdrawn_routes
     }
 
-    pub fn get_origin(&self) -> Option<Origin> {
+    pub fn origin(&self) -> Option<Origin> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::Origin(origin) = attr.value {
                 Some(origin)
@@ -801,7 +121,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_as_path(&self) -> Option<Vec<AsPathSegment>> {
+    pub fn as_path(&self) -> Option<Vec<AsPathSegment>> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 Some(as_path.segments.clone())
@@ -812,7 +132,7 @@ impl UpdateMessage {
     }
 
     /// Returns the leftmost AS in the AS_PATH attribute.
-    pub fn get_leftmost_as(&self) -> Option<u16> {
+    pub fn leftmost_as(&self) -> Option<u16> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 as_path.leftmost_as()
@@ -822,7 +142,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_next_hop(&self) -> Option<Ipv4Addr> {
+    pub fn next_hop(&self) -> Option<Ipv4Addr> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::NextHop(ref next_hop) = attr.value {
                 match next_hop {
@@ -835,7 +155,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_local_pref(&self) -> Option<u32> {
+    pub fn local_pref(&self) -> Option<u32> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::LocalPref(pref) = attr.value {
                 Some(pref)
@@ -845,7 +165,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_med(&self) -> Option<u32> {
+    pub fn med(&self) -> Option<u32> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::MultiExtiDisc(med) = attr.value {
                 Some(med)
@@ -855,13 +175,13 @@ impl UpdateMessage {
         })
     }
 
-    pub fn get_atomic_aggregate(&self) -> bool {
+    pub fn atomic_aggregate(&self) -> bool {
         self.path_attributes
             .iter()
             .any(|attr| attr.value == PathAttrValue::AtomicAggregate)
     }
 
-    pub fn get_unknown_attrs(&self) -> Vec<PathAttribute> {
+    pub fn unknown_attrs(&self) -> Vec<PathAttribute> {
         self.path_attributes
             .iter()
             .filter_map(|attr| {
@@ -949,9 +269,480 @@ impl Message for UpdateMessage {
     }
 }
 
+// ===== Helper Functions =====
+
+pub(crate) fn validate_attribute_flags(
+    flags: u8,
+    attr_type: &AttrType,
+    attr_type_code: u8,
+    attr_len: u16,
+) -> Result<(), ParserError> {
+    let expected = attr_type.expected_flags();
+    let mask = PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE;
+
+    // Validate Optional and Transitive bits match the attribute type
+    if (flags & mask) != expected {
+        let mut data = vec![flags, attr_type_code];
+        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
+            data.extend_from_slice(&attr_len.to_be_bytes());
+        } else {
+            data.push(attr_len as u8);
+        }
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+            data,
+        });
+    }
+
+    // Partial bit must be 0 for well-known attributes
+    if attr_type.is_well_known() && (flags & PathAttrFlag::PARTIAL != 0) {
+        let mut data = vec![flags, attr_type_code];
+        if flags & PathAttrFlag::EXTENDED_LENGTH != 0 {
+            data.extend_from_slice(&attr_len.to_be_bytes());
+        } else {
+            data.push(attr_len as u8);
+        }
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
+            data,
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_attribute_length(
+    attr_type: &AttrType,
+    attr_len: u16,
+    attr_bytes: &[u8],
+) -> Result<(), ParserError> {
+    let valid = match attr_type {
+        AttrType::Origin => attr_len == 1,
+        AttrType::NextHop => attr_len == 4, // Only IPv4 per RFC 4271
+        AttrType::MultiExtiDisc => attr_len == 4,
+        AttrType::LocalPref => attr_len == 4,
+        AttrType::AtomicAggregate => attr_len == 0,
+        AttrType::Aggregator => attr_len == 6,
+        AttrType::AsPath => true, // Variable length
+    };
+
+    if !valid {
+        // RFC 4271 Section 6.3: for recognized optional attributes, use OptionalAttributeError
+        let error = if attr_type.is_optional() {
+            UpdateMessageError::OptionalAttributeError
+        } else {
+            UpdateMessageError::AttributeLengthError
+        };
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(error),
+            data: attr_bytes.to_vec(),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_update_message_lengths(
+    withdrawn_routes_len: usize,
+    total_path_attributes_len: usize,
+    body_length: usize,
+) -> Result<(), ParserError> {
+    // RFC 4271 Section 6.3: If Withdrawn Routes Length + Total Attribute Length + 23
+    // exceeds the message Length, then Error Subcode MUST be set to Malformed Attribute List.
+    // Since we work with body (message_length - 19), check becomes:
+    // withdrawn_routes_len + total_path_attributes_len + 4 > body_length
+    let length_fields_size = WITHDRAWN_ROUTES_LENGTH_SIZE + TOTAL_ATTR_LENGTH_SIZE;
+    let claimed_size = withdrawn_routes_len + total_path_attributes_len + length_fields_size;
+
+    if claimed_size > body_length {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+            data: Vec::new(),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_well_known_mandatory_attributes(
+    path_attributes: &[PathAttribute],
+    has_nlri: bool,
+) -> Result<(), ParserError> {
+    // RFC 4271 Section 5: well-known mandatory attributes MUST be included
+    // in every UPDATE message that contains NLRI
+    if !has_nlri {
+        return Ok(());
+    }
+
+    let has_origin = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::Origin(_)));
+    let has_as_path = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::AsPath(_)));
+    let has_next_hop = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
+
+    if !has_origin {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::ORIGIN],
+        });
+    }
+
+    if !has_as_path {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::AS_PATH],
+        });
+    }
+
+    if !has_next_hop {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
+            data: vec![attr_type_code::NEXT_HOP],
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn parse_attr_type(
+    bytes: &[u8],
+    flags: u8,
+    attr_type_code: u8,
+    attr_len: u16,
+) -> Result<Option<AttrType>, ParserError> {
+    match AttrType::try_from(attr_type_code) {
+        Ok(attr_type) => Ok(Some(attr_type)),
+        Err(_) => {
+            // Unrecognized well-known attribute (OPTIONAL=0)
+            // RFC 4271 Section 6.3: return error with full attribute data
+            if flags & PathAttrFlag::OPTIONAL == 0 {
+                let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
+                let header_len = if extended_len { 4 } else { 3 };
+                let total_attr_len = header_len + attr_len as usize;
+                let attr_data = bytes[..total_attr_len.min(bytes.len())].to_vec();
+
+                Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(
+                        UpdateMessageError::UnrecognizedWellKnownAttribute,
+                    ),
+                    data: attr_data,
+                })
+            } else {
+                // RFC 4271 Section 6.3: optional attributes (transitive or non-transitive)
+                // Return None to signal this should be stored as Unknown variant
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub(crate) fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
+    let mut segments = vec![];
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        // Calculate total bytes needed for this segment (header + ASN data)
+        let segment_size = 2 + (bytes.get(cursor + 1).copied().unwrap_or(0) as usize * 2);
+
+        if cursor + segment_size > bytes.len() {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+                data: Vec::new(),
+            });
+        }
+
+        let segment_type = AsPathSegmentType::try_from(bytes[cursor])?;
+        let segment_len = bytes[cursor + 1];
+
+        let asn_list = (0..segment_len)
+            .map(|i| {
+                let pos = cursor + 2 + (i as usize * 2);
+                u16::from_be_bytes([bytes[pos], bytes[pos + 1]])
+            })
+            .collect();
+
+        segments.push(AsPathSegment {
+            segment_type,
+            segment_len,
+            asn_list,
+        });
+
+        cursor += segment_size;
+    }
+
+    Ok(AsPath { segments })
+}
+
+pub(crate) fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
+    // Length already validated by validate_attribute_length
+    NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
+}
+
+pub(crate) fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
+    // Length already validated by validate_attribute_length
+    let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
+
+    Aggregator { asn, ip_addr }
+}
+
+pub(crate) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
+    let attribute_flag = PathAttrFlag(bytes[0]);
+    let attr_type_code = bytes[1];
+
+    let attr_len = match attribute_flag.extended_len() {
+        true => u16::from_be_bytes([bytes[2], bytes[3]]),
+        false => bytes[2] as u16,
+    };
+
+    let attr_type_opt = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
+
+    let attr_val = match attr_type_opt {
+        Some(attr_type) => {
+            // Known attribute - validate and parse normally
+            validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
+
+            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+            let attr_total_len = offset + attr_len as usize;
+            let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
+
+            validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
+
+            let attr_data = &bytes[offset..offset + attr_len as usize];
+
+            match attr_type {
+                AttrType::Origin => {
+                    let value = bytes[offset];
+                    let origin = match value {
+                        0 => Origin::IGP,
+                        1 => Origin::EGP,
+                        2 => Origin::INCOMPLETE,
+                        _ => {
+                            return Err(ParserError::BgpError {
+                                error: BgpError::UpdateMessageError(
+                                    UpdateMessageError::InvalidOriginAttribute,
+                                ),
+                                data: attr_bytes.to_vec(),
+                            });
+                        }
+                    };
+                    PathAttrValue::Origin(origin)
+                }
+                AttrType::AsPath => {
+                    let as_path = read_attr_as_path(attr_data)?;
+                    PathAttrValue::AsPath(as_path)
+                }
+                AttrType::NextHop => {
+                    let next_hop = read_attr_next_hop(attr_data);
+
+                    // RFC 4271: NEXT_HOP must be a valid IP host address
+                    if let NextHopAddr::Ipv4(addr) = next_hop {
+                        if !is_valid_unicast_ipv4(u32::from(addr)) {
+                            return Err(ParserError::BgpError {
+                                error: BgpError::UpdateMessageError(
+                                    UpdateMessageError::InvalidNextHopAttribute,
+                                ),
+                                data: attr_bytes.to_vec(),
+                            });
+                        }
+                    }
+
+                    PathAttrValue::NextHop(next_hop)
+                }
+                AttrType::MultiExtiDisc => {
+                    let multi_exit_disc = read_u32(attr_data)?;
+                    PathAttrValue::MultiExtiDisc(multi_exit_disc)
+                }
+                AttrType::LocalPref => {
+                    let local_pref = read_u32(attr_data)?;
+                    PathAttrValue::LocalPref(local_pref)
+                }
+                AttrType::AtomicAggregate => {
+                    if attr_len > 0 {
+                        return Err(ParserError::BgpError {
+                            error: BgpError::UpdateMessageError(
+                                UpdateMessageError::AttributeLengthError,
+                            ),
+                            data: Vec::new(),
+                        });
+                    }
+                    PathAttrValue::AtomicAggregate
+                }
+                AttrType::Aggregator => {
+                    let aggregator = read_attr_aggregator(attr_data);
+                    PathAttrValue::Aggregator(aggregator)
+                }
+            }
+        }
+        None => {
+            // Unknown optional attribute
+            // RFC 4271 Section 6.3: set PARTIAL bit for transitive, store raw data
+            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+            let data = bytes[offset..offset + attr_len as usize].to_vec();
+
+            let mut flags = attribute_flag.0;
+            if flags & PathAttrFlag::TRANSITIVE != 0 {
+                flags |= PathAttrFlag::PARTIAL;
+            }
+
+            PathAttrValue::Unknown {
+                type_code: attr_type_code,
+                flags,
+                data,
+            }
+        }
+    };
+
+    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+    let total_offset = offset + attr_len as usize;
+
+    // Update PathAttribute flags if PARTIAL bit was set for unknown transitive
+    let final_flags = match &attr_val {
+        PathAttrValue::Unknown { flags, .. } => PathAttrFlag(*flags),
+        _ => attribute_flag,
+    };
+
+    let attribute = PathAttribute {
+        flags: final_flags,
+        value: attr_val,
+    };
+
+    Ok((attribute, total_offset as u8))
+}
+
+pub(crate) fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
+    use std::collections::HashSet;
+
+    let mut cursor = 0;
+    let mut path_attributes: Vec<PathAttribute> = Vec::new();
+    let mut seen_type_codes: HashSet<u8> = HashSet::new();
+
+    while cursor < bytes.len() {
+        let (attribute, offset) = read_path_attribute(&bytes[cursor..])?;
+        cursor += offset as usize;
+
+        let type_code = attribute.type_code();
+        if !seen_type_codes.insert(type_code) {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                data: Vec::new(),
+            });
+        }
+
+        path_attributes.push(attribute);
+    }
+
+    Ok(path_attributes)
+}
+
+pub(crate) fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for network in nlri_list {
+        match network {
+            IpNetwork::V4(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+            IpNetwork::V6(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+        }
+    }
+    bytes
+}
+
+pub(crate) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
+    let mut bytes = Vec::new();
+
+    // Serialize attribute value first to determine length
+    let attr_value_bytes = match &attr.value {
+        PathAttrValue::Origin(origin) => {
+            vec![*origin as u8]
+        }
+        PathAttrValue::AsPath(as_path) => {
+            let mut path_bytes = Vec::new();
+            for segment in &as_path.segments {
+                path_bytes.push(segment.segment_type as u8);
+                path_bytes.push(segment.segment_len);
+                for asn in &segment.asn_list {
+                    path_bytes.extend_from_slice(&asn.to_be_bytes());
+                }
+            }
+            path_bytes
+        }
+        PathAttrValue::NextHop(next_hop) => match next_hop {
+            NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
+            NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
+        },
+        PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
+        PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),
+        PathAttrValue::AtomicAggregate => vec![],
+        PathAttrValue::Aggregator(agg) => {
+            let mut agg_bytes = Vec::new();
+            agg_bytes.extend_from_slice(&agg.asn.to_be_bytes());
+            agg_bytes.extend_from_slice(&agg.ip_addr.octets());
+            agg_bytes
+        }
+        PathAttrValue::Unknown { data, .. } => data.clone(),
+    };
+
+    // Write flags (Unknown stores its own flags)
+    let flags = match &attr.value {
+        PathAttrValue::Unknown { flags, .. } => *flags,
+        _ => attr.flags.0,
+    };
+    bytes.push(flags);
+
+    // Write attribute type (Unknown stores its own type)
+    let attr_type = match &attr.value {
+        PathAttrValue::Origin(_) => AttrType::Origin as u8,
+        PathAttrValue::AsPath(_) => AttrType::AsPath as u8,
+        PathAttrValue::NextHop(_) => AttrType::NextHop as u8,
+        PathAttrValue::MultiExtiDisc(_) => AttrType::MultiExtiDisc as u8,
+        PathAttrValue::LocalPref(_) => AttrType::LocalPref as u8,
+        PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
+        PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
+        PathAttrValue::Unknown { type_code, .. } => *type_code,
+    };
+    bytes.push(attr_type);
+
+    // Write length (use extended_len from Unknown's flags if applicable)
+    let attr_len = attr_value_bytes.len();
+    let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
+    if extended_len {
+        bytes.extend_from_slice(&(attr_len as u16).to_be_bytes());
+    } else {
+        bytes.push(attr_len as u8);
+    }
+
+    // Write attribute value
+    bytes.extend_from_slice(&attr_value_bytes);
+
+    bytes
+}
+
+pub(crate) fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for attr in path_attributes {
+        bytes.extend_from_slice(&write_path_attribute(attr));
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
+    use crate::bgp::msg_update_types::AttrType;
     use crate::bgp::utils::Ipv4Net;
     use std::str::FromStr;
 
@@ -1780,7 +1571,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_local_pref(), Some(200));
+        assert_eq!(msg.local_pref(), Some(200));
 
         let msg_no_pref = UpdateMessage::new(
             Origin::IGP,
@@ -1792,7 +1583,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_no_pref.get_local_pref(), None);
+        assert_eq!(msg_no_pref.local_pref(), None);
     }
 
     #[test]
@@ -1807,7 +1598,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_med(), Some(50));
+        assert_eq!(msg.med(), Some(50));
 
         let msg_no_med = UpdateMessage::new(
             Origin::IGP,
@@ -1819,7 +1610,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_no_med.get_med(), None);
+        assert_eq!(msg_no_med.med(), None);
     }
 
     #[test]
@@ -1847,12 +1638,12 @@ mod tests {
             let bytes = msg.to_bytes();
             let parsed = UpdateMessage::from_bytes(bytes).unwrap();
 
-            assert_eq!(parsed.get_origin(), Some(origin));
-            assert_eq!(parsed.get_as_path(), Some(vec![]));
-            assert_eq!(parsed.get_next_hop(), Some(Ipv4Addr::new(10, 0, 0, 1)));
-            assert_eq!(parsed.get_local_pref(), local_pref);
-            assert_eq!(parsed.get_med(), med);
-            assert_eq!(parsed.get_atomic_aggregate(), atomic_aggregate);
+            assert_eq!(parsed.origin(), Some(origin));
+            assert_eq!(parsed.as_path(), Some(vec![]));
+            assert_eq!(parsed.next_hop(), Some(Ipv4Addr::new(10, 0, 0, 1)));
+            assert_eq!(parsed.local_pref(), local_pref);
+            assert_eq!(parsed.med(), med);
+            assert_eq!(parsed.atomic_aggregate(), atomic_aggregate);
         }
     }
 
@@ -2284,7 +2075,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg.get_leftmost_as(), Some(65001));
+        assert_eq!(msg.leftmost_as(), Some(65001));
 
         let msg_empty_path = UpdateMessage::new(
             Origin::IGP,
@@ -2296,7 +2087,7 @@ mod tests {
             false,
             vec![],
         );
-        assert_eq!(msg_empty_path.get_leftmost_as(), None);
+        assert_eq!(msg_empty_path.leftmost_as(), None);
     }
 
     #[test]

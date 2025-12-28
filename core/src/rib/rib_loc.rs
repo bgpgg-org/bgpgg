@@ -18,6 +18,7 @@ use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 /// Loc-RIB: Local routing table
 ///
@@ -29,25 +30,29 @@ pub struct LocRib {
 }
 
 impl LocRib {
-    fn add_route(&mut self, prefix: IpNetwork, path: Path) {
-        self.routes
-            .entry(prefix)
-            .and_modify(|route| {
+    fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
+        use std::collections::hash_map::Entry;
+        match self.routes.entry(prefix) {
+            Entry::Occupied(mut entry) => {
+                let route = entry.get_mut();
                 // Check if we already have a path from this source, if so replace it
                 if let Some(existing_path) =
                     route.paths.iter_mut().find(|p| p.source == path.source)
                 {
-                    *existing_path = path.clone();
+                    *existing_path = path;
                 } else {
-                    route.paths.push(path.clone());
+                    route.paths.push(path);
                 }
                 // Keep paths sorted (best first)
                 route.paths.sort_by(|a, b| b.cmp(a));
-            })
-            .or_insert_with(|| Route {
-                prefix,
-                paths: vec![path],
-            });
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Route {
+                    prefix,
+                    paths: vec![path],
+                });
+            }
+        }
     }
 
     /// Remove paths from a specific peer for a given prefix.
@@ -89,7 +94,7 @@ impl LocRib {
         &mut self,
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, Path)>,
+        announced: Vec<(IpNetwork, Arc<Path>)>,
         import_policy: F,
     ) -> Vec<IpNetwork>
     where
@@ -102,9 +107,9 @@ impl LocRib {
                 affected.push(*prefix);
             }
         }
-        let old_best: HashMap<IpNetwork, Option<Path>> = affected
+        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = affected
             .iter()
-            .map(|p| (*p, self.get_best_path(p).cloned()))
+            .map(|p| (*p, self.get_best_path(p).map(Arc::clone)))
             .collect();
 
         // Process withdrawals
@@ -114,10 +119,12 @@ impl LocRib {
         }
 
         // Process announcements - apply import policy and add to Loc-RIB
-        for (prefix, mut path) in announced {
+        for (prefix, path_arc) in announced {
+            // Clone inner Path for policy mutation
+            let mut path = (*path_arc).clone();
             if import_policy(&prefix, &mut path) {
                 info!("adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => peer_ip.to_string());
-                self.add_route(prefix, path);
+                self.add_route(prefix, Arc::new(path));
             } else {
                 debug!("route rejected by import policy", "prefix" => format!("{:?}", prefix), "peer_ip" => peer_ip.to_string());
                 self.remove_peer_path(prefix, peer_ip);
@@ -127,8 +134,14 @@ impl LocRib {
         // Return only prefixes where best path actually changed
         affected
             .into_iter()
-            .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).cloned())
+            .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).map(Arc::clone))
             .collect()
+    }
+}
+
+impl Default for LocRib {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -140,6 +153,7 @@ impl LocRib {
     }
 
     /// Add a locally originated route
+    #[allow(clippy::too_many_arguments)]
     pub fn add_local_route(
         &mut self,
         prefix: IpNetwork,
@@ -154,7 +168,7 @@ impl LocRib {
         // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
         // We store it as provided and add local_asn during export based on peer type.
         // If as_path is not empty, it's used as-is (for testing or route injection).
-        let path = Path {
+        let path = Arc::new(Path {
             origin,
             as_path,
             next_hop,
@@ -163,7 +177,7 @@ impl LocRib {
             med,
             atomic_aggregate,
             unknown_attrs: vec![],
-        };
+        });
 
         info!("adding local route to Loc-RIB", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
         self.add_route(prefix, path);
@@ -193,7 +207,7 @@ impl LocRib {
     /// Remove all routes from a peer. Returns prefixes where best path changed.
     pub fn remove_routes_from_peer(&mut self, peer_ip: IpAddr) -> Vec<IpNetwork> {
         // Snapshot old best for all prefixes that have paths from this peer
-        let old_best: HashMap<IpNetwork, Option<Path>> = self
+        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = self
             .routes
             .iter()
             .filter(|(_, route)| {
@@ -201,7 +215,7 @@ impl LocRib {
                     matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
                 })
             })
-            .map(|(prefix, _)| (*prefix, self.get_best_path(prefix).cloned()))
+            .map(|(prefix, _)| (*prefix, self.get_best_path(prefix).map(Arc::clone)))
             .collect();
 
         // Remove paths from this peer
@@ -218,7 +232,7 @@ impl LocRib {
         // Return only prefixes where best changed
         old_best
             .into_iter()
-            .filter(|(prefix, old)| old != &self.get_best_path(prefix).cloned())
+            .filter(|(prefix, old)| old != &self.get_best_path(prefix).map(Arc::clone))
             .map(|(prefix, _)| prefix)
             .collect()
     }
@@ -228,7 +242,7 @@ impl LocRib {
     }
 
     /// Get the best path for a specific prefix, if any
-    pub fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Path> {
+    pub fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Arc<Path>> {
         self.routes
             .get(prefix)
             .and_then(|route| route.paths.first())
@@ -347,15 +361,16 @@ mod tests {
         let prefix = create_test_prefix();
 
         let path1 = create_test_path(peer_ip);
-        let mut path2 = create_test_path(peer_ip);
-        path2.as_path = vec![AsPathSegment {
-            segment_type: AsPathSegmentType::AsSequence,
-            segment_len: 2,
-            asn_list: vec![300, 400],
-        }];
+        let path2 = create_test_path_with(peer_ip, |p| {
+            p.as_path = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![300, 400],
+            }];
+        });
 
         loc_rib.add_route(prefix, path1);
-        loc_rib.add_route(prefix, path2.clone());
+        loc_rib.add_route(prefix, Arc::clone(&path2));
 
         assert_eq!(
             loc_rib.get_all_routes(),

@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 /// Action to take when max prefix limit is reached
@@ -92,7 +93,7 @@ fn default_passive_mode() -> bool {
 
 impl PeerConfig {
     /// Returns the DelayOpenTime as a Duration, or None if disabled.
-    pub fn get_delay_open_time(&self) -> Option<Duration> {
+    pub fn delay_open_time(&self) -> Option<Duration> {
         self.delay_open_time_secs.map(Duration::from_secs)
     }
 
@@ -178,16 +179,18 @@ impl Config {
     }
 
     /// Get the local bind address for outgoing connections (IP with port 0)
-    pub fn get_local_addr(&self) -> Result<SocketAddr, String> {
+    pub fn local_addr(&self) -> Result<SocketAddr, String> {
         let local_ip = self
             .listen_addr
             .split(':')
             .next()
             .ok_or_else(|| "invalid listen_addr format".to_string())?;
 
-        format!("{}:0", local_ip)
+        let ip: IpAddr = local_ip
             .parse()
-            .map_err(|e| format!("failed to parse local bind address: {}", e))
+            .map_err(|e| format!("failed to parse IP address: {}", e))?;
+
+        Ok(bind_addr_from_ip(ip))
     }
 }
 

@@ -499,7 +499,7 @@ async fn test_as_loop_prevention() {
                 .get_peer(server2.address.clone())
                 .await
                 .expect("Failed to get peer");
-            stats.map_or(false, |s| s.update_received == 1)
+            stats.is_some_and(|s| s.update_received == 1)
         },
         "Timeout waiting for server1_b to receive UPDATE from server2",
     )

@@ -17,7 +17,7 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::bgp::msg_notification::{CeaseSubcode, NotifcationMessage};
+use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
 
 /// BGP FSM states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,9 +74,9 @@ pub enum FsmEvent {
     /// Event 20: BGPOpen with DelayOpenTimer running
     BgpOpenWithDelayOpenTimer(BgpOpenParams),
     /// Event 21: BGPHeaderErr
-    BgpHeaderErr(NotifcationMessage),
+    BgpHeaderErr(NotificationMessage),
     /// Event 22: BGPOpenMsgErr
-    BgpOpenMsgErr(NotifcationMessage),
+    BgpOpenMsgErr(NotificationMessage),
     /// Event 24: NotifMsgVerErr
     NotifMsgVerErr,
     /// Event 25: NotifMsg
@@ -86,7 +86,7 @@ pub enum FsmEvent {
     /// Event 27: UpdateMsg
     BgpUpdateReceived,
     /// Event 28: UpdateMsgErr
-    BgpUpdateMsgErr(NotifcationMessage),
+    BgpUpdateMsgErr(NotificationMessage),
 }
 
 /// BGP FSM timers
@@ -370,7 +370,7 @@ impl Fsm {
             (BgpState::Connect, FsmEvent::ManualStop) => BgpState::Idle,
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
             (BgpState::Connect, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
-            (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
+            (BgpState::Connect, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
             // RFC 4271 8.2.2 Event 18: If DelayOpenTimer running -> Active, else -> Idle
             (BgpState::Connect, FsmEvent::TcpConnectionFails) => {
                 if self.timers.delay_open_timer_running() {
@@ -403,7 +403,7 @@ impl Fsm {
             (BgpState::Active, FsmEvent::ManualStop) => BgpState::Idle,
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
             (BgpState::Active, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
-            (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
+            (BgpState::Active, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
             // RFC 4271 Event 18: TcpConnectionFails -> Idle
             (BgpState::Active, FsmEvent::TcpConnectionFails) => BgpState::Idle,
             // RFC 4271 Event 20: BGPOpen with DelayOpenTimer running -> OpenConfirm
@@ -871,7 +871,7 @@ mod tests {
             // Established + BgpHeaderErr -> Idle (Event 21)
             (
                 BgpState::Established,
-                FsmEvent::BgpHeaderErr(NotifcationMessage::new(
+                FsmEvent::BgpHeaderErr(NotificationMessage::new(
                     BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
                     vec![],
                 )),
@@ -879,7 +879,7 @@ mod tests {
             // Established + BgpOpenMsgErr -> Idle (Event 22)
             (
                 BgpState::Established,
-                FsmEvent::BgpOpenMsgErr(NotifcationMessage::new(
+                FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
                     BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
                     vec![],
                 )),
@@ -933,9 +933,9 @@ mod tests {
 
     #[test]
     fn test_update_msg_err() {
-        use crate::bgp::msg_notification::{BgpError, NotifcationMessage, UpdateMessageError};
+        use crate::bgp::msg_notification::{BgpError, NotificationMessage, UpdateMessageError};
 
-        let notif = NotifcationMessage::new(
+        let notif = NotificationMessage::new(
             BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
             vec![],
         );

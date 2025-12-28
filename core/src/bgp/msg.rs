@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg_keepalive::KeepAliveMessage;
-use super::msg_notification::{BgpError, MessageHeaderError, NotifcationMessage};
+use super::msg_notification::{BgpError, MessageHeaderError, NotificationMessage};
 use super::msg_open::OpenMessage;
 use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
@@ -94,7 +94,7 @@ pub enum BgpMessage {
     Open(OpenMessage),
     Update(UpdateMessage),
     KeepAlive(KeepAliveMessage),
-    Notification(NotifcationMessage),
+    Notification(NotificationMessage),
 }
 
 impl BgpMessage {
@@ -112,7 +112,7 @@ impl BgpMessage {
             }
             MessageType::KEEPALIVE => Ok(BgpMessage::KeepAlive(KeepAliveMessage {})),
             MessageType::NOTIFICATION => {
-                let message = NotifcationMessage::from_bytes(bytes);
+                let message = NotificationMessage::from_bytes(bytes);
                 Ok(BgpMessage::Notification(message))
             }
         }
@@ -151,7 +151,7 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
 }
 
 fn validate_marker(header: &[u8]) -> Result<(), ParserError> {
-    if &header[0..16] != &BGP_MARKER {
+    if header[0..16] != BGP_MARKER {
         return Err(ParserError::BgpError {
             error: BgpError::MessageHeaderError(MessageHeaderError::ConnectionNotSynchronized),
             data: Vec::new(),

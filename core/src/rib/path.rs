@@ -34,6 +34,7 @@ pub struct Path {
 
 impl Path {
     /// Create a Path from BGP UPDATE message attributes
+    #[allow(clippy::too_many_arguments)]
     pub fn from_attributes(
         origin: Origin,
         as_path: Vec<AsPathSegment>,
@@ -58,18 +59,18 @@ impl Path {
 
     /// Create a Path from an UPDATE message. Returns None if required attributes are missing.
     pub fn from_update_msg(update_msg: &UpdateMessage, source: RouteSource) -> Option<Self> {
-        let origin = update_msg.get_origin()?;
-        let as_path = update_msg.get_as_path()?;
-        let next_hop = update_msg.get_next_hop()?;
+        let origin = update_msg.origin()?;
+        let as_path = update_msg.as_path()?;
+        let next_hop = update_msg.next_hop()?;
         Some(Path {
             origin,
             as_path,
             next_hop,
             source,
-            local_pref: update_msg.get_local_pref(),
-            med: update_msg.get_med(),
-            atomic_aggregate: update_msg.get_atomic_aggregate(),
-            unknown_attrs: update_msg.get_unknown_attrs(),
+            local_pref: update_msg.local_pref(),
+            med: update_msg.med(),
+            atomic_aggregate: update_msg.atomic_aggregate(),
+            unknown_attrs: update_msg.unknown_attrs(),
         })
     }
 
@@ -90,10 +91,9 @@ impl Path {
     fn neighboring_as(&self) -> Option<u16> {
         // Find first AS_SEQUENCE segment and return its first ASN
         for segment in &self.as_path {
-            if segment.segment_type == AsPathSegmentType::AsSequence {
-                if !segment.asn_list.is_empty() {
-                    return Some(segment.asn_list[0]);
-                }
+            if segment.segment_type == AsPathSegmentType::AsSequence && !segment.asn_list.is_empty()
+            {
+                return Some(segment.asn_list[0]);
             }
         }
         // Empty AS_PATH or no AS_SEQUENCE (locally originated or aggregated routes)
@@ -347,7 +347,7 @@ mod tests {
             true,
             vec![],
         );
-        let path = Path::from_update_msg(&update, source.clone());
+        let path = Path::from_update_msg(&update, source);
         assert!(path.is_some());
         let path = path.unwrap();
         assert_eq!(path.origin, Origin::IGP);

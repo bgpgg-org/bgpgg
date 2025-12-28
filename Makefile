@@ -18,6 +18,7 @@ run: setup
 	cargo run
 
 test: setup
+	cargo clippy --all-targets --all-features -- -D warnings
 	cargo test
 
 fmt:

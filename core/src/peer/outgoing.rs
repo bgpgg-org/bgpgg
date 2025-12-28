@@ -24,12 +24,13 @@ use crate::rib::{Path, RouteSource};
 use crate::{error, info};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// A batch of route announcements sharing the same path attributes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnnouncementBatch {
-    pub path: Path,
+    pub path: Arc<Path>,
     pub prefixes: Vec<IpNetwork>,
 }
 
@@ -56,6 +57,7 @@ pub fn should_propagate_to_peer(
 /// - Local routes to iBGP: [] (empty)
 /// - Learned routes to eBGP: prepend local_asn to first AS_SEQUENCE (or create new segment)
 /// - Learned routes to iBGP: unchanged
+///
 /// Preserves AS_SET segments during propagation
 pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<AsPathSegment> {
     let is_ebgp = peer_asn != local_asn;
@@ -167,7 +169,7 @@ pub fn send_withdrawals_to_peer(
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
-fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<AnnouncementBatch> {
+fn batch_announcements_by_path(to_announce: &[(IpNetwork, Arc<Path>)]) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<(Origin, Vec<AsPathSegment>, Ipv4Addr, bool), AnnouncementBatch> =
         HashMap::new();
 
@@ -179,7 +181,7 @@ fn batch_announcements_by_path(to_announce: &[(IpNetwork, Path)]) -> Vec<Announc
             path.atomic_aggregate,
         );
         let batch = batches.entry(key).or_insert_with(|| AnnouncementBatch {
-            path: path.clone(),
+            path: Arc::clone(path),
             prefixes: Vec::new(),
         });
         batch.prefixes.push(*prefix);
@@ -221,7 +223,7 @@ fn build_export_next_hop(
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
-    to_announce: &[(IpNetwork, Path)],
+    to_announce: &[(IpNetwork, Arc<Path>)],
     local_asn: u16,
     peer_asn: u16,
     local_router_id: Ipv4Addr,
@@ -232,12 +234,13 @@ pub fn send_announcements_to_peer(
     }
 
     // Apply export policy per-prefix BEFORE batching
-    let filtered: Vec<(IpNetwork, Path)> = to_announce
+    let filtered: Vec<(IpNetwork, Arc<Path>)> = to_announce
         .iter()
         .filter_map(|(prefix, path)| {
-            let mut path_mut = path.clone();
+            // Clone inner Path for policy mutation
+            let mut path_mut = (**path).clone();
             if export_policy.accept(prefix, &mut path_mut) {
-                Some((*prefix, path_mut))
+                Some((*prefix, Arc::new(path_mut)))
             } else {
                 None
             }
@@ -408,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_batch_announcements_by_path() {
-        let path_a = make_path(
+        let path_a = Arc::new(make_path(
             RouteSource::Local,
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
@@ -416,9 +419,9 @@ mod tests {
                 asn_list: vec![65000],
             }],
             Ipv4Addr::new(192, 168, 1, 1),
-        );
+        ));
 
-        let path_b = make_path(
+        let path_b = Arc::new(make_path(
             RouteSource::Local,
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
@@ -426,7 +429,7 @@ mod tests {
                 asn_list: vec![65000],
             }],
             Ipv4Addr::new(192, 168, 1, 2),
-        );
+        ));
 
         let p1 = IpNetwork::V4(Ipv4Net {
             address: Ipv4Addr::new(10, 0, 1, 0),
@@ -441,9 +444,9 @@ mod tests {
             prefix_length: 24,
         });
         let announcements = vec![
-            (p1, path_a.clone()),
-            (p2, path_b.clone()),
-            (p3, path_a.clone()),
+            (p1, Arc::clone(&path_a)),
+            (p2, Arc::clone(&path_b)),
+            (p3, Arc::clone(&path_a)),
         ];
 
         let actual = HashSet::from_iter(batch_announcements_by_path(&announcements));
@@ -668,7 +671,7 @@ mod tests {
         // RFC 4271 Section 9.2: Messages exceeding MAX_MESSAGE_SIZE must not be sent
         let (tx, mut rx) = mpsc::unbounded_channel();
         let peer_addr = test_ip(1);
-        let policy = Policy::new().add(Statement::new().then(crate::policy::action::Accept));
+        let policy = Policy::new().with(Statement::new().then(crate::policy::action::Accept));
 
         // Create huge AS_PATH to make UPDATE message exceed 4096 bytes
         // Multiple AS_SEQUENCE segments with 255 ASNs each = ~4000 bytes total
@@ -696,7 +699,7 @@ mod tests {
             address: Ipv4Addr::new(10, 0, 0, 0),
             prefix_length: 24,
         });
-        let routes = vec![(prefix, path)];
+        let routes = vec![(prefix, Arc::new(path))];
 
         // Send announcements - should skip due to size
         send_announcements_to_peer(

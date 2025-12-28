@@ -49,15 +49,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create BGP server
-    let server = BgpServer::new(config);
+    let server = BgpServer::new(config)?;
 
     // Create gRPC service with cloned components
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Run both servers concurrently
     tokio::select! {
-        _ = server.run() => {
-            error!("BGP server stopped unexpectedly");
+        result = server.run() => {
+            if let Err(e) = result {
+                error!("BGP server error", "error" => e.to_string());
+            }
         },
 
         result = tonic::transport::Server::builder()

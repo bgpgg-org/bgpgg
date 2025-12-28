@@ -73,24 +73,24 @@ impl Policy {
     /// Create a default inbound policy with AS loop prevention and default local pref
     pub fn default_in(local_asn: u16) -> Self {
         Self::new()
-            .add(stmt_reject_as_loop(local_asn))
-            .add(stmt_default_local_pref(100))
-            .add(Statement::new().then(Accept))
+            .with(stmt_reject_as_loop(local_asn))
+            .with(stmt_default_local_pref(100))
+            .with(Statement::new().then(Accept))
     }
 
     /// Create a default outbound policy with iBGP reflection prevention
     pub fn default_out(local_asn: u16, peer_asn: u16) -> Self {
         if local_asn == peer_asn {
             Self::new()
-                .add(stmt_reject_ibgp())
-                .add(Statement::new().then(Accept))
+                .with(stmt_reject_ibgp())
+                .with(Statement::new().then(Accept))
         } else {
-            Self::new().add(Statement::new().then(Accept))
+            Self::new().with(Statement::new().then(Accept))
         }
     }
 
     /// Add a statement to the policy
-    pub fn add(mut self, statement: Statement) -> Self {
+    pub fn with(mut self, statement: Statement) -> Self {
         self.statements.push(statement);
         self
     }
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_policy_accept_all() {
-        let policy = Policy::new().add(Statement::new().then(Accept));
+        let policy = Policy::new().with(Statement::new().then(Accept));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
     }
@@ -236,12 +236,12 @@ mod tests {
             prefix_length: 24,
         });
         let policy = Policy::new()
-            .add(
+            .with(
                 Statement::new()
                     .when(PrefixCondition::new(prefix))
                     .then(SetLocalPref::new(200)),
             )
-            .add(Statement::new().then(SetLocalPref::new(100)));
+            .with(Statement::new().then(SetLocalPref::new(100)));
 
         let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&prefix, &mut path1));
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_stmt_default_local_pref() {
-        let policy = Policy::new().add(stmt_default_local_pref(100));
+        let policy = Policy::new().with(stmt_default_local_pref(100));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
         assert_eq!(path.local_pref, Some(100));
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_stmt_reject_as_loop() {
-        let policy = Policy::new().add(stmt_reject_as_loop(65000));
+        let policy = Policy::new().with(stmt_reject_as_loop(65000));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn test_stmt_reject_ibgp() {
         let policy = Policy::new()
-            .add(stmt_reject_ibgp())
-            .add(Statement::new().then(Accept));
+            .with(stmt_reject_ibgp())
+            .with(Statement::new().then(Accept));
         let mut ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
         assert!(!policy.accept(&test_prefix(), &mut ibgp_path));
         let mut ebgp_path = create_path(RouteSource::Ebgp(test_ip(1)));

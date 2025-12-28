@@ -135,6 +135,7 @@ impl BgpClient {
     }
 
     /// Add a route to the global RIB
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_route(
         &mut self,
         prefix: String,

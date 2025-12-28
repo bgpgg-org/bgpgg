@@ -237,12 +237,12 @@ impl BgpService for BgpGrpcService {
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|(addr, asn, state, admin_state, configured)| ProtoPeer {
-                address: addr.to_string(),
-                asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
-                state: to_proto_state(*state),
-                admin_state: to_proto_admin_state(*admin_state),
-                configured: *configured,
+            .map(|peer| ProtoPeer {
+                address: peer.address.clone(),
+                asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                state: to_proto_state(peer.state),
+                admin_state: to_proto_admin_state(peer.admin_state),
+                configured: peer.configured,
             })
             .collect();
 
@@ -273,24 +273,24 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         match peer_info {
-            Some((addr, asn, state, admin_state, configured, statistics)) => {
+            Some(peer) => {
                 let proto_peer = ProtoPeer {
-                    address: addr,
-                    asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
-                    state: to_proto_state(state),
-                    admin_state: to_proto_admin_state(admin_state),
-                    configured,
+                    address: peer.address.clone(),
+                    asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                    state: to_proto_state(peer.state),
+                    admin_state: to_proto_admin_state(peer.admin_state),
+                    configured: peer.configured,
                 };
 
                 let proto_statistics = ProtoPeerStatistics {
-                    open_sent: statistics.open_sent,
-                    keepalive_sent: statistics.keepalive_sent,
-                    update_sent: statistics.update_sent,
-                    notification_sent: statistics.notification_sent,
-                    open_received: statistics.open_received,
-                    keepalive_received: statistics.keepalive_received,
-                    update_received: statistics.update_received,
-                    notification_received: statistics.notification_received,
+                    open_sent: peer.statistics.open_sent,
+                    keepalive_sent: peer.statistics.keepalive_sent,
+                    update_sent: peer.statistics.update_sent,
+                    notification_sent: peer.statistics.notification_sent,
+                    open_received: peer.statistics.open_received,
+                    keepalive_received: peer.statistics.keepalive_received,
+                    update_received: peer.statistics.update_received,
+                    notification_received: peer.statistics.notification_received,
                 };
 
                 Ok(Response::new(GetPeerResponse {
@@ -488,7 +488,7 @@ impl BgpService for BgpGrpcService {
                         },
                         as_path: path
                             .as_path
-                            .into_iter()
+                            .iter()
                             .map(|segment| proto::AsPathSegment {
                                 segment_type: match segment.segment_type {
                                     AsPathSegmentType::AsSet => {
@@ -498,7 +498,7 @@ impl BgpService for BgpGrpcService {
                                         proto::AsPathSegmentType::AsSequence as i32
                                     }
                                 },
-                                asns: segment.asn_list.into_iter().map(|asn| asn as u32).collect(),
+                                asns: segment.asn_list.iter().map(|asn| *asn as u32).collect(),
                             })
                             .collect(),
                         next_hop: path.next_hop.to_string(),
@@ -511,18 +511,18 @@ impl BgpService for BgpGrpcService {
                         atomic_aggregate: path.atomic_aggregate,
                         unknown_attributes: path
                             .unknown_attrs
-                            .into_iter()
+                            .iter()
                             .filter_map(|attr| {
                                 if let crate::bgp::msg_update::PathAttrValue::Unknown {
                                     type_code,
                                     flags,
                                     data,
-                                } = attr.value
+                                } = &attr.value
                                 {
                                     Some(proto::UnknownAttribute {
-                                        attr_type: type_code as u32,
-                                        flags: flags as u32,
-                                        value: data,
+                                        attr_type: *type_code as u32,
+                                        flags: *flags as u32,
+                                        value: data.clone(),
                                     })
                                 } else {
                                     None

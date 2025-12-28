@@ -15,6 +15,7 @@
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Adj-RIB-In: Per-peer input routing table
 ///
@@ -26,7 +27,7 @@ pub struct AdjRibIn {
 }
 
 impl AdjRibIn {
-    pub fn add_route(&mut self, prefix: IpNetwork, path: Path) {
+    pub fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         self.routes.insert(
             prefix,
             Route {
@@ -47,6 +48,12 @@ impl AdjRibIn {
     #[cfg(test)]
     pub fn clear(&mut self) {
         self.routes.clear();
+    }
+}
+
+impl Default for AdjRibIn {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -135,15 +142,16 @@ mod tests {
         let prefix = create_test_prefix();
 
         let path1 = create_test_path(peer_ip);
-        let mut path2 = create_test_path(peer_ip);
-        path2.as_path = vec![AsPathSegment {
-            segment_type: AsPathSegmentType::AsSequence,
-            segment_len: 2,
-            asn_list: vec![300, 400],
-        }];
+        let path2 = create_test_path_with(peer_ip, |p| {
+            p.as_path = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![300, 400],
+            }];
+        });
 
         rib_in.add_route(prefix, path1);
-        rib_in.add_route(prefix, path2.clone());
+        rib_in.add_route(prefix, Arc::clone(&path2));
 
         let routes = rib_in.get_all_routes();
         assert_eq!(routes.len(), 1);

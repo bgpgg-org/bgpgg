@@ -88,12 +88,12 @@ impl RouteTypeCondition {
 
 impl Condition for RouteTypeCondition {
     fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
-        match (&self.route_type, &path.source) {
-            (RouteType::Ebgp, RouteSource::Ebgp(_)) => true,
-            (RouteType::Ibgp, RouteSource::Ibgp(_)) => true,
-            (RouteType::Local, RouteSource::Local) => true,
-            _ => false,
-        }
+        matches!(
+            (&self.route_type, &path.source),
+            (RouteType::Ebgp, RouteSource::Ebgp(_))
+                | (RouteType::Ibgp, RouteSource::Ibgp(_))
+                | (RouteType::Local, RouteSource::Local)
+        )
     }
 }
 

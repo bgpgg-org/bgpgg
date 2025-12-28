@@ -118,7 +118,7 @@ async fn test_origin_preservation() {
     // eBGP rewrites NEXT_HOP to local address of the sending speaker
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             build_expected_routes(
                 vec![as_sequence(vec![65001])],
                 &server1.address,
@@ -126,7 +126,7 @@ async fn test_origin_preservation() {
             ),
         ),
         (
-            &server3,
+            server3,
             build_expected_routes(
                 vec![as_sequence(vec![65002, 65001])],
                 &server2.address,
@@ -204,7 +204,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     // S3 -> S4 (eBGP): S3 prepends AS_PATH=[65002, 65001], NEXT_HOP=3.3.3.3 (rewritten to S3's router ID)
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -220,7 +220,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             }],
         ),
         (
-            &server3,
+            server3,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -236,7 +236,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             }],
         ),
         (
-            &server4,
+            server4,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -313,7 +313,7 @@ async fn test_originating_speaker_as_path() {
     // S2 -> S3 (eBGP): S2 creates AS_PATH=[65001] (prepends its AS), NEXT_HOP=2.2.2.2 (rewritten to S2's router ID)
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -329,7 +329,7 @@ async fn test_originating_speaker_as_path() {
             }],
         ),
         (
-            &server3,
+            server3,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -400,7 +400,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // Result: AS_SEQUENCE[65001], AS_SET[65003, 65004], AS_SEQUENCE[65005]
     // eBGP: NEXT_HOP rewritten to S1's router ID
     poll_route_propagation(&[(
-        &server2,
+        server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -477,7 +477,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     // RFC expectation: S2 should receive the route with NEXT_HOP set to S1's local address
     // (the interface address used for the peering session)
     poll_route_propagation(&[(
-        &server2,
+        server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -556,7 +556,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
     // S2 -> S3 (eBGP): NEXT_HOP rewritten to S2's local address (2.2.2.2)
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -572,7 +572,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
             }],
         ),
         (
-            &server3,
+            server3,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -653,7 +653,7 @@ async fn test_local_pref_send_to_ibgp() {
     // S3 (iBGP): receives route with LOCAL_PREF=100 (proves LOCAL_PREF was in UPDATE from S2)
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -669,7 +669,7 @@ async fn test_local_pref_send_to_ibgp() {
             }],
         ),
         (
-            &server3,
+            server3,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -750,7 +750,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
 
     // Verify S2 first (iBGP): receives route with LOCAL_PREF=200 (preserved from S1)
     poll_route_propagation(&[(
-        &server2,
+        server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -770,7 +770,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
     // Verify S3 (eBGP): receives route with LOCAL_PREF=100 (set by DefaultLocalPref policy, NOT from S2)
     //                   This proves LOCAL_PREF was NOT sent in UPDATE from S2 to S3
     poll_route_propagation(&[(
-        &server3,
+        server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -850,7 +850,7 @@ async fn test_med_propagation_over_ibgp() {
     // S3 (iBGP): receives route with MED=50 (proves MED was propagated over iBGP)
     poll_route_propagation(&[
         (
-            &server2,
+            server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -866,7 +866,7 @@ async fn test_med_propagation_over_ibgp() {
             }],
         ),
         (
-            &server3,
+            server3,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
                 paths: vec![build_path(
@@ -944,7 +944,7 @@ async fn test_med_not_propagated_to_other_as() {
 
     // Verify S2 first (eBGP): receives route with MED=50
     poll_route_propagation(&[(
-        &server2,
+        server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -964,7 +964,7 @@ async fn test_med_not_propagated_to_other_as() {
     // Verify S3 (eBGP to different AS): receives route with MED=None
     // This proves MED was NOT propagated to other neighboring AS (AS65002)
     poll_route_propagation(&[(
-        &server3,
+        server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -1041,7 +1041,7 @@ async fn test_atomic_aggregate_propagation() {
 
     // Verify S2 (eBGP): receives route with ATOMIC_AGGREGATE=true
     poll_route_propagation(&[(
-        &server2,
+        server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -1061,7 +1061,7 @@ async fn test_atomic_aggregate_propagation() {
     // Verify S3 (iBGP): receives route with ATOMIC_AGGREGATE=true
     // This proves ATOMIC_AGGREGATE was propagated over iBGP
     poll_route_propagation(&[(
-        &server3,
+        server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
@@ -1123,7 +1123,7 @@ async fn test_unknown_optional_attribute_handling(
     ])
     .await;
 
-    let mut server1 = FakePeer::connect(None, &server2).await;
+    let mut server1 = FakePeer::connect(None, server2).await;
     server1
         .handshake_open(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300)
         .await;
@@ -1150,7 +1150,7 @@ async fn test_unknown_optional_attribute_handling(
     server1.send_raw(&msg).await;
 
     poll_route_propagation(&[(
-        &server3,
+        server3,
         vec![Route {
             prefix: "192.168.1.0/24".to_string(),
             paths: vec![build_path(

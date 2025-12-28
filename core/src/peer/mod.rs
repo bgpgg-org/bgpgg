@@ -18,7 +18,8 @@ use crate::config::PeerConfig;
 use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
-use std::collections::VecDeque;
+use std::fmt;
+use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
 mod fsm;
+mod incoming;
 mod messages;
 mod state_active;
 mod state_connect;
@@ -34,7 +36,8 @@ mod state_idle;
 mod state_openconfirm;
 mod state_opensent;
 mod states;
-mod updates;
+
+pub mod outgoing;
 
 // Re-export FSM types so they can be used from outside the peer module
 pub use fsm::{BgpState, Fsm, FsmEvent, FsmTimers};
@@ -49,11 +52,11 @@ pub enum PeerError {
     /// BGP UPDATE message validation error
     UpdateError,
     /// I/O error during message send/receive
-    IoError(std::io::Error),
+    IoError(Error),
 }
 
-impl std::fmt::Display for PeerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PeerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PeerError::FsmError => write!(f, "FSM protocol error"),
             PeerError::AutomaticStop(subcode) => write!(f, "automatic stop: {:?}", subcode),
@@ -63,17 +66,17 @@ impl std::fmt::Display for PeerError {
     }
 }
 
-impl From<std::io::Error> for PeerError {
-    fn from(e: std::io::Error) -> Self {
+impl From<Error> for PeerError {
+    fn from(e: Error) -> Self {
         PeerError::IoError(e)
     }
 }
 
-impl From<PeerError> for std::io::Error {
+impl From<PeerError> for Error {
     fn from(e: PeerError) -> Self {
         match e {
             PeerError::IoError(io_err) => io_err,
-            _ => std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            _ => Error::other(e.to_string()),
         }
     }
 }
@@ -160,7 +163,7 @@ pub struct Peer {
     /// RFC 4271 9.2.1.1: Last time we sent an UPDATE
     last_update_sent: Option<Instant>,
     /// Queued UPDATE messages waiting for MRAI timer
-    pending_updates: VecDeque<UpdateMessage>,
+    pending_updates: Vec<UpdateMessage>,
     /// MinRouteAdvertisementIntervalTimer from config
     mrai_interval: Duration,
 }
@@ -168,6 +171,7 @@ pub struct Peer {
 impl Peer {
     /// Create a new Peer in Idle state (RFC 4271 8.2.2).
     /// Peer starts without TCP connection - use ManualStart to initiate connection.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         addr: IpAddr,
         port: u16,
@@ -181,7 +185,7 @@ impl Peer {
         connect_retry_secs: u64,
     ) -> Self {
         let local_ip = match local_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
+            IpAddr::V4(ip) => ip,
             _ => Ipv4Addr::UNSPECIFIED,
         };
         Peer {
@@ -192,7 +196,7 @@ impl Peer {
                 local_hold_time,
                 local_bgp_id,
                 local_ip,
-                config.get_delay_open_time(),
+                config.delay_open_time(),
                 config.passive_mode,
             ),
             conn: None,
@@ -204,7 +208,7 @@ impl Peer {
                 config.min_route_advertisement_interval_secs.unwrap_or(0),
             ),
             last_update_sent: None,
-            pending_updates: VecDeque::new(),
+            pending_updates: Vec::new(),
             config,
             peer_rx,
             server_tx,
@@ -274,11 +278,12 @@ impl Peer {
         let cfg = &self.config;
         let base = Duration::from_secs(cfg.idle_hold_time_secs?);
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
-            return Some(base);
+            Some(base)
+        } else {
+            let exp = self.consecutive_down_count.min(6);
+            let backoff = base * 2u32.pow(exp);
+            Some(backoff.min(MAX_IDLE_HOLD_TIME))
         }
-        let exp = self.consecutive_down_count.min(6);
-        let backoff = base * 2u32.pow(exp);
-        Some(backoff.min(MAX_IDLE_HOLD_TIME))
     }
 
     /// Notify server of state change.
@@ -353,7 +358,7 @@ pub mod test_helpers {
             established_at: None,
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
-            pending_updates: VecDeque::new(),
+            pending_updates: Vec::new(),
         }
     }
 }

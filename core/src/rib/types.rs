@@ -16,6 +16,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -57,7 +58,7 @@ impl RouteSource {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Route {
     pub prefix: IpNetwork,
-    pub paths: Vec<Path>,
+    pub paths: Vec<Arc<Path>>,
 }
 
 #[cfg(test)]

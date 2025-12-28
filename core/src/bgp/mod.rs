@@ -16,5 +16,7 @@ pub mod msg;
 pub mod msg_keepalive;
 pub mod msg_notification;
 pub mod msg_open;
+pub mod msg_open_types;
 pub mod msg_update;
+pub mod msg_update_types;
 pub mod utils;
