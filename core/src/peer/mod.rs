@@ -18,7 +18,6 @@ use crate::config::PeerConfig;
 use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
-use std::collections::VecDeque;
 use std::fmt;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -164,7 +163,7 @@ pub struct Peer {
     /// RFC 4271 9.2.1.1: Last time we sent an UPDATE
     last_update_sent: Option<Instant>,
     /// Queued UPDATE messages waiting for MRAI timer
-    pending_updates: VecDeque<UpdateMessage>,
+    pending_updates: Vec<UpdateMessage>,
     /// MinRouteAdvertisementIntervalTimer from config
     mrai_interval: Duration,
 }
@@ -209,7 +208,7 @@ impl Peer {
                 config.min_route_advertisement_interval_secs.unwrap_or(0),
             ),
             last_update_sent: None,
-            pending_updates: VecDeque::new(),
+            pending_updates: Vec::new(),
             config,
             peer_rx,
             server_tx,
@@ -359,7 +358,7 @@ pub mod test_helpers {
             established_at: None,
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
-            pending_updates: VecDeque::new(),
+            pending_updates: Vec::new(),
         }
     }
 }

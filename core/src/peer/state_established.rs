@@ -17,6 +17,7 @@ use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::{debug, error, info};
+use std::mem;
 use std::time::{Duration, Instant};
 
 impl Peer {
@@ -162,7 +163,7 @@ impl Peer {
                                 self.last_update_sent = Some(Instant::now());
                             } else {
                                 // Queue for later
-                                self.pending_updates.push_back(update_msg);
+                                self.pending_updates.push(update_msg);
                             }
                         }
                         PeerOp::GetStatistics(response) => {
@@ -209,7 +210,8 @@ impl Peer {
 
                 // MRAI timer - send pending updates when timer expires
                 _ = sleep_future, if next_send_time.is_some() => {
-                    while let Some(update) = self.pending_updates.pop_front() {
+                    let updates = mem::take(&mut self.pending_updates);
+                    for update in updates {
                         if let Err(e) = self.send_update(update).await {
                             error!("failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect(true);

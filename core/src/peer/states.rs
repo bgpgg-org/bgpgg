@@ -297,7 +297,6 @@ pub(super) mod tests {
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm};
     use crate::rib::rib_in::AdjRibIn;
-    use std::collections::VecDeque;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -350,7 +349,7 @@ pub(super) mod tests {
             established_at: None,
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
-            pending_updates: VecDeque::new(),
+            pending_updates: Vec::new(),
         }
     }
 
