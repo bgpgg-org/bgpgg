@@ -34,6 +34,24 @@ pub struct AnnouncementBatch {
     pub prefixes: Vec<IpNetwork>,
 }
 
+/// Check if a route should be filtered based on well-known communities
+/// RFC 1997 Section 3: Well-known communities
+fn should_filter_by_community(communities: &[u32], local_asn: u16, peer_asn: u16) -> bool {
+    use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
+
+    if communities.contains(&NO_ADVERTISE) {
+        return true;
+    }
+
+    let is_ebgp = local_asn != peer_asn;
+
+    if is_ebgp && (communities.contains(&NO_EXPORT) || communities.contains(&NO_EXPORT_SUBCONFED)) {
+        return true;
+    }
+
+    false
+}
+
 /// Check if we should propagate routes to this peer
 pub fn should_propagate_to_peer(
     peer_addr: IpAddr,
@@ -167,11 +185,13 @@ pub fn send_withdrawals_to_peer(
     }
 }
 
+/// Batching key: attributes that must match for announcements to be batched together
+type BatchingKey = (Origin, Vec<AsPathSegment>, Ipv4Addr, bool, Vec<u32>);
+
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
 fn batch_announcements_by_path(to_announce: &[(IpNetwork, Arc<Path>)]) -> Vec<AnnouncementBatch> {
-    let mut batches: HashMap<(Origin, Vec<AsPathSegment>, Ipv4Addr, bool), AnnouncementBatch> =
-        HashMap::new();
+    let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
     for (prefix, path) in to_announce {
         let key = (
@@ -179,6 +199,7 @@ fn batch_announcements_by_path(to_announce: &[(IpNetwork, Arc<Path>)]) -> Vec<An
             path.as_path.clone(),
             path.next_hop,
             path.atomic_aggregate,
+            path.communities.clone(),
         );
         let batch = batches.entry(key).or_insert_with(|| AnnouncementBatch {
             path: Arc::clone(path),
@@ -233,10 +254,14 @@ pub fn send_announcements_to_peer(
         return;
     }
 
-    // Apply export policy per-prefix BEFORE batching
+    // Apply well-known community filtering BEFORE export policy
+    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
     let filtered: Vec<(IpNetwork, Arc<Path>)> = to_announce
         .iter()
         .filter_map(|(prefix, path)| {
+            if should_filter_by_community(&path.communities, local_asn, peer_asn) {
+                return None;
+            }
             // Clone inner Path for policy mutation
             let mut path_mut = (**path).clone();
             if export_policy.accept(prefix, &mut path_mut) {
@@ -280,6 +305,7 @@ pub fn send_announcements_to_peer(
             local_pref,
             med,
             atomic_aggregate,
+            batch.path.communities.clone(),
             unknown_attrs,
         );
 
@@ -326,6 +352,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         }
     }
@@ -620,6 +647,7 @@ mod tests {
             local_pref: Some(200),
             med: None,
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -641,6 +669,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -659,6 +688,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -716,6 +746,58 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "Oversized UPDATE should not be sent"
+        );
+    }
+
+    #[test]
+    fn test_should_filter_by_community_no_advertise() {
+        use crate::bgp::msg_update_types::NO_ADVERTISE;
+
+        let communities = vec![NO_ADVERTISE, 65001];
+        assert!(should_filter_by_community(&communities, 65000, 65001));
+        assert!(should_filter_by_community(&communities, 65000, 65000));
+    }
+
+    #[test]
+    fn test_should_filter_by_community_no_export_ebgp() {
+        use crate::bgp::msg_update_types::NO_EXPORT;
+
+        let communities = vec![NO_EXPORT, 65001];
+        assert!(
+            should_filter_by_community(&communities, 65000, 65001),
+            "NO_EXPORT should filter for eBGP"
+        );
+        assert!(
+            !should_filter_by_community(&communities, 65000, 65000),
+            "NO_EXPORT should not filter for iBGP"
+        );
+    }
+
+    #[test]
+    fn test_should_filter_by_community_no_export_subconfed_ebgp() {
+        use crate::bgp::msg_update_types::NO_EXPORT_SUBCONFED;
+
+        let communities = vec![NO_EXPORT_SUBCONFED];
+        assert!(
+            should_filter_by_community(&communities, 65000, 65001),
+            "NO_EXPORT_SUBCONFED should filter for eBGP"
+        );
+        assert!(
+            !should_filter_by_community(&communities, 65000, 65000),
+            "NO_EXPORT_SUBCONFED should not filter for iBGP"
+        );
+    }
+
+    #[test]
+    fn test_should_filter_by_community_regular() {
+        let communities = vec![65001, 65002];
+        assert!(
+            !should_filter_by_community(&communities, 65000, 65001),
+            "Regular communities should not filter"
+        );
+        assert!(
+            !should_filter_by_community(&communities, 65000, 65000),
+            "Regular communities should not filter"
         );
     }
 }

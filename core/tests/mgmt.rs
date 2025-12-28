@@ -239,6 +239,7 @@ async fn test_announce_withdraw_route() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .unwrap();

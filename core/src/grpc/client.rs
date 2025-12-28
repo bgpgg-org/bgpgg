@@ -145,6 +145,7 @@ impl BgpClient {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        communities: Vec<u32>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
@@ -156,6 +157,7 @@ impl BgpClient {
                 local_pref,
                 med,
                 atomic_aggregate,
+                communities,
             })
             .await?
             .into_inner();

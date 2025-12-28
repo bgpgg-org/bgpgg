@@ -54,6 +54,7 @@ impl BgpServer {
                 local_pref,
                 med,
                 atomic_aggregate,
+                communities,
                 response,
             } => {
                 self.handle_add_route(
@@ -64,6 +65,7 @@ impl BgpServer {
                     local_pref,
                     med,
                     atomic_aggregate,
+                    communities,
                     response,
                 )
                 .await;
@@ -351,6 +353,7 @@ impl BgpServer {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        communities: Vec<u32>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
@@ -364,6 +367,7 @@ impl BgpServer {
             local_pref,
             med,
             atomic_aggregate,
+            communities,
         );
 
         // Propagate to all peers using the common propagation logic

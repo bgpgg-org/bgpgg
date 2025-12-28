@@ -33,6 +33,10 @@ enum Commands {
     /// Peer management commands
     #[command(subcommand)]
     Peer(PeerCommands),
+
+    /// Global RIB commands
+    #[command(subcommand)]
+    Global(GlobalCommands),
 }
 
 #[derive(Subcommand, Debug)]
@@ -59,6 +63,12 @@ pub enum PeerCommands {
     List,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum GlobalCommands {
+    /// Show global RIB (Routing Information Base)
+    Rib,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -67,6 +77,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Peer(peer_cmd) => {
             commands::peer::handle(cli.addr, peer_cmd)
+                .await
+                .map_err(|e| format!("Failed to execute command: {}", e))?;
+        }
+        Commands::Global(global_cmd) => {
+            commands::global::handle(cli.addr, global_cmd)
                 .await
                 .map_err(|e| format!("Failed to execute command: {}", e))?;
         }
@@ -183,5 +198,18 @@ mod tests {
         let args = vec!["bgpgg"];
         let result = Cli::try_parse_from(args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_global_rib_command() {
+        let args = vec!["bgpgg", "global", "rib"];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Global(GlobalCommands::Rib) => {
+                // Success
+            }
+            _ => panic!("Expected Global Rib command"),
+        }
     }
 }

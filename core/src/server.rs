@@ -123,6 +123,7 @@ pub enum MgmtOp {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        communities: Vec<u32>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {

@@ -7,9 +7,10 @@ pub use statement::{
 };
 
 // Re-export commonly used conditions and actions
-pub use action::{Accept, Reject, SetLocalPref, SetMed};
+pub use action::{Accept, CommunityOp, Reject, SetCommunity, SetLocalPref, SetMed};
 pub use condition::{
-    AsPathCondition, NeighborCondition, PrefixCondition, RouteType, RouteTypeCondition,
+    AsPathCondition, CommunityCondition, NeighborCondition, PrefixCondition, RouteType,
+    RouteTypeCondition,
 };
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub(crate) mod test_helpers {
             local_pref: None,
             med: None,
             atomic_aggregate: false,
+            communities: vec![],
             unknown_attrs: vec![],
         }
     }
