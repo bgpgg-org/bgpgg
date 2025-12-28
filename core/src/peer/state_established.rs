@@ -150,7 +150,7 @@ impl Peer {
                         PeerOp::SendUpdate(update_msg) => {
                             // RFC 4271 9.2.1.1: MRAI rate limiting
                             let can_send = self.mrai_interval.is_zero() ||
-                                self.last_update_sent.map_or(true, |t| t.elapsed() >= self.mrai_interval);
+                                self.last_update_sent.is_none_or(|t| t.elapsed() >= self.mrai_interval);
 
                             if can_send {
                                 // Send immediately

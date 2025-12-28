@@ -370,7 +370,7 @@ impl Fsm {
             (BgpState::Connect, FsmEvent::ManualStop) => BgpState::Idle,
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
             (BgpState::Connect, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
-            (BgpState::Connect, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
+            (BgpState::Connect, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
             // RFC 4271 8.2.2 Event 18: If DelayOpenTimer running -> Active, else -> Idle
             (BgpState::Connect, FsmEvent::TcpConnectionFails) => {
                 if self.timers.delay_open_timer_running() {
@@ -403,7 +403,7 @@ impl Fsm {
             (BgpState::Active, FsmEvent::ManualStop) => BgpState::Idle,
             (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
             (BgpState::Active, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
-            (BgpState::Active, FsmEvent::TcpConnectionConfirmed { .. }) => BgpState::OpenSent,
+            (BgpState::Active, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
             // RFC 4271 Event 18: TcpConnectionFails -> Idle
             (BgpState::Active, FsmEvent::TcpConnectionFails) => BgpState::Idle,
             // RFC 4271 Event 20: BGPOpen with DelayOpenTimer running -> OpenConfirm

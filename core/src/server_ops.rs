@@ -16,9 +16,12 @@ use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
-use crate::peer::{BgpState, PeerOp, PeerStatistics};
+use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
-use crate::server::{AdminState, BgpServer, ConnectionType, MgmtOp, PeerInfo, ServerOp};
+use crate::server::{
+    AdminState, BgpServer, ConnectionType, GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo,
+    ServerOp,
+};
 use crate::{error, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::oneshot;
@@ -110,7 +113,7 @@ impl BgpServer {
 
                 if let Some(policy) = peer.policy_in() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
-                        peer_ip.clone(),
+                        peer_ip,
                         withdrawn,
                         announced,
                         |prefix, path| policy.accept(prefix, path),
@@ -151,7 +154,7 @@ impl BgpServer {
                 }
 
                 // Notify Loc-RIB about disconnection and get affected prefixes
-                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip.clone());
+                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
 
                 // Propagate withdrawals to other peers
                 if !changed_prefixes.is_empty() {
@@ -338,6 +341,7 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_add_route(
         &mut self,
         prefix: IpNetwork,
@@ -389,21 +393,16 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn handle_get_peers(
-        &self,
-        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState, AdminState, bool)>>,
-    ) {
-        let peers: Vec<(String, Option<u16>, BgpState, AdminState, bool)> = self
+    fn handle_get_peers(&self, response: oneshot::Sender<Vec<GetPeersResponse>>) {
+        let peers: Vec<GetPeersResponse> = self
             .peers
             .iter()
-            .map(|(addr, entry)| {
-                (
-                    addr.to_string(),
-                    entry.asn,
-                    entry.state,
-                    entry.admin_state,
-                    entry.configured,
-                )
+            .map(|(addr, entry)| GetPeersResponse {
+                address: addr.to_string(),
+                asn: entry.asn,
+                state: entry.state,
+                admin_state: entry.admin_state,
+                configured: entry.configured,
             })
             .collect();
         let _ = response.send(peers);
@@ -412,16 +411,7 @@ impl BgpServer {
     async fn handle_get_peer(
         &self,
         addr: String,
-        response: oneshot::Sender<
-            Option<(
-                String,
-                Option<u16>,
-                BgpState,
-                AdminState,
-                bool,
-                PeerStatistics,
-            )>,
-        >,
+        response: oneshot::Sender<Option<GetPeerResponse>>,
     ) {
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
@@ -438,14 +428,14 @@ impl BgpServer {
 
         let stats = entry.get_statistics().await.unwrap_or_default();
 
-        let _ = response.send(Some((
-            addr,
-            entry.asn,
-            entry.state,
-            entry.admin_state,
-            entry.configured,
-            stats,
-        )));
+        let _ = response.send(Some(GetPeerResponse {
+            address: addr,
+            asn: entry.asn,
+            state: entry.state,
+            admin_state: entry.admin_state,
+            configured: entry.configured,
+            statistics: stats,
+        }));
     }
 
     fn handle_get_routes(&self, response: oneshot::Sender<Vec<crate::rib::Route>>) {

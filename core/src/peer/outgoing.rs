@@ -56,6 +56,7 @@ pub fn should_propagate_to_peer(
 /// - Local routes to iBGP: [] (empty)
 /// - Learned routes to eBGP: prepend local_asn to first AS_SEQUENCE (or create new segment)
 /// - Learned routes to iBGP: unchanged
+///
 /// Preserves AS_SET segments during propagation
 pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<AsPathSegment> {
     let is_ebgp = peer_asn != local_asn;
@@ -668,7 +669,7 @@ mod tests {
         // RFC 4271 Section 9.2: Messages exceeding MAX_MESSAGE_SIZE must not be sent
         let (tx, mut rx) = mpsc::unbounded_channel();
         let peer_addr = test_ip(1);
-        let policy = Policy::new().add(Statement::new().then(crate::policy::action::Accept));
+        let policy = Policy::new().with(Statement::new().then(crate::policy::action::Accept));
 
         // Create huge AS_PATH to make UPDATE message exceed 4096 bytes
         // Multiple AS_SEQUENCE segments with 255 ASNs each = ~4000 bytes total

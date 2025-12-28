@@ -34,6 +34,7 @@ pub struct Path {
 
 impl Path {
     /// Create a Path from BGP UPDATE message attributes
+    #[allow(clippy::too_many_arguments)]
     pub fn from_attributes(
         origin: Origin,
         as_path: Vec<AsPathSegment>,
@@ -90,10 +91,9 @@ impl Path {
     fn neighboring_as(&self) -> Option<u16> {
         // Find first AS_SEQUENCE segment and return its first ASN
         for segment in &self.as_path {
-            if segment.segment_type == AsPathSegmentType::AsSequence {
-                if !segment.asn_list.is_empty() {
-                    return Some(segment.asn_list[0]);
-                }
+            if segment.segment_type == AsPathSegmentType::AsSequence && !segment.asn_list.is_empty()
+            {
+                return Some(segment.asn_list[0]);
             }
         }
         // Empty AS_PATH or no AS_SEQUENCE (locally originated or aggregated routes)
@@ -347,7 +347,7 @@ mod tests {
             true,
             vec![],
         );
-        let path = Path::from_update_msg(&update, source.clone());
+        let path = Path::from_update_msg(&update, source);
         assert!(path.is_some());
         let path = path.unwrap();
         assert_eq!(path.origin, Origin::IGP);

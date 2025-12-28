@@ -21,13 +21,15 @@ use crate::{info, warn};
 
 use super::{Peer, SessionType};
 
+type UpdateResult = (Vec<IpNetwork>, Vec<(IpNetwork, Path)>);
+
 impl Peer {
     /// Handle a BGP UPDATE message
     /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
     pub(super) fn handle_update(
         &mut self,
         update_msg: UpdateMessage,
-    ) -> Result<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>), BgpError> {
+    ) -> Result<UpdateResult, BgpError> {
         // RFC 4271 Section 6.3: For eBGP, check that leftmost AS in AS_PATH equals peer AS.
         // If mismatch, MUST set error subcode to MalformedASPath.
         if self.session_type == Some(SessionType::Ebgp) {
@@ -180,6 +182,7 @@ mod tests {
         use crate::peer::test_helpers::create_test_peer_with_state;
 
         // (max_prefix, initial, new, expected_ok, expected_rib, desc)
+        #[allow(clippy::type_complexity)]
         let cases: Vec<(Option<MaxPrefixSetting>, usize, usize, bool, usize, &str)> = vec![
             // No limit: all prefixes accepted
             (None, 0, 10, true, 10, "no limit set"),
@@ -313,6 +316,7 @@ mod tests {
 
         // (setting, rib_count, new_count, expected)
         // expected: Ok(true)=proceed, Ok(false)=discard, Err=terminate
+        #[allow(clippy::type_complexity)]
         let cases: Vec<(Option<MaxPrefixSetting>, usize, usize, Result<bool, ()>)> = vec![
             (None, 0, 100, Ok(true)),
             (
@@ -373,7 +377,7 @@ mod tests {
 
         for (setting, rib_count, incoming, expected) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.config.max_prefix = setting.clone();
+            peer.config.max_prefix = setting;
             let test_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
             for i in 0..rib_count {
                 peer.rib_in

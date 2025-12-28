@@ -77,6 +77,25 @@ pub enum AdminState {
     PrefixLimitReached,
 }
 
+#[derive(Debug, Clone)]
+pub struct GetPeersResponse {
+    pub address: String,
+    pub asn: Option<u16>,
+    pub state: BgpState,
+    pub admin_state: AdminState,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetPeerResponse {
+    pub address: String,
+    pub asn: Option<u16>,
+    pub state: BgpState,
+    pub admin_state: AdminState,
+    pub configured: bool,
+    pub statistics: PeerStatistics,
+}
+
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
     AddPeer {
@@ -111,20 +130,11 @@ pub enum MgmtOp {
         response: oneshot::Sender<Result<(), String>>,
     },
     GetPeers {
-        response: oneshot::Sender<Vec<(String, Option<u16>, BgpState, AdminState, bool)>>,
+        response: oneshot::Sender<Vec<GetPeersResponse>>,
     },
     GetPeer {
         addr: String,
-        response: oneshot::Sender<
-            Option<(
-                String,
-                Option<u16>,
-                BgpState,
-                AdminState,
-                bool,
-                PeerStatistics,
-            )>,
-        >,
+        response: oneshot::Sender<Option<GetPeerResponse>>,
     },
     GetRoutes {
         response: oneshot::Sender<Vec<crate::rib::Route>>,
@@ -295,8 +305,8 @@ impl BgpServer {
         // local < remote: close local-initiated, keep remote-initiated
         // local >= remote: close remote-initiated, keep local-initiated
         let dominated = match conn_type {
-            ConnectionType::Incoming => peer.bgp_id.map_or(true, |id| self.local_bgp_id >= id),
-            ConnectionType::Outgoing => peer.bgp_id.map_or(false, |id| self.local_bgp_id < id),
+            ConnectionType::Incoming => peer.bgp_id.is_none_or(|id| self.local_bgp_id >= id),
+            ConnectionType::Outgoing => peer.bgp_id.is_some_and(|id| self.local_bgp_id < id),
         };
 
         if dominated {

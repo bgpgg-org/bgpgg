@@ -20,7 +20,7 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -77,7 +77,7 @@ impl From<PeerError> for Error {
     fn from(e: PeerError) -> Self {
         match e {
             PeerError::IoError(io_err) => io_err,
-            _ => Error::new(ErrorKind::Other, e.to_string()),
+            _ => Error::other(e.to_string()),
         }
     }
 }
@@ -172,6 +172,7 @@ pub struct Peer {
 impl Peer {
     /// Create a new Peer in Idle state (RFC 4271 8.2.2).
     /// Peer starts without TCP connection - use ManualStart to initiate connection.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         addr: IpAddr,
         port: u16,
@@ -278,11 +279,12 @@ impl Peer {
         let cfg = &self.config;
         let base = Duration::from_secs(cfg.idle_hold_time_secs?);
         if !cfg.damp_peer_oscillations || self.consecutive_down_count == 0 {
-            return Some(base);
+            Some(base)
+        } else {
+            let exp = self.consecutive_down_count.min(6);
+            let backoff = base * 2u32.pow(exp);
+            Some(backoff.min(MAX_IDLE_HOLD_TIME))
         }
-        let exp = self.consecutive_down_count.min(6);
-        let backoff = base * 2u32.pow(exp);
-        Some(backoff.min(MAX_IDLE_HOLD_TIME))
     }
 
     /// Notify server of state change.

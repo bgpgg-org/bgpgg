@@ -93,6 +93,7 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
 }
 
 /// Helper to build a Path with AS_PATH segments
+#[allow(clippy::too_many_arguments)]
 pub fn build_path(
     as_path: Vec<AsPathSegment>,
     next_hop: &str,
@@ -640,28 +641,26 @@ pub struct ExpectedStats {
 
 impl ExpectedStats {
     pub fn is_met_by(&self, s: &bgpgg::grpc::proto::PeerStatistics) -> bool {
-        self.open_sent.map_or(true, |e| s.open_sent == e)
-            && self.open_received.map_or(true, |e| s.open_received == e)
-            && self.update_sent.map_or(true, |e| s.update_sent == e)
-            && self
-                .update_received
-                .map_or(true, |e| s.update_received == e)
+        self.open_sent.is_none_or(|e| s.open_sent == e)
+            && self.open_received.is_none_or(|e| s.open_received == e)
+            && self.update_sent.is_none_or(|e| s.update_sent == e)
+            && self.update_received.is_none_or(|e| s.update_received == e)
             && self
                 .notification_sent
-                .map_or(true, |e| s.notification_sent == e)
+                .is_none_or(|e| s.notification_sent == e)
             && self
                 .notification_received
-                .map_or(true, |e| s.notification_received == e)
-            && self.min_update_sent.map_or(true, |e| s.update_sent >= e)
+                .is_none_or(|e| s.notification_received == e)
+            && self.min_update_sent.is_none_or(|e| s.update_sent >= e)
             && self
                 .min_update_received
-                .map_or(true, |e| s.update_received >= e)
+                .is_none_or(|e| s.update_received >= e)
             && self
                 .min_keepalive_sent
-                .map_or(true, |e| s.keepalive_sent >= e)
+                .is_none_or(|e| s.keepalive_sent >= e)
             && self
                 .min_keepalive_received
-                .map_or(true, |e| s.keepalive_received >= e)
+                .is_none_or(|e| s.keepalive_received >= e)
     }
 }
 
@@ -862,7 +861,7 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
             .client
             .add_peer(format!("{}:{}", next_address, next_port), None)
             .await
-            .expect(&format!("Failed to add peer {} to server {}", i + 1, i));
+            .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
     }
 
     // Build expected peer states for verification
@@ -929,7 +928,7 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
                 .client
                 .add_peer(format!("{}:{}", peer_address, peer_port), None)
                 .await
-                .expect(&format!("Failed to add peer {} to server {}", j, i));
+                .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", j, i));
         }
     }
 

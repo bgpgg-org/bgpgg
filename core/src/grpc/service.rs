@@ -237,12 +237,12 @@ impl BgpService for BgpGrpcService {
 
         let proto_peers: Vec<ProtoPeer> = peers
             .iter()
-            .map(|(addr, asn, state, admin_state, configured)| ProtoPeer {
-                address: addr.to_string(),
-                asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
-                state: to_proto_state(*state),
-                admin_state: to_proto_admin_state(*admin_state),
-                configured: *configured,
+            .map(|peer| ProtoPeer {
+                address: peer.address.clone(),
+                asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                state: to_proto_state(peer.state),
+                admin_state: to_proto_admin_state(peer.admin_state),
+                configured: peer.configured,
             })
             .collect();
 
@@ -273,24 +273,24 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         match peer_info {
-            Some((addr, asn, state, admin_state, configured, statistics)) => {
+            Some(peer) => {
                 let proto_peer = ProtoPeer {
-                    address: addr,
-                    asn: asn.unwrap_or(0) as u32, // 0 for peers still in handshake
-                    state: to_proto_state(state),
-                    admin_state: to_proto_admin_state(admin_state),
-                    configured,
+                    address: peer.address.clone(),
+                    asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                    state: to_proto_state(peer.state),
+                    admin_state: to_proto_admin_state(peer.admin_state),
+                    configured: peer.configured,
                 };
 
                 let proto_statistics = ProtoPeerStatistics {
-                    open_sent: statistics.open_sent,
-                    keepalive_sent: statistics.keepalive_sent,
-                    update_sent: statistics.update_sent,
-                    notification_sent: statistics.notification_sent,
-                    open_received: statistics.open_received,
-                    keepalive_received: statistics.keepalive_received,
-                    update_received: statistics.update_received,
-                    notification_received: statistics.notification_received,
+                    open_sent: peer.statistics.open_sent,
+                    keepalive_sent: peer.statistics.keepalive_sent,
+                    update_sent: peer.statistics.update_sent,
+                    notification_sent: peer.statistics.notification_sent,
+                    open_received: peer.statistics.open_received,
+                    keepalive_received: peer.statistics.keepalive_received,
+                    update_received: peer.statistics.update_received,
+                    notification_received: peer.statistics.notification_received,
                 };
 
                 Ok(Response::new(GetPeerResponse {

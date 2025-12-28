@@ -1261,7 +1261,7 @@ async fn test_delay_open() {
             let Ok((_, stats)) = server.client.get_peer("127.0.0.2".to_string()).await else {
                 return false;
             };
-            stats.map_or(false, |s| s.open_sent > 0)
+            stats.is_some_and(|s| s.open_sent > 0)
         },
         "Timeout waiting for OPEN",
     )

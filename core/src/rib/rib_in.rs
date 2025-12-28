@@ -50,6 +50,12 @@ impl AdjRibIn {
     }
 }
 
+impl Default for AdjRibIn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdjRibIn {
     pub fn new() -> Self {
         AdjRibIn {

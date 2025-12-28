@@ -136,6 +136,12 @@ impl LocRib {
     }
 }
 
+impl Default for LocRib {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocRib {
     pub fn new() -> Self {
         LocRib {
@@ -144,6 +150,7 @@ impl LocRib {
     }
 
     /// Add a locally originated route
+    #[allow(clippy::too_many_arguments)]
     pub fn add_local_route(
         &mut self,
         prefix: IpNetwork,
