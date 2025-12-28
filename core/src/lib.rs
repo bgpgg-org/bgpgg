@@ -19,7 +19,6 @@ pub mod log;
 pub mod net;
 pub mod peer;
 pub mod policy;
-pub mod propagate;
 pub mod rib;
 pub mod server;
 pub mod server_ops;

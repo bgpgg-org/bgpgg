@@ -18,12 +18,12 @@ use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
+use crate::peer::outgoing::{
+    send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
+};
 use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
-use crate::propagate::{
-    send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
-};
 use crate::rib::rib_loc::LocRib;
 use crate::{error, info};
 use std::collections::HashMap;

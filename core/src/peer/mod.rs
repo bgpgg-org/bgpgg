@@ -28,6 +28,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
 mod fsm;
+mod incoming;
 mod messages;
 mod state_active;
 mod state_connect;
@@ -36,7 +37,8 @@ mod state_idle;
 mod state_openconfirm;
 mod state_opensent;
 mod states;
-mod updates;
+
+pub mod outgoing;
 
 // Re-export FSM types so they can be used from outside the peer module
 pub use fsm::{BgpState, Fsm, FsmEvent, FsmTimers};
