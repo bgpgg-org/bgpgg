@@ -1242,6 +1242,7 @@ async fn test_max_prefix_limit() {
                     None,
                     None,
                     false,
+                    vec![],
                 )
                 .await
                 .expect("Failed to add route");

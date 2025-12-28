@@ -88,6 +88,7 @@ async fn test_origin_preservation() {
                 None,
                 None,
                 false,
+                vec![],
             )
             .await
             .expect("Failed to announce route");
@@ -108,6 +109,7 @@ async fn test_origin_preservation() {
                         Some(100),
                         None,
                         false,
+                        vec![],
                         vec![],
                     )],
                 })
@@ -193,6 +195,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -216,6 +219,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -232,6 +236,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -247,6 +252,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -303,6 +309,7 @@ async fn test_originating_speaker_as_path() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -325,6 +332,7 @@ async fn test_originating_speaker_as_path() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -340,6 +348,7 @@ async fn test_originating_speaker_as_path() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -392,6 +401,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to add route from server 1");
@@ -415,6 +425,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -470,6 +481,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -488,6 +500,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -547,6 +560,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -568,6 +582,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -583,6 +598,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -644,6 +660,7 @@ async fn test_local_pref_send_to_ibgp() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -665,6 +682,7 @@ async fn test_local_pref_send_to_ibgp() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -680,6 +698,7 @@ async fn test_local_pref_send_to_ibgp() {
                     Some(100), // LOCAL_PREF preserved from S2's UPDATE (proves it was included)
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -744,6 +763,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
             Some(200), // Explicitly set LOCAL_PREF to 200
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -761,6 +781,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
                 Some(200),
                 None, // LOCAL_PREF=200 preserved via iBGP
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -781,6 +802,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
                 Some(100), // LOCAL_PREF=100 (set by policy, NOT 200 from S2!)
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -841,6 +863,7 @@ async fn test_med_propagation_over_ibgp() {
             None,
             Some(50), // Set MED=50
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -862,6 +885,7 @@ async fn test_med_propagation_over_ibgp() {
                     Some(50),  // MED=50 received from S1
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -877,6 +901,7 @@ async fn test_med_propagation_over_ibgp() {
                     Some(100), // LOCAL_PREF preserved from S2
                     Some(50),  // MED=50 propagated over iBGP (proves propagation)
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -938,6 +963,7 @@ async fn test_med_not_propagated_to_other_as() {
             None,
             Some(50), // Set MED=50
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -955,6 +981,7 @@ async fn test_med_not_propagated_to_other_as() {
                 Some(100), // LOCAL_PREF set by policy
                 Some(50),  // MED=50 received from S1
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -975,6 +1002,7 @@ async fn test_med_not_propagated_to_other_as() {
                 Some(100), // LOCAL_PREF set by policy
                 None,      // MED=None (NOT 50 from S1 - proves MED not propagated to other AS)
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -1035,6 +1063,7 @@ async fn test_atomic_aggregate_propagation() {
             None,
             None,
             true, // ATOMIC_AGGREGATE=true
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -1052,6 +1081,7 @@ async fn test_atomic_aggregate_propagation() {
                 Some(100), // LOCAL_PREF set by DefaultLocalPref policy
                 None,
                 true, // ATOMIC_AGGREGATE=true (received from S1)
+                vec![],
                 vec![],
             )],
         }],
@@ -1072,6 +1102,7 @@ async fn test_atomic_aggregate_propagation() {
                 Some(100), // LOCAL_PREF preserved from S2
                 None,
                 true, // ATOMIC_AGGREGATE=true (propagated from S1 -> S2 -> S3)
+                vec![],
                 vec![],
             )],
         }],
@@ -1162,6 +1193,7 @@ async fn test_unknown_optional_attribute_handling(
                 None,
                 false,
                 expected_unknown_attrs,
+                vec![],
             )],
         }],
     )])
@@ -1263,6 +1295,7 @@ async fn test_med_comparison_restricted_to_same_as() {
             None,
             Some(100),
             false,
+            vec![],
         )
         .await
         .unwrap();
@@ -1277,6 +1310,7 @@ async fn test_med_comparison_restricted_to_same_as() {
             None,
             Some(50),
             false,
+            vec![],
         )
         .await
         .unwrap();
@@ -1291,6 +1325,7 @@ async fn test_med_comparison_restricted_to_same_as() {
             None,
             Some(10),
             false,
+            vec![],
         )
         .await
         .unwrap();
@@ -1311,8 +1346,151 @@ async fn test_med_comparison_restricted_to_same_as() {
                 Some(50),
                 false,
                 vec![],
+                vec![],
             )],
         }],
     )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_normal_community_propagation() {
+    let (mut server1, server2) = setup_two_peered_servers(None).await;
+
+    server1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![100, 200, 300],
+        )
+        .await
+        .expect("Failed to add route");
+
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(
+                vec![as_sequence(vec![65001])],
+                &server1.address,
+                server1.address.clone(),
+                Origin::Igp,
+                Some(100),
+                None,
+                false,
+                vec![],
+                vec![100, 200, 300],
+            )],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_well_known_communities() {
+    let (mut server1, server2) = setup_two_peered_servers(None).await;
+
+    // Add routes with well-known communities (should be filtered)
+    server1
+        .client
+        .add_route(
+            "10.1.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![0xFFFFFF02], // NO_ADVERTISE
+        )
+        .await
+        .expect("Failed to add route");
+
+    server1
+        .client
+        .add_route(
+            "10.2.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![0xFFFFFF01], // NO_EXPORT
+        )
+        .await
+        .expect("Failed to add route");
+
+    server1
+        .client
+        .add_route(
+            "10.3.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![0xFFFFFF03], // NO_EXPORT_SUBCONFED
+        )
+        .await
+        .expect("Failed to add route");
+
+    // Add normal route (should propagate)
+    server1
+        .client
+        .add_route(
+            "10.4.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .expect("Failed to add route");
+
+    // Poll for 3 seconds: only normal route propagates, only 1 UPDATE sent
+    poll_while(
+        || async {
+            let Ok(routes) = server2.client.get_routes().await else {
+                return false;
+            };
+
+            routes_match(
+                &routes,
+                &[Route {
+                    prefix: "10.4.0.0/24".to_string(),
+                    paths: vec![build_path(
+                        vec![as_sequence(vec![65001])],
+                        &server1.address,
+                        server1.address.clone(),
+                        Origin::Igp,
+                        Some(100),
+                        None,
+                        false,
+                        vec![],
+                        vec![],
+                    )],
+                }],
+            ) && server1
+                .client
+                .get_peer(server2.address.clone())
+                .await
+                .ok()
+                .and_then(|(_, stats)| stats)
+                .is_some_and(|s| s.update_sent == 1)
+        },
+        std::time::Duration::from_secs(3),
+        "Route propagation and UPDATE count validation",
+    )
     .await;
 }

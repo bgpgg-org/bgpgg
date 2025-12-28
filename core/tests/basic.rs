@@ -34,6 +34,7 @@ async fn test_announce_withdraw() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route");
@@ -56,6 +57,7 @@ async fn test_announce_withdraw() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -97,6 +99,7 @@ async fn test_announce_withdraw_mesh() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -117,6 +120,7 @@ async fn test_announce_withdraw_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -132,6 +136,7 @@ async fn test_announce_withdraw_mesh() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -197,6 +202,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -213,6 +219,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             Some(100),
             None,
             false,
+            vec![],
             vec![],
         )],
     }];
@@ -368,6 +375,7 @@ async fn test_ibgp_split_horizon() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -388,6 +396,7 @@ async fn test_ibgp_split_horizon() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -463,6 +472,7 @@ async fn test_as_loop_prevention() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1_A");
@@ -484,6 +494,7 @@ async fn test_as_loop_prevention() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],

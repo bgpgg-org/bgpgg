@@ -103,6 +103,7 @@ pub fn build_path(
     med: Option<u32>,
     atomic_aggregate: bool,
     unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
+    communities: Vec<u32>,
 ) -> Path {
     Path {
         origin: origin.into(),
@@ -113,7 +114,23 @@ pub fn build_path(
         med,
         atomic_aggregate,
         unknown_attributes,
+        communities,
     }
+}
+
+pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
+    use std::collections::HashMap;
+
+    let routes_map: HashMap<_, _> = actual
+        .iter()
+        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+        .collect();
+    let expected_map: HashMap<_, _> = expected
+        .iter()
+        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+        .collect();
+
+    routes_map == expected_map
 }
 
 /// Starts a single BGP server with gRPC interface for testing
@@ -592,8 +609,6 @@ pub async fn poll_route_propagation_with_timeout(
     expectations: &[(&TestServer, Vec<Route>)],
     max_iterations: usize,
 ) {
-    use std::collections::HashMap;
-
     poll_until_with_timeout(
         || async {
             for (server, expected_routes) in expectations {
@@ -601,17 +616,7 @@ pub async fn poll_route_propagation_with_timeout(
                     return false;
                 };
 
-                // Compare only best paths (first path in each route)
-                let routes_map: HashMap<_, _> = routes
-                    .into_iter()
-                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
-                    .collect();
-                let expected_map: HashMap<_, _> = expected_routes
-                    .iter()
-                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
-                    .collect();
-
-                if routes_map != expected_map {
+                if !routes_match(&routes, expected_routes) {
                     return false;
                 }
             }

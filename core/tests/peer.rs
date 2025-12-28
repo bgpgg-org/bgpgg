@@ -37,6 +37,7 @@ async fn test_peer_down() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route");
@@ -59,6 +60,7 @@ async fn test_peer_down() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -97,6 +99,7 @@ async fn test_peer_down_four_node_mesh() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 1");
@@ -117,6 +120,7 @@ async fn test_peer_down_four_node_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -133,6 +137,7 @@ async fn test_peer_down_four_node_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -148,6 +153,7 @@ async fn test_peer_down_four_node_mesh() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -211,6 +217,7 @@ async fn test_peer_down_four_node_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -226,6 +233,7 @@ async fn test_peer_down_four_node_mesh() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -250,6 +258,7 @@ async fn test_remove_peer() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route");
@@ -272,6 +281,7 @@ async fn test_remove_peer() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -308,6 +318,7 @@ async fn test_remove_peer_withdraw_routes() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 2");
@@ -330,6 +341,7 @@ async fn test_remove_peer_withdraw_routes() {
                 Some(100),
                 None,
                 false,
+                vec![],
                 vec![],
             )],
         }],
@@ -367,6 +379,7 @@ async fn test_remove_peer_four_node_mesh() {
             None,
             None,
             false,
+            vec![],
         )
         .await
         .expect("Failed to announce route from server 4");
@@ -387,6 +400,7 @@ async fn test_remove_peer_four_node_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -403,6 +417,7 @@ async fn test_remove_peer_four_node_mesh() {
                     None,
                     false,
                     vec![],
+                    vec![],
                 )],
             }],
         ),
@@ -418,6 +433,7 @@ async fn test_remove_peer_four_node_mesh() {
                     Some(100),
                     None,
                     false,
+                    vec![],
                     vec![],
                 )],
             }],
@@ -452,6 +468,7 @@ async fn test_remove_peer_four_node_mesh() {
                         None,
                         false,
                         vec![],
+                        vec![],
                     )], // Via server2 (127.0.0.2 < 127.0.0.3)
                 }],
             ),
@@ -468,6 +485,7 @@ async fn test_remove_peer_four_node_mesh() {
                         None,
                         false,
                         vec![],
+                        vec![],
                     )],
                 }],
             ),
@@ -483,6 +501,7 @@ async fn test_remove_peer_four_node_mesh() {
                         Some(100),
                         None,
                         false,
+                        vec![],
                         vec![],
                     )],
                 }],
@@ -1424,6 +1443,7 @@ async fn test_mrai_rate_limiting() {
                     None,
                     None,
                     false,
+                    vec![],
                 )
                 .await
                 .unwrap();
@@ -1443,6 +1463,7 @@ async fn test_mrai_rate_limiting() {
                         Some(100),
                         None,
                         false,
+                        vec![],
                         vec![],
                     )],
                 })
