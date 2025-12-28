@@ -24,6 +24,7 @@ use crate::server::ServerOp;
 use crate::{debug, info, warn};
 use std::io;
 use std::net::IpAddr;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use super::{Peer, SessionType};
@@ -201,7 +202,7 @@ impl Peer {
     pub(super) async fn handle_message(
         &mut self,
         message: BgpMessage,
-    ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Path)>)>, io::Error> {
+    ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Arc<Path>)>)>, io::Error> {
         self.track_received_message(&message);
 
         // Process FSM event

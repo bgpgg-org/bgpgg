@@ -18,10 +18,11 @@ use crate::bgp::utils::IpNetwork;
 use crate::config::MaxPrefixAction;
 use crate::rib::{Path, RouteSource};
 use crate::{info, warn};
+use std::sync::Arc;
 
 use super::{Peer, SessionType};
 
-type UpdateResult = (Vec<IpNetwork>, Vec<(IpNetwork, Path)>);
+type UpdateResult = (Vec<IpNetwork>, Vec<(IpNetwork, Arc<Path>)>);
 
 impl Peer {
     /// Handle a BGP UPDATE message
@@ -89,7 +90,7 @@ impl Peer {
     fn process_announcements(
         &mut self,
         update_msg: &UpdateMessage,
-    ) -> Result<Vec<(IpNetwork, Path)>, BgpError> {
+    ) -> Result<Vec<(IpNetwork, Arc<Path>)>, BgpError> {
         if !self.check_max_prefix_limit(update_msg.nlri_list().len())? {
             return Ok(Vec::new());
         }
@@ -116,10 +117,13 @@ impl Peer {
             return Ok(announced);
         }
 
+        // Wrap path in Arc once
+        let path_arc = Arc::new(path);
+
         for prefix in update_msg.nlri_list() {
-            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path.med));
-            self.rib_in.add_route(*prefix, path.clone());
-            announced.push((*prefix, path.clone()));
+            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path_arc.med));
+            self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
+            announced.push((*prefix, Arc::clone(&path_arc)));
         }
 
         Ok(announced)

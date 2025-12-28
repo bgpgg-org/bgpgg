@@ -163,7 +163,7 @@ pub enum ServerOp {
     PeerUpdate {
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, crate::rib::Path)>,
+        announced: Vec<(IpNetwork, std::sync::Arc<crate::rib::Path>)>,
     },
     PeerDisconnected {
         peer_ip: IpAddr,

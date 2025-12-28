@@ -488,7 +488,7 @@ impl BgpService for BgpGrpcService {
                         },
                         as_path: path
                             .as_path
-                            .into_iter()
+                            .iter()
                             .map(|segment| proto::AsPathSegment {
                                 segment_type: match segment.segment_type {
                                     AsPathSegmentType::AsSet => {
@@ -498,7 +498,7 @@ impl BgpService for BgpGrpcService {
                                         proto::AsPathSegmentType::AsSequence as i32
                                     }
                                 },
-                                asns: segment.asn_list.into_iter().map(|asn| asn as u32).collect(),
+                                asns: segment.asn_list.iter().map(|asn| *asn as u32).collect(),
                             })
                             .collect(),
                         next_hop: path.next_hop.to_string(),
@@ -511,18 +511,18 @@ impl BgpService for BgpGrpcService {
                         atomic_aggregate: path.atomic_aggregate,
                         unknown_attributes: path
                             .unknown_attrs
-                            .into_iter()
+                            .iter()
                             .filter_map(|attr| {
                                 if let crate::bgp::msg_update::PathAttrValue::Unknown {
                                     type_code,
                                     flags,
                                     data,
-                                } = attr.value
+                                } = &attr.value
                                 {
                                     Some(proto::UnknownAttribute {
-                                        attr_type: type_code as u32,
-                                        flags: flags as u32,
-                                        value: data,
+                                        attr_type: *type_code as u32,
+                                        flags: *flags as u32,
+                                        value: data.clone(),
                                     })
                                 } else {
                                     None
