@@ -17,7 +17,7 @@ use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
-use crate::net::peer_ip;
+use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
@@ -245,10 +245,8 @@ impl BgpServer {
             .listen_addr
             .parse()
             .map_err(|_| ServerError::InvalidListenAddr(config.listen_addr.clone()))?;
-        let local_addr = match sock_addr.ip() {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => return Err(ServerError::UnsupportedIPv6),
-        };
+        let local_addr =
+            ipv4_from_ipaddr(sock_addr.ip()).map_err(|_| ServerError::UnsupportedIPv6)?;
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
@@ -326,7 +324,7 @@ impl BgpServer {
             .map_err(ServerError::BindError)?;
         self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
-        let bind_addr = SocketAddr::new(self.local_addr.into(), 0);
+        let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);
 
         loop {

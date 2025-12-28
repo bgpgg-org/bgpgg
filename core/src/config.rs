@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 /// Action to take when max prefix limit is reached
@@ -185,9 +186,11 @@ impl Config {
             .next()
             .ok_or_else(|| "invalid listen_addr format".to_string())?;
 
-        format!("{}:0", local_ip)
+        let ip: IpAddr = local_ip
             .parse()
-            .map_err(|e| format!("failed to parse local bind address: {}", e))
+            .map_err(|e| format!("failed to parse IP address: {}", e))?;
+
+        Ok(bind_addr_from_ip(ip))
     }
 }
 

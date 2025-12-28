@@ -20,8 +20,7 @@ use super::utils::{is_valid_unicast_ipv4, ParserError};
 pub use super::msg_open_types::OptionalParam;
 
 use super::msg_open_types::{
-    BgpCapabiltyCode, Capability, OptionalParam as OptParam, OptionalParamTypes, ParamVal,
-    BGP_VERSION,
+    BgpCapabiltyCode, Capability, OptionalParamTypes, ParamVal, BGP_VERSION,
 };
 
 fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
