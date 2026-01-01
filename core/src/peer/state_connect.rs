@@ -16,6 +16,7 @@ use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -33,7 +34,7 @@ impl Peer {
                 self.fsm.timers.start_delay_open_timer();
             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
                 error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
             }
         } else {
             // No connection - first check if incoming connection is already queued
@@ -68,7 +69,7 @@ impl Peer {
                                 self.fsm.timers.start_delay_open_timer();
                             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
                                 error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
                         }
                         Err(e) => {
@@ -118,7 +119,7 @@ impl Peer {
                             }
                         )).await {
                             error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                         }
                     }
                     Ok(BgpMessage::Notification(notif)) => {
@@ -126,7 +127,7 @@ impl Peer {
                     }
                     Ok(_) => {
                         error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
-                        self.disconnect(true);
+                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
                     Err(e) => {
                         debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
@@ -153,7 +154,7 @@ impl Peer {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
                         error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        self.disconnect(true);
+                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
                 }
             }
@@ -182,21 +183,21 @@ impl Peer {
         match (new_state, event) {
             // RFC 4271 8.2.2: ConnectRetryTimer expires in Connect state
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
             }
 
             // RFC 4271 8.2.2 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
             (BgpState::Active, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
             }
 
             // RFC 4271 8.2.2 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.reset_connect_retry_counter();
             }
@@ -207,7 +208,7 @@ impl Peer {
                 let _ = self.send_notification(notif.clone()).await;
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 
@@ -216,7 +217,10 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
                 let delay_open_was_running = self.fsm.timers.delay_open_timer_running();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(!delay_open_was_running);
+                self.disconnect(
+                    !delay_open_was_running,
+                    PeerDownReason::LocalNoNotification(FsmEvent::NotifMsgVerErr),
+                );
                 if !delay_open_was_running {
                     self.fsm.increment_connect_retry_counter();
                 }
@@ -226,13 +230,13 @@ impl Peer {
             (BgpState::Idle, FsmEvent::NotifMsg) => {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 
             // RFC 4271 8.2.2: ManualStop in Connect state
             (BgpState::Idle, FsmEvent::ManualStop) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.manually_stopped = true;
                 self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.stop_connect_retry();
@@ -253,7 +257,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_running() {
                     self.fsm.timers.stop_delay_open_timer();
                 }
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
                 return Err(PeerError::FsmError);
             }
@@ -271,7 +275,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_running() {
                     self.fsm.timers.stop_delay_open_timer();
                 }
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 

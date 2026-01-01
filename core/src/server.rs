@@ -14,6 +14,7 @@
 
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::config::{Config, PeerConfig};
@@ -25,6 +26,7 @@ use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::rib::rib_loc::LocRib;
+use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::collections::HashMap;
 use std::io;
@@ -168,11 +170,30 @@ pub enum ServerOp {
     },
     PeerDisconnected {
         peer_ip: IpAddr,
+        reason: PeerDownReason,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
     SetAdminState {
         peer_ip: IpAddr,
         state: AdminState,
+    },
+}
+
+// BMP operations sent from server to BMP sender task
+pub enum BmpOp {
+    PeerUp {
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        local_address: IpAddr,
+        local_port: u16,
+        remote_port: u16,
+        sent_open: OpenMessage,
+        received_open: OpenMessage,
+    },
+    PeerDown {
+        peer_ip: IpAddr,
+        reason: PeerDownReason,
     },
 }
 
@@ -247,6 +268,8 @@ pub struct BgpServer {
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
+    pub(crate) bmp_tx: mpsc::UnboundedSender<BmpOp>,
+    bmp_rx: Option<mpsc::UnboundedReceiver<BmpOp>>,
 }
 
 impl BgpServer {
@@ -261,6 +284,7 @@ impl BgpServer {
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let (bmp_tx, bmp_rx) = mpsc::unbounded_channel();
 
         Ok(BgpServer {
             peers: HashMap::new(),
@@ -273,6 +297,8 @@ impl BgpServer {
             mgmt_rx,
             op_tx,
             op_rx,
+            bmp_tx,
+            bmp_rx: Some(bmp_rx),
         })
     }
 
@@ -329,6 +355,14 @@ impl BgpServer {
 
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
+
+        // Spawn BMP sender task if enabled
+        if let Some(bmp_rx) = self.bmp_rx.take() {
+            tokio::spawn(async move {
+                let sender = crate::bmp::sender::BmpSender::new(bmp_rx);
+                sender.run().await;
+            });
+        }
 
         let listener = TcpListener::bind(&self.config.listen_addr)
             .await

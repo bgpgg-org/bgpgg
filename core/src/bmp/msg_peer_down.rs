@@ -15,21 +15,9 @@
 use super::msg::{Message, MessageType};
 use super::utils::{PeerDistinguisher, PeerHeader};
 use crate::bgp::msg::Message as BgpMessage;
-use crate::bgp::msg_notification::NotificationMessage;
-use crate::peer::FsmEvent;
+use crate::types::PeerDownReason;
 use std::net::IpAddr;
 use std::time::SystemTime;
-
-// TODO: Add support for RFC 9069 reason 6 (Local system closed, TLV data follows)
-// for Loc-RIB monitoring support
-#[derive(Clone, Debug)]
-pub enum PeerDownReason {
-    LocalNotification(NotificationMessage), // reason 1: local sent NOTIFICATION (data = BGP NOTIFICATION PDU)
-    LocalNoNotification(FsmEvent), // reason 2: local closed, no NOTIFICATION (data = 2-byte FSM event code)
-    RemoteNotification(NotificationMessage), // reason 3: remote sent NOTIFICATION (data = BGP NOTIFICATION PDU)
-    RemoteNoNotification,                    // reason 4: remote closed, no NOTIFICATION (no data)
-    PeerDeConfigured,                        // reason 5: peer de-configured (no data)
-}
 
 impl PeerDownReason {
     fn reason_code(&self) -> u8 {
@@ -136,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_peer_down_message_with_notification() {
-        use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
+        use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
         use crate::bmp::utils::PeerDistinguisher;
 
         let notif =

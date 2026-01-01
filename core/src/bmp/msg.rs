@@ -75,3 +75,17 @@ pub enum BmpMessage {
     RouteMirroring(RouteMirroringMessage),
     Termination(TerminationMessage),
 }
+
+impl BmpMessage {
+    pub fn serialize(&self) -> Vec<u8> {
+        match self {
+            Self::Initiation(m) => m.serialize(),
+            Self::PeerUp(m) => m.serialize(),
+            Self::PeerDown(m) => m.serialize(),
+            Self::RouteMonitoring(m) => m.serialize(),
+            Self::StatisticsReport(m) => m.serialize(),
+            Self::RouteMirroring(m) => m.serialize(),
+            Self::Termination(m) => m.serialize(),
+        }
+    }
+}

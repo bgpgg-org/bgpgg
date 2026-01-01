@@ -16,6 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::mem;
 use std::time::{Duration, Instant};
@@ -131,7 +132,7 @@ impl Peer {
                         Ok(message) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                 error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
@@ -140,7 +141,7 @@ impl Peer {
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif).await;
                             }
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }
@@ -157,7 +158,7 @@ impl Peer {
                                 // Send immediately
                                 if let Err(e) = self.send_update(update_msg).await {
                                     error!("failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                    self.disconnect(true);
+                                    self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                     return false;
                                 }
                                 self.last_update_sent = Some(Instant::now());
@@ -202,7 +203,7 @@ impl Peer {
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
                             error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }
@@ -214,7 +215,7 @@ impl Peer {
                     for update in updates {
                         if let Err(e) = self.send_update(update).await {
                             error!("failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }

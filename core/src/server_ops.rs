@@ -19,8 +19,8 @@ use crate::config::PeerConfig;
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
 use crate::server::{
-    AdminState, BgpServer, ConnectionType, GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo,
-    ServerOp,
+    AdminState, BgpServer, BmpOp, ConnectionType, GetPeerResponse, GetPeersResponse, MgmtOp,
+    PeerInfo, ServerOp,
 };
 use crate::{error, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -137,7 +137,7 @@ impl BgpServer {
             } => {
                 self.handle_open_received(peer_ip, bgp_id, conn_type);
             }
-            ServerOp::PeerDisconnected { peer_ip } => {
+            ServerOp::PeerDisconnected { peer_ip, reason } => {
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
@@ -162,6 +162,9 @@ impl BgpServer {
                 if !changed_prefixes.is_empty() {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
                 }
+
+                // BMP: Peer Down notification
+                let _ = self.bmp_tx.send(BmpOp::PeerDown { peer_ip, reason });
             }
             ServerOp::SetAdminState { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {

@@ -18,6 +18,7 @@ use crate::config::PeerConfig;
 use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
 use crate::server::{ConnectionType, ServerOp};
+use crate::types::PeerDownReason;
 use std::fmt;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -255,7 +256,7 @@ impl Peer {
     }
 
     /// Disconnect TCP and transition FSM.
-    fn disconnect(&mut self, apply_damping: bool) {
+    fn disconnect(&mut self, apply_damping: bool, reason: PeerDownReason) {
         let had_connection = self.conn.is_some();
         self.conn = None;
         self.established_at = None;
@@ -266,9 +267,10 @@ impl Peer {
             if apply_damping {
                 self.consecutive_down_count += 1;
             }
-            let _ = self
-                .server_tx
-                .send(ServerOp::PeerDisconnected { peer_ip: self.addr });
+            let _ = self.server_tx.send(ServerOp::PeerDisconnected {
+                peer_ip: self.addr,
+                reason,
+            });
         }
     }
 

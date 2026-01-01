@@ -14,6 +14,7 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
+use crate::types::PeerDownReason;
 use std::time::Instant;
 
 impl Peer {
@@ -41,7 +42,10 @@ impl Peer {
             }
 
             (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
-                self.disconnect(false);
+                self.disconnect(
+                    false,
+                    PeerDownReason::LocalNoNotification(FsmEvent::NotifMsgVerErr),
+                );
                 self.fsm.timers.stop_connect_retry();
             }
 

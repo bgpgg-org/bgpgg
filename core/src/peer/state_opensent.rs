@@ -15,6 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::types::PeerDownReason;
 
 impl Peer {
     /// Handle OpenSent state transitions.
@@ -32,7 +33,7 @@ impl Peer {
                     Vec::new(),
                 );
                 let _ = self.send_notification(notif).await;
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
@@ -43,7 +44,7 @@ impl Peer {
             (BgpState::Idle, FsmEvent::AutomaticStop(ref subcode)) => {
                 let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
                 let _ = self.send_notification(notif).await;
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
@@ -66,7 +67,7 @@ impl Peer {
             (BgpState::Idle, FsmEvent::HoldTimerExpires) => {
                 let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
                 let _ = self.send_notification(notif).await;
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.increment_connect_retry_counter();
                 self.fsm.timers.stop_hold_timer();
@@ -74,21 +75,24 @@ impl Peer {
             }
 
             (BgpState::Active, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.start_connect_retry();
             }
 
             (BgpState::Idle, FsmEvent::BgpHeaderErr(ref notif))
             | (BgpState::Idle, FsmEvent::BgpOpenMsgErr(ref notif)) => {
                 let _ = self.send_notification(notif.clone()).await;
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.increment_connect_retry_counter();
             }
 
             (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
                 self.fsm.timers.stop_connect_retry();
-                self.disconnect(false);
+                self.disconnect(
+                    false,
+                    PeerDownReason::LocalNoNotification(FsmEvent::NotifMsgVerErr),
+                );
             }
 
             (BgpState::Idle, FsmEvent::NotifMsg) => {
@@ -99,7 +103,7 @@ impl Peer {
                     ))
                     .await;
                 self.fsm.timers.stop_connect_retry();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 
@@ -116,14 +120,14 @@ impl Peer {
                     ))
                     .await;
                 self.fsm.timers.stop_connect_retry();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
                 return Err(PeerError::FsmError);
             }
 
             (BgpState::Idle, FsmEvent::BgpUpdateMsgErr(ref notif)) => {
                 let _ = self.send_notification(notif.clone()).await;
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_hold_timer();
                 self.fsm.timers.stop_keepalive_timer();
                 return Err(PeerError::UpdateError);
