@@ -87,15 +87,12 @@ impl Peer {
                 self.fsm.increment_connect_retry_counter();
             }
 
-            (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
+            (BgpState::Idle, FsmEvent::NotifMsgVerErr(ref notif)) => {
                 self.fsm.timers.stop_connect_retry();
-                self.disconnect(
-                    false,
-                    PeerDownReason::LocalNoNotification(FsmEvent::NotifMsgVerErr),
-                );
+                self.disconnect(false, PeerDownReason::RemoteNotification(notif.clone()));
             }
 
-            (BgpState::Idle, FsmEvent::NotifMsg) => {
+            (BgpState::Idle, FsmEvent::NotifMsg(ref notif)) => {
                 let _ = self
                     .send_notification(NotificationMessage::new(
                         BgpError::FiniteStateMachineError,
@@ -103,7 +100,7 @@ impl Peer {
                     ))
                     .await;
                 self.fsm.timers.stop_connect_retry();
-                self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                self.disconnect(true, PeerDownReason::RemoteNotification(notif.clone()));
                 self.fsm.increment_connect_retry_counter();
             }
 
@@ -250,7 +247,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_opensent_notification_received() {
-        let cases = vec![(FsmEvent::NotifMsgVerErr, 0, 0), (FsmEvent::NotifMsg, 1, 1)];
+        use crate::bgp::msg_notification::{
+            BgpError, CeaseSubcode, NotificationMessage, OpenMessageError,
+        };
+
+        let notif_ver = NotificationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+        let notif = NotificationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+
+        let cases = vec![
+            (FsmEvent::NotifMsgVerErr(notif_ver), 0, 0),
+            (FsmEvent::NotifMsg(notif), 1, 1),
+        ];
 
         for (event, expected_down_count, expected_counter) in cases {
             let mut peer = create_test_peer_with_state(BgpState::OpenSent).await;

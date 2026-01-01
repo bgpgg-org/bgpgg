@@ -125,10 +125,10 @@ impl Peer {
     pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
         let event = if notif.is_version_error() {
             debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsgVerErr
+            FsmEvent::NotifMsgVerErr(notif.clone())
         } else {
             debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsg
+            FsmEvent::NotifMsg(notif.clone())
         };
         self.try_process_event(&event).await;
     }
@@ -203,8 +203,8 @@ impl Peer {
     }
 
     /// Transition to Idle on error - increments retry counter and stops all timers
-    pub(super) fn transition_to_idle_on_error(&mut self) {
-        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+    pub(super) fn transition_to_idle_on_error(&mut self, reason: PeerDownReason) {
+        self.disconnect(true, reason);
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         self.stop_session_timers();
