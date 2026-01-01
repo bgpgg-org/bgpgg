@@ -14,7 +14,7 @@
 
 pub(crate) const BGP_VERSION: u8 = 4;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) enum BgpCapabiltyCode {
     Multiprotocol = 1,
     RouteRefresh = 2,
@@ -42,7 +42,7 @@ impl BgpCapabiltyCode {
 }
 
 // https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-11
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[repr(u8)]
 pub(crate) enum OptionalParamTypes {
     Capabilities = 2, // RFC3392
@@ -67,7 +67,7 @@ impl OptionalParamTypes {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) enum ParamVal {
     Capability(Capability),
     Unknown(Vec<u8>),
@@ -82,7 +82,7 @@ impl ParamVal {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct Capability {
     pub(crate) code: BgpCapabiltyCode,
     pub(crate) len: u8,
@@ -99,7 +99,7 @@ impl Capability {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct OptionalParam {
     pub(crate) param_type: OptionalParamTypes,
     pub(crate) param_len: u8,

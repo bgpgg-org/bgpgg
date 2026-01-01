@@ -31,6 +31,13 @@ pub(super) enum TerminationType {
     Reason = 1,
 }
 
+/// Peer Up message Information TLV types (RFC 7854 Section 4.10)
+#[repr(u16)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PeerUpInfoType {
+    String = 0, // Only type defined for Peer Up messages
+}
+
 /// Information TLV used in Initiation and Termination messages (internal)
 #[derive(Clone, Debug)]
 pub(super) struct InformationTlv {

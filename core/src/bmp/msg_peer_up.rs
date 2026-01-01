@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::PeerHeader;
+use super::types::{InformationTlv, PeerHeader, PeerUpInfoType};
+use crate::bgp::msg::Message as BgpMessage;
+use crate::bgp::msg_open::OpenMessage;
 use std::net::IpAddr;
 
 #[derive(Clone, Debug)]
@@ -22,9 +24,9 @@ pub struct PeerUpMessage {
     local_address: IpAddr,
     local_port: u16,
     remote_port: u16,
-    sent_open_message: Vec<u8>,
-    received_open_message: Vec<u8>,
-    information: Vec<u8>, // Optional TLVs
+    sent_open_message: OpenMessage,
+    received_open_message: OpenMessage,
+    information: Vec<InformationTlv>, // Optional string TLVs (RFC 7854 Section 4.10)
 }
 
 impl PeerUpMessage {
@@ -36,9 +38,16 @@ impl PeerUpMessage {
         local_address: IpAddr,
         local_port: u16,
         remote_port: u16,
-        sent_open: Vec<u8>,
-        received_open: Vec<u8>,
+        sent_open: OpenMessage,
+        received_open: OpenMessage,
+        info_strings: &[&str],
     ) -> Self {
+        let information = info_strings
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| InformationTlv::new(PeerUpInfoType::String as u16, s.as_bytes().to_vec()))
+            .collect();
+
         Self {
             peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
             local_address,
@@ -46,7 +55,7 @@ impl PeerUpMessage {
             remote_port,
             sent_open_message: sent_open,
             received_open_message: received_open,
-            information: Vec::new(),
+            information,
         }
     }
 }
@@ -80,13 +89,15 @@ impl Message for PeerUpMessage {
         bytes.extend_from_slice(&self.remote_port.to_be_bytes());
 
         // Sent OPEN Message
-        bytes.extend_from_slice(&self.sent_open_message);
+        bytes.extend_from_slice(&self.sent_open_message.serialize());
 
         // Received OPEN Message
-        bytes.extend_from_slice(&self.received_open_message);
+        bytes.extend_from_slice(&self.received_open_message.serialize());
 
         // Information (optional TLVs)
-        bytes.extend_from_slice(&self.information);
+        for tlv in &self.information {
+            bytes.extend_from_slice(&tlv.to_bytes());
+        }
 
         bytes
     }
@@ -99,6 +110,11 @@ mod tests {
 
     #[test]
     fn test_peer_up_message() {
+        use crate::bgp::msg_open::OpenMessage;
+
+        let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
+        let received_open = OpenMessage::new(65001, 180, 0x01010101);
+
         let msg = PeerUpMessage::new(
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
@@ -106,8 +122,33 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,
-            vec![0xff; 29], // Mock OPEN message
-            vec![0xff; 29],
+            sent_open,
+            received_open,
+            &[], // No info strings
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::PeerUpNotification.as_u8());
+    }
+
+    #[test]
+    fn test_peer_up_message_with_info() {
+        use crate::bgp::msg_open::OpenMessage;
+
+        let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
+        let received_open = OpenMessage::new(65001, 180, 0x01010101);
+
+        let msg = PeerUpMessage::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            179,
+            12345,
+            sent_open,
+            received_open,
+            &["peer info", "extra context"],
         );
 
         let serialized = msg.serialize();

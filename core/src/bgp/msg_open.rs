@@ -107,7 +107,7 @@ fn validate_bgp_identifier(bgp_identifier: u32) -> Result<(), ParserError> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenMessage {
     pub version: u8,
     pub asn: u16,
