@@ -13,32 +13,57 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::InformationTlv;
+use super::types::{InformationTlv, TerminationType};
 
 #[derive(Clone, Debug)]
 pub struct TerminationMessage {
-    pub information: Vec<InformationTlv>,
+    information: Vec<InformationTlv>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TerminationReason {
+    AdminClose,
+    Unspecified,
+    OutOfResources,
+    RedundantConnection,
+    PermanentlyAdminClose,
+}
+
+impl TerminationReason {
+    fn as_u16(self) -> u16 {
+        match self {
+            TerminationReason::AdminClose => 0,
+            TerminationReason::Unspecified => 1,
+            TerminationReason::OutOfResources => 2,
+            TerminationReason::RedundantConnection => 3,
+            TerminationReason::PermanentlyAdminClose => 4,
+        }
+    }
 }
 
 impl TerminationMessage {
-    pub fn new(information: Vec<InformationTlv>) -> Self {
-        Self { information }
-    }
+    /// Create Termination message with reason and optional string messages
+    /// Multiple string TLVs may be included (RFC 7854)
+    pub fn new(reason: TerminationReason, messages: &[&str]) -> Self {
+        let mut information = Vec::new();
 
-    pub const REASON_ADMIN_CLOSE: u16 = 0;
-    pub const REASON_UNSPECIFIED: u16 = 1;
-    pub const REASON_OUT_OF_RESOURCES: u16 = 2;
-    pub const REASON_REDUNDANT_CONNECTION: u16 = 3;
-    pub const REASON_PERMANENTLY_ADMIN_CLOSE: u16 = 4;
+        // Reason TLV (type = 1, value = 2-byte reason code)
+        information.push(InformationTlv::new(
+            TerminationType::Reason as u16,
+            reason.as_u16().to_be_bytes().to_vec(),
+        ));
 
-    pub fn new_with_reason(reason: u16) -> Self {
-        let tlv = InformationTlv {
-            info_type: reason,
-            info_value: Vec::new(),
-        };
-        Self {
-            information: vec![tlv],
+        // Optional string TLVs (multiple allowed per RFC 7854)
+        for msg in messages {
+            if !msg.is_empty() {
+                information.push(InformationTlv::new(
+                    TerminationType::String as u16,
+                    msg.as_bytes().to_vec(),
+                ));
+            }
         }
+
+        Self { information }
     }
 }
 

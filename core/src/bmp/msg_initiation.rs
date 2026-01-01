@@ -13,15 +13,35 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::InformationTlv;
+use super::types::{InformationTlv, InitiationType};
 
 #[derive(Clone, Debug)]
 pub struct InitiationMessage {
-    pub information: Vec<InformationTlv>,
+    information: Vec<InformationTlv>,
 }
 
 impl InitiationMessage {
-    pub fn new(information: Vec<InformationTlv>) -> Self {
+    /// Create Initiation message with required sysName and sysDescr (RFC 7854 MUST)
+    /// Optional string TLVs may be included (RFC 7854)
+    pub fn new(sys_name: &str, sys_descr: &str, messages: &[&str]) -> Self {
+        let mut information = vec![
+            InformationTlv::new(InitiationType::SysName as u16, sys_name.as_bytes().to_vec()),
+            InformationTlv::new(
+                InitiationType::SysDescr as u16,
+                sys_descr.as_bytes().to_vec(),
+            ),
+        ];
+
+        // Optional string TLVs (multiple allowed per RFC 7854)
+        for msg in messages {
+            if !msg.is_empty() {
+                information.push(InformationTlv::new(
+                    InitiationType::String as u16,
+                    msg.as_bytes().to_vec(),
+                ));
+            }
+        }
+
         Self { information }
     }
 }
@@ -46,16 +66,22 @@ mod tests {
 
     #[test]
     fn test_initiation_message_serialize() {
-        let tlvs = vec![
-            InformationTlv::new_string(InformationTlv::SYS_NAME, "bgpgg".to_string()),
-            InformationTlv::new_string(InformationTlv::SYS_DESCR, "bgpgg router".to_string()),
-        ];
-        let msg = InitiationMessage::new(tlvs);
+        let msg = InitiationMessage::new("bgpgg", "bgpgg router", &[]);
         let serialized = msg.serialize();
 
         // Version
         assert_eq!(serialized[0], 3);
         // Type
+        assert_eq!(serialized[5], MessageType::Initiation.as_u8());
+    }
+
+    #[test]
+    fn test_initiation_message_with_strings() {
+        let msg = InitiationMessage::new("bgpgg", "bgpgg router", &["version 0.1", "build 123"]);
+        let serialized = msg.serialize();
+
+        // Should have all TLVs
+        assert_eq!(serialized[0], 3);
         assert_eq!(serialized[5], MessageType::Initiation.as_u8());
     }
 }

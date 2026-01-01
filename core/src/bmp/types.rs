@@ -14,26 +14,39 @@
 
 use std::net::IpAddr;
 
-/// Information TLV used in Initiation and Termination messages
+/// Initiation message Information TLV types
+#[repr(u16)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum InitiationType {
+    String = 0,
+    SysDescr = 1,
+    SysName = 2,
+}
+
+/// Termination message Information TLV types
+#[repr(u16)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TerminationType {
+    String = 0,
+    Reason = 1,
+}
+
+/// Information TLV used in Initiation and Termination messages (internal)
 #[derive(Clone, Debug)]
-pub struct InformationTlv {
-    pub info_type: u16,
-    pub info_value: Vec<u8>,
+pub(super) struct InformationTlv {
+    info_type: u16,
+    info_value: Vec<u8>,
 }
 
 impl InformationTlv {
-    pub const STRING: u16 = 0;
-    pub const SYS_DESCR: u16 = 1;
-    pub const SYS_NAME: u16 = 2;
-
-    pub fn new_string(info_type: u16, value: String) -> Self {
+    pub(super) fn new(info_type: u16, value: impl Into<Vec<u8>>) -> Self {
         Self {
             info_type,
-            info_value: value.into_bytes(),
+            info_value: value.into(),
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(super) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.info_type.to_be_bytes());
         bytes.extend_from_slice(&(self.info_value.len() as u16).to_be_bytes());
