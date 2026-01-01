@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bmp::destination::BmpDestination;
+use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::msg::BmpMessage;
 use crate::bmp::msg_initiation::InitiationMessage;
 use crate::bmp::msg_peer_down::PeerDownMessage;
@@ -67,12 +67,34 @@ impl BmpSender {
             tokio::select! {
                 // Receive BmpOp from server
                 Some(op) = self.receiver.recv() => {
-                    if let Some(msg) = self.convert_to_bmp(op) {
-                        self.batch.push(msg);
+                    match op {
+                        BmpOp::AddDestination { addr, response } => {
+                            info!("BMP: Adding destination", "addr" => &addr.to_string());
+                            self.destinations.push(BmpDestination::TcpClient(BmpTcpClient::new(addr)));
+                            let _ = response.send(Ok(()));
+                        }
+                        BmpOp::RemoveDestination { addr, response } => {
+                            info!("BMP: Removing destination", "addr" => &addr.to_string());
+                            self.destinations.retain(|d| match d {
+                                BmpDestination::TcpClient(client) => client.addr() != addr,
+                            });
+                            let _ = response.send(Ok(()));
+                        }
+                        BmpOp::GetDestinations { response } => {
+                            let addrs: Vec<String> = self.destinations.iter().map(|d| match d {
+                                BmpDestination::TcpClient(client) => client.addr().to_string(),
+                            }).collect();
+                            let _ = response.send(addrs);
+                        }
+                        _ => {
+                            if let Some(msg) = self.convert_to_bmp(op) {
+                                self.batch.push(msg);
 
-                        // Flush if batch full
-                        if self.batch.len() >= MAX_BATCH_SIZE {
-                            self.flush().await;
+                                // Flush if batch full
+                                if self.batch.len() >= MAX_BATCH_SIZE {
+                                    self.flush().await;
+                                }
+                            }
                         }
                     }
                 }
@@ -129,6 +151,12 @@ impl BmpSender {
                     Some(SystemTime::now()),
                     reason,
                 )))
+            }
+            BmpOp::AddDestination { .. }
+            | BmpOp::RemoveDestination { .. }
+            | BmpOp::GetDestinations { .. } => {
+                // Management ops handled in main loop, not converted to BMP messages
+                None
             }
         }
     }

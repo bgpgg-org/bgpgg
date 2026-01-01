@@ -35,6 +35,10 @@ impl BmpTcpClient {
         }
     }
 
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
     async fn ensure_connected(&mut self) -> bool {
         if self.conn.is_some() {
             return true;

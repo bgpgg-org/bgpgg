@@ -23,12 +23,14 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
-    self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
-    AddRouteResponse, AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
-    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
-    GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
-    GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
-    PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
+    self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
+    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse,
+    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
+    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetBmpServersRequest,
+    GetBmpServersResponse, GetPeerRequest, GetPeerResponse, GetPeersRequest, GetPeersResponse,
+    GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest, GetServerInfoResponse,
+    Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics,
+    RemoveBmpServerRequest, RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse,
     RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
     SessionConfig as ProtoSessionConfig,
 };
@@ -566,5 +568,84 @@ impl BgpService for BgpGrpcService {
             listen_addr: listen_addr.to_string(),
             listen_port: listen_port as u32,
         }))
+    }
+
+    async fn add_bmp_server(
+        &self,
+        request: Request<AddBmpServerRequest>,
+    ) -> Result<Response<AddBmpServerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddBmpServer {
+            addr: addr.clone(),
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddBmpServerResponse {
+                success: true,
+                message: format!("BMP server {} added", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddBmpServerResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn remove_bmp_server(
+        &self,
+        request: Request<RemoveBmpServerRequest>,
+    ) -> Result<Response<RemoveBmpServerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RemoveBmpServer {
+            addr: addr.clone(),
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(RemoveBmpServerResponse {
+                success: true,
+                message: format!("BMP server {} removed", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(RemoveBmpServerResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn get_bmp_servers(
+        &self,
+        _request: Request<GetBmpServersRequest>,
+    ) -> Result<Response<GetBmpServersResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetBmpServers { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let addresses = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(GetBmpServersResponse { addresses }))
     }
 }

@@ -16,6 +16,9 @@ service BgpService {
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+    rpc AddBmpServer(AddBmpServerRequest) returns (AddBmpServerResponse);
+    rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);
+    rpc GetBmpServers(GetBmpServersRequest) returns (GetBmpServersResponse);
 }
 
 message GetServerInfoRequest {}
@@ -217,4 +220,29 @@ message UnknownAttribute {
     uint32 attr_type = 1;
     uint32 flags = 2;
     bytes value = 3;
+}
+
+// BMP server management
+message AddBmpServerRequest {
+    string address = 1;  // IP:PORT format (e.g., "127.0.0.1:11019")
+}
+
+message AddBmpServerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message RemoveBmpServerRequest {
+    string address = 1;
+}
+
+message RemoveBmpServerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetBmpServersRequest {}
+
+message GetBmpServersResponse {
+    repeated string addresses = 1;
 }

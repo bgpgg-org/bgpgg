@@ -85,6 +85,15 @@ impl BgpServer {
             MgmtOp::GetServerInfo { response } => {
                 let _ = response.send((self.local_addr, self.local_port));
             }
+            MgmtOp::AddBmpServer { addr, response } => {
+                self.handle_add_bmp_server(addr, response);
+            }
+            MgmtOp::RemoveBmpServer { addr, response } => {
+                self.handle_remove_bmp_server(addr, response);
+            }
+            MgmtOp::GetBmpServers { response } => {
+                self.handle_get_bmp_servers(response);
+            }
         }
     }
 
@@ -448,5 +457,85 @@ impl BgpServer {
     fn handle_get_routes(&self, response: oneshot::Sender<Vec<crate::rib::Route>>) {
         let routes = self.loc_rib.get_all_routes();
         let _ = response.send(routes);
+    }
+
+    fn handle_add_bmp_server(&self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let sock_addr: SocketAddr = match addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid BMP server address: {}", e)));
+                return;
+            }
+        };
+
+        let (tx, rx) = oneshot::channel();
+        let _ = self.bmp_tx.send(BmpOp::AddDestination {
+            addr: sock_addr,
+            response: tx,
+        });
+
+        tokio::spawn(async move {
+            match rx.await {
+                Ok(Ok(())) => {
+                    let _ = response.send(Ok(()));
+                }
+                Ok(Err(e)) => {
+                    let _ = response.send(Err(e));
+                }
+                Err(_) => {
+                    let _ = response.send(Err("BMP sender task not responding".to_string()));
+                }
+            }
+        });
+    }
+
+    fn handle_remove_bmp_server(
+        &self,
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let sock_addr: SocketAddr = match addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid BMP server address: {}", e)));
+                return;
+            }
+        };
+
+        let (tx, rx) = oneshot::channel();
+        let _ = self.bmp_tx.send(BmpOp::RemoveDestination {
+            addr: sock_addr,
+            response: tx,
+        });
+
+        tokio::spawn(async move {
+            match rx.await {
+                Ok(Ok(())) => {
+                    let _ = response.send(Ok(()));
+                }
+                Ok(Err(e)) => {
+                    let _ = response.send(Err(e));
+                }
+                Err(_) => {
+                    let _ = response.send(Err("BMP sender task not responding".to_string()));
+                }
+            }
+        });
+    }
+
+    fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.bmp_tx.send(BmpOp::GetDestinations { response: tx });
+
+        tokio::spawn(async move {
+            match rx.await {
+                Ok(addrs) => {
+                    let _ = response.send(addrs);
+                }
+                Err(_) => {
+                    let _ = response.send(Vec::new());
+                }
+            }
+        });
     }
 }

@@ -146,6 +146,17 @@ pub enum MgmtOp {
     GetServerInfo {
         response: oneshot::Sender<(Ipv4Addr, u16)>,
     },
+    AddBmpServer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveBmpServer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    GetBmpServers {
+        response: oneshot::Sender<Vec<String>>,
+    },
 }
 
 // Server operations sent from peer tasks to the main server loop
@@ -195,6 +206,17 @@ pub enum BmpOp {
     PeerDown {
         peer_ip: IpAddr,
         reason: PeerDownReason,
+    },
+    AddDestination {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveDestination {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    GetDestinations {
+        response: oneshot::Sender<Vec<String>>,
     },
 }
 
@@ -354,16 +376,34 @@ impl BgpServer {
         false // Accept new connection
     }
 
+    fn run_bmp(&mut self) {
+        let Some(bmp_rx) = self.bmp_rx.take() else {
+            return;
+        };
+
+        let bmp_servers = self.config.bmp_servers.clone();
+        tokio::spawn(async move {
+            let mut sender = BmpSender::new(bmp_rx);
+
+            for bmp_cfg in bmp_servers {
+                if let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() {
+                    info!("BMP destination added", "addr" => &addr.to_string());
+                    sender.add_destination(crate::bmp::destination::BmpDestination::TcpClient(
+                        crate::bmp::destination::BmpTcpClient::new(addr)
+                    ));
+                } else {
+                    error!("Invalid BMP server address", "addr" => &bmp_cfg.address);
+                }
+            }
+
+            sender.run().await;
+        });
+    }
+
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
 
-        // Spawn BMP sender task if enabled
-        if let Some(bmp_rx) = self.bmp_rx.take() {
-            tokio::spawn(async move {
-                let sender = BmpSender::new(bmp_rx);
-                sender.run().await;
-            });
-        }
+        self.run_bmp();
 
         let listener = TcpListener::bind(&self.config.listen_addr)
             .await
