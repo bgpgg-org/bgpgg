@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerHeader, PeerType};
+use super::types::{PeerDistinguisher, PeerHeader};
 use std::net::IpAddr;
 
 /// Statistics counter types (RFC 7854 Section 4.8)
@@ -76,7 +76,7 @@ pub struct StatisticsReportMessage {
 
 impl StatisticsReportMessage {
     pub fn new(
-        peer_type: PeerType,
+        peer_distinguisher: PeerDistinguisher,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
@@ -84,7 +84,7 @@ impl StatisticsReportMessage {
     ) -> Self {
         Self {
             peer_header: PeerHeader::new(
-                peer_type,
+                peer_distinguisher,
                 peer_address,
                 peer_as,
                 peer_bgp_id,
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_statistics_report_message() {
-        use crate::bmp::types::PeerType;
+        use crate::bmp::types::PeerDistinguisher;
 
         let stats = vec![
             StatisticsTlv::new_counter32(StatType::RoutesInAdjRibIn, 100),
@@ -134,7 +134,7 @@ mod tests {
         ];
 
         let msg = StatisticsReportMessage::new(
-            PeerType::GlobalInstance,
+            PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{InformationTlv, PeerHeader, PeerType, PeerUpInfoType};
+use super::types::{InformationTlv, PeerDistinguisher, PeerHeader, PeerUpInfoType};
+use super::utils::encode_ip_address;
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_open::OpenMessage;
 use std::net::IpAddr;
@@ -32,7 +33,7 @@ pub struct PeerUpMessage {
 impl PeerUpMessage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        peer_type: PeerType,
+        peer_distinguisher: PeerDistinguisher,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
@@ -52,7 +53,7 @@ impl PeerUpMessage {
 
         Self {
             peer_header: PeerHeader::new(
-                peer_type,
+                peer_distinguisher,
                 peer_address,
                 peer_as,
                 peer_bgp_id,
@@ -81,15 +82,7 @@ impl Message for PeerUpMessage {
         bytes.extend_from_slice(&self.peer_header.to_bytes());
 
         // Local Address (16 bytes, IPv4-mapped if IPv4)
-        match self.local_address {
-            IpAddr::V4(addr) => {
-                bytes.extend_from_slice(&[0u8; 12]);
-                bytes.extend_from_slice(&addr.octets());
-            }
-            IpAddr::V6(addr) => {
-                bytes.extend_from_slice(&addr.octets());
-            }
-        }
+        bytes.extend_from_slice(&encode_ip_address(self.local_address));
 
         // Local Port (2 bytes)
         bytes.extend_from_slice(&self.local_port.to_be_bytes());
@@ -120,13 +113,13 @@ mod tests {
     #[test]
     fn test_peer_up_message() {
         use crate::bgp::msg_open::OpenMessage;
-        use crate::bmp::types::PeerType;
+        use crate::bmp::types::PeerDistinguisher;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);
 
         let msg = PeerUpMessage::new(
-            PeerType::GlobalInstance,
+            PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
@@ -147,13 +140,13 @@ mod tests {
     #[test]
     fn test_peer_up_message_with_info() {
         use crate::bgp::msg_open::OpenMessage;
-        use crate::bmp::types::PeerType;
+        use crate::bmp::types::PeerDistinguisher;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);
 
         let msg = PeerUpMessage::new(
-            PeerType::GlobalInstance,
+            PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,

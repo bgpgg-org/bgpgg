@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerHeader, PeerType};
+use super::types::{PeerDistinguisher, PeerHeader};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use std::net::IpAddr;
@@ -27,7 +27,7 @@ pub struct RouteMonitoringMessage {
 
 impl RouteMonitoringMessage {
     pub fn new(
-        peer_type: PeerType,
+        peer_distinguisher: PeerDistinguisher,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
@@ -37,7 +37,7 @@ impl RouteMonitoringMessage {
     ) -> Self {
         Self {
             peer_header: PeerHeader::new(
-                peer_type,
+                peer_distinguisher,
                 peer_address,
                 peer_as,
                 peer_bgp_id,
@@ -76,7 +76,7 @@ mod tests {
     fn test_route_monitoring_message() {
         use crate::bgp::msg_update::UpdateMessage;
         use crate::bgp::utils::{IpNetwork, Ipv4Net};
-        use crate::bmp::types::PeerType;
+        use crate::bmp::types::PeerDistinguisher;
         use std::net::Ipv4Addr;
 
         // Create a withdrawal UPDATE message
@@ -86,7 +86,7 @@ mod tests {
         })]);
 
         let msg = RouteMonitoringMessage::new(
-            PeerType::GlobalInstance,
+            PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,

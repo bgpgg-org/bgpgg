@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod msg;
-pub mod msg_initiation;
-pub mod msg_peer_down;
-pub mod msg_peer_up;
-pub mod msg_route_mirroring;
-pub mod msg_route_monitoring;
-pub mod msg_statistics;
-pub mod msg_termination;
-pub mod types;
-mod utils;
+use std::net::IpAddr;
+
+/// Encode IP address to 16-byte format (IPv4-mapped for IPv4)
+pub(super) fn encode_ip_address(addr: IpAddr) -> [u8; 16] {
+    match addr {
+        IpAddr::V4(ipv4) => {
+            let mut bytes = [0u8; 16];
+            bytes[12..16].copy_from_slice(&ipv4.octets());
+            bytes
+        }
+        IpAddr::V6(ipv6) => ipv6.octets(),
+    }
+}
