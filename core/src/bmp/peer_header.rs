@@ -1,0 +1,131 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::net::IpAddr;
+
+/// Per-Peer Header used in most BMP messages
+#[derive(Clone, Debug)]
+pub struct PeerHeader {
+    pub peer_type: u8,
+    pub peer_flags: u8,
+    pub peer_distinguisher: u64,
+    pub peer_address: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub timestamp_seconds: u32,
+    pub timestamp_microseconds: u32,
+}
+
+impl PeerHeader {
+    pub const PEER_TYPE_GLOBAL: u8 = 0;
+    pub const PEER_TYPE_RD: u8 = 1;
+    pub const PEER_TYPE_LOCAL: u8 = 2;
+    pub const PEER_TYPE_LOC_RIB: u8 = 3;
+
+    pub const FLAG_V6: u8 = 0b10000000;
+    pub const FLAG_POST_POLICY: u8 = 0b01000000;
+    pub const FLAG_AS_PATH_2BYTE: u8 = 0b00100000;
+    pub const FLAG_ADJ_RIB_OUT: u8 = 0b00010000;
+
+    pub fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32) -> Self {
+        let peer_flags = match peer_address {
+            IpAddr::V6(_) => Self::FLAG_V6,
+            IpAddr::V4(_) => 0,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+
+        Self {
+            peer_type: Self::PEER_TYPE_GLOBAL,
+            peer_flags,
+            peer_distinguisher: 0,
+            peer_address,
+            peer_as,
+            peer_bgp_id,
+            timestamp_seconds: now.as_secs() as u32,
+            timestamp_microseconds: now.subsec_micros(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Peer Type (1 byte)
+        bytes.push(self.peer_type);
+
+        // Peer Flags (1 byte)
+        bytes.push(self.peer_flags);
+
+        // Peer Distinguisher (8 bytes)
+        bytes.extend_from_slice(&self.peer_distinguisher.to_be_bytes());
+
+        // Peer Address (16 bytes, IPv4-mapped if IPv4)
+        match self.peer_address {
+            IpAddr::V4(addr) => {
+                bytes.extend_from_slice(&[0u8; 12]); // 12 zeros
+                bytes.extend_from_slice(&addr.octets());
+            }
+            IpAddr::V6(addr) => {
+                bytes.extend_from_slice(&addr.octets());
+            }
+        }
+
+        // Peer AS (4 bytes)
+        bytes.extend_from_slice(&self.peer_as.to_be_bytes());
+
+        // Peer BGP ID (4 bytes)
+        bytes.extend_from_slice(&self.peer_bgp_id.to_be_bytes());
+
+        // Timestamp (4 + 4 bytes)
+        bytes.extend_from_slice(&self.timestamp_seconds.to_be_bytes());
+        bytes.extend_from_slice(&self.timestamp_microseconds.to_be_bytes());
+
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_peer_header_ipv4() {
+        let header = PeerHeader::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+        );
+        let bytes = header.to_bytes();
+
+        assert_eq!(bytes.len(), 42); // Per-Peer Header is 42 bytes
+        assert_eq!(bytes[0], PeerHeader::PEER_TYPE_GLOBAL);
+        assert_eq!(bytes[1] & PeerHeader::FLAG_V6, 0); // Not IPv6
+    }
+
+    #[test]
+    fn test_peer_header_ipv6() {
+        let header = PeerHeader::new(
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+            65001,
+            0x01010101,
+        );
+        let bytes = header.to_bytes();
+
+        assert_eq!(bytes.len(), 42);
+        assert_eq!(bytes[1] & PeerHeader::FLAG_V6, PeerHeader::FLAG_V6); // Is IPv6
+    }
+}
