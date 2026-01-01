@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerDistinguisher, PeerHeader};
+use super::utils::{PeerDistinguisher, PeerHeader};
 use std::net::IpAddr;
 use std::time::SystemTime;
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_statistics_report_message() {
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
 
         let stats = vec![
             StatisticsTlv::new_counter32(StatType::RoutesInAdjRibIn, 100),

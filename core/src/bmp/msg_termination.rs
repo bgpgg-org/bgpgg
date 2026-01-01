@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{InformationTlv, TerminationType};
+use super::utils::{InformationTlv, TerminationType};
 
 #[derive(Clone, Debug)]
 pub struct TerminationMessage {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerDistinguisher, PeerHeader};
+use super::utils::{PeerDistinguisher, PeerHeader};
 use std::net::IpAddr;
 use std::time::SystemTime;
 
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_route_mirroring_message() {
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
 
         let tlv = MirroringTlv::new_bgp_message(vec![0xff; 23]);
         let msg = RouteMirroringMessage::new(

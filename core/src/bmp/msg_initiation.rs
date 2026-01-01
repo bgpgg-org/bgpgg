@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{InformationTlv, InitiationType};
+use super::utils::{InformationTlv, InitiationType};
 
 #[derive(Clone, Debug)]
 pub struct InitiationMessage {

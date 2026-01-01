@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerDistinguisher, PeerHeader};
+use super::utils::{PeerDistinguisher, PeerHeader};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use std::net::IpAddr;
@@ -27,6 +27,7 @@ pub struct RouteMonitoringMessage {
 }
 
 impl RouteMonitoringMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_distinguisher: PeerDistinguisher,
         peer_address: IpAddr,
@@ -79,7 +80,7 @@ mod tests {
     fn test_route_monitoring_message() {
         use crate::bgp::msg_update::UpdateMessage;
         use crate::bgp::utils::{IpNetwork, Ipv4Net};
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
         use std::net::Ipv4Addr;
 
         // Create a withdrawal UPDATE message

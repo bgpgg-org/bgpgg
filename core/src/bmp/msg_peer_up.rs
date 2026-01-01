@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{InformationTlv, PeerDistinguisher, PeerHeader, PeerUpInfoType};
-use super::utils::encode_ip_address;
+use super::utils::{
+    encode_ip_address, InformationTlv, PeerDistinguisher, PeerHeader, PeerUpInfoType,
+};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_open::OpenMessage;
 use std::net::IpAddr;
@@ -116,7 +117,7 @@ mod tests {
     #[test]
     fn test_peer_up_message() {
         use crate::bgp::msg_open::OpenMessage;
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);
@@ -144,7 +145,7 @@ mod tests {
     #[test]
     fn test_peer_up_message_with_info() {
         use crate::bgp::msg_open::OpenMessage;
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);

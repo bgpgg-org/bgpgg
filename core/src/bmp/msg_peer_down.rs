@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{PeerDistinguisher, PeerHeader};
+use super::utils::{PeerDistinguisher, PeerHeader};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_notification::NotificationMessage;
 use crate::peer::FsmEvent;
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_peer_down_message_no_notification() {
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
         use crate::peer::FsmEvent;
 
         let msg = PeerDownMessage::new(
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_peer_down_message_with_notification() {
         use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
-        use crate::bmp::types::PeerDistinguisher;
+        use crate::bmp::utils::PeerDistinguisher;
 
         let notif =
             NotificationMessage::new(BgpError::Cease(CeaseSubcode::AdministrativeReset), vec![]);
