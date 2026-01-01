@@ -17,6 +17,7 @@ use super::msg_peer_down::PeerDownMessage;
 use super::msg_peer_up::PeerUpMessage;
 use super::msg_route_mirroring::RouteMirroringMessage;
 use super::msg_route_monitoring::RouteMonitoringMessage;
+use super::msg_statistics::StatisticsReportMessage;
 use super::msg_termination::TerminationMessage;
 
 pub const BMP_VERSION: u8 = 3;
@@ -70,6 +71,7 @@ pub enum BmpMessage {
     PeerUp(PeerUpMessage),
     PeerDown(PeerDownMessage),
     RouteMonitoring(RouteMonitoringMessage),
+    StatisticsReport(StatisticsReportMessage),
     RouteMirroring(RouteMirroringMessage),
     Termination(TerminationMessage),
 }

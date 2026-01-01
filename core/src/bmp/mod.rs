@@ -18,5 +18,6 @@ pub mod msg_peer_down;
 pub mod msg_peer_up;
 pub mod msg_route_mirroring;
 pub mod msg_route_monitoring;
+pub mod msg_statistics;
 pub mod msg_termination;
 pub mod types;
