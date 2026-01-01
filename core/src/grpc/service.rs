@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegmentType, Origin};
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttrValue};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::peer::BgpState;
@@ -344,10 +344,10 @@ impl BgpService for BgpGrpcService {
         };
 
         // Convert proto AS_PATH segments to internal format
-        let as_path: Vec<crate::bgp::msg_update::AsPathSegment> = req
+        let as_path: Vec<AsPathSegment> = req
             .as_path
             .into_iter()
-            .map(|seg| crate::bgp::msg_update::AsPathSegment {
+            .map(|seg| AsPathSegment {
                 segment_type: match seg.segment_type {
                     0 => AsPathSegmentType::AsSet,
                     1 => AsPathSegmentType::AsSequence,
@@ -514,7 +514,7 @@ impl BgpService for BgpGrpcService {
                             .unknown_attrs
                             .iter()
                             .filter_map(|attr| {
-                                if let crate::bgp::msg_update::PathAttrValue::Unknown {
+                                if let PathAttrValue::Unknown {
                                     type_code,
                                     flags,
                                     data,

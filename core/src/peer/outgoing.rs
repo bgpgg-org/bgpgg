@@ -16,6 +16,7 @@
 
 use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::bgp::utils::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
@@ -37,8 +38,6 @@ pub struct AnnouncementBatch {
 /// Check if a route should be filtered based on well-known communities
 /// RFC 1997 Section 3: Well-known communities
 fn should_filter_by_community(communities: &[u32], local_asn: u16, peer_asn: u16) -> bool {
-    use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
-
     if communities.contains(&NO_ADVERTISE) {
         return true;
     }

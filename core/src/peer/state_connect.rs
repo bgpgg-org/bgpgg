@@ -16,6 +16,7 @@ use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::net::create_and_bind_tcp_socket;
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::net::SocketAddr;
@@ -60,7 +61,7 @@ impl Peer {
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
             tokio::select! {
-                result = crate::net::create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
+                result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
                     match result {
                         Ok(stream) => {
                             info!("TCP connection established", "peer_ip" => self.addr.to_string());

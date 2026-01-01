@@ -17,6 +17,7 @@ use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
+use crate::bmp::sender::BmpSender;
 use crate::config::{Config, PeerConfig};
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
@@ -359,7 +360,7 @@ impl BgpServer {
         // Spawn BMP sender task if enabled
         if let Some(bmp_rx) = self.bmp_rx.take() {
             tokio::spawn(async move {
-                let sender = crate::bmp::sender::BmpSender::new(bmp_rx);
+                let sender = BmpSender::new(bmp_rx);
                 sender.run().await;
             });
         }

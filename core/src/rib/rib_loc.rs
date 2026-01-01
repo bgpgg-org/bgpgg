@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::AsPathSegment;
+use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -31,7 +32,6 @@ pub struct LocRib {
 
 impl LocRib {
     fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
-        use std::collections::hash_map::Entry;
         match self.routes.entry(prefix) {
             Entry::Occupied(mut entry) => {
                 let route = entry.get_mut();
@@ -158,7 +158,7 @@ impl LocRib {
         &mut self,
         prefix: IpNetwork,
         next_hop: Ipv4Addr,
-        origin: crate::bgp::msg_update::Origin,
+        origin: Origin,
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
         med: Option<u32>,
@@ -430,7 +430,7 @@ mod tests {
         loc_rib.add_local_route(
             prefix,
             next_hop,
-            crate::bgp::msg_update::Origin::IGP,
+            Origin::IGP,
             vec![],
             None,
             None,
@@ -457,7 +457,7 @@ mod tests {
         loc_rib.add_local_route(
             prefix,
             next_hop,
-            crate::bgp::msg_update::Origin::IGP,
+            Origin::IGP,
             vec![],
             Some(200), // Custom LOCAL_PREF
             None,

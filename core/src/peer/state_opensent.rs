@@ -15,6 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::server::{AdminState, ServerOp};
 use crate::types::PeerDownReason;
 
 impl Peer {
@@ -51,12 +52,10 @@ impl Peer {
                 self.fsm.timers.stop_keepalive_timer();
 
                 let admin_state = match subcode {
-                    CeaseSubcode::MaxPrefixesReached => {
-                        crate::server::AdminState::PrefixLimitReached
-                    }
-                    _ => crate::server::AdminState::Down,
+                    CeaseSubcode::MaxPrefixesReached => AdminState::PrefixLimitReached,
+                    _ => AdminState::Down,
                 };
-                let _ = self.server_tx.send(crate::server::ServerOp::SetAdminState {
+                let _ = self.server_tx.send(ServerOp::SetAdminState {
                     peer_ip: self.addr,
                     state: admin_state,
                 });

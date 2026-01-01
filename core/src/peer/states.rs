@@ -15,8 +15,8 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, NotificationMessage};
-use crate::server::ConnectionType;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::server::{AdminState, ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::time::Duration;
@@ -212,8 +212,6 @@ impl Peer {
 
     /// Handle ManualStop event - sends admin shutdown notification and transitions to Idle
     pub(super) async fn handle_manual_stop(&mut self) -> Result<(), PeerError> {
-        use crate::bgp::msg_notification::CeaseSubcode;
-
         self.manually_stopped = true;
         let notif = NotificationMessage::new(
             BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
@@ -230,10 +228,8 @@ impl Peer {
     /// Handle AutomaticStop event - sends cease notification and transitions to Idle
     pub(super) async fn handle_automatic_stop(
         &mut self,
-        subcode: &crate::bgp::msg_notification::CeaseSubcode,
+        subcode: &CeaseSubcode,
     ) -> Result<(), PeerError> {
-        use crate::server::{AdminState, ServerOp};
-
         let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
         let _ = self.send_notification(notif.clone()).await;
         self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -242,9 +238,7 @@ impl Peer {
         self.stop_session_timers();
 
         let admin_state = match subcode {
-            crate::bgp::msg_notification::CeaseSubcode::MaxPrefixesReached => {
-                AdminState::PrefixLimitReached
-            }
+            CeaseSubcode::MaxPrefixesReached => AdminState::PrefixLimitReached,
             _ => AdminState::Down,
         };
         let _ = self.server_tx.send(ServerOp::SetAdminState {
