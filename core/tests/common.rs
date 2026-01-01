@@ -1288,7 +1288,6 @@ pub fn build_raw_open(
     length_override: Option<u16>,
     msg_type_override: Option<u8>,
 ) -> Vec<u8> {
-
     let version = version_override.unwrap_or(4);
     let marker = marker_override.unwrap_or(BGP_MARKER);
     let msg_type = msg_type_override.unwrap_or(MessageType::OPEN.as_u8());

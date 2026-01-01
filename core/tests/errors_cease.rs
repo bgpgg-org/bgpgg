@@ -19,7 +19,10 @@ pub use common::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::{Config, PeerConfig};
-use bgpgg::grpc::proto::{AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin, Peer, SessionConfig};
+use bgpgg::grpc::proto::{
+    AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin, Peer,
+    SessionConfig,
+};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
