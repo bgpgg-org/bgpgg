@@ -35,7 +35,7 @@ impl RouteMonitoringMessage {
         peer_bgp_id: u32,
         post_policy: bool,
         legacy_as_path: bool,
-        timestamp: SystemTime,
+        timestamp: Option<SystemTime>,
         bgp_update: UpdateMessage,
     ) -> Self {
         Self {
@@ -96,7 +96,7 @@ mod tests {
             0x01010101,
             false,
             false,
-            SystemTime::now(),
+            Some(SystemTime::now()),
             update,
         );
 

@@ -57,7 +57,7 @@ impl RouteMirroringMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
-        timestamp: SystemTime,
+        timestamp: Option<SystemTime>,
         tlvs: Vec<MirroringTlv>,
     ) -> Self {
         Self {
@@ -110,7 +110,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
-            SystemTime::now(),
+            Some(SystemTime::now()),
             vec![tlv],
         );
 

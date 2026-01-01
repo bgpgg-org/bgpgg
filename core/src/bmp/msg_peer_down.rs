@@ -73,7 +73,7 @@ impl PeerDownMessage {
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
-        timestamp: SystemTime,
+        timestamp: Option<SystemTime>,
         reason: PeerDownReason,
     ) -> Self {
         Self {
@@ -125,7 +125,7 @@ mod tests {
             65001,
             0x01010101,
             false,
-            SystemTime::now(),
+            Some(SystemTime::now()),
             PeerDownReason::LocalNoNotification(FsmEvent::HoldTimerExpires),
         );
 
@@ -147,7 +147,7 @@ mod tests {
             65001,
             0x01010101,
             false,
-            SystemTime::now(),
+            Some(SystemTime::now()),
             PeerDownReason::LocalNotification(notif),
         );
 

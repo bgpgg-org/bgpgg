@@ -137,11 +137,12 @@ impl PeerHeader {
         peer_bgp_id: u32,
         post_policy: bool,
         legacy_as_path: bool,
-        timestamp: SystemTime,
+        timestamp: Option<SystemTime>,
     ) -> Self {
-        let duration = timestamp
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
+        let (timestamp_seconds, timestamp_microseconds) = timestamp
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs() as u32, d.subsec_micros()))
+            .unwrap_or((0, 0));
 
         Self {
             peer_distinguisher,
@@ -149,8 +150,8 @@ impl PeerHeader {
             peer_address,
             peer_as,
             peer_bgp_id,
-            timestamp_seconds: duration.as_secs() as u32,
-            timestamp_microseconds: duration.subsec_micros(),
+            timestamp_seconds,
+            timestamp_microseconds,
         }
     }
 
@@ -261,7 +262,7 @@ mod tests {
                 0x01010101,
                 false,
                 false,
-                SystemTime::now(),
+                Some(SystemTime::now()),
             );
             let bytes = header.to_bytes();
 
@@ -270,6 +271,40 @@ mod tests {
             let distinguisher = u64::from_be_bytes(distinguisher_bytes.try_into().unwrap());
             assert_eq!(distinguisher, expected_distinguisher_value);
         }
+    }
+
+    #[test]
+    fn test_peer_header_timestamp() {
+        // Test with actual timestamp
+        let now = SystemTime::now();
+        let header_with_time = PeerHeader::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            false,
+            false,
+            Some(now),
+        );
+        assert_ne!(header_with_time.timestamp_seconds, 0);
+
+        // Test with None - should produce 0,0 (RFC 7854 Section 5)
+        let header_without_time = PeerHeader::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(header_without_time.timestamp_seconds, 0);
+        assert_eq!(header_without_time.timestamp_microseconds, 0);
+
+        let bytes = header_without_time.to_bytes();
+        // Timestamp starts at offset 34 (4 bytes seconds + 4 bytes microseconds)
+        assert_eq!(&bytes[34..38], &[0, 0, 0, 0]); // seconds
+        assert_eq!(&bytes[38..42], &[0, 0, 0, 0]); // microseconds
     }
 
     #[test]
@@ -334,7 +369,7 @@ mod tests {
                 0x01010101,
                 post_policy,
                 legacy_as_path,
-                SystemTime::now(),
+                Some(SystemTime::now()),
             );
             let bytes = header.to_bytes();
 
