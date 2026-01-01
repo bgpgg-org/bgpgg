@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 use super::utils::encode_ip_address;
 
@@ -126,9 +127,10 @@ impl PeerHeader {
         peer_bgp_id: u32,
         post_policy: bool,
         legacy_as_path: bool,
+        timestamp: SystemTime,
     ) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let duration = timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
 
         Self {
@@ -137,8 +139,8 @@ impl PeerHeader {
             peer_address,
             peer_as,
             peer_bgp_id,
-            timestamp_seconds: now.as_secs() as u32,
-            timestamp_microseconds: now.subsec_micros(),
+            timestamp_seconds: duration.as_secs() as u32,
+            timestamp_microseconds: duration.subsec_micros(),
         }
     }
 
@@ -227,6 +229,7 @@ mod tests {
                 0x01010101,
                 false,
                 false,
+                SystemTime::now(),
             );
             let bytes = header.to_bytes();
 
@@ -299,6 +302,7 @@ mod tests {
                 0x01010101,
                 post_policy,
                 legacy_as_path,
+                SystemTime::now(),
             );
             let bytes = header.to_bytes();
 

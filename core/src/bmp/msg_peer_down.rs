@@ -18,6 +18,7 @@ use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_notification::NotificationMessage;
 use crate::peer::FsmEvent;
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 // TODO: Add support for RFC 9069 reason 6 (Local system closed, TLV data follows)
 // for Loc-RIB monitoring support
@@ -72,6 +73,7 @@ impl PeerDownMessage {
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
+        timestamp: SystemTime,
         reason: PeerDownReason,
     ) -> Self {
         Self {
@@ -82,6 +84,7 @@ impl PeerDownMessage {
                 peer_bgp_id,
                 post_policy,
                 false,
+                timestamp,
             ),
             reason,
         }
@@ -122,6 +125,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            SystemTime::now(),
             PeerDownReason::LocalNoNotification(FsmEvent::HoldTimerExpires),
         );
 
@@ -143,6 +147,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            SystemTime::now(),
             PeerDownReason::LocalNotification(notif),
         );
 

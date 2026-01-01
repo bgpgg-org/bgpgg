@@ -15,6 +15,7 @@
 use super::msg::{Message, MessageType};
 use super::types::{PeerDistinguisher, PeerHeader};
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 /// Statistics counter types (RFC 7854 Section 4.8)
 #[repr(u16)]
@@ -80,6 +81,7 @@ impl StatisticsReportMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        timestamp: SystemTime,
         statistics: Vec<StatisticsTlv>,
     ) -> Self {
         Self {
@@ -90,6 +92,7 @@ impl StatisticsReportMessage {
                 peer_bgp_id,
                 false,
                 false,
+                timestamp,
             ),
             statistics,
         }
@@ -138,6 +141,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            SystemTime::now(),
             stats,
         );
 

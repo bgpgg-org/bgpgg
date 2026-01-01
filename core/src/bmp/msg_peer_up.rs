@@ -18,6 +18,7 @@ use super::utils::encode_ip_address;
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_open::OpenMessage;
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
 pub struct PeerUpMessage {
@@ -38,6 +39,7 @@ impl PeerUpMessage {
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
+        timestamp: SystemTime,
         local_address: IpAddr,
         local_port: u16,
         remote_port: u16,
@@ -59,6 +61,7 @@ impl PeerUpMessage {
                 peer_bgp_id,
                 post_policy,
                 false,
+                timestamp,
             ),
             local_address,
             local_port,
@@ -124,6 +127,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            SystemTime::now(),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,
@@ -151,6 +155,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            SystemTime::now(),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,

@@ -17,6 +17,7 @@ use super::types::{PeerDistinguisher, PeerHeader};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 /// Route Monitoring message - carries BGP UPDATE messages (RFC 7854 Section 5)
 #[derive(Clone, Debug)]
@@ -33,6 +34,7 @@ impl RouteMonitoringMessage {
         peer_bgp_id: u32,
         post_policy: bool,
         legacy_as_path: bool,
+        timestamp: SystemTime,
         bgp_update: UpdateMessage,
     ) -> Self {
         Self {
@@ -43,6 +45,7 @@ impl RouteMonitoringMessage {
                 peer_bgp_id,
                 post_policy,
                 legacy_as_path,
+                timestamp,
             ),
             bgp_update,
         }
@@ -92,6 +95,7 @@ mod tests {
             0x01010101,
             false,
             false,
+            SystemTime::now(),
             update,
         );
 

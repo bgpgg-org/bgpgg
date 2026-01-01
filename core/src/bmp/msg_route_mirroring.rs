@@ -15,6 +15,7 @@
 use super::msg::{Message, MessageType};
 use super::types::{PeerDistinguisher, PeerHeader};
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 /// Route Mirroring TLV
 #[derive(Clone, Debug)]
@@ -56,6 +57,7 @@ impl RouteMirroringMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        timestamp: SystemTime,
         tlvs: Vec<MirroringTlv>,
     ) -> Self {
         Self {
@@ -66,6 +68,7 @@ impl RouteMirroringMessage {
                 peer_bgp_id,
                 false,
                 false,
+                timestamp,
             ),
             tlvs,
         }
@@ -107,6 +110,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            SystemTime::now(),
             vec![tlv],
         );
 
