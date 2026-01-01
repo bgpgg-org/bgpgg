@@ -31,10 +31,19 @@ impl RouteMonitoringMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        post_policy: bool,
+        legacy_as_path: bool,
         bgp_update: UpdateMessage,
     ) -> Self {
         Self {
-            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(
+                peer_type,
+                peer_address,
+                peer_as,
+                peer_bgp_id,
+                post_policy,
+                legacy_as_path,
+            ),
             bgp_update,
         }
     }
@@ -81,6 +90,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            false,
+            false,
             update,
         );
 

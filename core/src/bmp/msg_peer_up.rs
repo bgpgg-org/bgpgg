@@ -36,6 +36,7 @@ impl PeerUpMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        post_policy: bool,
         local_address: IpAddr,
         local_port: u16,
         remote_port: u16,
@@ -50,7 +51,14 @@ impl PeerUpMessage {
             .collect();
 
         Self {
-            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(
+                peer_type,
+                peer_address,
+                peer_as,
+                peer_bgp_id,
+                post_policy,
+                false,
+            ),
             local_address,
             local_port,
             remote_port,
@@ -122,6 +130,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            false,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,
@@ -148,6 +157,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            false,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,

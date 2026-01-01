@@ -59,7 +59,14 @@ impl RouteMirroringMessage {
         tlvs: Vec<MirroringTlv>,
     ) -> Self {
         Self {
-            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(
+                peer_type,
+                peer_address,
+                peer_as,
+                peer_bgp_id,
+                false,
+                false,
+            ),
             tlvs,
         }
     }

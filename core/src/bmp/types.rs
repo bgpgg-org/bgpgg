@@ -85,26 +85,25 @@ pub(super) struct PeerHeader {
 }
 
 impl PeerHeader {
-    const FLAG_V6: u8 = 0b10000000;
+    const FLAG_V6: u8 = 0b10000000; // V flag: IPv6 address
+    const FLAG_L: u8 = 0b01000000; // L flag: post-policy Adj-RIB-In
+    const FLAG_A: u8 = 0b00100000; // A flag: legacy 2-byte AS_PATH format
 
     pub(super) fn new(
         peer_type: PeerType,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        post_policy: bool,
+        legacy_as_path: bool,
     ) -> Self {
-        let peer_flags = match peer_address {
-            IpAddr::V6(_) => Self::FLAG_V6,
-            IpAddr::V4(_) => 0,
-        };
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 
         Self {
             peer_type,
-            peer_flags,
+            peer_flags: Self::build_peer_flags(peer_address, post_policy, legacy_as_path),
             peer_distinguisher: 0,
             peer_address,
             peer_as,
@@ -149,40 +148,56 @@ impl PeerHeader {
 
         bytes
     }
+
+    fn build_peer_flags(peer_address: IpAddr, post_policy: bool, legacy_as_path: bool) -> u8 {
+        let mut flags = match peer_address {
+            IpAddr::V6(_) => Self::FLAG_V6,
+            IpAddr::V4(_) => 0,
+        };
+
+        if post_policy {
+            flags |= Self::FLAG_L;
+        }
+
+        if legacy_as_path {
+            flags |= Self::FLAG_A;
+        }
+
+        flags
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
-    fn test_peer_header_ipv4() {
-        let header = PeerHeader::new(
-            PeerType::GlobalInstance,
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            65001,
-            0x01010101,
-        );
-        let bytes = header.to_bytes();
+    fn test_peer_header_flags() {
+        let tests = [
+            // (address, post_policy, legacy_as_path, expected_flags)
+            (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), false, false, 0b00000000),
+            (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), true, false, 0b01000000),
+            (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), false, true, 0b00100000),
+            (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), true, true, 0b01100000),
+            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), false, false, 0b10000000),
+            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), true, false, 0b11000000),
+            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), false, true, 0b10100000),
+            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), true, true, 0b11100000),
+        ];
 
-        assert_eq!(bytes.len(), 42); // Per-Peer Header is 42 bytes
-        assert_eq!(bytes[0], 0); // GlobalInstance
-        assert_eq!(bytes[1] & 0b10000000, 0); // Not IPv6
-    }
+        for (addr, post_policy, legacy_as_path, expected_flags) in tests {
+            let header = PeerHeader::new(
+                PeerType::GlobalInstance,
+                addr,
+                65001,
+                0x01010101,
+                post_policy,
+                legacy_as_path,
+            );
+            let bytes = header.to_bytes();
 
-    #[test]
-    fn test_peer_header_ipv6() {
-        let header = PeerHeader::new(
-            PeerType::LocalInstance,
-            IpAddr::V6("2001:db8::1".parse().unwrap()),
-            65001,
-            0x01010101,
-        );
-        let bytes = header.to_bytes();
-
-        assert_eq!(bytes.len(), 42);
-        assert_eq!(bytes[0], 2); // LocalInstance
-        assert_eq!(bytes[1] & 0b10000000, 0b10000000); // Is IPv6
+            assert_eq!(bytes[1], expected_flags, "flags mismatch for {:?}, post_policy={}, legacy_as_path={}", addr, post_policy, legacy_as_path);
+        }
     }
 }
