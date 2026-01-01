@@ -14,32 +14,76 @@
 
 use super::msg::{Message, MessageType};
 use super::utils::{PeerDistinguisher, PeerHeader};
+use crate::bgp::msg::BgpMessage;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-/// Route Mirroring TLV
+/// What to mirror in a Route Mirroring message (RFC 7854 Section 4.7)
 #[derive(Clone, Debug)]
-pub struct MirroringTlv {
-    pub info_code: u16,
-    pub info_value: Vec<u8>,
+pub enum MirroringContent {
+    /// Normal verbatim mirror of a valid BGP message
+    Normal(BgpMessage),
+    /// Errored PDU with parsed message (semantic error, treated-as-withdraw per RFC 7606)
+    ErroredMessage(BgpMessage),
+    /// Errored PDU with unparseable bytes (malformed/corrupted message)
+    ErroredRaw(Vec<u8>),
+    /// One or more messages were lost (e.g., buffer overflow)
+    MessagesLost,
+}
+
+impl MirroringContent {
+    fn to_tlvs(&self) -> Vec<MirroringTlv> {
+        match self {
+            Self::Normal(msg) => vec![MirroringTlv::BgpMessage(msg.serialize())],
+            Self::ErroredMessage(msg) => vec![
+                MirroringTlv::ErroredPdu,
+                MirroringTlv::BgpMessage(msg.serialize()),
+            ],
+            Self::ErroredRaw(pdu) => vec![
+                MirroringTlv::ErroredPdu,
+                MirroringTlv::BgpMessage(pdu.clone()),
+            ],
+            Self::MessagesLost => vec![MirroringTlv::MessagesLost],
+        }
+    }
+}
+
+/// Route Mirroring TLV (internal - RFC 7854 Section 4.7)
+#[derive(Clone, Debug)]
+enum MirroringTlv {
+    /// Type 0: BGP Message - verbatim copy of received BGP PDU
+    BgpMessage(Vec<u8>),
+    /// Type 1, Code 0: Errored PDU (treated-as-withdraw per RFC 7606)
+    ErroredPdu,
+    /// Type 1, Code 1: Messages Lost (e.g., buffer overflow)
+    MessagesLost,
 }
 
 impl MirroringTlv {
-    pub const BGP_MESSAGE: u16 = 0;
-    pub const INFORMATION: u16 = 1;
-
-    pub fn new_bgp_message(bgp_pdu: Vec<u8>) -> Self {
-        Self {
-            info_code: Self::BGP_MESSAGE,
-            info_value: bgp_pdu,
-        }
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.info_code.to_be_bytes());
-        bytes.extend_from_slice(&(self.info_value.len() as u16).to_be_bytes());
-        bytes.extend_from_slice(&self.info_value);
+
+        match self {
+            Self::BgpMessage(pdu) => {
+                // Type 0: BGP Message
+                bytes.extend_from_slice(&0u16.to_be_bytes());
+                bytes.extend_from_slice(&(pdu.len() as u16).to_be_bytes());
+                bytes.extend_from_slice(pdu);
+            }
+            Self::ErroredPdu => {
+                // Type 1: Information, Code 0: Errored PDU
+                bytes.extend_from_slice(&1u16.to_be_bytes());
+                bytes.extend_from_slice(&2u16.to_be_bytes()); // Length = 2
+                bytes.extend_from_slice(&0u16.to_be_bytes()); // Code 0
+            }
+            Self::MessagesLost => {
+                // Type 1: Information, Code 1: Messages Lost
+                bytes.extend_from_slice(&1u16.to_be_bytes());
+                bytes.extend_from_slice(&2u16.to_be_bytes()); // Length = 2
+                bytes.extend_from_slice(&1u16.to_be_bytes()); // Code 1
+            }
+        }
+
         bytes
     }
 }
@@ -48,7 +92,7 @@ impl MirroringTlv {
 #[derive(Clone, Debug)]
 pub struct RouteMirroringMessage {
     peer_header: PeerHeader,
-    tlvs: Vec<MirroringTlv>,
+    content: MirroringContent,
 }
 
 impl RouteMirroringMessage {
@@ -58,7 +102,7 @@ impl RouteMirroringMessage {
         peer_as: u32,
         peer_bgp_id: u32,
         timestamp: Option<SystemTime>,
-        tlvs: Vec<MirroringTlv>,
+        content: MirroringContent,
     ) -> Self {
         Self {
             peer_header: PeerHeader::new(
@@ -70,7 +114,7 @@ impl RouteMirroringMessage {
                 false,
                 timestamp,
             ),
-            tlvs,
+            content,
         }
     }
 }
@@ -86,8 +130,9 @@ impl Message for RouteMirroringMessage {
         // Per-Peer Header (42 bytes)
         bytes.extend_from_slice(&self.peer_header.to_bytes());
 
-        // TLVs
-        for tlv in &self.tlvs {
+        // Convert content to TLVs and serialize
+        let tlvs = self.content.to_tlvs();
+        for tlv in &tlvs {
             bytes.extend_from_slice(&tlv.to_bytes());
         }
 
@@ -101,17 +146,77 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
-    fn test_route_mirroring_message() {
+    fn test_route_mirroring_normal() {
+        use crate::bgp::msg_keepalive::KeepAliveMessage;
         use crate::bmp::utils::PeerDistinguisher;
 
-        let tlv = MirroringTlv::new_bgp_message(vec![0xff; 23]);
+        let keepalive = BgpMessage::KeepAlive(KeepAliveMessage {});
         let msg = RouteMirroringMessage::new(
             PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
             Some(SystemTime::now()),
-            vec![tlv],
+            MirroringContent::Normal(keepalive),
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::RouteMirroring.as_u8());
+    }
+
+    #[test]
+    fn test_route_mirroring_errored_message() {
+        use crate::bgp::msg_keepalive::KeepAliveMessage;
+        use crate::bmp::utils::PeerDistinguisher;
+
+        // A parsed message that had semantic errors (treated-as-withdraw)
+        let keepalive = BgpMessage::KeepAlive(KeepAliveMessage {});
+        let msg = RouteMirroringMessage::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            Some(SystemTime::now()),
+            MirroringContent::ErroredMessage(keepalive),
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::RouteMirroring.as_u8());
+    }
+
+    #[test]
+    fn test_route_mirroring_errored_raw() {
+        use crate::bmp::utils::PeerDistinguisher;
+
+        // Unparseable/malformed PDU bytes
+        let bad_pdu = vec![0xff; 23];
+        let msg = RouteMirroringMessage::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            Some(SystemTime::now()),
+            MirroringContent::ErroredRaw(bad_pdu),
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::RouteMirroring.as_u8());
+    }
+
+    #[test]
+    fn test_route_mirroring_messages_lost() {
+        use crate::bmp::utils::PeerDistinguisher;
+
+        let msg = RouteMirroringMessage::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            Some(SystemTime::now()),
+            MirroringContent::MessagesLost,
         );
 
         let serialized = msg.serialize();

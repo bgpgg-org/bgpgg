@@ -90,6 +90,7 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum BgpMessage {
     Open(OpenMessage),
     Update(UpdateMessage),
@@ -98,6 +99,16 @@ pub enum BgpMessage {
 }
 
 impl BgpMessage {
+    /// Serialize the BGP message to bytes with BGP header
+    pub fn serialize(&self) -> Vec<u8> {
+        match self {
+            Self::Open(m) => m.serialize(),
+            Self::Update(m) => m.serialize(),
+            Self::KeepAlive(m) => m.serialize(),
+            Self::Notification(m) => m.serialize(),
+        }
+    }
+
     fn from_bytes(message_type_val: u8, bytes: Vec<u8>) -> Result<Self, ParserError> {
         let message_type = MessageType::try_from(message_type_val)?;
 

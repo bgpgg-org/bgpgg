@@ -80,3 +80,38 @@ impl Message for TerminationMessage {
         bytes
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_termination_message_with_reason() {
+        let msg = TerminationMessage::new(TerminationReason::AdminClose, &[]);
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::Termination.as_u8());
+    }
+
+    #[test]
+    fn test_termination_message_with_strings() {
+        let msg = TerminationMessage::new(
+            TerminationReason::OutOfResources,
+            &["Shutting down", "Memory exhausted"],
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::Termination.as_u8());
+    }
+
+    #[test]
+    fn test_termination_reason_codes() {
+        assert_eq!(TerminationReason::AdminClose.as_u16(), 0);
+        assert_eq!(TerminationReason::Unspecified.as_u16(), 1);
+        assert_eq!(TerminationReason::OutOfResources.as_u16(), 2);
+        assert_eq!(TerminationReason::RedundantConnection.as_u16(), 3);
+        assert_eq!(TerminationReason::PermanentlyAdminClose.as_u16(), 4);
+    }
+}
