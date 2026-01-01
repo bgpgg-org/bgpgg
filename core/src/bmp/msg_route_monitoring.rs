@@ -13,20 +13,28 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::PeerHeader;
+use super::types::{PeerHeader, PeerType};
+use crate::bgp::msg::Message as BgpMessage;
+use crate::bgp::msg_update::UpdateMessage;
 use std::net::IpAddr;
 
-/// Route Monitoring message - carries BGP UPDATE messages
+/// Route Monitoring message - carries BGP UPDATE messages (RFC 7854 Section 5)
 #[derive(Clone, Debug)]
 pub struct RouteMonitoringMessage {
     peer_header: PeerHeader,
-    bgp_update: Vec<u8>, // Serialized BGP UPDATE message
+    bgp_update: UpdateMessage,
 }
 
 impl RouteMonitoringMessage {
-    pub fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32, bgp_update: Vec<u8>) -> Self {
+    pub fn new(
+        peer_type: PeerType,
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        bgp_update: UpdateMessage,
+    ) -> Self {
         Self {
-            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
             bgp_update,
         }
     }
@@ -44,7 +52,7 @@ impl Message for RouteMonitoringMessage {
         bytes.extend_from_slice(&self.peer_header.to_bytes());
 
         // BGP UPDATE Message
-        bytes.extend_from_slice(&self.bgp_update);
+        bytes.extend_from_slice(&self.bgp_update.serialize());
 
         bytes
     }
@@ -53,15 +61,27 @@ impl Message for RouteMonitoringMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::IpAddr;
 
     #[test]
     fn test_route_monitoring_message() {
+        use crate::bgp::msg_update::UpdateMessage;
+        use crate::bgp::utils::{IpNetwork, Ipv4Net};
+        use crate::bmp::types::PeerType;
+        use std::net::Ipv4Addr;
+
+        // Create a withdrawal UPDATE message
+        let update = UpdateMessage::new_withdraw(vec![IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        })]);
+
         let msg = RouteMonitoringMessage::new(
+            PeerType::GlobalInstance,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
-            vec![0xff; 23], // Mock UPDATE
+            update,
         );
 
         let serialized = msg.serialize();

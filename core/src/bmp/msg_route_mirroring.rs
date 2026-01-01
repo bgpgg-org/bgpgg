@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::PeerHeader;
+use super::types::{PeerHeader, PeerType};
 use std::net::IpAddr;
 
 /// Route Mirroring TLV
@@ -52,13 +52,14 @@ pub struct RouteMirroringMessage {
 
 impl RouteMirroringMessage {
     pub fn new(
+        peer_type: PeerType,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
         tlvs: Vec<MirroringTlv>,
     ) -> Self {
         Self {
-            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
             tlvs,
         }
     }
@@ -91,8 +92,11 @@ mod tests {
 
     #[test]
     fn test_route_mirroring_message() {
+        use crate::bmp::types::PeerType;
+
         let tlv = MirroringTlv::new_bgp_message(vec![0xff; 23]);
         let msg = RouteMirroringMessage::new(
+            PeerType::GlobalInstance,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,

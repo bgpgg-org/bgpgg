@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::types::{InformationTlv, PeerHeader, PeerUpInfoType};
+use super::types::{InformationTlv, PeerHeader, PeerType, PeerUpInfoType};
 use crate::bgp::msg::Message as BgpMessage;
 use crate::bgp::msg_open::OpenMessage;
 use std::net::IpAddr;
@@ -32,6 +32,7 @@ pub struct PeerUpMessage {
 impl PeerUpMessage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        peer_type: PeerType,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
@@ -49,7 +50,7 @@ impl PeerUpMessage {
             .collect();
 
         Self {
-            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
+            peer_header: PeerHeader::new(peer_type, peer_address, peer_as, peer_bgp_id),
             local_address,
             local_port,
             remote_port,
@@ -111,11 +112,13 @@ mod tests {
     #[test]
     fn test_peer_up_message() {
         use crate::bgp::msg_open::OpenMessage;
+        use crate::bmp::types::PeerType;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);
 
         let msg = PeerUpMessage::new(
+            PeerType::GlobalInstance,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
@@ -135,11 +138,13 @@ mod tests {
     #[test]
     fn test_peer_up_message_with_info() {
         use crate::bgp::msg_open::OpenMessage;
+        use crate::bmp::types::PeerType;
 
         let sent_open = OpenMessage::new(65000, 180, 0x0a000001);
         let received_open = OpenMessage::new(65001, 180, 0x01010101);
 
         let msg = PeerUpMessage::new(
+            PeerType::GlobalInstance,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,

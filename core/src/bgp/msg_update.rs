@@ -254,7 +254,7 @@ impl UpdateMessage {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct UpdateMessage {
     withdrawn_routes_len: u16,
     withdrawn_routes: Vec<IpNetwork>,

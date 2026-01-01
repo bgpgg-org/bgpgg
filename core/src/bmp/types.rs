@@ -38,6 +38,15 @@ pub(super) enum PeerUpInfoType {
     String = 0, // Only type defined for Peer Up messages
 }
 
+/// BMP Peer Type (RFC 7854 Section 4.2)
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerType {
+    GlobalInstance = 0,
+    RdInstance = 1,
+    LocalInstance = 2,
+}
+
 /// Information TLV used in Initiation and Termination messages (internal)
 #[derive(Clone, Debug)]
 pub(super) struct InformationTlv {
@@ -65,7 +74,7 @@ impl InformationTlv {
 /// Per-Peer Header used in most BMP messages (internal encoding detail)
 #[derive(Clone, Debug)]
 pub(super) struct PeerHeader {
-    pub peer_type: u8,
+    pub peer_type: PeerType,
     pub peer_flags: u8,
     pub peer_distinguisher: u64,
     pub peer_address: IpAddr,
@@ -76,10 +85,14 @@ pub(super) struct PeerHeader {
 }
 
 impl PeerHeader {
-    const PEER_TYPE_GLOBAL: u8 = 0;
     const FLAG_V6: u8 = 0b10000000;
 
-    pub(super) fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32) -> Self {
+    pub(super) fn new(
+        peer_type: PeerType,
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+    ) -> Self {
         let peer_flags = match peer_address {
             IpAddr::V6(_) => Self::FLAG_V6,
             IpAddr::V4(_) => 0,
@@ -90,7 +103,7 @@ impl PeerHeader {
             .unwrap_or_default();
 
         Self {
-            peer_type: Self::PEER_TYPE_GLOBAL,
+            peer_type,
             peer_flags,
             peer_distinguisher: 0,
             peer_address,
@@ -105,7 +118,7 @@ impl PeerHeader {
         let mut bytes = Vec::new();
 
         // Peer Type (1 byte)
-        bytes.push(self.peer_type);
+        bytes.push(self.peer_type as u8);
 
         // Peer Flags (1 byte)
         bytes.push(self.peer_flags);
@@ -145,17 +158,23 @@ mod tests {
 
     #[test]
     fn test_peer_header_ipv4() {
-        let header = PeerHeader::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 65001, 0x01010101);
+        let header = PeerHeader::new(
+            PeerType::GlobalInstance,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+        );
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), 42); // Per-Peer Header is 42 bytes
-        assert_eq!(bytes[0], 0); // PEER_TYPE_GLOBAL
+        assert_eq!(bytes[0], 0); // GlobalInstance
         assert_eq!(bytes[1] & 0b10000000, 0); // Not IPv6
     }
 
     #[test]
     fn test_peer_header_ipv6() {
         let header = PeerHeader::new(
+            PeerType::LocalInstance,
             IpAddr::V6("2001:db8::1".parse().unwrap()),
             65001,
             0x01010101,
@@ -163,6 +182,7 @@ mod tests {
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), 42);
+        assert_eq!(bytes[0], 2); // LocalInstance
         assert_eq!(bytes[1] & 0b10000000, 0b10000000); // Is IPv6
     }
 }
