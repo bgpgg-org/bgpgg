@@ -14,27 +14,30 @@
 
 use super::msg::{Message, MessageType};
 use super::types::PeerHeader;
+use crate::bgp::msg::Message as BgpMessage;
+use crate::bgp::msg_notification::NotificationMessage;
+use crate::peer::FsmEvent;
 use std::net::IpAddr;
 
+// TODO: Add support for RFC 9069 reason 6 (Local system closed, TLV data follows)
+// for Loc-RIB monitoring support
 #[derive(Clone, Debug)]
 pub enum PeerDownReason {
-    LocalNotification(Vec<u8>),  // reason 1: local system sent NOTIFICATION
-    LocalNoNotification,         // reason 2: local system closed, no NOTIFICATION
-    RemoteNotification(Vec<u8>), // reason 3: remote system sent NOTIFICATION
-    RemoteNoNotification,        // reason 4: remote closed, no NOTIFICATION
-    PeerDeConfigured,            // reason 5: peer de-configured
-    LocalTlv(Vec<u8>),           // reason 6: local system closed with TLV
+    LocalNotification(NotificationMessage), // reason 1: local sent NOTIFICATION (data = BGP NOTIFICATION PDU)
+    LocalNoNotification(FsmEvent), // reason 2: local closed, no NOTIFICATION (data = 2-byte FSM event code)
+    RemoteNotification(NotificationMessage), // reason 3: remote sent NOTIFICATION (data = BGP NOTIFICATION PDU)
+    RemoteNoNotification,                    // reason 4: remote closed, no NOTIFICATION (no data)
+    PeerDeConfigured,                        // reason 5: peer de-configured (no data)
 }
 
 impl PeerDownReason {
     fn reason_code(&self) -> u8 {
         match self {
             PeerDownReason::LocalNotification(_) => 1,
-            PeerDownReason::LocalNoNotification => 2,
+            PeerDownReason::LocalNoNotification(_) => 2,
             PeerDownReason::RemoteNotification(_) => 3,
             PeerDownReason::RemoteNoNotification => 4,
             PeerDownReason::PeerDeConfigured => 5,
-            PeerDownReason::LocalTlv(_) => 6,
         }
     }
 
@@ -42,11 +45,15 @@ impl PeerDownReason {
         let mut bytes = vec![self.reason_code()];
         match self {
             PeerDownReason::LocalNotification(notif)
-            | PeerDownReason::RemoteNotification(notif)
-            | PeerDownReason::LocalTlv(notif) => {
-                bytes.extend_from_slice(notif);
+            | PeerDownReason::RemoteNotification(notif) => {
+                bytes.extend_from_slice(&notif.serialize());
             }
-            _ => {}
+            PeerDownReason::LocalNoNotification(fsm_event) => {
+                bytes.extend_from_slice(&fsm_event.to_event_code().to_be_bytes());
+            }
+            PeerDownReason::RemoteNoNotification | PeerDownReason::PeerDeConfigured => {
+                // No data for reasons 4 and 5
+            }
         }
         bytes
     }
@@ -96,12 +103,32 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
-    fn test_peer_down_message() {
+    fn test_peer_down_message_no_notification() {
+        use crate::peer::FsmEvent;
+
         let msg = PeerDownMessage::new(
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
-            PeerDownReason::LocalNoNotification,
+            PeerDownReason::LocalNoNotification(FsmEvent::HoldTimerExpires),
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::PeerDownNotification.as_u8());
+    }
+
+    #[test]
+    fn test_peer_down_message_with_notification() {
+        use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
+
+        let notif =
+            NotificationMessage::new(BgpError::Cease(CeaseSubcode::AdministrativeReset), vec![]);
+        let msg = PeerDownMessage::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            PeerDownReason::LocalNotification(notif),
         );
 
         let serialized = msg.serialize();

@@ -89,6 +89,38 @@ pub enum FsmEvent {
     BgpUpdateMsgErr(NotificationMessage),
 }
 
+impl FsmEvent {
+    /// Convert FSM event to RFC 4271 event code.
+    /// Returns the event number as defined in RFC 4271 Section 8.1.
+    /// Used for BMP Peer Down Notification (RFC 7854 Section 4.9).
+    pub fn to_event_code(&self) -> u16 {
+        match self {
+            FsmEvent::ManualStart => 1,
+            FsmEvent::ManualStop => 2,
+            FsmEvent::AutomaticStart => 3,
+            FsmEvent::ManualStartPassive => 4,
+            FsmEvent::AutomaticStartPassive => 5,
+            FsmEvent::AutomaticStop(_) => 8,
+            FsmEvent::ConnectRetryTimerExpires => 9,
+            FsmEvent::HoldTimerExpires => 10,
+            FsmEvent::KeepaliveTimerExpires => 11,
+            FsmEvent::DelayOpenTimerExpires => 12,
+            FsmEvent::IdleHoldTimerExpires => 13,
+            FsmEvent::TcpConnectionConfirmed => 17,
+            FsmEvent::TcpConnectionFails => 18,
+            FsmEvent::BgpOpenReceived(_) => 19,
+            FsmEvent::BgpOpenWithDelayOpenTimer(_) => 20,
+            FsmEvent::BgpHeaderErr(_) => 21,
+            FsmEvent::BgpOpenMsgErr(_) => 22,
+            FsmEvent::NotifMsgVerErr => 24,
+            FsmEvent::NotifMsg => 25,
+            FsmEvent::BgpKeepaliveReceived => 26,
+            FsmEvent::BgpUpdateReceived => 27,
+            FsmEvent::BgpUpdateMsgErr(_) => 28,
+        }
+    }
+}
+
 /// BGP FSM timers
 #[derive(Debug, Clone)]
 pub struct FsmTimers {
@@ -952,6 +984,86 @@ mod tests {
             let mut fsm = Fsm::with_state(state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR, false);
             let new_state = fsm.handle_event(&FsmEvent::BgpUpdateMsgErr(notif.clone()));
             assert_eq!(new_state, BgpState::Idle);
+        }
+    }
+
+    #[test]
+    fn test_fsm_event_to_event_code() {
+        use crate::bgp::msg_notification::{BgpError, NotificationMessage, UpdateMessageError};
+
+        // Verify event codes match RFC 4271 Section 8.1
+        let cases = [
+            (FsmEvent::ManualStart, 1),
+            (FsmEvent::ManualStop, 2),
+            (FsmEvent::AutomaticStart, 3),
+            (FsmEvent::ManualStartPassive, 4),
+            (FsmEvent::AutomaticStartPassive, 5),
+            (
+                FsmEvent::AutomaticStop(CeaseSubcode::AdministrativeReset),
+                8,
+            ),
+            (FsmEvent::ConnectRetryTimerExpires, 9),
+            (FsmEvent::HoldTimerExpires, 10),
+            (FsmEvent::KeepaliveTimerExpires, 11),
+            (FsmEvent::DelayOpenTimerExpires, 12),
+            (FsmEvent::IdleHoldTimerExpires, 13),
+            (FsmEvent::TcpConnectionConfirmed, 17),
+            (FsmEvent::TcpConnectionFails, 18),
+            (
+                FsmEvent::BgpOpenReceived(BgpOpenParams {
+                    peer_asn: 65001,
+                    peer_hold_time: 180,
+                    peer_bgp_id: 0x02020202,
+                    local_asn: 65000,
+                    local_hold_time: 180,
+                }),
+                19,
+            ),
+            (
+                FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                    peer_asn: 65001,
+                    peer_hold_time: 180,
+                    peer_bgp_id: 0x02020202,
+                    local_asn: 65000,
+                    local_hold_time: 180,
+                }),
+                20,
+            ),
+            (
+                FsmEvent::BgpHeaderErr(NotificationMessage::new(
+                    BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+                    vec![],
+                )),
+                21,
+            ),
+            (
+                FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
+                    BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+                    vec![],
+                )),
+                22,
+            ),
+            (FsmEvent::NotifMsgVerErr, 24),
+            (FsmEvent::NotifMsg, 25),
+            (FsmEvent::BgpKeepaliveReceived, 26),
+            (FsmEvent::BgpUpdateReceived, 27),
+            (
+                FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(
+                    BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                    vec![],
+                )),
+                28,
+            ),
+        ];
+
+        for (event, expected_code) in cases {
+            assert_eq!(
+                event.to_event_code(),
+                expected_code,
+                "Event {:?} should have code {}",
+                event,
+                expected_code
+            );
         }
     }
 }
