@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::peer_header::PeerHeader;
+use super::types::PeerHeader;
 use std::net::IpAddr;
 
 /// Route Monitoring message - carries BGP UPDATE messages
@@ -24,12 +24,7 @@ pub struct RouteMonitoringMessage {
 }
 
 impl RouteMonitoringMessage {
-    pub fn new(
-        peer_address: IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        bgp_update: Vec<u8>,
-    ) -> Self {
+    pub fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32, bgp_update: Vec<u8>) -> Self {
         Self {
             peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
             bgp_update,

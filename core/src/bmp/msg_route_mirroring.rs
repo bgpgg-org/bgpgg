@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::peer_header::PeerHeader;
+use super::types::PeerHeader;
 use std::net::IpAddr;
 
 /// Route Mirroring TLV

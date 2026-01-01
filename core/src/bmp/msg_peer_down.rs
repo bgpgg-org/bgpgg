@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-use super::peer_header::PeerHeader;
+use super::types::PeerHeader;
 use std::net::IpAddr;
 
 #[derive(Clone, Debug)]
 pub enum PeerDownReason {
-    LocalNotification(Vec<u8>),   // reason 1: local system sent NOTIFICATION
-    LocalNoNotification,           // reason 2: local system closed, no NOTIFICATION
-    RemoteNotification(Vec<u8>),   // reason 3: remote system sent NOTIFICATION
-    RemoteNoNotification,          // reason 4: remote closed, no NOTIFICATION
-    PeerDeConfigured,              // reason 5: peer de-configured
-    LocalTlv(Vec<u8>),             // reason 6: local system closed with TLV
+    LocalNotification(Vec<u8>),  // reason 1: local system sent NOTIFICATION
+    LocalNoNotification,         // reason 2: local system closed, no NOTIFICATION
+    RemoteNotification(Vec<u8>), // reason 3: remote system sent NOTIFICATION
+    RemoteNoNotification,        // reason 4: remote closed, no NOTIFICATION
+    PeerDeConfigured,            // reason 5: peer de-configured
+    LocalTlv(Vec<u8>),           // reason 6: local system closed with TLV
 }
 
 impl PeerDownReason {

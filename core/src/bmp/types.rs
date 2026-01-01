@@ -14,6 +14,34 @@
 
 use std::net::IpAddr;
 
+/// Information TLV used in Initiation and Termination messages
+#[derive(Clone, Debug)]
+pub struct InformationTlv {
+    pub info_type: u16,
+    pub info_value: Vec<u8>,
+}
+
+impl InformationTlv {
+    pub const STRING: u16 = 0;
+    pub const SYS_DESCR: u16 = 1;
+    pub const SYS_NAME: u16 = 2;
+
+    pub fn new_string(info_type: u16, value: String) -> Self {
+        Self {
+            info_type,
+            info_value: value.into_bytes(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.info_type.to_be_bytes());
+        bytes.extend_from_slice(&(self.info_value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&self.info_value);
+        bytes
+    }
+}
+
 /// Per-Peer Header used in most BMP messages (internal encoding detail)
 #[derive(Clone, Debug)]
 pub(super) struct PeerHeader {
@@ -97,11 +125,7 @@ mod tests {
 
     #[test]
     fn test_peer_header_ipv4() {
-        let header = PeerHeader::new(
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            65001,
-            0x01010101,
-        );
+        let header = PeerHeader::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 65001, 0x01010101);
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), 42); // Per-Peer Header is 42 bytes

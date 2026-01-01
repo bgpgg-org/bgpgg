@@ -19,4 +19,4 @@ pub mod msg_peer_up;
 pub mod msg_route_mirroring;
 pub mod msg_route_monitoring;
 pub mod msg_termination;
-pub mod peer_header;
+pub mod types;

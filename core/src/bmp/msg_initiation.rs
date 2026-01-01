@@ -13,34 +13,7 @@
 // limitations under the License.
 
 use super::msg::{Message, MessageType};
-
-/// Information TLV for Initiation and Termination messages
-#[derive(Clone, Debug)]
-pub struct InformationTlv {
-    pub info_type: u16,
-    pub info_value: Vec<u8>,
-}
-
-impl InformationTlv {
-    pub const STRING: u16 = 0;
-    pub const SYS_DESCR: u16 = 1;
-    pub const SYS_NAME: u16 = 2;
-
-    pub fn new_string(info_type: u16, value: String) -> Self {
-        Self {
-            info_type,
-            info_value: value.into_bytes(),
-        }
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.info_type.to_be_bytes());
-        bytes.extend_from_slice(&(self.info_value.len() as u16).to_be_bytes());
-        bytes.extend_from_slice(&self.info_value);
-        bytes
-    }
-}
+use super::types::InformationTlv;
 
 #[derive(Clone, Debug)]
 pub struct InitiationMessage {
