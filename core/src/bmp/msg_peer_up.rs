@@ -12,24 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::msg::{BmpMessage, MessageType};
+use super::msg::{Message, MessageType};
 use super::peer_header::PeerHeader;
 use std::net::IpAddr;
 
 #[derive(Clone, Debug)]
 pub struct PeerUpMessage {
-    pub peer_header: PeerHeader,
-    pub local_address: IpAddr,
-    pub local_port: u16,
-    pub remote_port: u16,
-    pub sent_open_message: Vec<u8>,
-    pub received_open_message: Vec<u8>,
-    pub information: Vec<u8>, // Optional TLVs
+    peer_header: PeerHeader,
+    local_address: IpAddr,
+    local_port: u16,
+    remote_port: u16,
+    sent_open_message: Vec<u8>,
+    received_open_message: Vec<u8>,
+    information: Vec<u8>, // Optional TLVs
 }
 
 impl PeerUpMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        peer_header: PeerHeader,
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
         local_address: IpAddr,
         local_port: u16,
         remote_port: u16,
@@ -37,7 +40,7 @@ impl PeerUpMessage {
         received_open: Vec<u8>,
     ) -> Self {
         Self {
-            peer_header,
+            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
             local_address,
             local_port,
             remote_port,
@@ -48,7 +51,7 @@ impl PeerUpMessage {
     }
 }
 
-impl BmpMessage for PeerUpMessage {
+impl Message for PeerUpMessage {
     fn message_type(&self) -> MessageType {
         MessageType::PeerUpNotification
     }
@@ -96,14 +99,10 @@ mod tests {
 
     #[test]
     fn test_peer_up_message() {
-        let peer_header = PeerHeader::new(
+        let msg = PeerUpMessage::new(
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
-        );
-
-        let msg = PeerUpMessage::new(
-            peer_header,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             179,
             12345,

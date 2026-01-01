@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::msg::{BmpMessage, MessageType};
+use super::msg::{Message, MessageType};
 use super::msg_initiation::InformationTlv;
 
 #[derive(Clone, Debug)]
@@ -42,7 +42,7 @@ impl TerminationMessage {
     }
 }
 
-impl BmpMessage for TerminationMessage {
+impl Message for TerminationMessage {
     fn message_type(&self) -> MessageType {
         MessageType::Termination
     }

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::msg::{BmpMessage, MessageType};
+use super::msg::{Message, MessageType};
 use super::peer_header::PeerHeader;
+use std::net::IpAddr;
 
 /// Route Mirroring TLV
 #[derive(Clone, Debug)]
@@ -45,17 +46,25 @@ impl MirroringTlv {
 /// Route Mirroring message - for debugging/monitoring rejected or policy-filtered messages
 #[derive(Clone, Debug)]
 pub struct RouteMirroringMessage {
-    pub peer_header: PeerHeader,
-    pub tlvs: Vec<MirroringTlv>,
+    peer_header: PeerHeader,
+    tlvs: Vec<MirroringTlv>,
 }
 
 impl RouteMirroringMessage {
-    pub fn new(peer_header: PeerHeader, tlvs: Vec<MirroringTlv>) -> Self {
-        Self { peer_header, tlvs }
+    pub fn new(
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        tlvs: Vec<MirroringTlv>,
+    ) -> Self {
+        Self {
+            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
+            tlvs,
+        }
     }
 }
 
-impl BmpMessage for RouteMirroringMessage {
+impl Message for RouteMirroringMessage {
     fn message_type(&self) -> MessageType {
         MessageType::RouteMirroring
     }
@@ -82,14 +91,13 @@ mod tests {
 
     #[test]
     fn test_route_mirroring_message() {
-        let peer_header = PeerHeader::new(
+        let tlv = MirroringTlv::new_bgp_message(vec![0xff; 23]);
+        let msg = RouteMirroringMessage::new(
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            vec![tlv],
         );
-
-        let tlv = MirroringTlv::new_bgp_message(vec![0xff; 23]);
-        let msg = RouteMirroringMessage::new(peer_header, vec![tlv]);
 
         let serialized = msg.serialize();
         assert_eq!(serialized[0], 3); // Version

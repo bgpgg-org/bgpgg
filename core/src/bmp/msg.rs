@@ -39,7 +39,7 @@ impl MessageType {
     }
 }
 
-pub trait BmpMessage {
+pub trait Message {
     fn message_type(&self) -> MessageType;
     fn to_bytes(&self) -> Vec<u8>;
 
@@ -65,7 +65,7 @@ pub trait BmpMessage {
     }
 }
 
-pub enum BmpMsg {
+pub enum BmpMessage {
     Initiation(InitiationMessage),
     PeerUp(PeerUpMessage),
     PeerDown(PeerDownMessage),

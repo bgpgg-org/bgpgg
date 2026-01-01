@@ -14,9 +14,9 @@
 
 use std::net::IpAddr;
 
-/// Per-Peer Header used in most BMP messages
+/// Per-Peer Header used in most BMP messages (internal encoding detail)
 #[derive(Clone, Debug)]
-pub struct PeerHeader {
+pub(super) struct PeerHeader {
     pub peer_type: u8,
     pub peer_flags: u8,
     pub peer_distinguisher: u64,
@@ -28,17 +28,10 @@ pub struct PeerHeader {
 }
 
 impl PeerHeader {
-    pub const PEER_TYPE_GLOBAL: u8 = 0;
-    pub const PEER_TYPE_RD: u8 = 1;
-    pub const PEER_TYPE_LOCAL: u8 = 2;
-    pub const PEER_TYPE_LOC_RIB: u8 = 3;
+    const PEER_TYPE_GLOBAL: u8 = 0;
+    const FLAG_V6: u8 = 0b10000000;
 
-    pub const FLAG_V6: u8 = 0b10000000;
-    pub const FLAG_POST_POLICY: u8 = 0b01000000;
-    pub const FLAG_AS_PATH_2BYTE: u8 = 0b00100000;
-    pub const FLAG_ADJ_RIB_OUT: u8 = 0b00010000;
-
-    pub fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32) -> Self {
+    pub(super) fn new(peer_address: IpAddr, peer_as: u32, peer_bgp_id: u32) -> Self {
         let peer_flags = match peer_address {
             IpAddr::V6(_) => Self::FLAG_V6,
             IpAddr::V4(_) => 0,
@@ -60,7 +53,7 @@ impl PeerHeader {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(super) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
         // Peer Type (1 byte)
@@ -112,8 +105,8 @@ mod tests {
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), 42); // Per-Peer Header is 42 bytes
-        assert_eq!(bytes[0], PeerHeader::PEER_TYPE_GLOBAL);
-        assert_eq!(bytes[1] & PeerHeader::FLAG_V6, 0); // Not IPv6
+        assert_eq!(bytes[0], 0); // PEER_TYPE_GLOBAL
+        assert_eq!(bytes[1] & 0b10000000, 0); // Not IPv6
     }
 
     #[test]
@@ -126,6 +119,6 @@ mod tests {
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), 42);
-        assert_eq!(bytes[1] & PeerHeader::FLAG_V6, PeerHeader::FLAG_V6); // Is IPv6
+        assert_eq!(bytes[1] & 0b10000000, 0b10000000); // Is IPv6
     }
 }

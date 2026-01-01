@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::msg::{BmpMessage, MessageType};
+use super::msg::{Message, MessageType};
 use super::peer_header::PeerHeader;
+use std::net::IpAddr;
 
 #[derive(Clone, Debug)]
 pub enum PeerDownReason {
@@ -53,20 +54,25 @@ impl PeerDownReason {
 
 #[derive(Clone, Debug)]
 pub struct PeerDownMessage {
-    pub peer_header: PeerHeader,
-    pub reason: PeerDownReason,
+    peer_header: PeerHeader,
+    reason: PeerDownReason,
 }
 
 impl PeerDownMessage {
-    pub fn new(peer_header: PeerHeader, reason: PeerDownReason) -> Self {
+    pub fn new(
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        reason: PeerDownReason,
+    ) -> Self {
         Self {
-            peer_header,
+            peer_header: PeerHeader::new(peer_address, peer_as, peer_bgp_id),
             reason,
         }
     }
 }
 
-impl BmpMessage for PeerDownMessage {
+impl Message for PeerDownMessage {
     fn message_type(&self) -> MessageType {
         MessageType::PeerDownNotification
     }
@@ -91,13 +97,12 @@ mod tests {
 
     #[test]
     fn test_peer_down_message() {
-        let peer_header = PeerHeader::new(
+        let msg = PeerDownMessage::new(
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            PeerDownReason::LocalNoNotification,
         );
-
-        let msg = PeerDownMessage::new(peer_header, PeerDownReason::LocalNoNotification);
 
         let serialized = msg.serialize();
         assert_eq!(serialized[0], 3); // Version
