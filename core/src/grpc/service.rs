@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegmentType, Origin};
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttrValue};
 use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::peer::BgpState;
@@ -23,14 +23,15 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
-    self, bgp_service_server::BgpService, AddPeerRequest, AddPeerResponse, AddRouteRequest,
-    AddRouteResponse, AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
+    self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
+    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse,
+    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
     DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
-    GetPeersRequest, GetPeersResponse, GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest,
-    GetServerInfoResponse, Path as ProtoPath, Peer as ProtoPeer,
-    PeerStatistics as ProtoPeerStatistics, RemovePeerRequest, RemovePeerResponse,
-    RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
-    SessionConfig as ProtoSessionConfig,
+    GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
+    ListPeersRequest, ListPeersResponse, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath,
+    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemoveBmpServerRequest,
+    RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse, RemoveRouteRequest,
+    RemoveRouteResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -217,10 +218,10 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn get_peers(
+    async fn list_peers(
         &self,
-        _request: Request<GetPeersRequest>,
-    ) -> Result<Response<GetPeersResponse>, Status> {
+        _request: Request<ListPeersRequest>,
+    ) -> Result<Response<ListPeersResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::GetPeers { response: tx };
@@ -246,7 +247,7 @@ impl BgpService for BgpGrpcService {
             })
             .collect();
 
-        Ok(Response::new(GetPeersResponse { peers: proto_peers }))
+        Ok(Response::new(ListPeersResponse { peers: proto_peers }))
     }
 
     async fn get_peer(
@@ -344,10 +345,10 @@ impl BgpService for BgpGrpcService {
         };
 
         // Convert proto AS_PATH segments to internal format
-        let as_path: Vec<crate::bgp::msg_update::AsPathSegment> = req
+        let as_path: Vec<AsPathSegment> = req
             .as_path
             .into_iter()
-            .map(|seg| crate::bgp::msg_update::AsPathSegment {
+            .map(|seg| AsPathSegment {
                 segment_type: match seg.segment_type {
                     0 => AsPathSegmentType::AsSet,
                     1 => AsPathSegmentType::AsSequence,
@@ -446,10 +447,10 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn get_routes(
+    async fn list_routes(
         &self,
-        _request: Request<GetRoutesRequest>,
-    ) -> Result<Response<GetRoutesResponse>, Status> {
+        _request: Request<ListRoutesRequest>,
+    ) -> Result<Response<ListRoutesResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::GetRoutes { response: tx };
@@ -514,7 +515,7 @@ impl BgpService for BgpGrpcService {
                             .unknown_attrs
                             .iter()
                             .filter_map(|attr| {
-                                if let crate::bgp::msg_update::PathAttrValue::Unknown {
+                                if let PathAttrValue::Unknown {
                                     type_code,
                                     flags,
                                     data,
@@ -541,7 +542,7 @@ impl BgpService for BgpGrpcService {
             })
             .collect();
 
-        Ok(Response::new(GetRoutesResponse {
+        Ok(Response::new(ListRoutesResponse {
             routes: proto_routes,
         }))
     }
@@ -566,5 +567,84 @@ impl BgpService for BgpGrpcService {
             listen_addr: listen_addr.to_string(),
             listen_port: listen_port as u32,
         }))
+    }
+
+    async fn add_bmp_server(
+        &self,
+        request: Request<AddBmpServerRequest>,
+    ) -> Result<Response<AddBmpServerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddBmpServer {
+            addr: addr.clone(),
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddBmpServerResponse {
+                success: true,
+                message: format!("BMP server {} added", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddBmpServerResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn remove_bmp_server(
+        &self,
+        request: Request<RemoveBmpServerRequest>,
+    ) -> Result<Response<RemoveBmpServerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RemoveBmpServer {
+            addr: addr.clone(),
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(RemoveBmpServerResponse {
+                success: true,
+                message: format!("BMP server {} removed", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(RemoveBmpServerResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_bmp_servers(
+        &self,
+        _request: Request<ListBmpServersRequest>,
+    ) -> Result<Response<ListBmpServersResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetBmpServers { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let addresses = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(ListBmpServersResponse { addresses }))
     }
 }

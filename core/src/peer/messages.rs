@@ -41,6 +41,7 @@ impl Peer {
             self.fsm.local_hold_time(),
             self.fsm.local_bgp_id(),
         );
+        self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
         self.statistics.open_sent += 1;
         info!("sent OPEN message", "peer_ip" => self.addr.to_string());
@@ -208,6 +209,9 @@ impl Peer {
         // Process FSM event
         match &message {
             BgpMessage::Open(open_msg) => {
+                // Store received OPEN for BMP PeerUp
+                self.received_open = Some(open_msg.clone());
+
                 // RFC 4271 6.8: Notify server for collision detection
                 let _ = self.server_tx.send(ServerOp::OpenReceived {
                     peer_ip: self.addr,

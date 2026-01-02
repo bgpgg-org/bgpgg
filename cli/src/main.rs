@@ -162,9 +162,7 @@ mod tests {
 
         match cli.command {
             Commands::Peer(PeerCommands::Add {
-                address,
-                remote_as,
-                ..
+                address, remote_as, ..
             }) => {
                 assert_eq!(address, "192.168.1.1:179");
                 assert_eq!(remote_as, 65001);

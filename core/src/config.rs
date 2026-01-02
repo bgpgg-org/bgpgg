@@ -121,6 +121,11 @@ impl Default for PeerConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BmpConfig {
+    pub address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub asn: u16,
     pub listen_addr: String,
@@ -137,6 +142,8 @@ pub struct Config {
     pub accept_unconfigured_peers: bool,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    #[serde(default)]
+    pub bmp_servers: Vec<BmpConfig>,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -169,6 +176,7 @@ impl Config {
             connect_retry_secs: default_connect_retry_time(),
             accept_unconfigured_peers,
             peers: Vec::new(),
+            bmp_servers: Vec::new(),
         }
     }
 
@@ -205,6 +213,7 @@ impl Default for Config {
             connect_retry_secs: default_connect_retry_time(),
             accept_unconfigured_peers: false,
             peers: Vec::new(),
+            bmp_servers: Vec::new(),
         }
     }
 }

@@ -14,6 +14,8 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
+use crate::server::ServerOp;
+use crate::types::PeerDownReason;
 use std::time::Instant;
 
 impl Peer {
@@ -37,16 +39,16 @@ impl Peer {
             }
 
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
-                self.transition_to_idle_on_error();
+                self.transition_to_idle_on_error(PeerDownReason::RemoteNoNotification);
             }
 
-            (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
-                self.disconnect(false);
+            (BgpState::Idle, FsmEvent::NotifMsgVerErr(ref notif)) => {
+                self.disconnect(false, PeerDownReason::RemoteNotification(notif.clone()));
                 self.fsm.timers.stop_connect_retry();
             }
 
-            (BgpState::Idle, FsmEvent::NotifMsg) => {
-                self.transition_to_idle_on_error();
+            (BgpState::Idle, FsmEvent::NotifMsg(ref notif)) => {
+                self.transition_to_idle_on_error(PeerDownReason::RemoteNotification(notif.clone()));
             }
 
             (BgpState::Idle, FsmEvent::BgpHeaderErr(ref notif))
@@ -61,6 +63,24 @@ impl Peer {
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived) => {
                 self.fsm.timers.reset_hold_timer();
                 self.established_at = Some(Instant::now());
+
+                // Send connection info to server for BMP
+                if let (Some(sent_open), Some(received_open), Some(conn)) =
+                    (&self.sent_open, &self.received_open, &self.conn)
+                {
+                    if let (Ok(local_addr), Ok(remote_addr)) =
+                        (conn.rx.local_addr(), conn.rx.peer_addr())
+                    {
+                        let _ = self.server_tx.send(ServerOp::PeerConnectionInfo {
+                            peer_ip: self.addr,
+                            local_address: local_addr.ip(),
+                            local_port: local_addr.port(),
+                            remote_port: remote_addr.port(),
+                            sent_open: sent_open.clone(),
+                            received_open: received_open.clone(),
+                        });
+                    }
+                }
             }
 
             (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)
@@ -317,12 +337,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_openconfirm_notification_received() {
+        use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+
         let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
         peer.fsm.connect_retry_counter = 1;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
 
-        peer.process_event(&FsmEvent::NotifMsg).await.unwrap();
+        let notif = NotificationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+        peer.process_event(&FsmEvent::NotifMsg(notif))
+            .await
+            .unwrap();
 
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");
@@ -346,12 +374,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_openconfirm_notification_version_error() {
+        use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
+
         let mut peer = create_test_peer_with_state(BgpState::OpenConfirm).await;
         peer.fsm.connect_retry_counter = 5;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
 
-        peer.process_event(&FsmEvent::NotifMsgVerErr).await.unwrap();
+        let notif = NotificationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+        peer.process_event(&FsmEvent::NotifMsgVerErr(notif))
+            .await
+            .unwrap();
 
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");

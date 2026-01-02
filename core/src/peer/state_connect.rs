@@ -16,6 +16,8 @@ use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{read_bgp_message, BgpMessage};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::net::create_and_bind_tcp_socket;
+use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -33,7 +35,10 @@ impl Peer {
                 self.fsm.timers.start_delay_open_timer();
             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
                 error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                self.disconnect(true);
+                self.disconnect(
+                    true,
+                    PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
+                );
             }
         } else {
             // No connection - first check if incoming connection is already queued
@@ -56,7 +61,7 @@ impl Peer {
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
             tokio::select! {
-                result = crate::net::create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
+                result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
                     match result {
                         Ok(stream) => {
                             info!("TCP connection established", "peer_ip" => self.addr.to_string());
@@ -68,7 +73,7 @@ impl Peer {
                                 self.fsm.timers.start_delay_open_timer();
                             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
                                 error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
+                                self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed));
                             }
                         }
                         Err(e) => {
@@ -108,17 +113,16 @@ impl Peer {
                     Ok(BgpMessage::Open(open)) => {
                         debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
-                        if let Err(e) = self.process_event(&FsmEvent::BgpOpenWithDelayOpenTimer(
-                            BgpOpenParams {
-                                peer_asn: open.asn,
-                                peer_hold_time: open.hold_time,
-                                local_asn: self.fsm.local_asn(),
-                                local_hold_time: self.fsm.local_hold_time(),
-                                peer_bgp_id: open.bgp_identifier,
-                            }
-                        )).await {
+                        let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                            peer_asn: open.asn,
+                            peer_hold_time: open.hold_time,
+                            local_asn: self.fsm.local_asn(),
+                            local_hold_time: self.fsm.local_hold_time(),
+                            peer_bgp_id: open.bgp_identifier,
+                        });
+                        if let Err(e) = self.process_event(&event).await {
                             error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
                     Ok(BgpMessage::Notification(notif)) => {
@@ -126,7 +130,7 @@ impl Peer {
                     }
                     Ok(_) => {
                         error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
-                        self.disconnect(true);
+                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
                     Err(e) => {
                         debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
@@ -153,7 +157,7 @@ impl Peer {
                     debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
                         error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        self.disconnect(true);
+                        self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::DelayOpenTimerExpires));
                     }
                 }
             }
@@ -182,21 +186,21 @@ impl Peer {
         match (new_state, event) {
             // RFC 4271 8.2.2: ConnectRetryTimer expires in Connect state
             (BgpState::Connect, FsmEvent::ConnectRetryTimerExpires) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
             }
 
             // RFC 4271 8.2.2 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
             (BgpState::Active, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.start_connect_retry();
             }
 
             // RFC 4271 8.2.2 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.reset_connect_retry_counter();
             }
@@ -207,32 +211,35 @@ impl Peer {
                 let _ = self.send_notification(notif.clone()).await;
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 
             // RFC 4271 Event 24: NOTIFICATION with version error -> Idle
-            (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
+            (BgpState::Idle, FsmEvent::NotifMsgVerErr(ref notif)) => {
                 self.fsm.timers.stop_connect_retry();
                 let delay_open_was_running = self.fsm.timers.delay_open_timer_running();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(!delay_open_was_running);
+                self.disconnect(
+                    !delay_open_was_running,
+                    PeerDownReason::RemoteNotification(notif.clone()),
+                );
                 if !delay_open_was_running {
                     self.fsm.increment_connect_retry_counter();
                 }
             }
 
             // RFC 4271 Event 25: NOTIFICATION without version error -> Idle
-            (BgpState::Idle, FsmEvent::NotifMsg) => {
+            (BgpState::Idle, FsmEvent::NotifMsg(ref notif)) => {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNotification(notif.clone()));
                 self.fsm.increment_connect_retry_counter();
             }
 
             // RFC 4271 8.2.2: ManualStop in Connect state
             (BgpState::Idle, FsmEvent::ManualStop) => {
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.manually_stopped = true;
                 self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.stop_connect_retry();
@@ -253,7 +260,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_running() {
                     self.fsm.timers.stop_delay_open_timer();
                 }
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
                 return Err(PeerError::FsmError);
             }
@@ -271,7 +278,7 @@ impl Peer {
                 if self.fsm.timers.delay_open_timer_running() {
                     self.fsm.timers.stop_delay_open_timer();
                 }
-                self.disconnect(true);
+                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                 self.fsm.increment_connect_retry_counter();
             }
 
@@ -376,11 +383,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_notification_received_in_connect() {
+        use crate::bgp::msg_notification::{
+            BgpError, CeaseSubcode, NotificationMessage, OpenMessageError,
+        };
+
+        let notif_ver = NotificationMessage::new(
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
+            vec![],
+        );
+        let notif = NotificationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+
         let cases = vec![
-            (FsmEvent::NotifMsgVerErr, true, 0, 0),
-            (FsmEvent::NotifMsgVerErr, false, 1, 1),
-            (FsmEvent::NotifMsg, true, 1, 1),
-            (FsmEvent::NotifMsg, false, 1, 1),
+            (FsmEvent::NotifMsgVerErr(notif_ver.clone()), true, 0, 0),
+            (FsmEvent::NotifMsgVerErr(notif_ver.clone()), false, 1, 1),
+            (FsmEvent::NotifMsg(notif.clone()), true, 1, 1),
+            (FsmEvent::NotifMsg(notif.clone()), false, 1, 1),
         ];
 
         for (event, delay_open_running, expected_down_count, expected_counter) in cases {

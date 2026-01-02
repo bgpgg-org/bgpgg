@@ -1277,3 +1277,58 @@ pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
     let octets = ip.octets();
     build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
 }
+
+// Build raw OPEN message with optional custom version, marker, length, and message type
+pub fn build_raw_open(
+    asn: u16,
+    hold_time: u16,
+    router_id: u32,
+    version_override: Option<u8>,
+    marker_override: Option<[u8; 16]>,
+    length_override: Option<u16>,
+    msg_type_override: Option<u8>,
+) -> Vec<u8> {
+    let version = version_override.unwrap_or(4);
+    let marker = marker_override.unwrap_or(BGP_MARKER);
+    let msg_type = msg_type_override.unwrap_or(MessageType::OPEN.as_u8());
+
+    let mut body = Vec::new();
+    body.push(version);
+    body.extend_from_slice(&asn.to_be_bytes());
+    body.extend_from_slice(&hold_time.to_be_bytes());
+    body.extend_from_slice(&router_id.to_be_bytes());
+    body.push(0); // Optional parameters length = 0
+
+    build_raw_message(marker, length_override, msg_type, &body)
+}
+
+// Build raw KEEPALIVE message with optional custom length
+pub fn build_raw_keepalive(length_override: Option<u16>) -> Vec<u8> {
+    let body = Vec::new(); // KEEPALIVE has no body
+    build_raw_message(
+        BGP_MARKER,
+        length_override,
+        MessageType::KEEPALIVE.as_u8(),
+        &body,
+    )
+}
+
+// Build raw NOTIFICATION message with optional custom length
+pub fn build_raw_notification(
+    error_code: u8,
+    error_subcode: u8,
+    data: &[u8],
+    length_override: Option<u16>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(error_code);
+    body.push(error_subcode);
+    body.extend_from_slice(data);
+
+    build_raw_message(
+        BGP_MARKER,
+        length_override,
+        MessageType::NOTIFICATION.as_u8(),
+        &body,
+    )
+}

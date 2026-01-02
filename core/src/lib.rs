@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod bgp;
+pub mod bmp;
 pub mod config;
 pub mod grpc;
 pub mod log;
@@ -22,6 +23,7 @@ pub mod policy;
 pub mod rib;
 pub mod server;
 pub mod server_ops;
+pub mod types;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {

@@ -1,0 +1,107 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::msg::{Message, MessageType};
+use super::utils::{PeerDistinguisher, PeerHeader};
+use crate::bgp::msg::Message as BgpMessage;
+use crate::bgp::msg_update::UpdateMessage;
+use std::net::IpAddr;
+use std::time::SystemTime;
+
+/// Route Monitoring message - carries BGP UPDATE messages (RFC 7854 Section 5)
+#[derive(Clone, Debug)]
+pub struct RouteMonitoringMessage {
+    peer_header: PeerHeader,
+    bgp_update: UpdateMessage,
+}
+
+impl RouteMonitoringMessage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        peer_distinguisher: PeerDistinguisher,
+        peer_address: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        post_policy: bool,
+        legacy_as_path: bool,
+        timestamp: Option<SystemTime>,
+        bgp_update: UpdateMessage,
+    ) -> Self {
+        Self {
+            peer_header: PeerHeader::new(
+                peer_distinguisher,
+                peer_address,
+                peer_as,
+                peer_bgp_id,
+                post_policy,
+                legacy_as_path,
+                timestamp,
+            ),
+            bgp_update,
+        }
+    }
+}
+
+impl Message for RouteMonitoringMessage {
+    fn message_type(&self) -> MessageType {
+        MessageType::RouteMonitoring
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Per-Peer Header (42 bytes)
+        bytes.extend_from_slice(&self.peer_header.to_bytes());
+
+        // BGP UPDATE Message
+        bytes.extend_from_slice(&self.bgp_update.serialize());
+
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    #[test]
+    fn test_route_monitoring_message() {
+        use crate::bgp::msg_update::UpdateMessage;
+        use crate::bgp::utils::{IpNetwork, Ipv4Net};
+        use crate::bmp::utils::PeerDistinguisher;
+        use std::net::Ipv4Addr;
+
+        // Create a withdrawal UPDATE message
+        let update = UpdateMessage::new_withdraw(vec![IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        })]);
+
+        let msg = RouteMonitoringMessage::new(
+            PeerDistinguisher::Global,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            65001,
+            0x01010101,
+            false,
+            false,
+            Some(SystemTime::now()),
+            update,
+        );
+
+        let serialized = msg.serialize();
+        assert_eq!(serialized[0], 3); // Version
+        assert_eq!(serialized[5], MessageType::RouteMonitoring.as_u8());
+    }
+}

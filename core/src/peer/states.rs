@@ -15,8 +15,9 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::read_bgp_message;
-use crate::bgp::msg_notification::{BgpError, NotificationMessage};
-use crate::server::ConnectionType;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::server::{AdminState, ConnectionType, ServerOp};
+use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::time::Duration;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -46,16 +47,18 @@ impl Peer {
                         Ok(message) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                 error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
                         Err(e) => {
                             error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
-                                let _ = self.send_notification(notif).await;
+                                let _ = self.send_notification(notif.clone()).await;
+                                self.disconnect(true, PeerDownReason::LocalNotification(notif));
+                            } else {
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
-                            self.disconnect(true);
                             return false;
                         }
                     }
@@ -103,7 +106,7 @@ impl Peer {
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
                             error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
                     }
@@ -122,10 +125,10 @@ impl Peer {
     pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
         let event = if notif.is_version_error() {
             debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsgVerErr
+            FsmEvent::NotifMsgVerErr(notif.clone())
         } else {
             debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
-            FsmEvent::NotifMsg
+            FsmEvent::NotifMsg(notif.clone())
         };
         self.try_process_event(&event).await;
     }
@@ -147,7 +150,10 @@ impl Peer {
             self.fsm.timers.start_delay_open_timer();
         } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
             error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-            self.disconnect(true);
+            self.disconnect(
+                true,
+                PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
+            );
         }
     }
 
@@ -197,8 +203,8 @@ impl Peer {
     }
 
     /// Transition to Idle on error - increments retry counter and stops all timers
-    pub(super) fn transition_to_idle_on_error(&mut self) {
-        self.disconnect(true);
+    pub(super) fn transition_to_idle_on_error(&mut self, reason: PeerDownReason) {
+        self.disconnect(true, reason);
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         self.stop_session_timers();
@@ -206,15 +212,13 @@ impl Peer {
 
     /// Handle ManualStop event - sends admin shutdown notification and transitions to Idle
     pub(super) async fn handle_manual_stop(&mut self) -> Result<(), PeerError> {
-        use crate::bgp::msg_notification::CeaseSubcode;
-
         self.manually_stopped = true;
         let notif = NotificationMessage::new(
             BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
             Vec::new(),
         );
-        let _ = self.send_notification(notif).await;
-        self.disconnect(true);
+        let _ = self.send_notification(notif.clone()).await;
+        self.disconnect(true, PeerDownReason::LocalNotification(notif));
         self.fsm.timers.stop_connect_retry();
         self.fsm.reset_connect_retry_counter();
         self.stop_session_timers();
@@ -224,21 +228,17 @@ impl Peer {
     /// Handle AutomaticStop event - sends cease notification and transitions to Idle
     pub(super) async fn handle_automatic_stop(
         &mut self,
-        subcode: &crate::bgp::msg_notification::CeaseSubcode,
+        subcode: &CeaseSubcode,
     ) -> Result<(), PeerError> {
-        use crate::server::{AdminState, ServerOp};
-
         let notif = NotificationMessage::new(BgpError::Cease(subcode.clone()), Vec::new());
-        let _ = self.send_notification(notif).await;
-        self.disconnect(true);
+        let _ = self.send_notification(notif.clone()).await;
+        self.disconnect(true, PeerDownReason::LocalNotification(notif));
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         self.stop_session_timers();
 
         let admin_state = match subcode {
-            crate::bgp::msg_notification::CeaseSubcode::MaxPrefixesReached => {
-                AdminState::PrefixLimitReached
-            }
+            CeaseSubcode::MaxPrefixesReached => AdminState::PrefixLimitReached,
             _ => AdminState::Down,
         };
         let _ = self.server_tx.send(ServerOp::SetAdminState {
@@ -251,8 +251,8 @@ impl Peer {
     /// Handle HoldTimer expiration - sends hold timer expired notification and transitions to Idle
     pub(super) async fn handle_hold_timer_expires(&mut self) -> Result<(), PeerError> {
         let notif = NotificationMessage::new(BgpError::HoldTimerExpired, vec![]);
-        let _ = self.send_notification(notif).await;
-        self.disconnect(true);
+        let _ = self.send_notification(notif.clone()).await;
+        self.disconnect(true, PeerDownReason::LocalNotification(notif));
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         self.stop_session_timers();
@@ -266,7 +266,7 @@ impl Peer {
         in_session_state: bool,
     ) -> Result<(), PeerError> {
         let _ = self.send_notification(notif.clone()).await;
-        self.disconnect(true);
+        self.disconnect(true, PeerDownReason::LocalNotification(notif.clone()));
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         if in_session_state {
@@ -278,8 +278,8 @@ impl Peer {
     /// Handle FSM error - sends FSM error notification and transitions to Idle
     pub(super) async fn handle_fsm_error(&mut self, in_session: bool) -> Result<(), PeerError> {
         let notif = NotificationMessage::new(BgpError::FiniteStateMachineError, vec![]);
-        let _ = self.send_notification(notif).await;
-        self.disconnect(true);
+        let _ = self.send_notification(notif.clone()).await;
+        self.disconnect(true, PeerDownReason::LocalNotification(notif));
         self.fsm.timers.stop_connect_retry();
         self.fsm.increment_connect_retry_counter();
         if in_session {
@@ -350,6 +350,8 @@ pub(super) mod tests {
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
             pending_updates: Vec::new(),
+            sent_open: None,
+            received_open: None,
         }
     }
 

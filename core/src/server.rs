@@ -14,8 +14,10 @@
 
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin};
 use crate::bgp::utils::IpNetwork;
+use crate::bmp::sender::BmpSender;
 use crate::config::{Config, PeerConfig};
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
@@ -25,6 +27,7 @@ use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::rib::rib_loc::LocRib;
+use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::collections::HashMap;
 use std::io;
@@ -143,6 +146,17 @@ pub enum MgmtOp {
     GetServerInfo {
         response: oneshot::Sender<(Ipv4Addr, u16)>,
     },
+    AddBmpServer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveBmpServer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    GetBmpServers {
+        response: oneshot::Sender<Vec<String>>,
+    },
 }
 
 // Server operations sent from peer tasks to the main server loop
@@ -161,6 +175,15 @@ pub enum ServerOp {
         bgp_id: u32,
         conn_type: ConnectionType,
     },
+    /// Connection info sent when peer establishes
+    PeerConnectionInfo {
+        peer_ip: IpAddr,
+        local_address: IpAddr,
+        local_port: u16,
+        remote_port: u16,
+        sent_open: OpenMessage,
+        received_open: OpenMessage,
+    },
     PeerUpdate {
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
@@ -168,6 +191,7 @@ pub enum ServerOp {
     },
     PeerDisconnected {
         peer_ip: IpAddr,
+        reason: PeerDownReason,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
     SetAdminState {
@@ -176,14 +200,52 @@ pub enum ServerOp {
     },
 }
 
+// BMP operations sent from server to BMP sender task
+pub enum BmpOp {
+    PeerUp {
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        local_address: IpAddr,
+        local_port: u16,
+        remote_port: u16,
+        sent_open: OpenMessage,
+        received_open: OpenMessage,
+    },
+    PeerDown {
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        reason: PeerDownReason,
+    },
+    AddDestination {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveDestination {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    GetDestinations {
+        response: oneshot::Sender<Vec<String>>,
+    },
+}
+
+/// Connection info (stored only while peer is Established)
+pub struct ConnectionInfo {
+    pub sent_open: OpenMessage,
+    pub received_open: OpenMessage,
+    pub local_address: IpAddr,
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
 /// Peer configuration and state stored in server's HashMap.
 /// The peer IP is the HashMap key.
 pub struct PeerInfo {
     pub admin_state: AdminState,
     /// true if explicitly configured, false if accepted via accept_unconfigured_peers
     pub configured: bool,
-    /// Port for reconnection (configured peers only)
-    pub port: Option<u16>,
     pub asn: Option<u16>,
     /// BGP Identifier from OPEN message, used for collision detection (RFC 4271 Section 6.8)
     pub bgp_id: Option<u32>,
@@ -196,11 +258,12 @@ pub struct PeerInfo {
     /// Pending incoming TCP stream awaiting collision resolution (RFC 4271 6.8).
     /// Stored when incoming arrives while outgoing is in OpenSent without BGP ID.
     pub pending_incoming: Option<TcpStream>,
+    /// Connection info (Some when Established, None otherwise)
+    pub conn_info: Option<ConnectionInfo>,
 }
 
 impl PeerInfo {
     pub fn new(
-        port: Option<u16>,
         configured: bool,
         config: PeerConfig,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
@@ -208,7 +271,6 @@ impl PeerInfo {
         Self {
             admin_state: AdminState::Up,
             configured,
-            port,
             asn: None,
             bgp_id: None,
             import_policy: None,
@@ -217,6 +279,7 @@ impl PeerInfo {
             peer_tx,
             config,
             pending_incoming: None,
+            conn_info: None,
         }
     }
 
@@ -247,6 +310,8 @@ pub struct BgpServer {
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
+    pub(crate) bmp_tx: mpsc::UnboundedSender<BmpOp>,
+    bmp_rx: Option<mpsc::UnboundedReceiver<BmpOp>>,
 }
 
 impl BgpServer {
@@ -261,6 +326,7 @@ impl BgpServer {
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let (bmp_tx, bmp_rx) = mpsc::unbounded_channel();
 
         Ok(BgpServer {
             peers: HashMap::new(),
@@ -273,6 +339,8 @@ impl BgpServer {
             mgmt_rx,
             op_tx,
             op_rx,
+            bmp_tx,
+            bmp_rx: Some(bmp_rx),
         })
     }
 
@@ -327,8 +395,34 @@ impl BgpServer {
         false // Accept new connection
     }
 
+    fn run_bmp(&mut self) {
+        let Some(bmp_rx) = self.bmp_rx.take() else {
+            return;
+        };
+
+        let bmp_servers = self.config.bmp_servers.clone();
+        tokio::spawn(async move {
+            let mut sender = BmpSender::new(bmp_rx);
+
+            for bmp_cfg in bmp_servers {
+                if let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() {
+                    info!("BMP destination added", "addr" => &addr.to_string());
+                    sender.add_destination(crate::bmp::destination::BmpDestination::TcpClient(
+                        crate::bmp::destination::BmpTcpClient::new(addr),
+                    ));
+                } else {
+                    error!("Invalid BMP server address", "addr" => &bmp_cfg.address);
+                }
+            }
+
+            sender.run().await;
+        });
+    }
+
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
+
+        self.run_bmp();
 
         let listener = TcpListener::bind(&self.config.listen_addr)
             .await
@@ -372,7 +466,7 @@ impl BgpServer {
 
             let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
 
-            let entry = PeerInfo::new(Some(peer_addr.port()), true, config, Some(peer_tx.clone()));
+            let entry = PeerInfo::new(true, config, Some(peer_tx.clone()));
             self.peers.insert(peer_ip, entry);
 
             // RFC 4271: AutomaticStart for configured peers (if allowed)
@@ -478,7 +572,7 @@ impl BgpServer {
             existing.state = BgpState::Idle;
         } else {
             self.peers
-                .insert(peer_ip, PeerInfo::new(None, false, config, Some(peer_tx)));
+                .insert(peer_ip, PeerInfo::new(false, config, Some(peer_tx)));
         }
     }
 
@@ -579,7 +673,7 @@ mod tests {
     use super::*;
 
     fn peer_info() -> PeerInfo {
-        PeerInfo::new(None, true, PeerConfig::default(), None)
+        PeerInfo::new(true, PeerConfig::default(), None)
     }
 
     fn make_server(accept_unconfigured_peers: bool) -> BgpServer {

@@ -16,6 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::mem;
 use std::time::{Duration, Instant};
@@ -50,12 +51,13 @@ impl Peer {
 
             // RFC 4271 8.2.2: TcpConnectionFails in Established -> Idle
             (BgpState::Idle, FsmEvent::TcpConnectionFails) => {
-                self.transition_to_idle_on_error();
+                self.transition_to_idle_on_error(PeerDownReason::RemoteNoNotification);
             }
 
             // RFC 4271 8.2.2: NotifMsg in Established -> Idle
-            (BgpState::Idle, FsmEvent::NotifMsg) | (BgpState::Idle, FsmEvent::NotifMsgVerErr) => {
-                self.transition_to_idle_on_error();
+            (BgpState::Idle, FsmEvent::NotifMsg(ref notif))
+            | (BgpState::Idle, FsmEvent::NotifMsgVerErr(ref notif)) => {
+                self.transition_to_idle_on_error(PeerDownReason::RemoteNotification(notif.clone()));
             }
 
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => {
@@ -131,16 +133,18 @@ impl Peer {
                         Ok(message) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                 error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true);
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
                         Err(e) => {
                             error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
-                                let _ = self.send_notification(notif).await;
+                                let _ = self.send_notification(notif.clone()).await;
+                                self.disconnect(true, PeerDownReason::LocalNotification(notif));
+                            } else {
+                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
-                            self.disconnect(true);
                             return false;
                         }
                     }
@@ -157,7 +161,7 @@ impl Peer {
                                 // Send immediately
                                 if let Err(e) = self.send_update(update_msg).await {
                                     error!("failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                    self.disconnect(true);
+                                    self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                                     return false;
                                 }
                                 self.last_update_sent = Some(Instant::now());
@@ -202,7 +206,7 @@ impl Peer {
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
                             error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
                     }
@@ -214,7 +218,7 @@ impl Peer {
                     for update in updates {
                         if let Err(e) = self.send_update(update).await {
                             error!("failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                            self.disconnect(true);
+                            self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                             return false;
                         }
                     }
@@ -593,13 +597,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_established_notification_received() {
+        use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+
         // RFC 4271 8.2.2: NotifMsg -> Idle
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
         peer.fsm.connect_retry_counter = 1;
         peer.fsm.timers.start_hold_timer();
         peer.fsm.timers.start_keepalive_timer();
 
-        peer.process_event(&FsmEvent::NotifMsg).await.unwrap();
+        let notif = NotificationMessage::new(
+            BgpError::Cease(CeaseSubcode::AdministrativeShutdown),
+            vec![],
+        );
+        peer.process_event(&FsmEvent::NotifMsg(notif))
+            .await
+            .unwrap();
 
         assert_eq!(peer.state(), BgpState::Idle);
         assert!(peer.conn.is_none(), "TCP connection should be dropped");

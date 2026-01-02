@@ -14,6 +14,7 @@
 
 use super::msg::{Message, MessageType};
 
+#[derive(Debug, Clone)]
 pub struct KeepAliveMessage {}
 
 impl Message for KeepAliveMessage {
