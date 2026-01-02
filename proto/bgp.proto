@@ -10,15 +10,15 @@ service BgpService {
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
     rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
-    rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+    rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
-    rpc GetRoutes(GetRoutesRequest) returns (GetRoutesResponse);
+    rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
     rpc AddBmpServer(AddBmpServerRequest) returns (AddBmpServerResponse);
     rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);
-    rpc GetBmpServers(GetBmpServersRequest) returns (GetBmpServersResponse);
+    rpc ListBmpServers(ListBmpServersRequest) returns (ListBmpServersResponse);
 }
 
 message GetServerInfoRequest {}
@@ -88,10 +88,10 @@ message EnablePeerRequest {
 
 message EnablePeerResponse {}
 
-// Get peers request/response
-message GetPeersRequest {}
+// List peers request/response
+message ListPeersRequest {}
 
-message GetPeersResponse {
+message ListPeersResponse {
     repeated Peer peers = 1;
 }
 
@@ -189,10 +189,10 @@ message AsPathSegment {
     repeated uint32 asns = 2;
 }
 
-// Get routes request/response
-message GetRoutesRequest {}
+// List routes request/response
+message ListRoutesRequest {}
 
-message GetRoutesResponse {
+message ListRoutesResponse {
     repeated Route routes = 1;
 }
 
@@ -241,8 +241,8 @@ message RemoveBmpServerResponse {
     string message = 2;
 }
 
-message GetBmpServersRequest {}
+message ListBmpServersRequest {}
 
-message GetBmpServersResponse {
+message ListBmpServersResponse {
     repeated string addresses = 1;
 }

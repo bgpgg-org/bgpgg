@@ -14,8 +14,8 @@
 
 use super::proto::{
     bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddPeerRequest, AddRouteRequest,
-    AsPathSegment, DisablePeerRequest, EnablePeerRequest, GetBmpServersRequest, GetPeerRequest,
-    GetPeersRequest, GetRoutesRequest, GetServerInfoRequest, Origin, Peer, PeerStatistics,
+    AsPathSegment, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
+    ListBmpServersRequest, ListPeersRequest, ListRoutesRequest, Origin, Peer, PeerStatistics,
     RemoveBmpServerRequest, RemovePeerRequest, RemoveRouteRequest, Route, SessionConfig,
 };
 use std::net::Ipv4Addr;
@@ -52,7 +52,7 @@ impl BgpClient {
         Ok(self
             .inner
             .clone()
-            .get_routes(GetRoutesRequest {})
+            .list_routes(ListRoutesRequest {})
             .await?
             .into_inner()
             .routes)
@@ -63,7 +63,7 @@ impl BgpClient {
         Ok(self
             .inner
             .clone()
-            .get_peers(GetPeersRequest {})
+            .list_peers(ListPeersRequest {})
             .await?
             .into_inner()
             .peers)
@@ -235,7 +235,7 @@ impl BgpClient {
         Ok(self
             .inner
             .clone()
-            .get_bmp_servers(GetBmpServersRequest {})
+            .list_bmp_servers(ListBmpServersRequest {})
             .await?
             .into_inner()
             .addresses)

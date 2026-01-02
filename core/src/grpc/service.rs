@@ -26,13 +26,12 @@ use super::proto::{
     self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
     AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse,
     AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
-    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetBmpServersRequest,
-    GetBmpServersResponse, GetPeerRequest, GetPeerResponse, GetPeersRequest, GetPeersResponse,
-    GetRoutesRequest, GetRoutesResponse, GetServerInfoRequest, GetServerInfoResponse,
-    Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics,
-    RemoveBmpServerRequest, RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse,
-    RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
-    SessionConfig as ProtoSessionConfig,
+    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
+    GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
+    ListPeersRequest, ListPeersResponse, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath,
+    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemoveBmpServerRequest,
+    RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse, RemoveRouteRequest,
+    RemoveRouteResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -219,10 +218,10 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn get_peers(
+    async fn list_peers(
         &self,
-        _request: Request<GetPeersRequest>,
-    ) -> Result<Response<GetPeersResponse>, Status> {
+        _request: Request<ListPeersRequest>,
+    ) -> Result<Response<ListPeersResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::GetPeers { response: tx };
@@ -248,7 +247,7 @@ impl BgpService for BgpGrpcService {
             })
             .collect();
 
-        Ok(Response::new(GetPeersResponse { peers: proto_peers }))
+        Ok(Response::new(ListPeersResponse { peers: proto_peers }))
     }
 
     async fn get_peer(
@@ -448,10 +447,10 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn get_routes(
+    async fn list_routes(
         &self,
-        _request: Request<GetRoutesRequest>,
-    ) -> Result<Response<GetRoutesResponse>, Status> {
+        _request: Request<ListRoutesRequest>,
+    ) -> Result<Response<ListRoutesResponse>, Status> {
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::GetRoutes { response: tx };
@@ -543,7 +542,7 @@ impl BgpService for BgpGrpcService {
             })
             .collect();
 
-        Ok(Response::new(GetRoutesResponse {
+        Ok(Response::new(ListRoutesResponse {
             routes: proto_routes,
         }))
     }
@@ -630,10 +629,10 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn get_bmp_servers(
+    async fn list_bmp_servers(
         &self,
-        _request: Request<GetBmpServersRequest>,
-    ) -> Result<Response<GetBmpServersResponse>, Status> {
+        _request: Request<ListBmpServersRequest>,
+    ) -> Result<Response<ListBmpServersResponse>, Status> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::GetBmpServers { response: tx };
 
@@ -646,6 +645,6 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("request processing failed"))?;
 
-        Ok(Response::new(GetBmpServersResponse { addresses }))
+        Ok(Response::new(ListBmpServersResponse { addresses }))
     }
 }
