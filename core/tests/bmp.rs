@@ -114,6 +114,103 @@ impl FakeBmpServer {
 }
 
 #[tokio::test]
+async fn test_add_bmp_server_sends_initiation() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let bmp_addr = bmp_server.address();
+
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    server
+        .client
+        .add_bmp_server(bmp_addr)
+        .await
+        .unwrap();
+
+    bmp_server.accept().await;
+    bmp_server.read_initiation().await;
+}
+
+#[tokio::test]
+async fn test_add_bmp_server_with_existing_peers() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    let peer1 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        true,
+    ))
+    .await;
+
+    let peer2 = start_test_server(Config::new(
+        65003,
+        "127.0.0.3:0",
+        Ipv4Addr::new(3, 3, 3, 3),
+        90,
+        true,
+    ))
+    .await;
+
+    // Add both peers
+    server
+        .client
+        .add_peer(format!("{}:{}", peer1.address, peer1.bgp_port), None)
+        .await
+        .unwrap();
+
+    server
+        .client
+        .add_peer(format!("{}:{}", peer2.address, peer2.bgp_port), None)
+        .await
+        .unwrap();
+
+    // Wait for both peers to establish
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 2
+                && peers.iter().all(|p| p.state == BgpState::Established as i32)
+        },
+        "Timeout waiting for peers to establish",
+    )
+    .await;
+
+    // Now add BMP server
+    let mut bmp_server = FakeBmpServer::new().await;
+    let bmp_addr = bmp_server.address();
+
+    server
+        .client
+        .add_bmp_server(bmp_addr)
+        .await
+        .unwrap();
+
+    bmp_server.accept().await;
+
+    // Should receive initiation first
+    bmp_server.read_initiation().await;
+
+    // Should receive peer up for both existing peers
+    bmp_server.read_peer_up().await;
+    bmp_server.read_peer_up().await;
+}
+
+#[tokio::test]
 async fn test_peer_up_down() {
     let mut bmp_server = FakeBmpServer::new().await;
     let bmp_addr = bmp_server.address();
