@@ -319,3 +319,80 @@ async fn test_disable_enable_peer() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_add_bmp_server() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 0);
+
+    let result = server
+        .client
+        .add_bmp_server("127.0.0.1:11019".to_string())
+        .await;
+    assert!(result.is_ok());
+
+    let result = server
+        .client
+        .add_bmp_server("127.0.0.1:11020".to_string())
+        .await;
+    assert!(result.is_ok());
+
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 2);
+    assert!(servers.contains(&"127.0.0.1:11019".to_string()));
+    assert!(servers.contains(&"127.0.0.1:11020".to_string()));
+}
+
+#[tokio::test]
+async fn test_remove_bmp_server() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    server
+        .client
+        .add_bmp_server("127.0.0.1:11019".to_string())
+        .await
+        .unwrap();
+
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 1);
+
+    let result = server
+        .client
+        .remove_bmp_server("127.0.0.1:11019".to_string())
+        .await;
+    assert!(result.is_ok());
+
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_bmp_servers_empty() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 0);
+}

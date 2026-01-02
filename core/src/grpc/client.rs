@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddPeerRequest, AddRouteRequest, AsPathSegment,
-    DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetPeersRequest, GetRoutesRequest,
-    GetServerInfoRequest, Origin, Peer, PeerStatistics, RemovePeerRequest, RemoveRouteRequest,
-    Route, SessionConfig,
+    bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddPeerRequest, AddRouteRequest,
+    AsPathSegment, DisablePeerRequest, EnablePeerRequest, GetBmpServersRequest, GetPeerRequest,
+    GetPeersRequest, GetRoutesRequest, GetServerInfoRequest, Origin, Peer, PeerStatistics,
+    RemoveBmpServerRequest, RemovePeerRequest, RemoveRouteRequest, Route, SessionConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -198,5 +198,46 @@ impl BgpClient {
             .parse()
             .map_err(|_| tonic::Status::internal("invalid listen_addr"))?;
         Ok((addr, resp.listen_port as u16))
+    }
+
+    /// Add a BMP server destination
+    pub async fn add_bmp_server(&mut self, address: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .add_bmp_server(AddBmpServerRequest { address })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Remove a BMP server destination
+    pub async fn remove_bmp_server(&mut self, address: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .remove_bmp_server(RemoveBmpServerRequest { address })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Get all BMP server destinations
+    pub async fn get_bmp_servers(&self) -> Result<Vec<String>, tonic::Status> {
+        Ok(self
+            .inner
+            .clone()
+            .get_bmp_servers(GetBmpServersRequest {})
+            .await?
+            .into_inner()
+            .addresses)
     }
 }
