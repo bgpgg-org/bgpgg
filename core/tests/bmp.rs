@@ -114,7 +114,6 @@ impl FakeBmpServer {
 }
 
 #[tokio::test]
-#[ignore] // TODO: Fix hanging test
 async fn test_peer_up_down() {
     let mut bmp_server = FakeBmpServer::new().await;
     let bmp_addr = bmp_server.address();
@@ -167,7 +166,7 @@ async fn test_peer_up_down() {
     )
     .await;
 
-    // Read PeerUp message
+    // Read PeerUp message (only from server1, which has BMP configured)
     bmp_server.read_peer_up().await;
 
     // Remove peer
@@ -187,6 +186,6 @@ async fn test_peer_up_down() {
     )
     .await;
 
-    // Read PeerDown message
+    // Read PeerDown message (only from server1)
     bmp_server.read_peer_down().await;
 }

@@ -22,6 +22,7 @@ use crate::server::{
     AdminState, BgpServer, BmpOp, ConnectionInfo, ConnectionType, GetPeerResponse,
     GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
+use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::oneshot;
@@ -322,19 +323,33 @@ impl BgpServer {
             }
         };
 
-        // Remove entry from map
-        let entry = self.peers.remove(&peer_ip);
+        // Get peer entry (keep it in map for now to send BMP PeerDown)
+        let entry = self.peers.get_mut(&peer_ip);
 
         if entry.is_none() {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
 
-        // Send graceful shutdown notification if peer_tx is active
         let entry = entry.unwrap();
-        if let Some(peer_tx) = entry.peer_tx {
+
+        // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
+        if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
+            let _ = self.bmp_tx.send(BmpOp::PeerDown {
+                peer_ip,
+                peer_as: asn as u32,
+                peer_bgp_id: bgp_id,
+                reason: PeerDownReason::PeerDeConfigured,
+            });
+        }
+
+        // Send graceful shutdown notification if peer_tx is active
+        if let Some(peer_tx) = &entry.peer_tx {
             let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
         }
+
+        // Now remove the peer from the map
+        self.peers.remove(&peer_ip);
 
         // Notify Loc-RIB to remove routes from this peer
         let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
