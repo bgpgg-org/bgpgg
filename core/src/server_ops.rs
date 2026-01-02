@@ -151,6 +151,13 @@ impl BgpServer {
                     return;
                 };
 
+                // Extract peer info for BMP before potentially removing the peer
+                // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
+                let bmp_peer_info = match (peer.asn, peer.bgp_id) {
+                    (Some(asn), Some(bgp_id)) => Some((asn as u32, bgp_id)),
+                    _ => None,
+                };
+
                 if peer.configured {
                     // Configured peer: update state, Peer task handles reconnection internally
                     peer.state = BgpState::Idle;
@@ -172,8 +179,15 @@ impl BgpServer {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
                 }
 
-                // BMP: Peer Down notification
-                let _ = self.bmp_tx.send(BmpOp::PeerDown { peer_ip, reason });
+                // BMP: Peer Down notification (only if session reached ESTABLISHED)
+                if let Some((peer_as, peer_bgp_id)) = bmp_peer_info {
+                    let _ = self.bmp_tx.send(BmpOp::PeerDown {
+                        peer_ip,
+                        peer_as,
+                        peer_bgp_id,
+                        reason,
+                    });
+                }
             }
             ServerOp::SetAdminState { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {

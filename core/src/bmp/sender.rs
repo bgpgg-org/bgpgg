@@ -137,16 +137,18 @@ impl BmpSender {
                     &[], // No Information strings for now
                 )))
             }
-            BmpOp::PeerDown { peer_ip, reason } => {
+            BmpOp::PeerDown {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                reason,
+            } => {
                 info!("BMP: Peer Down", "peer_ip" => &peer_ip);
-                // We need peer AS and BGP ID, but we don't have them in PeerDown event
-                // For now, use placeholder values - we'll improve this later
-                // TODO: Store peer info in BmpSender or pass more info in PeerDown
                 Some(BmpMessage::PeerDown(PeerDownMessage::new(
                     PeerDistinguisher::Global,
                     peer_ip,
-                    0,     // peer_as - TODO: get from state
-                    0,     // peer_bgp_id - TODO: get from state
+                    peer_as,
+                    peer_bgp_id,
                     false, // post_policy
                     Some(SystemTime::now()),
                     reason,
