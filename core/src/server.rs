@@ -175,6 +175,15 @@ pub enum ServerOp {
         bgp_id: u32,
         conn_type: ConnectionType,
     },
+    /// Connection info sent when peer establishes
+    PeerConnectionInfo {
+        peer_ip: IpAddr,
+        local_address: IpAddr,
+        local_port: u16,
+        remote_port: u16,
+        sent_open: OpenMessage,
+        received_open: OpenMessage,
+    },
     PeerUpdate {
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
@@ -222,14 +231,21 @@ pub enum BmpOp {
     },
 }
 
+/// Connection info (stored only while peer is Established)
+pub struct ConnectionInfo {
+    pub sent_open: OpenMessage,
+    pub received_open: OpenMessage,
+    pub local_address: IpAddr,
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
 /// Peer configuration and state stored in server's HashMap.
 /// The peer IP is the HashMap key.
 pub struct PeerInfo {
     pub admin_state: AdminState,
     /// true if explicitly configured, false if accepted via accept_unconfigured_peers
     pub configured: bool,
-    /// Port for reconnection (configured peers only)
-    pub port: Option<u16>,
     pub asn: Option<u16>,
     /// BGP Identifier from OPEN message, used for collision detection (RFC 4271 Section 6.8)
     pub bgp_id: Option<u32>,
@@ -242,11 +258,12 @@ pub struct PeerInfo {
     /// Pending incoming TCP stream awaiting collision resolution (RFC 4271 6.8).
     /// Stored when incoming arrives while outgoing is in OpenSent without BGP ID.
     pub pending_incoming: Option<TcpStream>,
+    /// Connection info (Some when Established, None otherwise)
+    pub conn_info: Option<ConnectionInfo>,
 }
 
 impl PeerInfo {
     pub fn new(
-        port: Option<u16>,
         configured: bool,
         config: PeerConfig,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
@@ -254,7 +271,6 @@ impl PeerInfo {
         Self {
             admin_state: AdminState::Up,
             configured,
-            port,
             asn: None,
             bgp_id: None,
             import_policy: None,
@@ -263,6 +279,7 @@ impl PeerInfo {
             peer_tx,
             config,
             pending_incoming: None,
+            conn_info: None,
         }
     }
 
@@ -449,7 +466,7 @@ impl BgpServer {
 
             let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
 
-            let entry = PeerInfo::new(Some(peer_addr.port()), true, config, Some(peer_tx.clone()));
+            let entry = PeerInfo::new(true, config, Some(peer_tx.clone()));
             self.peers.insert(peer_ip, entry);
 
             // RFC 4271: AutomaticStart for configured peers (if allowed)
@@ -555,7 +572,7 @@ impl BgpServer {
             existing.state = BgpState::Idle;
         } else {
             self.peers
-                .insert(peer_ip, PeerInfo::new(None, false, config, Some(peer_tx)));
+                .insert(peer_ip, PeerInfo::new(false, config, Some(peer_tx)));
         }
     }
 
@@ -656,7 +673,7 @@ mod tests {
     use super::*;
 
     fn peer_info() -> PeerInfo {
-        PeerInfo::new(None, true, PeerConfig::default(), None)
+        PeerInfo::new(true, PeerConfig::default(), None)
     }
 
     fn make_server(accept_unconfigured_peers: bool) -> BgpServer {

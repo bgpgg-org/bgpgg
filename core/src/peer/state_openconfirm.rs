@@ -14,6 +14,7 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
+use crate::server::ServerOp;
 use crate::types::PeerDownReason;
 use std::time::Instant;
 
@@ -62,6 +63,24 @@ impl Peer {
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived) => {
                 self.fsm.timers.reset_hold_timer();
                 self.established_at = Some(Instant::now());
+
+                // Send connection info to server for BMP
+                if let (Some(sent_open), Some(received_open), Some(conn)) =
+                    (&self.sent_open, &self.received_open, &self.conn)
+                {
+                    if let (Ok(local_addr), Ok(remote_addr)) =
+                        (conn.rx.local_addr(), conn.rx.peer_addr())
+                    {
+                        let _ = self.server_tx.send(ServerOp::PeerConnectionInfo {
+                            peer_ip: self.addr,
+                            local_address: local_addr.ip(),
+                            local_port: local_addr.port(),
+                            remote_port: remote_addr.port(),
+                            sent_open: sent_open.clone(),
+                            received_open: received_open.clone(),
+                        });
+                    }
+                }
             }
 
             (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)

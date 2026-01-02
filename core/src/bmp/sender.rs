@@ -54,15 +54,6 @@ impl BmpSender {
     pub async fn run(mut self) {
         info!("BMP sender task starting");
 
-        // Send Initiation message on startup
-        let initiation = BmpMessage::Initiation(InitiationMessage::new(
-            "bgpgg",
-            "bgpgg BGP implementation",
-            &[],
-        ));
-        self.batch.push(initiation);
-        self.flush().await;
-
         loop {
             tokio::select! {
                 // Receive BmpOp from server
@@ -70,7 +61,17 @@ impl BmpSender {
                     match op {
                         BmpOp::AddDestination { addr, response } => {
                             info!("BMP: Adding destination", "addr" => &addr.to_string());
-                            self.destinations.push(BmpDestination::TcpClient(BmpTcpClient::new(addr)));
+                            let mut dest = BmpDestination::TcpClient(BmpTcpClient::new(addr));
+
+                            // Send Initiation message to new destination immediately
+                            let initiation = BmpMessage::Initiation(InitiationMessage::new(
+                                "bgpgg",
+                                "bgpgg BGP implementation",
+                                &[],
+                            ));
+                            dest.send(&initiation).await;
+
+                            self.destinations.push(dest);
                             let _ = response.send(Ok(()));
                         }
                         BmpOp::RemoveDestination { addr, response } => {

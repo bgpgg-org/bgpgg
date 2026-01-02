@@ -350,6 +350,8 @@ pub(super) mod tests {
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
             pending_updates: Vec::new(),
+            sent_open: None,
+            received_open: None,
         }
     }
 

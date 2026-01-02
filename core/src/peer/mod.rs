@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::msg_notification::CeaseSubcode;
+use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::config::PeerConfig;
 use crate::debug;
@@ -167,6 +168,10 @@ pub struct Peer {
     pending_updates: Vec<UpdateMessage>,
     /// MinRouteAdvertisementIntervalTimer from config
     mrai_interval: Duration,
+    /// OPEN message sent to peer (for BMP PeerUp)
+    sent_open: Option<OpenMessage>,
+    /// OPEN message received from peer (for BMP PeerUp)
+    received_open: Option<OpenMessage>,
 }
 
 impl Peer {
@@ -219,6 +224,8 @@ impl Peer {
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
             established_at: None,
+            sent_open: None,
+            received_open: None,
         }
     }
 
@@ -361,6 +368,8 @@ pub mod test_helpers {
             mrai_interval: Duration::from_secs(0),
             last_update_sent: None,
             pending_updates: Vec::new(),
+            sent_open: None,
+            received_open: None,
         }
     }
 }
