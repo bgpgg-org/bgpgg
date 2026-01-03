@@ -51,6 +51,21 @@ impl RouteMonitoringMessage {
             bgp_update,
         }
     }
+
+    pub fn from_parts(peer_header: PeerHeader, bgp_update: UpdateMessage) -> Self {
+        Self {
+            peer_header,
+            bgp_update,
+        }
+    }
+
+    pub fn peer_header(&self) -> &PeerHeader {
+        &self.peer_header
+    }
+
+    pub fn bgp_update(&self) -> &UpdateMessage {
+        &self.bgp_update
+    }
 }
 
 impl Message for RouteMonitoringMessage {

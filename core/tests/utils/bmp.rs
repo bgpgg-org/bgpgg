@@ -17,10 +17,13 @@
 use super::common::TestServer;
 use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
+use bgpgg::bgp::msg_update::UpdateMessage;
+use bgpgg::bgp::utils::IpNetwork;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
+use bgpgg::bmp::msg_route_monitoring::RouteMonitoringMessage;
 use bgpgg::bmp::utils::{InformationTlv, InitiationType, PeerHeader, PEER_HEADER_SIZE};
 use bgpgg::types::PeerDownReason;
 use std::net::{IpAddr, Ipv4Addr};
@@ -245,6 +248,20 @@ impl FakeBmpServer {
             reason,
         }
     }
+
+    pub async fn read_route_monitoring(&mut self) -> RouteMonitoringMessage {
+        let (message_type, body) = self.read_message().await;
+        assert_eq!(
+            message_type,
+            BmpMessageType::RouteMonitoring.as_u8(),
+            "Expected Route Monitoring message"
+        );
+
+        let peer_header = parse_peer_header(&body);
+        let bgp_update = UpdateMessage::from_bytes(body[PEER_HEADER_SIZE..].to_vec()).unwrap();
+
+        RouteMonitoringMessage::from_parts(peer_header, bgp_update)
+    }
 }
 
 pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
@@ -366,4 +383,35 @@ pub fn assert_bmp_peer_up_msg(
     assert_eq!(actual.peer_header.peer_as, expected_peer_as);
     assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
     assert_eq!(actual.remote_port, expected_remote_port);
+}
+
+/// Assert that a RouteMonitoringMessage matches expected values (ignoring timestamp)
+pub fn assert_bmp_route_monitoring_msg(
+    actual: &RouteMonitoringMessage,
+    expected_peer_address: IpAddr,
+    expected_peer_as: u32,
+    expected_peer_bgp_id: u32,
+    expected_peer_flags: u8,
+    expected_announced: &[IpNetwork],
+    expected_withdrawn: &[IpNetwork],
+) {
+    assert_eq!(actual.peer_header().peer_address, expected_peer_address);
+    assert_eq!(actual.peer_header().peer_as, expected_peer_as);
+    assert_eq!(actual.peer_header().peer_bgp_id, expected_peer_bgp_id);
+    assert_eq!(actual.peer_header().peer_flags, expected_peer_flags);
+
+    let mut actual_nlri = actual.bgp_update().nlri_list().to_vec();
+    let mut expected_nlri = expected_announced.to_vec();
+    actual_nlri.sort_by_key(|n| format!("{:?}", n));
+    expected_nlri.sort_by_key(|n| format!("{:?}", n));
+    assert_eq!(actual_nlri, expected_nlri, "NLRI mismatch");
+
+    let mut actual_withdrawn = actual.bgp_update().withdrawn_routes().to_vec();
+    let mut expected_withdrawn_vec = expected_withdrawn.to_vec();
+    actual_withdrawn.sort_by_key(|n| format!("{:?}", n));
+    expected_withdrawn_vec.sort_by_key(|n| format!("{:?}", n));
+    assert_eq!(
+        actual_withdrawn, expected_withdrawn_vec,
+        "Withdrawn routes mismatch"
+    );
 }
