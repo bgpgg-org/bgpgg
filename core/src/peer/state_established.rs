@@ -173,6 +173,10 @@ impl Peer {
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
                         }
+                        PeerOp::GetAdjRibIn(response) => {
+                            let routes = self.rib_in.get_all_routes();
+                            let _ = response.send(routes);
+                        }
                         PeerOp::Shutdown(subcode) => {
                             info!("shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());

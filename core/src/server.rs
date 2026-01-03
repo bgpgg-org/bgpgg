@@ -15,7 +15,7 @@
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::{AsPathSegment, Origin};
+use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::bmp::sender::BmpSender;
 use crate::config::{Config, PeerConfig};
@@ -217,6 +217,12 @@ pub enum BmpOp {
         peer_as: u32,
         peer_bgp_id: u32,
         reason: PeerDownReason,
+    },
+    RouteMonitoring {
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        update: UpdateMessage,
     },
     AddDestination {
         addr: SocketAddr,

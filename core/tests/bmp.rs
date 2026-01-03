@@ -19,7 +19,9 @@ mod utils;
 pub use utils::bmp::*;
 pub use utils::*;
 
-use bgpgg::grpc::proto::BgpState;
+use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::grpc::proto::{BgpState, Origin};
+use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_add_bmp_server_sends_initiation() {
@@ -37,7 +39,49 @@ async fn test_add_bmp_server_sends_initiation() {
 
 #[tokio::test]
 async fn test_add_bmp_server_with_existing_peers() {
-    let (mut server, peer1, peer2) = setup_three_meshed_servers(Some(90)).await;
+    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(90)).await;
+
+    // Announce routes from peer1
+    peer1
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Announce routes from peer2
+    peer2
+        .client
+        .add_route(
+            "10.0.1.0/24".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for routes to be received
+    poll_until(
+        || async {
+            let routes = server.client.get_routes().await.unwrap();
+            routes.len() == 2
+        },
+        "Timeout waiting for routes",
+    )
+    .await;
 
     // Add an idle peer (connection will fail - address doesn't exist)
     server
@@ -88,6 +132,43 @@ async fn test_add_bmp_server_with_existing_peers() {
         u32::from(peers[1].client.router_id),
         peers[1].bgp_port,
     );
+
+    // Should receive route monitoring messages (2 routes per peer = 4 total in mesh)
+    // Each peer's Adj-RIB-In contains routes received from the other peer too
+    let rm1 = bmp_server.read_route_monitoring().await;
+    let rm2 = bmp_server.read_route_monitoring().await;
+    let rm3 = bmp_server.read_route_monitoring().await;
+    let rm4 = bmp_server.read_route_monitoring().await;
+
+    // Both routes in mesh
+    let route_1 = vec![IpNetwork::V4(Ipv4Net {
+        address: Ipv4Addr::new(10, 0, 0, 0),
+        prefix_length: 24,
+    })];
+    let route_2 = vec![IpNetwork::V4(Ipv4Net {
+        address: Ipv4Addr::new(10, 0, 1, 0),
+        prefix_length: 24,
+    })];
+
+    // Verify each message
+    for rm in &[&rm1, &rm2, &rm3, &rm4] {
+        let peer_addr = rm.peer_header().peer_address;
+        let peer = peers.iter().find(|p| p.address == peer_addr).unwrap();
+        let nlri = rm.bgp_update().nlri_list();
+
+        // Must be one of the two routes
+        assert!(nlri == &route_1[..] || nlri == &route_2[..]);
+
+        assert_bmp_route_monitoring_msg(
+            rm,
+            peer.address,
+            peer.asn as u32,
+            u32::from(peer.client.router_id),
+            0, // peer_flags (L=0 for pre-policy)
+            nlri,
+            &[], // no withdrawals
+        );
+    }
 }
 
 #[tokio::test]

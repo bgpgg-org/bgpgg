@@ -189,7 +189,9 @@ type BatchingKey = (Origin, Vec<AsPathSegment>, Ipv4Addr, bool, Vec<u32>);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
-fn batch_announcements_by_path(to_announce: &[(IpNetwork, Arc<Path>)]) -> Vec<AnnouncementBatch> {
+pub(crate) fn batch_announcements_by_path(
+    to_announce: &[(IpNetwork, Arc<Path>)],
+) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
     for (prefix, path) in to_announce {

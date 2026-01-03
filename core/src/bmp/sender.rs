@@ -17,6 +17,7 @@ use crate::bmp::msg::BmpMessage;
 use crate::bmp::msg_initiation::InitiationMessage;
 use crate::bmp::msg_peer_down::PeerDownMessage;
 use crate::bmp::msg_peer_up::PeerUpMessage;
+use crate::bmp::msg_route_monitoring::RouteMonitoringMessage;
 use crate::bmp::utils::PeerDistinguisher;
 use crate::info;
 use crate::server::BmpOp;
@@ -153,6 +154,23 @@ impl BmpSender {
                     false, // post_policy
                     Some(SystemTime::now()),
                     reason,
+                )))
+            }
+            BmpOp::RouteMonitoring {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                update,
+            } => {
+                Some(BmpMessage::RouteMonitoring(RouteMonitoringMessage::new(
+                    PeerDistinguisher::Global,
+                    peer_ip,
+                    peer_as,
+                    peer_bgp_id,
+                    false, // post_policy (pre-policy routes from Adj-RIB-In)
+                    false, // legacy_as_path
+                    Some(SystemTime::now()),
+                    update,
                 )))
             }
             BmpOp::AddDestination { .. }

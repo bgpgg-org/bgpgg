@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use crate::bgp::msg_notification::CeaseSubcode;
-use crate::bgp::msg_update::{AsPathSegment, Origin};
+use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
+use crate::rib::Route;
 use crate::server::{
     AdminState, BgpServer, BmpOp, ConnectionInfo, ConnectionType, GetPeerResponse,
     GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
@@ -519,7 +520,47 @@ impl BgpServer {
         let routes = self.loc_rib.get_all_routes();
         let _ = response.send(routes);
     }
+}
 
+/// Convert routes to UpdateMessages, batching by shared path attributes
+fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
+    use crate::peer::outgoing::batch_announcements_by_path;
+    use std::sync::Arc;
+
+    // Convert routes to (prefix, path) tuples for batching
+    let announcements: Vec<(IpNetwork, Arc<crate::rib::Path>)> = routes
+        .iter()
+        .flat_map(|route| {
+            route
+                .paths
+                .iter()
+                .map(|path| (route.prefix, Arc::clone(path)))
+        })
+        .collect();
+
+    // Batch announcements by path attributes
+    let batches = batch_announcements_by_path(&announcements);
+
+    // Convert each batch to an UpdateMessage
+    batches
+        .into_iter()
+        .map(|batch| {
+            UpdateMessage::new(
+                batch.path.origin,
+                batch.path.as_path.clone(),
+                batch.path.next_hop,
+                batch.prefixes,
+                batch.path.local_pref,
+                batch.path.med,
+                batch.path.atomic_aggregate,
+                batch.path.communities.clone(),
+                batch.path.unknown_attrs.clone(),
+            )
+        })
+        .collect()
+}
+
+impl BgpServer {
     fn handle_add_bmp_server(&self, addr: String, response: oneshot::Sender<Result<(), String>>) {
         let sock_addr: SocketAddr = match addr.parse() {
             Ok(a) => a,
@@ -531,11 +572,15 @@ impl BgpServer {
 
         // Collect all established peers' info
         let mut existing_peers = Vec::new();
+        let mut peer_route_queries = Vec::new();
         for (peer_ip, peer_info) in &self.peers {
             if peer_info.state == BgpState::Established {
-                if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-                    (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
-                {
+                if let (Some(asn), Some(bgp_id), Some(conn_info), Some(peer_tx)) = (
+                    peer_info.asn,
+                    peer_info.bgp_id,
+                    &peer_info.conn_info,
+                    &peer_info.peer_tx,
+                ) {
                     existing_peers.push(BmpOp::PeerUp {
                         peer_ip: *peer_ip,
                         peer_as: asn as u32,
@@ -546,6 +591,11 @@ impl BgpServer {
                         sent_open: conn_info.sent_open.clone(),
                         received_open: conn_info.received_open.clone(),
                     });
+
+                    // Query this peer for routes asynchronously
+                    let (routes_tx, routes_rx) = oneshot::channel();
+                    let _ = peer_tx.send(PeerOp::GetAdjRibIn(routes_tx));
+                    peer_route_queries.push((*peer_ip, asn as u32, bgp_id, routes_rx));
                 }
             }
         }
@@ -569,6 +619,21 @@ impl BgpServer {
                     // After destination is added, send PeerUp for existing peers
                     for peer_up in existing_peers {
                         let _ = bmp_tx.send(peer_up);
+                    }
+
+                    // Collect routes from each peer and send RouteMonitoring
+                    for (peer_ip, peer_as, peer_bgp_id, routes_rx) in peer_route_queries {
+                        if let Ok(routes) = routes_rx.await {
+                            let updates = routes_to_update_messages(&routes);
+                            for update in updates {
+                                let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+                                    peer_ip,
+                                    peer_as,
+                                    peer_bgp_id,
+                                    update,
+                                });
+                            }
+                        }
                     }
                     let _ = response.send(Ok(()));
                 }

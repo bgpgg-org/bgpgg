@@ -90,6 +90,7 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
     GetStatistics(oneshot::Sender<PeerStatistics>),
+    GetAdjRibIn(oneshot::Sender<Vec<crate::rib::Route>>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
     /// RFC 4271 Event 1: ManualStart - admin starts the peer connection
