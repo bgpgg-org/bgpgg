@@ -147,11 +147,11 @@ pub enum MgmtOp {
         response: oneshot::Sender<(Ipv4Addr, u16)>,
     },
     AddBmpServer {
-        addr: String,
+        addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveBmpServer {
-        addr: String,
+        addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
     },
     GetBmpServers {
@@ -240,6 +240,7 @@ pub enum BmpOp {
 }
 
 /// Connection info (stored only while peer is Established)
+#[derive(Clone)]
 pub struct ConnectionInfo {
     pub sent_open: OpenMessage,
     pub received_open: OpenMessage,

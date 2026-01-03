@@ -573,13 +573,13 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<AddBmpServerRequest>,
     ) -> Result<Response<AddBmpServerResponse>, Status> {
-        let addr = request.into_inner().address;
+        let addr_str = request.into_inner().address;
+        let addr = addr_str
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid BMP server address: {}", e)))?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::AddBmpServer {
-            addr: addr.clone(),
-            response: tx,
-        };
+        let req = MgmtOp::AddBmpServer { addr, response: tx };
 
         self.mgmt_request_tx
             .send(req)
@@ -603,13 +603,13 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<RemoveBmpServerRequest>,
     ) -> Result<Response<RemoveBmpServerResponse>, Status> {
-        let addr = request.into_inner().address;
+        let addr_str = request.into_inner().address;
+        let addr = addr_str
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid BMP server address: {}", e)))?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::RemoveBmpServer {
-            addr: addr.clone(),
-            response: tx,
-        };
+        let req = MgmtOp::RemoveBmpServer { addr, response: tx };
 
         self.mgmt_request_tx
             .send(req)

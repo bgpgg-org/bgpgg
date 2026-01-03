@@ -141,11 +141,11 @@ async fn test_add_bmp_server_with_existing_peers() {
     let rm4 = bmp_server.read_route_monitoring().await;
 
     // Both routes in mesh
-    let route_1 = vec![IpNetwork::V4(Ipv4Net {
+    let route_1 = [IpNetwork::V4(Ipv4Net {
         address: Ipv4Addr::new(10, 0, 0, 0),
         prefix_length: 24,
     })];
-    let route_2 = vec![IpNetwork::V4(Ipv4Net {
+    let route_2 = [IpNetwork::V4(Ipv4Net {
         address: Ipv4Addr::new(10, 0, 1, 0),
         prefix_length: 24,
     })];

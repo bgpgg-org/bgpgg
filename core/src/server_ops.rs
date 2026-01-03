@@ -26,7 +26,7 @@ use crate::server::{
 use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 impl BgpServer {
     pub(crate) async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
@@ -88,7 +88,7 @@ impl BgpServer {
                 let _ = response.send((self.local_addr, self.local_port));
             }
             MgmtOp::AddBmpServer { addr, response } => {
-                self.handle_add_bmp_server(addr, response);
+                self.handle_add_bmp_server(addr, response).await;
             }
             MgmtOp::RemoveBmpServer { addr, response } => {
                 self.handle_remove_bmp_server(addr, response);
@@ -560,111 +560,110 @@ fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
         .collect()
 }
 
+/// Query peer's Adj-RIB-In
+async fn get_peer_adj_rib_in(
+    peer_tx: &mpsc::UnboundedSender<PeerOp>,
+) -> Result<Vec<crate::rib::Route>, ()> {
+    let (tx, rx) = oneshot::channel();
+    let _ = peer_tx.send(PeerOp::GetAdjRibIn(tx));
+    rx.await.map_err(|_| ())
+}
+
+/// Send initial BMP messages for existing peers after BMP server connects
+async fn send_initial_bmp_state(
+    bmp_tx: &mpsc::UnboundedSender<BmpOp>,
+    established_peers: Vec<(IpAddr, &PeerInfo)>,
+    response: oneshot::Sender<Result<(), String>>,
+) {
+    // Send all PeerUp messages first
+    for (peer_ip, peer_info) in &established_peers {
+        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
+            (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
+        {
+            let _ = bmp_tx.send(BmpOp::PeerUp {
+                peer_ip: *peer_ip,
+                peer_as: asn as u32,
+                peer_bgp_id: bgp_id,
+                local_address: conn_info.local_address,
+                local_port: conn_info.local_port,
+                remote_port: conn_info.remote_port,
+                sent_open: conn_info.sent_open.clone(),
+                received_open: conn_info.received_open.clone(),
+            });
+        }
+    }
+
+    // Then send all RouteMonitoring messages
+    for (peer_ip, peer_info) in established_peers {
+        if let (Some(asn), Some(bgp_id), Some(peer_tx)) =
+            (peer_info.asn, peer_info.bgp_id, &peer_info.peer_tx)
+        {
+            if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
+                let updates = routes_to_update_messages(&routes);
+                for update in updates {
+                    let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+                        peer_ip,
+                        peer_as: asn as u32,
+                        peer_bgp_id: bgp_id,
+                        update,
+                    });
+                }
+            }
+        }
+    }
+    let _ = response.send(Ok(()));
+}
+
 impl BgpServer {
-    fn handle_add_bmp_server(&self, addr: String, response: oneshot::Sender<Result<(), String>>) {
-        let sock_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response.send(Err(format!("invalid BMP server address: {}", e)));
+    fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
+        self.peers
+            .iter()
+            .filter(|(_, peer_info)| peer_info.state == BgpState::Established)
+            .map(|(peer_ip, peer_info)| (*peer_ip, peer_info))
+            .collect()
+    }
+
+    async fn handle_add_bmp_server(
+        &self,
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // Add BMP destination
+        let (tx, rx) = oneshot::channel();
+        let _ = self.bmp_tx.send(BmpOp::AddDestination {
+            addr,
+            sys_name: self.config.sys_name(),
+            sys_descr: self.config.sys_descr(),
+            response: tx,
+        });
+
+        let result = match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = response.send(Err("BMP sender task not responding".to_string()));
                 return;
             }
         };
 
-        // Collect all established peers' info
-        let mut existing_peers = Vec::new();
-        let mut peer_route_queries = Vec::new();
-        for (peer_ip, peer_info) in &self.peers {
-            if peer_info.state == BgpState::Established {
-                if let (Some(asn), Some(bgp_id), Some(conn_info), Some(peer_tx)) = (
-                    peer_info.asn,
-                    peer_info.bgp_id,
-                    &peer_info.conn_info,
-                    &peer_info.peer_tx,
-                ) {
-                    existing_peers.push(BmpOp::PeerUp {
-                        peer_ip: *peer_ip,
-                        peer_as: asn as u32,
-                        peer_bgp_id: bgp_id,
-                        local_address: conn_info.local_address,
-                        local_port: conn_info.local_port,
-                        remote_port: conn_info.remote_port,
-                        sent_open: conn_info.sent_open.clone(),
-                        received_open: conn_info.received_open.clone(),
-                    });
-
-                    // Query this peer for routes asynchronously
-                    let (routes_tx, routes_rx) = oneshot::channel();
-                    let _ = peer_tx.send(PeerOp::GetAdjRibIn(routes_tx));
-                    peer_route_queries.push((*peer_ip, asn as u32, bgp_id, routes_rx));
-                }
-            }
+        if let Err(e) = result {
+            let _ = response.send(Err(e));
+            return;
         }
 
-        let (tx, rx) = oneshot::channel();
-        let bmp_tx = self.bmp_tx.clone();
-        let sys_name = self.config.sys_name();
-        let sys_descr = self.config.sys_descr();
-
-        // Send AddDestination
-        let _ = bmp_tx.send(BmpOp::AddDestination {
-            addr: sock_addr,
-            sys_name,
-            sys_descr,
-            response: tx,
-        });
-
-        tokio::spawn(async move {
-            match rx.await {
-                Ok(Ok(())) => {
-                    // After destination is added, send PeerUp for existing peers
-                    for peer_up in existing_peers {
-                        let _ = bmp_tx.send(peer_up);
-                    }
-
-                    // Collect routes from each peer and send RouteMonitoring
-                    for (peer_ip, peer_as, peer_bgp_id, routes_rx) in peer_route_queries {
-                        if let Ok(routes) = routes_rx.await {
-                            let updates = routes_to_update_messages(&routes);
-                            for update in updates {
-                                let _ = bmp_tx.send(BmpOp::RouteMonitoring {
-                                    peer_ip,
-                                    peer_as,
-                                    peer_bgp_id,
-                                    update,
-                                });
-                            }
-                        }
-                    }
-                    let _ = response.send(Ok(()));
-                }
-                Ok(Err(e)) => {
-                    let _ = response.send(Err(e));
-                }
-                Err(_) => {
-                    let _ = response.send(Err("BMP sender task not responding".to_string()));
-                }
-            }
-        });
+        // AddDestination succeeded, send initial state
+        let established_peers = self.get_established_peers();
+        send_initial_bmp_state(&self.bmp_tx, established_peers, response).await;
     }
 
     fn handle_remove_bmp_server(
         &self,
-        addr: String,
+        addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        let sock_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response.send(Err(format!("invalid BMP server address: {}", e)));
-                return;
-            }
-        };
-
         let (tx, rx) = oneshot::channel();
-        let _ = self.bmp_tx.send(BmpOp::RemoveDestination {
-            addr: sock_addr,
-            response: tx,
-        });
+        let _ = self
+            .bmp_tx
+            .send(BmpOp::RemoveDestination { addr, response: tx });
 
         tokio::spawn(async move {
             match rx.await {
