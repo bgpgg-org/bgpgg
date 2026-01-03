@@ -18,6 +18,7 @@ use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MA
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
+use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
@@ -26,7 +27,7 @@ use bgpgg::grpc::proto::{
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 
@@ -68,6 +69,19 @@ impl TestServer {
             admin_state: AdminState::Up.into(),
             configured,
         }
+    }
+
+    /// Add a peer to this server
+    pub async fn add_peer(&mut self, peer: &TestServer) {
+        self.client
+            .add_peer(format!("{}:{}", peer.address, peer.bgp_port), None)
+            .await
+            .unwrap();
+    }
+
+    /// Remove a peer from this server
+    pub async fn remove_peer(&mut self, peer: &TestServer) {
+        self.client.remove_peer(peer.address.clone()).await.unwrap();
     }
 }
 
@@ -131,6 +145,17 @@ pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
         .collect();
 
     routes_map == expected_map
+}
+
+/// Helper to create a standard test config with sane defaults
+pub fn test_config(asn: u16, ip_last_octet: u8) -> Config {
+    Config::new(
+        asn,
+        &format!("127.0.0.{}:0", ip_last_octet),
+        Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
+        90,
+        true,
+    )
 }
 
 /// Starts a single BGP server with gRPC interface for testing
@@ -1208,6 +1233,90 @@ impl FakePeer {
         socket.bind(local_addr).unwrap();
         socket.connect(server_addr).await.unwrap()
     }
+}
+
+#[allow(dead_code)]
+pub struct BmpMessageHeader {
+    pub version: u8,
+    pub length: u32,
+    pub message_type: u8,
+}
+
+/// Fake BMP server for testing
+pub struct FakeBmpServer {
+    listener: TcpListener,
+    stream: Option<TcpStream>,
+}
+
+impl FakeBmpServer {
+    pub async fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self {
+            listener,
+            stream: None,
+        }
+    }
+
+    pub fn address(&self) -> String {
+        let addr = self.listener.local_addr().unwrap();
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    pub async fn accept(&mut self) {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        self.stream = Some(stream);
+    }
+
+    pub async fn read_message(&mut self) -> (BmpMessageHeader, Vec<u8>) {
+        let stream = self.stream.as_mut().unwrap();
+
+        // Read BMP common header (6 bytes)
+        let mut header_buf = [0u8; 6];
+        stream.read_exact(&mut header_buf).await.unwrap();
+
+        let version = header_buf[0];
+        let length =
+            u32::from_be_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]]);
+        let message_type = header_buf[5];
+
+        assert_eq!(version, BMP_VERSION, "Invalid BMP version");
+
+        // Read message body (length includes the 6-byte header)
+        let body_len = length as usize - 6;
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).await.unwrap();
+
+        (
+            BmpMessageHeader {
+                version,
+                length,
+                message_type,
+            },
+            body,
+        )
+    }
+
+    pub async fn read_message_type(&mut self, expected: BmpMessageType) {
+        let (header, _body) = self.read_message().await;
+        assert_eq!(
+            header.message_type,
+            expected.as_u8(),
+            "Expected {:?} message",
+            expected
+        );
+    }
+}
+
+pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
+    server
+        .client
+        .add_bmp_server(bmp_server.address())
+        .await
+        .unwrap();
+    bmp_server.accept().await;
+    bmp_server
+        .read_message_type(BmpMessageType::Initiation)
+        .await;
 }
 
 // Build raw BGP message from components

@@ -1252,21 +1252,9 @@ async fn test_med_comparison_restricted_to_same_as() {
     .await;
 
     // Connect S1, S2, S3 to S4 (star topology)
-    server1
-        .client
-        .add_peer(format!("{}:{}", server4.address, server4.bgp_port), None)
-        .await
-        .unwrap();
-    server2
-        .client
-        .add_peer(format!("{}:{}", server4.address, server4.bgp_port), None)
-        .await
-        .unwrap();
-    server3
-        .client
-        .add_peer(format!("{}:{}", server4.address, server4.bgp_port), None)
-        .await
-        .unwrap();
+    server1.add_peer(&server4).await;
+    server2.add_peer(&server4).await;
+    server3.add_peer(&server4).await;
 
     // Wait for all peers to establish
     poll_until(
