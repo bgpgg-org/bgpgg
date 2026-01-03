@@ -19,8 +19,10 @@ use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::bmp::msg_initiation::InitiationMessage;
+use bgpgg::bmp::msg_peer_down::PeerDownMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
-use bgpgg::bmp::utils::{InformationTlv, InitiationType, PeerHeader};
+use bgpgg::bmp::utils::{InformationTlv, InitiationType, PeerHeader, PEER_HEADER_SIZE};
+use bgpgg::types::PeerDownReason;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -156,7 +158,7 @@ impl FakeBmpServer {
         );
 
         let peer_header = parse_peer_header(&body);
-        let mut offset = 42;
+        let mut offset = PEER_HEADER_SIZE;
 
         // Local Address (16 bytes)
         let local_address_bytes: [u8; 16] = body[offset..offset + 16].try_into().unwrap();
@@ -219,6 +221,54 @@ impl FakeBmpServer {
 
         InitiationMessage { information }
     }
+
+    pub async fn read_peer_down(&mut self) -> PeerDownMessage {
+        let (header, body) = self.read_message().await;
+        assert_eq!(
+            header.message_type,
+            BmpMessageType::PeerDownNotification.as_u8(),
+            "Expected PeerDownNotification message"
+        );
+
+        let peer_header = parse_peer_header(&body);
+        let reason_code = body[PEER_HEADER_SIZE];
+        let offset = PEER_HEADER_SIZE + 1;
+
+        let reason = match reason_code {
+            1 => {
+                // LocalNotification - parse BGP NOTIFICATION
+                let notif_bytes = body[offset..].to_vec();
+                let notif =
+                    bgpgg::bgp::msg_notification::NotificationMessage::from_bytes(notif_bytes);
+                PeerDownReason::LocalNotification(notif)
+            }
+            2 => {
+                // LocalNoNotification - parse 2-byte FSM event code
+                let event_code = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+                // Use HoldTimerExpires as placeholder since we can't reconstruct all variants
+                let fsm_event = match event_code {
+                    10 => bgpgg::peer::FsmEvent::HoldTimerExpires,
+                    _ => bgpgg::peer::FsmEvent::ManualStop, // Placeholder
+                };
+                PeerDownReason::LocalNoNotification(fsm_event)
+            }
+            3 => {
+                // RemoteNotification - parse BGP NOTIFICATION
+                let notif_bytes = body[offset..].to_vec();
+                let notif =
+                    bgpgg::bgp::msg_notification::NotificationMessage::from_bytes(notif_bytes);
+                PeerDownReason::RemoteNotification(notif)
+            }
+            4 => PeerDownReason::RemoteNoNotification,
+            5 => PeerDownReason::PeerDeConfigured,
+            _ => panic!("Unknown peer down reason code: {}", reason_code),
+        };
+
+        PeerDownMessage {
+            peer_header,
+            reason,
+        }
+    }
 }
 
 pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
@@ -258,6 +308,69 @@ pub fn assert_bmp_initiation_msg(
         String::from_utf8_lossy(&sys_descr.unwrap().info_value),
         expected_sys_descr
     );
+}
+
+/// Assert that a PeerDownMessage matches expected values (ignoring timestamp)
+pub fn assert_bmp_peer_down_msg(
+    actual: &PeerDownMessage,
+    expected_peer_address: IpAddr,
+    expected_peer_as: u32,
+    expected_peer_bgp_id: u32,
+    expected_reason: &PeerDownReason,
+) {
+    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
+    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
+    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
+
+    // Check reason matches
+    match (&actual.reason, expected_reason) {
+        (
+            PeerDownReason::LocalNotification(actual_notif),
+            PeerDownReason::LocalNotification(expected_notif),
+        ) => {
+            assert_eq!(
+                actual_notif.error(),
+                expected_notif.error(),
+                "LocalNotification error mismatch"
+            );
+            assert_eq!(
+                actual_notif.data(),
+                expected_notif.data(),
+                "LocalNotification data mismatch"
+            );
+        }
+        (
+            PeerDownReason::LocalNoNotification(actual_event),
+            PeerDownReason::LocalNoNotification(expected_event),
+        ) => {
+            assert_eq!(
+                actual_event.to_event_code(),
+                expected_event.to_event_code(),
+                "LocalNoNotification FSM event mismatch"
+            );
+        }
+        (
+            PeerDownReason::RemoteNotification(actual_notif),
+            PeerDownReason::RemoteNotification(expected_notif),
+        ) => {
+            assert_eq!(
+                actual_notif.error(),
+                expected_notif.error(),
+                "RemoteNotification error mismatch"
+            );
+            assert_eq!(
+                actual_notif.data(),
+                expected_notif.data(),
+                "RemoteNotification data mismatch"
+            );
+        }
+        (PeerDownReason::RemoteNoNotification, PeerDownReason::RemoteNoNotification) => {}
+        (PeerDownReason::PeerDeConfigured, PeerDownReason::PeerDeConfigured) => {}
+        _ => panic!(
+            "PeerDown reason variant mismatch: expected {:?}, got {:?}",
+            expected_reason, actual.reason
+        ),
+    }
 }
 
 /// Assert that a PeerUpMessage matches expected values (ignoring timestamp and local_port)

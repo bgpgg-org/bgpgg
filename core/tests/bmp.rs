@@ -19,7 +19,6 @@ mod utils;
 pub use utils::bmp::*;
 pub use utils::*;
 
-use bgpgg::bmp::msg::MessageType;
 use bgpgg::grpc::proto::BgpState;
 
 #[tokio::test]
@@ -122,8 +121,13 @@ async fn test_peer_up_down() {
     // Wait for peer to be removed
     poll_peers(&server1, vec![]).await;
 
-    // Read PeerDown message (only from server1)
-    bmp_server
-        .read_message_type(MessageType::PeerDownNotification)
-        .await;
+    // Read and verify PeerDown message
+    let peer_down = bmp_server.read_peer_down().await;
+    assert_bmp_peer_down_msg(
+        &peer_down,
+        server2.address,
+        server2.asn as u32,
+        u32::from(server2.client.router_id),
+        &bgpgg::types::PeerDownReason::PeerDeConfigured,
+    );
 }

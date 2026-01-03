@@ -113,6 +113,9 @@ impl InformationTlv {
     }
 }
 
+/// Per-Peer Header size in bytes (RFC 7854 Section 4.2)
+pub const PEER_HEADER_SIZE: usize = 42;
+
 /// Per-Peer Header used in most BMP messages
 #[derive(Clone, Debug)]
 pub struct PeerHeader {
