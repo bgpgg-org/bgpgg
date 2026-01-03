@@ -396,15 +396,9 @@ async fn test_reject_unconfigured_peer() {
         .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     configured_peer.handshake_keepalive().await;
-    poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![configured_peer.to_peer(BgpState::Established, true)],
-            )
-            .await
-        },
-        "configured peer should be established",
+    poll_peers(
+        &server,
+        vec![configured_peer.to_peer(BgpState::Established, true)],
     )
     .await;
 

@@ -73,11 +73,7 @@ async fn test_peer_down() {
 
     // Poll for peer state change (configured peers kept in Idle, not removed)
     // server1 connected to server2, so from server1's view, server2 is configured
-    poll_until(
-        || async { verify_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await },
-        "Timeout waiting for peer down detection",
-    )
-    .await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await;
 
     // Poll for route withdrawal
     poll_route_withdrawal(&[&server1]).await;
@@ -485,30 +481,20 @@ async fn test_auto_reconnect() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
-        "Timeout waiting for Established",
-    )
-    .await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
 
-    poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![Peer {
-                    address: peer.address.clone(),
-                    asn: 65002, // Preserved from previous session
-                    state: BgpState::OpenSent as i32,
-                    admin_state: AdminState::Up.into(),
-                    configured: true,
-                }],
-            )
-            .await
-        },
-        "Timeout waiting for reconnect attempt",
+    poll_peers(
+        &server,
+        vec![Peer {
+            address: peer.address.clone(),
+            asn: 65002, // Preserved from previous session
+            state: BgpState::OpenSent as i32,
+            admin_state: AdminState::Up.into(),
+            configured: true,
+        }],
     )
     .await;
 
@@ -558,11 +544,7 @@ async fn test_idle_hold_time_delay() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
-        "Timeout waiting for Established",
-    )
-    .await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
@@ -630,11 +612,7 @@ async fn test_allow_automatic_start_false() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
-        "Timeout waiting for Established",
-    )
-    .await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();

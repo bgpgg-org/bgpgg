@@ -175,11 +175,7 @@ async fn test_remove_peer_sends_cease_notification() {
         .await;
     peer.handshake_keepalive().await;
 
-    poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
-        "Timeout waiting for peer to establish",
-    )
-    .await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await;
 
     server
         .client
@@ -209,11 +205,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
         .await;
     peer.handshake_keepalive().await;
 
-    poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await },
-        "Timeout waiting for peer to establish",
-    )
-    .await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await;
 
     server
         .client
@@ -248,11 +240,7 @@ async fn test_collision_local_lower_bgp_id() {
         .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
 
-    poll_until(
-        || async { verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await },
-        "Timeout waiting for peer1 to reach OpenConfirm",
-    )
-    .await;
+    poll_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await;
 
     // Peer 2: collision - since local < remote, existing (peer1) closed, new (peer2) wins
     let mut peer2 = FakePeer::connect(Some("127.0.0.3"), &server).await;
@@ -272,11 +260,7 @@ async fn test_collision_local_lower_bgp_id() {
     peer2.send_keepalive().await;
 
     // Verify peer2 is Established (same address as peer1 since same IP)
-    poll_until(
-        || async { verify_peers(&server, vec![peer2.to_peer(BgpState::Established, false)]).await },
-        "Timeout waiting for peer2 to reach Established",
-    )
-    .await;
+    poll_peers(&server, vec![peer2.to_peer(BgpState::Established, false)]).await;
 }
 
 /// RFC 4271 Section 6.8: Connection Collision Detection in OpenConfirm state

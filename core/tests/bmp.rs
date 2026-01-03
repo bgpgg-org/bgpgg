@@ -85,30 +85,13 @@ impl FakeBmpServer {
         )
     }
 
-    async fn read_initiation(&mut self) {
+    async fn read_message_type(&mut self, expected: MessageType) {
         let (header, _body) = self.read_message().await;
         assert_eq!(
             header.message_type,
-            MessageType::Initiation.as_u8(),
-            "Expected Initiation message"
-        );
-    }
-
-    async fn read_peer_up(&mut self) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            MessageType::PeerUpNotification.as_u8(),
-            "Expected PeerUp message"
-        );
-    }
-
-    async fn read_peer_down(&mut self) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            MessageType::PeerDownNotification.as_u8(),
-            "Expected PeerDown message"
+            expected.as_u8(),
+            "Expected {:?} message",
+            expected
         );
     }
 }
@@ -134,7 +117,7 @@ async fn test_add_bmp_server_sends_initiation() {
         .unwrap();
 
     bmp_server.accept().await;
-    bmp_server.read_initiation().await;
+    bmp_server.read_message_type(MessageType::Initiation).await;
 }
 
 #[tokio::test]
@@ -180,13 +163,12 @@ async fn test_add_bmp_server_with_existing_peers() {
         .unwrap();
 
     // Wait for both peers to establish
-    poll_until(
-        || async {
-            let peers = server.client.get_peers().await.unwrap();
-            peers.len() == 2
-                && peers.iter().all(|p| p.state == BgpState::Established as i32)
-        },
-        "Timeout waiting for peers to establish",
+    poll_peers(
+        &server,
+        vec![
+            peer1.to_peer(BgpState::Established, true),
+            peer2.to_peer(BgpState::Established, true),
+        ],
     )
     .await;
 
@@ -203,11 +185,11 @@ async fn test_add_bmp_server_with_existing_peers() {
     bmp_server.accept().await;
 
     // Should receive initiation first
-    bmp_server.read_initiation().await;
+    bmp_server.read_message_type(MessageType::Initiation).await;
 
     // Should receive peer up for both existing peers
-    bmp_server.read_peer_up().await;
-    bmp_server.read_peer_up().await;
+    bmp_server.read_message_type(MessageType::PeerUpNotification).await;
+    bmp_server.read_message_type(MessageType::PeerUpNotification).await;
 }
 
 #[tokio::test]
@@ -244,7 +226,7 @@ async fn test_peer_up_down() {
     bmp_server.accept().await;
 
     // Read Initiation message sent immediately upon adding destination
-    bmp_server.read_initiation().await;
+    bmp_server.read_message_type(MessageType::Initiation).await;
 
     // Add BGP peer
     server1
@@ -264,7 +246,7 @@ async fn test_peer_up_down() {
     .await;
 
     // Read PeerUp message (only from server1, which has BMP configured)
-    bmp_server.read_peer_up().await;
+    bmp_server.read_message_type(MessageType::PeerUpNotification).await;
 
     // Remove peer
     server1
@@ -284,5 +266,5 @@ async fn test_peer_up_down() {
     .await;
 
     // Read PeerDown message (only from server1)
-    bmp_server.read_peer_down().await;
+    bmp_server.read_message_type(MessageType::PeerDownNotification).await;
 }

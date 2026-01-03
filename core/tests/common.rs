@@ -982,6 +982,15 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     peers == expected_peers
 }
 
+/// Poll until server has expected peers
+pub async fn poll_peers(server: &TestServer, expected_peers: Vec<Peer>) {
+    poll_until(
+        || async { verify_peers(server, expected_peers.clone()).await },
+        "Timeout waiting for peers to match expected state",
+    )
+    .await;
+}
+
 /// Fake BGP peer for testing error handling
 ///
 /// This allows sending raw/malformed BGP messages to test error handling.
