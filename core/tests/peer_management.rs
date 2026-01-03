@@ -55,7 +55,7 @@ async fn test_remove_peer() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address,
+                &server2.address.to_string(),
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -115,7 +115,7 @@ async fn test_remove_peer_withdraw_routes() {
             prefix: "10.2.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address, // eBGP: NEXT_HOP rewritten to sender's local address
+                &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -173,8 +173,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -190,8 +190,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -207,8 +207,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -224,7 +224,7 @@ async fn test_remove_peer_four_node_mesh() {
     // Remove Server4's peer from Server1 via API call
     server1
         .client
-        .remove_peer(server4.address.clone())
+        .remove_peer(server4.address.to_string())
         .await
         .expect("Failed to remove peer");
 
@@ -241,8 +241,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65002, 65004])],
-                        &server2.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server2.address.clone(),
+                        &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server2.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -258,8 +258,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65004])],
-                        &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.clone(),
+                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server4.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -275,8 +275,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65004])],
-                        &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.clone(),
+                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server4.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -351,7 +351,7 @@ async fn test_manually_stopped_no_auto_reconnect() {
     // Disable the peer
     server1
         .client
-        .disable_peer(server2.address.clone())
+        .disable_peer(server2.address.to_string())
         .await
         .unwrap();
 
@@ -488,7 +488,7 @@ async fn test_manual_stop() {
         // Send ManualStop
         server
             .client
-            .disable_peer(fake_peer.address.clone())
+            .disable_peer(fake_peer.address.to_string())
             .await
             .expect("Failed to disable peer");
 

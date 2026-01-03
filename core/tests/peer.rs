@@ -55,7 +55,7 @@ async fn test_peer_down() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address,
+                &server2.address.to_string(),
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -110,8 +110,8 @@ async fn test_peer_down_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server1.address.clone(),
+                    &server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -127,8 +127,8 @@ async fn test_peer_down_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server1.address.clone(),
+                    &server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -144,8 +144,8 @@ async fn test_peer_down_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server1.address.clone(),
+                    &server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -207,8 +207,8 @@ async fn test_peer_down_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server1.address.clone(),
+                    &server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -224,8 +224,8 @@ async fn test_peer_down_four_node_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server1.address.clone(),
+                    &server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -252,8 +252,8 @@ async fn test_peer_up() {
         min_keepalive_received: Some(2),
         ..Default::default()
     };
-    poll_peer_stats(&server1, &server2.address, expected).await;
-    poll_peer_stats(&server2, &server1.address, expected).await;
+    poll_peer_stats(&server1, &server2.address.to_string(), expected).await;
+    poll_peer_stats(&server2, &server1.address.to_string(), expected).await;
 
     // Verify both peers are still in Established state
     // chain_servers: server1 connected to server2
@@ -280,18 +280,18 @@ async fn test_peer_up_four_node_mesh() {
         min_keepalive_received: Some(2),
         ..Default::default()
     };
-    poll_peer_stats(&server1, &server2.address, expected).await;
-    poll_peer_stats(&server1, &server3.address, expected).await;
-    poll_peer_stats(&server1, &server4.address, expected).await;
-    poll_peer_stats(&server2, &server1.address, expected).await;
-    poll_peer_stats(&server2, &server3.address, expected).await;
-    poll_peer_stats(&server2, &server4.address, expected).await;
-    poll_peer_stats(&server3, &server1.address, expected).await;
-    poll_peer_stats(&server3, &server2.address, expected).await;
-    poll_peer_stats(&server3, &server4.address, expected).await;
-    poll_peer_stats(&server4, &server1.address, expected).await;
-    poll_peer_stats(&server4, &server2.address, expected).await;
-    poll_peer_stats(&server4, &server3.address, expected).await;
+    poll_peer_stats(&server1, &server2.address.to_string(), expected).await;
+    poll_peer_stats(&server1, &server3.address.to_string(), expected).await;
+    poll_peer_stats(&server1, &server4.address.to_string(), expected).await;
+    poll_peer_stats(&server2, &server1.address.to_string(), expected).await;
+    poll_peer_stats(&server2, &server3.address.to_string(), expected).await;
+    poll_peer_stats(&server2, &server4.address.to_string(), expected).await;
+    poll_peer_stats(&server3, &server1.address.to_string(), expected).await;
+    poll_peer_stats(&server3, &server2.address.to_string(), expected).await;
+    poll_peer_stats(&server3, &server4.address.to_string(), expected).await;
+    poll_peer_stats(&server4, &server1.address.to_string(), expected).await;
+    poll_peer_stats(&server4, &server2.address.to_string(), expected).await;
+    poll_peer_stats(&server4, &server3.address.to_string(), expected).await;
 
     // Verify all peers are still in Established state
     // mesh_servers: lower index connects to higher index
@@ -489,7 +489,7 @@ async fn test_auto_reconnect() {
     poll_peers(
         &server,
         vec![Peer {
-            address: peer.address.clone(),
+            address: peer.address.to_string(),
             asn: 65002, // Preserved from previous session
             state: BgpState::OpenSent as i32,
             admin_state: AdminState::Up.into(),
@@ -623,7 +623,7 @@ async fn test_allow_automatic_start_false() {
             verify_peers(
                 &server,
                 vec![Peer {
-                    address: peer.address.clone(),
+                    address: peer.address.to_string(),
                     asn: peer.asn as u32,
                     state: BgpState::Idle as i32,
                     admin_state: AdminState::Up.into(),
@@ -942,8 +942,8 @@ async fn test_mrai_rate_limiting() {
                     prefix: format!("10.{}.0.0/24", i),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65001])],
-                        &server1.address,
-                        server1.address.clone(),
+                        &server1.address.to_string(),
+                        server1.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -972,7 +972,7 @@ async fn test_mrai_rate_limiting() {
         // Verify all UPDATEs sent
         poll_peer_stats(
             &server1,
-            &server2.address,
+            &server2.address.to_string(),
             ExpectedStats {
                 update_sent: Some(num_routes),
                 ..Default::default()

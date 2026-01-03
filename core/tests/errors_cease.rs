@@ -112,7 +112,7 @@ async fn test_max_prefix_limit() {
                     verify_peers(
                         &server2,
                         vec![Peer {
-                            address: server1.address.clone(),
+                            address: server1.address.to_string(),
                             asn: server1.asn as u32,
                             state: BgpState::Idle.into(),
                             admin_state: AdminState::PrefixLimitExceeded.into(),
@@ -137,7 +137,7 @@ async fn test_max_prefix_limit() {
             // Verify no CEASE notification was sent
             poll_peer_stats(
                 &server2,
-                &server1.address,
+                &server1.address.to_string(),
                 ExpectedStats {
                     notification_sent: Some(0),
                     ..Default::default()
@@ -179,7 +179,7 @@ async fn test_remove_peer_sends_cease_notification() {
 
     server
         .client
-        .remove_peer(peer.address.clone())
+        .remove_peer(peer.address.to_string())
         .await
         .expect("Failed to remove peer");
 
@@ -209,7 +209,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
 
     server
         .client
-        .disable_peer(peer.address.clone())
+        .disable_peer(peer.address.to_string())
         .await
         .expect("Failed to disable peer");
 

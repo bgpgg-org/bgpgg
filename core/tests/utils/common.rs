@@ -35,7 +35,7 @@ pub struct TestServer {
     pub client: BgpClient,
     pub bgp_port: u16,
     pub asn: u16,
-    pub address: String, // IP address the server is bound to (no port)
+    pub address: std::net::IpAddr, // IP address the server is bound to (no port)
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -62,7 +62,7 @@ impl TestServer {
     /// Converts a TestServer to a Peer struct for use in test assertions
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
-            address: self.address.clone(),
+            address: self.address.to_string(),
             asn: self.asn as u32,
             state: state.into(),
             admin_state: AdminState::Up.into(),
@@ -80,7 +80,10 @@ impl TestServer {
 
     /// Remove a peer from this server
     pub async fn remove_peer(&mut self, peer: &TestServer) {
-        self.client.remove_peer(peer.address.clone()).await.unwrap();
+        self.client
+            .remove_peer(peer.address.to_string())
+            .await
+            .unwrap();
     }
 }
 
@@ -163,12 +166,13 @@ pub async fn start_test_server(config: Config) -> TestServer {
 
     let router_id = config.router_id;
     let asn = config.asn;
-    let bind_ip = config
+    let bind_ip: std::net::IpAddr = config
         .listen_addr
         .split(':')
         .next()
         .unwrap_or("127.0.0.1")
-        .to_string();
+        .parse()
+        .expect("valid IP address");
 
     // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
@@ -737,7 +741,7 @@ pub async fn wait_convergence(
                 }
             }
             for (server, peer, expected) in stats_expectations {
-                let Ok((_, stats)) = server.client.get_peer(peer.address.clone()).await else {
+                let Ok((_, stats)) = server.client.get_peer(peer.address.to_string()).await else {
                     return false;
                 };
                 let Some(s) = stats else {
@@ -884,7 +888,7 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
     // Connect each server to the next one: s0 -> s1 -> s2 -> ...
     for i in 0..servers.len() - 1 {
         let next_port = servers[i + 1].bgp_port;
-        let next_address = servers[i + 1].address.clone();
+        let next_address = servers[i + 1].address;
 
         servers[i]
             .client
@@ -951,7 +955,7 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
     for i in 0..servers.len() {
         for j in (i + 1)..servers.len() {
             let peer_port = servers[j].bgp_port;
-            let peer_address = servers[j].address.clone();
+            let peer_address = servers[j].address;
 
             servers[i]
                 .client

@@ -70,8 +70,6 @@ async fn test_add_bmp_server_with_existing_peers() {
 
 #[tokio::test]
 async fn test_peer_up_down() {
-    use std::net::IpAddr;
-
     let mut bmp_server = FakeBmpServer::new().await;
     let mut server1 = start_test_server(test_config(65001, 1)).await;
     let server2 = start_test_server(test_config(65002, 2)).await;
@@ -88,10 +86,10 @@ async fn test_peer_up_down() {
     let peer_up = bmp_server.read_peer_up().await;
     assert_bmp_peer_up_msg(
         &peer_up,
-        server2.address.parse::<IpAddr>().unwrap(),
+        server1.address,
+        server2.address,
         server2.asn as u32,
-        u32::from(std::net::Ipv4Addr::new(2, 2, 2, 2)),
-        server1.address.parse::<IpAddr>().unwrap(),
+        u32::from(server2.client.router_id),
         server2.bgp_port,
     );
 

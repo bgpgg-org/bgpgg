@@ -47,6 +47,34 @@ fn parse_bgp_open_from_bmp(body: &[u8], offset: usize) -> (OpenMessage, usize) {
     (open_msg, msg_len)
 }
 
+fn parse_peer_header(body: &[u8]) -> PeerHeader {
+    let peer_type = body[0];
+    let peer_flags = body[1];
+    let peer_distinguisher_val = u64::from_be_bytes(body[2..10].try_into().unwrap());
+    let peer_distinguisher = match peer_type {
+        0 => bgpgg::bmp::utils::PeerDistinguisher::Global,
+        1 => bgpgg::bmp::utils::PeerDistinguisher::Rd(peer_distinguisher_val),
+        2 => bgpgg::bmp::utils::PeerDistinguisher::Local(peer_distinguisher_val),
+        _ => panic!("Invalid peer type: {}", peer_type),
+    };
+    let peer_address_bytes: [u8; 16] = body[10..26].try_into().unwrap();
+    let peer_address = decode_bmp_ip_address(&peer_address_bytes);
+    let peer_as = u32::from_be_bytes(body[26..30].try_into().unwrap());
+    let peer_bgp_id = u32::from_be_bytes(body[30..34].try_into().unwrap());
+    let timestamp_seconds = u32::from_be_bytes(body[34..38].try_into().unwrap());
+    let timestamp_microseconds = u32::from_be_bytes(body[38..42].try_into().unwrap());
+
+    PeerHeader {
+        peer_distinguisher,
+        peer_flags,
+        peer_address,
+        peer_as,
+        peer_bgp_id,
+        timestamp_seconds,
+        timestamp_microseconds,
+    }
+}
+
 #[allow(dead_code)]
 pub struct BmpMessageHeader {
     pub version: u8,
@@ -126,33 +154,7 @@ impl FakeBmpServer {
             "Expected PeerUpNotification message"
         );
 
-        // Parse PeerHeader (42 bytes)
-        let peer_type = body[0];
-        let peer_flags = body[1];
-        let peer_distinguisher_val = u64::from_be_bytes(body[2..10].try_into().unwrap());
-        let peer_distinguisher = match peer_type {
-            0 => bgpgg::bmp::utils::PeerDistinguisher::Global,
-            1 => bgpgg::bmp::utils::PeerDistinguisher::Rd(peer_distinguisher_val),
-            2 => bgpgg::bmp::utils::PeerDistinguisher::Local(peer_distinguisher_val),
-            _ => panic!("Invalid peer type: {}", peer_type),
-        };
-        let peer_address_bytes: [u8; 16] = body[10..26].try_into().unwrap();
-        let peer_address = decode_bmp_ip_address(&peer_address_bytes);
-        let peer_as = u32::from_be_bytes(body[26..30].try_into().unwrap());
-        let peer_bgp_id = u32::from_be_bytes(body[30..34].try_into().unwrap());
-        let timestamp_seconds = u32::from_be_bytes(body[34..38].try_into().unwrap());
-        let timestamp_microseconds = u32::from_be_bytes(body[38..42].try_into().unwrap());
-
-        let peer_header = PeerHeader {
-            peer_distinguisher,
-            peer_flags,
-            peer_address,
-            peer_as,
-            peer_bgp_id,
-            timestamp_seconds,
-            timestamp_microseconds,
-        };
-
+        let peer_header = parse_peer_header(&body);
         let mut offset = 42;
 
         // Local Address (16 bytes)
@@ -208,15 +210,15 @@ pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut Fake
 /// is initiated (not the listening port).
 pub fn assert_bmp_peer_up_msg(
     actual: &PeerUpMessage,
+    expected_local_address: IpAddr,
     expected_peer_address: IpAddr,
     expected_peer_as: u32,
     expected_peer_bgp_id: u32,
-    expected_local_address: IpAddr,
     expected_remote_port: u16,
 ) {
+    assert_eq!(actual.local_address, expected_local_address);
     assert_eq!(actual.peer_header.peer_address, expected_peer_address);
     assert_eq!(actual.peer_header.peer_as, expected_peer_as);
     assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
-    assert_eq!(actual.local_address, expected_local_address);
     assert_eq!(actual.remote_port, expected_remote_port);
 }

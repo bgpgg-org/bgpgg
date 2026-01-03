@@ -156,7 +156,7 @@ async fn test_get_peers_with_peers() {
 
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].address, server2.address);
+    assert_eq!(peers[0].address, server2.address.to_string());
     assert_eq!(peers[0].asn, server2.asn as u32);
     assert_eq!(peers[0].state, BgpState::Established as i32);
 }
@@ -182,12 +182,12 @@ async fn test_get_peer_success() {
 
     let (peer_opt, stats_opt) = server1
         .client
-        .get_peer(server2.address.clone())
+        .get_peer(server2.address.to_string())
         .await
         .unwrap();
 
     let peer = peer_opt.unwrap();
-    assert_eq!(peer.address, server2.address);
+    assert_eq!(peer.address, server2.address.to_string());
     assert_eq!(peer.asn, server2.asn as u32);
     assert_eq!(peer.state, BgpState::Established as i32);
 
@@ -279,7 +279,7 @@ async fn test_disable_enable_peer() {
     // Disable peer
     server1
         .client
-        .disable_peer(server2.address.clone())
+        .disable_peer(server2.address.to_string())
         .await
         .unwrap();
 
@@ -298,7 +298,7 @@ async fn test_disable_enable_peer() {
     // Enable peer
     server1
         .client
-        .enable_peer(server2.address.clone())
+        .enable_peer(server2.address.to_string())
         .await
         .unwrap();
 
