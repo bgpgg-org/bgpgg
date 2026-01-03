@@ -36,6 +36,7 @@ pub struct TestServer {
     pub bgp_port: u16,
     pub asn: u16,
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
+    pub config: Config,
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -151,13 +152,17 @@ pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
 
 /// Helper to create a standard test config with sane defaults
 pub fn test_config(asn: u16, ip_last_octet: u8) -> Config {
-    Config::new(
+    let ip = format!("127.0.0.{}", ip_last_octet);
+    let mut config = Config::new(
         asn,
-        &format!("127.0.0.{}:0", ip_last_octet),
+        &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
         90,
         true,
-    )
+    );
+    config.sys_name = Some(format!("test-bgpgg-{}", ip));
+    config.sys_descr = Some("test bgpgg router".to_string());
+    config
 }
 
 /// Starts a single BGP server with gRPC interface for testing
@@ -179,6 +184,7 @@ pub async fn start_test_server(config: Config) -> TestServer {
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
 
+    let config_clone = config.clone();
     let server = BgpServer::new(config).expect("valid server config");
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
@@ -241,6 +247,7 @@ pub async fn start_test_server(config: Config) -> TestServer {
         bgp_port,
         asn,
         address: bind_ip,
+        config: config_clone,
         runtime: Some(runtime),
     }
 }

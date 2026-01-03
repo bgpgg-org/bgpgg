@@ -30,7 +30,7 @@ pub(super) fn encode_ip_address(addr: IpAddr) -> [u8; 16] {
 /// Initiation message Information TLV types
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
-pub(super) enum InitiationType {
+pub enum InitiationType {
     String = 0,
     SysDescr = 1,
     SysName = 2,
@@ -97,7 +97,7 @@ pub struct InformationTlv {
 }
 
 impl InformationTlv {
-    pub(super) fn new(info_type: u16, value: impl Into<Vec<u8>>) -> Self {
+    pub fn new(info_type: u16, value: impl Into<Vec<u8>>) -> Self {
         Self {
             info_type,
             info_value: value.into(),

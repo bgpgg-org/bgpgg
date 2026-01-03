@@ -220,6 +220,8 @@ pub enum BmpOp {
     },
     AddDestination {
         addr: SocketAddr,
+        sys_name: String,
+        sys_descr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveDestination {

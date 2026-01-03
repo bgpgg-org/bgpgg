@@ -552,10 +552,14 @@ impl BgpServer {
 
         let (tx, rx) = oneshot::channel();
         let bmp_tx = self.bmp_tx.clone();
+        let sys_name = self.config.sys_name();
+        let sys_descr = self.config.sys_descr();
 
         // Send AddDestination
         let _ = bmp_tx.send(BmpOp::AddDestination {
             addr: sock_addr,
+            sys_name,
+            sys_descr,
             response: tx,
         });
 

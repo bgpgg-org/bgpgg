@@ -17,7 +17,7 @@ use super::utils::{InformationTlv, InitiationType};
 
 #[derive(Clone, Debug)]
 pub struct InitiationMessage {
-    information: Vec<InformationTlv>,
+    pub information: Vec<InformationTlv>,
 }
 
 impl InitiationMessage {

@@ -144,6 +144,12 @@ pub struct Config {
     pub peers: Vec<PeerConfig>,
     #[serde(default)]
     pub bmp_servers: Vec<BmpConfig>,
+    /// BMP sysName (RFC 7854). Defaults to "bgpgg {router_id}".
+    #[serde(default)]
+    pub sys_name: Option<String>,
+    /// BMP sysDescr (RFC 7854). Defaults to "bgpgg version {VERSION}".
+    #[serde(default)]
+    pub sys_descr: Option<String>,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -177,7 +183,23 @@ impl Config {
             accept_unconfigured_peers,
             peers: Vec::new(),
             bmp_servers: Vec::new(),
+            sys_name: None,
+            sys_descr: None,
         }
+    }
+
+    /// Get BMP sysName (RFC 7854). Returns configured value or default.
+    pub fn sys_name(&self) -> String {
+        self.sys_name
+            .clone()
+            .unwrap_or_else(|| format!("bgpgg {}", self.router_id))
+    }
+
+    /// Get BMP sysDescr (RFC 7854). Returns configured value or default.
+    pub fn sys_descr(&self) -> String {
+        self.sys_descr
+            .clone()
+            .unwrap_or_else(|| format!("bgpgg version {}", env!("CARGO_PKG_VERSION")))
     }
 
     /// Load configuration from a YAML file
@@ -214,6 +236,8 @@ impl Default for Config {
             accept_unconfigured_peers: false,
             peers: Vec::new(),
             bmp_servers: Vec::new(),
+            sys_name: None,
+            sys_descr: None,
         }
     }
 }

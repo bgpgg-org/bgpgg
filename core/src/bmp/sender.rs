@@ -59,14 +59,14 @@ impl BmpSender {
                 // Receive BmpOp from server
                 Some(op) = self.receiver.recv() => {
                     match op {
-                        BmpOp::AddDestination { addr, response } => {
+                        BmpOp::AddDestination { addr, sys_name, sys_descr, response } => {
                             info!("BMP: Adding destination", "addr" => &addr.to_string());
                             let mut dest = BmpDestination::TcpClient(BmpTcpClient::new(addr));
 
                             // Send Initiation message to new destination immediately
                             let initiation = BmpMessage::Initiation(InitiationMessage::new(
-                                "bgpgg",
-                                "bgpgg BGP implementation",
+                                &sys_name,
+                                &sys_descr,
                                 &[],
                             ));
                             dest.send(&initiation).await;

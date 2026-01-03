@@ -18,8 +18,9 @@ use super::common::TestServer;
 use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
+use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
-use bgpgg::bmp::utils::PeerHeader;
+use bgpgg::bmp::utils::{InformationTlv, InitiationType, PeerHeader};
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -190,6 +191,34 @@ impl FakeBmpServer {
             information,
         }
     }
+
+    pub async fn read_initiation(&mut self) -> InitiationMessage {
+        let (header, body) = self.read_message().await;
+        assert_eq!(
+            header.message_type,
+            BmpMessageType::Initiation.as_u8(),
+            "Expected Initiation message"
+        );
+
+        let mut information = Vec::new();
+        let mut offset = 0;
+
+        while offset < body.len() {
+            let info_type = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+            offset += 2;
+
+            let info_length =
+                u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+            offset += 2;
+
+            let info_value = body[offset..offset + info_length].to_vec();
+            offset += info_length;
+
+            information.push(InformationTlv::new(info_type, info_value));
+        }
+
+        InitiationMessage { information }
+    }
 }
 
 pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
@@ -199,9 +228,36 @@ pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut Fake
         .await
         .unwrap();
     bmp_server.accept().await;
-    bmp_server
-        .read_message_type(BmpMessageType::Initiation)
-        .await;
+    let msg = bmp_server.read_initiation().await;
+    assert_bmp_initiation_msg(&msg, &server.config.sys_name(), &server.config.sys_descr());
+}
+
+/// Assert that an InitiationMessage contains expected sysName and sysDescr
+pub fn assert_bmp_initiation_msg(
+    actual: &InitiationMessage,
+    expected_sys_name: &str,
+    expected_sys_descr: &str,
+) {
+    let sys_name = actual
+        .information
+        .iter()
+        .find(|tlv| tlv.info_type == InitiationType::SysName as u16);
+    let sys_descr = actual
+        .information
+        .iter()
+        .find(|tlv| tlv.info_type == InitiationType::SysDescr as u16);
+
+    assert!(sys_name.is_some(), "sysName TLV not found");
+    assert!(sys_descr.is_some(), "sysDescr TLV not found");
+
+    assert_eq!(
+        String::from_utf8_lossy(&sys_name.unwrap().info_value),
+        expected_sys_name
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&sys_descr.unwrap().info_value),
+        expected_sys_descr
+    );
 }
 
 /// Assert that a PeerUpMessage matches expected values (ignoring timestamp and local_port)
