@@ -14,8 +14,8 @@
 
 //! Tests for peer management: add, remove, configure, passive mode, delay open, manual stop, MRAI
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::Config;

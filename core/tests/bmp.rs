@@ -14,11 +14,10 @@
 
 //! Tests for BMP (BGP Monitoring Protocol)
 
-mod bmp_utils;
-mod common;
+mod utils;
 
-pub use bmp_utils::*;
-pub use common::*;
+pub use utils::bmp::*;
+pub use utils::*;
 
 use bgpgg::bmp::msg::MessageType;
 use bgpgg::grpc::proto::BgpState;

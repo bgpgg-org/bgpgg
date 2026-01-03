@@ -14,8 +14,8 @@
 
 //! Tests for peer lifecycle: up, down, crash, recovery, and reconnection
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};

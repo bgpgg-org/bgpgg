@@ -14,8 +14,8 @@
 
 //! Tests for BGP CEASE notifications and connection collision detection per RFC 4271 Sections 6.7, 6.8
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::{Config, PeerConfig};

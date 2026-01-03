@@ -14,8 +14,8 @@
 
 //! Basic management operation tests
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin};

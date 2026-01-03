@@ -27,8 +27,8 @@
 //! NEXT_HOP handling:
 //! - iBGP: Locally-originated routes with unspecified NEXT_HOP (0.0.0.0) are rewritten to router ID
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::community;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};

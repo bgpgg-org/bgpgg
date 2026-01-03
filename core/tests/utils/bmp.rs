@@ -14,11 +14,12 @@
 
 //! BMP testing utilities
 
-use crate::TestServer;
-use bgpgg::bgp::msg::{Message as BgpMessage, BGP_HEADER_SIZE_BYTES};
+use super::common::TestServer;
+use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
+use bgpgg::bmp::utils::PeerHeader;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -118,9 +119,6 @@ impl FakeBmpServer {
     }
 
     pub async fn read_peer_up(&mut self) -> PeerUpMessage {
-        use bgpgg::bmp::msg_peer_up::PeerUpMessage;
-        use bgpgg::bmp::utils::PeerHeader;
-
         let (header, body) = self.read_message().await;
         assert_eq!(
             header.message_type,
