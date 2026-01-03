@@ -99,8 +99,17 @@ impl BmpDestination {
 
     /// Send a batch of BMP messages to the destination
     pub async fn send_batch(&mut self, msgs: &[BmpMessage]) {
+        // Serialize all messages into one buffer
+        let mut buffer = Vec::new();
         for msg in msgs {
-            self.send(msg).await;
+            buffer.extend_from_slice(&msg.serialize());
+        }
+
+        // Single write_all() syscall
+        match self {
+            Self::TcpClient(client) => {
+                client.send_raw(&buffer).await;
+            }
         }
     }
 }

@@ -26,6 +26,7 @@ use crate::server::{
 use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 impl BgpServer {
@@ -142,11 +143,15 @@ impl BgpServer {
             } => {
                 let peer = self.peers.get(&peer_ip).expect("peer should exist");
 
+                // Extract peer info before mutable operations
+                let peer_asn = peer.asn;
+                let peer_bgp_id = peer.bgp_id;
+
                 if let Some(policy) = peer.policy_in() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip,
-                        withdrawn,
-                        announced,
+                        withdrawn.clone(),
+                        announced.clone(),
                         |prefix, path| policy.accept(prefix, path),
                     );
                     info!("UPDATE processing complete", "peer_ip" => &peer_ip);
@@ -154,6 +159,18 @@ impl BgpServer {
                     // Propagate changed routes to other peers
                     if !changed_prefixes.is_empty() {
                         self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
+
+                    // BMP: Send route monitoring for this update
+                    if let (Some(asn), Some(bgp_id)) = (peer_asn, peer_bgp_id) {
+                        send_bmp_route_monitoring(
+                            &self.bmp_tx,
+                            peer_ip,
+                            asn as u32,
+                            bgp_id,
+                            &withdrawn,
+                            &announced,
+                        );
                     }
                 } else {
                     error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
@@ -567,6 +584,53 @@ async fn get_peer_adj_rib_in(
     let (tx, rx) = oneshot::channel();
     let _ = peer_tx.send(PeerOp::GetAdjRibIn(tx));
     rx.await.map_err(|_| ())
+}
+
+/// Send BMP route monitoring messages for a route update
+fn send_bmp_route_monitoring(
+    bmp_tx: &mpsc::UnboundedSender<BmpOp>,
+    peer_ip: IpAddr,
+    peer_as: u32,
+    peer_bgp_id: u32,
+    withdrawn: &[IpNetwork],
+    announced: &[(IpNetwork, Arc<crate::rib::Path>)],
+) {
+    use crate::peer::outgoing::batch_announcements_by_path;
+
+    // Send withdrawals if any
+    if !withdrawn.is_empty() {
+        let update = UpdateMessage::new_withdraw(withdrawn.to_vec());
+        let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+            peer_ip,
+            peer_as,
+            peer_bgp_id,
+            update,
+        });
+    }
+
+    // Send announcements batched by path attributes
+    if !announced.is_empty() {
+        let batches = batch_announcements_by_path(announced);
+        for batch in batches {
+            let update = UpdateMessage::new(
+                batch.path.origin,
+                batch.path.as_path.clone(),
+                batch.path.next_hop,
+                batch.prefixes,
+                batch.path.local_pref,
+                batch.path.med,
+                batch.path.atomic_aggregate,
+                batch.path.communities.clone(),
+                batch.path.unknown_attrs.clone(),
+            );
+            let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                update,
+            });
+        }
+    }
 }
 
 /// Send initial BMP messages for existing peers after BMP server connects

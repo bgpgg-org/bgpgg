@@ -62,6 +62,13 @@ impl BmpSender {
                     match op {
                         BmpOp::AddDestination { addr, sys_name, sys_descr, response } => {
                             info!("BMP: Adding destination", "addr" => &addr.to_string());
+
+                            // Flush any pending messages to existing destinations before adding new one
+                            // This prevents new destination from receiving old batched messages
+                            if !self.batch.is_empty() {
+                                self.flush().await;
+                            }
+
                             let mut dest = BmpDestination::TcpClient(BmpTcpClient::new(addr));
 
                             // Send Initiation message to new destination immediately
@@ -89,12 +96,15 @@ impl BmpSender {
                             let _ = response.send(addrs);
                         }
                         _ => {
-                            if let Some(msg) = self.convert_to_bmp(op) {
-                                self.batch.push(msg);
+                            // Only batch messages if we have destinations
+                            if !self.destinations.is_empty() {
+                                if let Some(msg) = self.convert_to_bmp(op) {
+                                    self.batch.push(msg);
 
-                                // Flush if batch full
-                                if self.batch.len() >= MAX_BATCH_SIZE {
-                                    self.flush().await;
+                                    // Flush if batch full
+                                    if self.batch.len() >= MAX_BATCH_SIZE {
+                                        self.flush().await;
+                                    }
                                 }
                             }
                         }
