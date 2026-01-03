@@ -89,11 +89,11 @@ impl PeerDistinguisher {
     }
 }
 
-/// Information TLV used in Initiation and Termination messages (internal)
+/// Information TLV used in Initiation and Termination messages
 #[derive(Clone, Debug)]
-pub(super) struct InformationTlv {
-    info_type: u16,
-    info_value: Vec<u8>,
+pub struct InformationTlv {
+    pub info_type: u16,
+    pub info_value: Vec<u8>,
 }
 
 impl InformationTlv {
@@ -113,9 +113,9 @@ impl InformationTlv {
     }
 }
 
-/// Per-Peer Header used in most BMP messages (internal encoding detail)
+/// Per-Peer Header used in most BMP messages
 #[derive(Clone, Debug)]
-pub(super) struct PeerHeader {
+pub struct PeerHeader {
     pub peer_distinguisher: PeerDistinguisher,
     pub peer_flags: u8,
     pub peer_address: IpAddr,

@@ -1,0 +1,224 @@
+// Copyright 2025 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! BMP testing utilities
+
+use crate::TestServer;
+use bgpgg::bgp::msg::{Message as BgpMessage, BGP_HEADER_SIZE_BYTES};
+use bgpgg::bgp::msg_open::OpenMessage;
+use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
+use bgpgg::bmp::msg_peer_up::PeerUpMessage;
+use std::net::{IpAddr, Ipv4Addr};
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+
+/// Decode IP address from 16-byte BMP format (detects IPv4-mapped)
+pub fn decode_bmp_ip_address(bytes: &[u8; 16]) -> IpAddr {
+    // Check if it's IPv4-mapped (first 12 bytes are 0)
+    if bytes[..12] == [0; 12] {
+        IpAddr::V4(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]))
+    } else {
+        IpAddr::V6(std::net::Ipv6Addr::from(*bytes))
+    }
+}
+
+/// Parse a BGP OPEN message from BMP body (includes BGP header)
+/// Returns (OpenMessage, message_length_including_header)
+fn parse_bgp_open_from_bmp(body: &[u8], offset: usize) -> (OpenMessage, usize) {
+    // Read BGP message length from header (bytes 16-17)
+    let msg_len = u16::from_be_bytes(body[offset + 16..offset + 18].try_into().unwrap()) as usize;
+    let body_len = msg_len - BGP_HEADER_SIZE_BYTES;
+    let open_msg = OpenMessage::from_bytes(
+        body[offset + BGP_HEADER_SIZE_BYTES..offset + BGP_HEADER_SIZE_BYTES + body_len].to_vec(),
+    )
+    .unwrap();
+    (open_msg, msg_len)
+}
+
+#[allow(dead_code)]
+pub struct BmpMessageHeader {
+    pub version: u8,
+    pub length: u32,
+    pub message_type: u8,
+}
+
+/// Fake BMP server for testing
+pub struct FakeBmpServer {
+    listener: TcpListener,
+    stream: Option<TcpStream>,
+}
+
+impl FakeBmpServer {
+    pub async fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self {
+            listener,
+            stream: None,
+        }
+    }
+
+    pub fn address(&self) -> String {
+        let addr = self.listener.local_addr().unwrap();
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    pub async fn accept(&mut self) {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        self.stream = Some(stream);
+    }
+
+    pub async fn read_message(&mut self) -> (BmpMessageHeader, Vec<u8>) {
+        let stream = self.stream.as_mut().unwrap();
+
+        // Read BMP common header (6 bytes)
+        let mut header_buf = [0u8; 6];
+        stream.read_exact(&mut header_buf).await.unwrap();
+
+        let version = header_buf[0];
+        let length =
+            u32::from_be_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]]);
+        let message_type = header_buf[5];
+
+        assert_eq!(version, BMP_VERSION, "Invalid BMP version");
+
+        // Read message body (length includes the 6-byte header)
+        let body_len = length as usize - 6;
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).await.unwrap();
+
+        (
+            BmpMessageHeader {
+                version,
+                length,
+                message_type,
+            },
+            body,
+        )
+    }
+
+    pub async fn read_message_type(&mut self, expected: BmpMessageType) {
+        let (header, _body) = self.read_message().await;
+        assert_eq!(
+            header.message_type,
+            expected.as_u8(),
+            "Expected {:?} message",
+            expected
+        );
+    }
+
+    pub async fn read_peer_up(&mut self) -> PeerUpMessage {
+        use bgpgg::bmp::msg_peer_up::PeerUpMessage;
+        use bgpgg::bmp::utils::PeerHeader;
+
+        let (header, body) = self.read_message().await;
+        assert_eq!(
+            header.message_type,
+            BmpMessageType::PeerUpNotification.as_u8(),
+            "Expected PeerUpNotification message"
+        );
+
+        // Parse PeerHeader (42 bytes)
+        let peer_type = body[0];
+        let peer_flags = body[1];
+        let peer_distinguisher_val = u64::from_be_bytes(body[2..10].try_into().unwrap());
+        let peer_distinguisher = match peer_type {
+            0 => bgpgg::bmp::utils::PeerDistinguisher::Global,
+            1 => bgpgg::bmp::utils::PeerDistinguisher::Rd(peer_distinguisher_val),
+            2 => bgpgg::bmp::utils::PeerDistinguisher::Local(peer_distinguisher_val),
+            _ => panic!("Invalid peer type: {}", peer_type),
+        };
+        let peer_address_bytes: [u8; 16] = body[10..26].try_into().unwrap();
+        let peer_address = decode_bmp_ip_address(&peer_address_bytes);
+        let peer_as = u32::from_be_bytes(body[26..30].try_into().unwrap());
+        let peer_bgp_id = u32::from_be_bytes(body[30..34].try_into().unwrap());
+        let timestamp_seconds = u32::from_be_bytes(body[34..38].try_into().unwrap());
+        let timestamp_microseconds = u32::from_be_bytes(body[38..42].try_into().unwrap());
+
+        let peer_header = PeerHeader {
+            peer_distinguisher,
+            peer_flags,
+            peer_address,
+            peer_as,
+            peer_bgp_id,
+            timestamp_seconds,
+            timestamp_microseconds,
+        };
+
+        let mut offset = 42;
+
+        // Local Address (16 bytes)
+        let local_address_bytes: [u8; 16] = body[offset..offset + 16].try_into().unwrap();
+        let local_address = decode_bmp_ip_address(&local_address_bytes);
+        offset += 16;
+
+        // Local Port (2 bytes)
+        let local_port = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+
+        // Remote Port (2 bytes)
+        let remote_port = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+
+        // Sent OPEN Message
+        let (sent_open, sent_msg_len) = parse_bgp_open_from_bmp(&body, offset);
+        offset += sent_msg_len;
+
+        // Received OPEN Message
+        let (received_open, _) = parse_bgp_open_from_bmp(&body, offset);
+
+        // Information TLVs - skip
+        let information = Vec::new();
+
+        PeerUpMessage {
+            peer_header,
+            local_address,
+            local_port,
+            remote_port,
+            sent_open_message: sent_open,
+            received_open_message: received_open,
+            information,
+        }
+    }
+}
+
+pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
+    server
+        .client
+        .add_bmp_server(bmp_server.address())
+        .await
+        .unwrap();
+    bmp_server.accept().await;
+    bmp_server
+        .read_message_type(BmpMessageType::Initiation)
+        .await;
+}
+
+/// Assert that a PeerUpMessage matches expected values (ignoring timestamp and local_port)
+///
+/// Note: local_port is not checked because it's an ephemeral port when the connection
+/// is initiated (not the listening port).
+pub fn assert_bmp_peer_up_msg(
+    actual: &PeerUpMessage,
+    expected_peer_address: IpAddr,
+    expected_peer_as: u32,
+    expected_peer_bgp_id: u32,
+    expected_local_address: IpAddr,
+    expected_remote_port: u16,
+) {
+    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
+    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
+    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
+    assert_eq!(actual.local_address, expected_local_address);
+    assert_eq!(actual.remote_port, expected_remote_port);
+}
