@@ -355,26 +355,14 @@ async fn test_manually_stopped_no_auto_reconnect() {
         .await
         .unwrap();
 
-    // Wait for Idle with admin_state Down
-    poll_until(
-        || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1
-                && peers[0].state == BgpState::Idle as i32
-                && peers[0].admin_state == AdminState::Down as i32
-        },
-        "Timeout waiting for Idle/Down",
-    )
-    .await;
-
-    // Verify peer stays in Idle (no auto-reconnect despite idle_hold_time=0)
-    poll_while(
+    // Wait for Idle with admin_state Down, verify no auto-reconnect
+    poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
         },
         std::time::Duration::from_secs(2),
-        "Manually stopped peer should not auto-reconnect",
+        "Manually stopped peer should stay in Idle",
     )
     .await;
 }

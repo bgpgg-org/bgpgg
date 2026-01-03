@@ -44,23 +44,13 @@ async fn test_add_peer_failure() {
     assert!(result.is_ok());
 
     // RFC 4271 Event 18: Connection fails without DelayOpenTimer -> Idle
-    poll_until(
-        || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
-        },
-        "Peer should reach Idle state after connection failure",
-    )
-    .await;
-
-    // Verify peer stays in Idle (will retry via IdleHoldTimer)
-    poll_while(
+    poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
         },
         std::time::Duration::from_secs(1),
-        "Peer should stay in Idle state",
+        "Peer should be in Idle state",
     )
     .await;
 }

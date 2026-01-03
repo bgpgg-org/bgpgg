@@ -831,6 +831,17 @@ where
     }
 }
 
+/// Wait until condition becomes true, then verify it stays stable for a duration.
+/// Combines poll_until + poll_while to prevent race conditions.
+pub async fn poll_until_stable<F, Fut>(check: F, stable_duration: Duration, fail_message: &str)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    poll_until(&check, fail_message).await;
+    poll_while(check, stable_duration, fail_message).await;
+}
+
 /// Verify peer statistics
 ///
 /// # Arguments

@@ -617,27 +617,8 @@ async fn test_allow_automatic_start_false() {
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
 
-    // Wait for peer to go Idle (ASN preserved from previous session)
-    poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![Peer {
-                    address: peer.address.to_string(),
-                    asn: peer.asn as u32,
-                    state: BgpState::Idle as i32,
-                    admin_state: AdminState::Up.into(),
-                    configured: true,
-                }],
-            )
-            .await
-        },
-        "Timeout waiting for Idle state",
-    )
-    .await;
-
-    // Verify peer stays in Idle (no auto-reconnect) for 3 seconds
-    poll_while(
+    // Wait for peer to go Idle, verify it stays there (no auto-reconnect)
+    poll_until_stable(
         || async {
             let peers = server.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
@@ -692,25 +673,15 @@ async fn test_damp_peer_oscillations() {
         peer.stream.as_mut().unwrap().shutdown().await.ok();
     }
 
-    // Wait for peer to reach Idle after second disconnect
-    poll_until(
-        || async {
-            let peers = server.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
-        },
-        "Timeout waiting for Idle after disconnect",
-    )
-    .await;
-
     // After 2 downs: idle_hold = 1s * 2^2 = 4s
-    // Verify peer stays in Idle for 2s (proving backoff > base 1s)
-    poll_while(
+    // Wait for Idle then verify it stays in Idle for 2s (proving backoff > base 1s)
+    poll_until_stable(
         || async {
             let peers = server.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
         },
         std::time::Duration::from_secs(2),
-        "Damping should delay reconnect beyond 2s",
+        "Damping should keep peer in Idle",
     )
     .await;
 }

@@ -1453,8 +1453,8 @@ async fn test_well_known_communities() {
         .await
         .expect("Failed to add route");
 
-    // Poll for 3 seconds: only normal route propagates, only 1 UPDATE sent
-    poll_while(
+    // Wait for route to propagate, then verify stability
+    poll_until_stable(
         || async {
             let Ok(routes) = server2.client.get_routes().await else {
                 return false;
@@ -1485,7 +1485,7 @@ async fn test_well_known_communities() {
                 .is_some_and(|s| s.update_sent == 1)
         },
         std::time::Duration::from_secs(3),
-        "Route propagation and UPDATE count validation",
+        "Only normal route should propagate with 1 UPDATE",
     )
     .await;
 }
