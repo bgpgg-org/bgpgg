@@ -78,13 +78,6 @@ fn parse_peer_header(body: &[u8]) -> PeerHeader {
     }
 }
 
-#[allow(dead_code)]
-pub struct BmpMessageHeader {
-    pub version: u8,
-    pub length: u32,
-    pub message_type: u8,
-}
-
 /// Fake BMP server for testing
 pub struct FakeBmpServer {
     listener: TcpListener,
@@ -110,7 +103,7 @@ impl FakeBmpServer {
         self.stream = Some(stream);
     }
 
-    pub async fn read_message(&mut self) -> (BmpMessageHeader, Vec<u8>) {
+    pub async fn read_message(&mut self) -> (u8, Vec<u8>) {
         let stream = self.stream.as_mut().unwrap();
 
         // Read BMP common header (6 bytes)
@@ -129,30 +122,13 @@ impl FakeBmpServer {
         let mut body = vec![0u8; body_len];
         stream.read_exact(&mut body).await.unwrap();
 
-        (
-            BmpMessageHeader {
-                version,
-                length,
-                message_type,
-            },
-            body,
-        )
-    }
-
-    pub async fn read_message_type(&mut self, expected: BmpMessageType) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            expected.as_u8(),
-            "Expected {:?} message",
-            expected
-        );
+        (message_type, body)
     }
 
     pub async fn read_peer_up(&mut self) -> PeerUpMessage {
-        let (header, body) = self.read_message().await;
+        let (message_type, body) = self.read_message().await;
         assert_eq!(
-            header.message_type,
+            message_type,
             BmpMessageType::PeerUpNotification.as_u8(),
             "Expected PeerUpNotification message"
         );
@@ -195,9 +171,9 @@ impl FakeBmpServer {
     }
 
     pub async fn read_initiation(&mut self) -> InitiationMessage {
-        let (header, body) = self.read_message().await;
+        let (message_type, body) = self.read_message().await;
         assert_eq!(
-            header.message_type,
+            message_type,
             BmpMessageType::Initiation.as_u8(),
             "Expected Initiation message"
         );
@@ -223,9 +199,9 @@ impl FakeBmpServer {
     }
 
     pub async fn read_peer_down(&mut self) -> PeerDownMessage {
-        let (header, body) = self.read_message().await;
+        let (message_type, body) = self.read_message().await;
         assert_eq!(
-            header.message_type,
+            message_type,
             BmpMessageType::PeerDownNotification.as_u8(),
             "Expected PeerDownNotification message"
         );
