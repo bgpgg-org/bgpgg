@@ -20,11 +20,12 @@ use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
     self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
-    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse,
+    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
     AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
     DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
     GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
@@ -391,6 +392,95 @@ impl BgpService for BgpGrpcService {
             })),
             Err(_) => Err(Status::internal("request processing failed")),
         }
+    }
+
+    async fn add_route_stream(
+        &self,
+        request: Request<tonic::Streaming<AddRouteRequest>>,
+    ) -> Result<Response<AddRouteStreamResponse>, Status> {
+        let mut stream = request.into_inner();
+        let mut count = 0u64;
+
+        while let Some(req) = stream.next().await {
+            let req = req?;
+
+            // Parse prefix (CIDR format like "10.0.0.0/24")
+            let parts: Vec<&str> = req.prefix.split('/').collect();
+            if parts.len() != 2 {
+                continue; // Skip invalid routes
+            }
+
+            let address: Ipv4Addr = match parts[0].parse() {
+                Ok(addr) => addr,
+                Err(_) => continue,
+            };
+            let prefix_length: u8 = match parts[1].parse() {
+                Ok(len) => len,
+                Err(_) => continue,
+            };
+
+            let prefix = IpNetwork::V4(Ipv4Net {
+                address,
+                prefix_length,
+            });
+
+            // Parse next_hop
+            let next_hop: Ipv4Addr = match req.next_hop.parse() {
+                Ok(nh) => nh,
+                Err(_) => continue,
+            };
+
+            // Convert proto Origin to Rust Origin
+            let origin = match req.origin {
+                0 => Origin::IGP,
+                1 => Origin::EGP,
+                2 => Origin::INCOMPLETE,
+                _ => continue,
+            };
+
+            // Convert proto AS_PATH segments to internal format
+            let as_path: Vec<AsPathSegment> = req
+                .as_path
+                .into_iter()
+                .map(|seg| AsPathSegment {
+                    segment_type: match seg.segment_type {
+                        0 => AsPathSegmentType::AsSet,
+                        1 => AsPathSegmentType::AsSequence,
+                        _ => AsPathSegmentType::AsSequence,
+                    },
+                    segment_len: seg.asns.len() as u8,
+                    asn_list: seg.asns.into_iter().map(|asn| asn as u16).collect(),
+                })
+                .collect();
+
+            // Send request to BGP server
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let mgmt_req = MgmtOp::AddRoute {
+                prefix,
+                next_hop,
+                origin,
+                as_path,
+                local_pref: req.local_pref,
+                med: req.med,
+                atomic_aggregate: req.atomic_aggregate,
+                communities: req.communities,
+                response: tx,
+            };
+
+            if self.mgmt_request_tx.send(mgmt_req).await.is_err() {
+                break;
+            }
+
+            // Wait for response
+            if let Ok(Ok(())) = rx.await {
+                count += 1;
+            }
+        }
+
+        Ok(Response::new(AddRouteStreamResponse {
+            count,
+            message: format!("{} routes added", count),
+        }))
     }
 
     async fn remove_route(
