@@ -14,275 +14,488 @@
 
 //! Tests for BMP (BGP Monitoring Protocol)
 
-mod common;
-pub use common::*;
+mod utils;
 
-use bgpgg::bmp::msg::{MessageType, BMP_VERSION};
-use bgpgg::config::Config;
-use bgpgg::grpc::proto::BgpState;
+pub use utils::bmp::*;
+pub use utils::*;
+
+use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::bmp::msg_termination::TerminationReason;
+use bgpgg::config::BmpConfig;
+use bgpgg::grpc::proto::{BgpState, Origin};
 use std::net::Ipv4Addr;
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
-
-#[allow(dead_code)]
-struct BmpMessageHeader {
-    version: u8,
-    length: u32,
-    message_type: u8,
-}
-
-/// Fake BMP server for testing
-struct FakeBmpServer {
-    listener: TcpListener,
-    stream: Option<TcpStream>,
-}
-
-impl FakeBmpServer {
-    async fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        Self {
-            listener,
-            stream: None,
-        }
-    }
-
-    fn address(&self) -> String {
-        let addr = self.listener.local_addr().unwrap();
-        format!("{}:{}", addr.ip(), addr.port())
-    }
-
-    async fn accept(&mut self) {
-        let (stream, _) = self.listener.accept().await.unwrap();
-        self.stream = Some(stream);
-    }
-
-    async fn read_message(&mut self) -> (BmpMessageHeader, Vec<u8>) {
-        let stream = self.stream.as_mut().unwrap();
-
-        // Read BMP common header (6 bytes)
-        let mut header_buf = [0u8; 6];
-        stream.read_exact(&mut header_buf).await.unwrap();
-
-        let version = header_buf[0];
-        let length =
-            u32::from_be_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]]);
-        let message_type = header_buf[5];
-
-        assert_eq!(version, BMP_VERSION, "Invalid BMP version");
-
-        // Read message body (length includes the 6-byte header)
-        let body_len = length as usize - 6;
-        let mut body = vec![0u8; body_len];
-        stream.read_exact(&mut body).await.unwrap();
-
-        (
-            BmpMessageHeader {
-                version,
-                length,
-                message_type,
-            },
-            body,
-        )
-    }
-
-    async fn read_initiation(&mut self) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            MessageType::Initiation.as_u8(),
-            "Expected Initiation message"
-        );
-    }
-
-    async fn read_peer_up(&mut self) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            MessageType::PeerUpNotification.as_u8(),
-            "Expected PeerUp message"
-        );
-    }
-
-    async fn read_peer_down(&mut self) {
-        let (header, _body) = self.read_message().await;
-        assert_eq!(
-            header.message_type,
-            MessageType::PeerDownNotification.as_u8(),
-            "Expected PeerDown message"
-        );
-    }
-}
 
 #[tokio::test]
 async fn test_add_bmp_server_sends_initiation() {
     let mut bmp_server = FakeBmpServer::new().await;
     let bmp_addr = bmp_server.address();
 
-    let mut server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-        true,
-    ))
-    .await;
+    let mut server = start_test_server(test_config(65001, 1)).await;
 
-    server
-        .client
-        .add_bmp_server(bmp_addr)
-        .await
-        .unwrap();
+    server.client.add_bmp_server(bmp_addr, None).await.unwrap();
 
     bmp_server.accept().await;
-    bmp_server.read_initiation().await;
+    bmp_server
+        .assert_bmp_initiation(&server.config.sys_name(), &server.config.sys_descr())
+        .await;
 }
 
 #[tokio::test]
 async fn test_add_bmp_server_with_existing_peers() {
-    let mut server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-        true,
-    ))
-    .await;
+    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(90)).await;
 
-    let peer1 = start_test_server(Config::new(
-        65002,
-        "127.0.0.2:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        true,
-    ))
-    .await;
-
-    let peer2 = start_test_server(Config::new(
-        65003,
-        "127.0.0.3:0",
-        Ipv4Addr::new(3, 3, 3, 3),
-        90,
-        true,
-    ))
-    .await;
-
-    // Add both peers
-    server
+    // Announce routes from peer1
+    peer1
         .client
-        .add_peer(format!("{}:{}", peer1.address, peer1.bgp_port), None)
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
         .await
         .unwrap();
 
-    server
+    // Announce routes from peer2
+    peer2
         .client
-        .add_peer(format!("{}:{}", peer2.address, peer2.bgp_port), None)
+        .add_route(
+            "10.0.1.0/24".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
         .await
         .unwrap();
 
-    // Wait for both peers to establish
+    // Wait for routes to be received
     poll_until(
         || async {
-            let peers = server.client.get_peers().await.unwrap();
-            peers.len() == 2
-                && peers.iter().all(|p| p.state == BgpState::Established as i32)
+            let routes = server.client.get_routes().await.unwrap();
+            routes.len() == 2
         },
-        "Timeout waiting for peers to establish",
+        "Timeout waiting for routes",
     )
     .await;
 
-    // Now add BMP server
-    let mut bmp_server = FakeBmpServer::new().await;
-    let bmp_addr = bmp_server.address();
-
+    // Add an idle peer (connection will fail - address doesn't exist)
     server
         .client
-        .add_bmp_server(bmp_addr)
+        .add_peer("192.168.255.1:179".to_string(), None)
         .await
         .unwrap();
 
-    bmp_server.accept().await;
+    // Wait for it to reach Idle state
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 3 && peers.iter().any(|p| p.state == BgpState::Idle as i32)
+        },
+        "Timeout waiting for idle peer",
+    )
+    .await;
 
-    // Should receive initiation first
-    bmp_server.read_initiation().await;
+    let mut bmp_server = FakeBmpServer::new().await;
+    setup_bmp_monitoring(&mut server, &mut bmp_server).await;
 
-    // Should receive peer up for both existing peers
-    bmp_server.read_peer_up().await;
-    bmp_server.read_peer_up().await;
+    // Should receive peer up for ONLY the 2 established peers (not the idle one)
+    let peer_up_1 = bmp_server.read_peer_up().await;
+    let peer_up_2 = bmp_server.read_peer_up().await;
+
+    // Sort peer_up messages by peer address
+    let mut peer_ups = [peer_up_1, peer_up_2];
+    peer_ups.sort_by_key(|p| p.peer_header.peer_address);
+
+    // Sort peers by address
+    let mut peers = [peer1, peer2];
+    peers.sort_by_key(|p| p.address);
+
+    // Verify each peer up message
+    assert_bmp_peer_up_msg(
+        &peer_ups[0],
+        server.address,
+        peers[0].address,
+        peers[0].asn as u32,
+        u32::from(peers[0].client.router_id),
+        peers[0].bgp_port,
+    );
+    assert_bmp_peer_up_msg(
+        &peer_ups[1],
+        server.address,
+        peers[1].address,
+        peers[1].asn as u32,
+        u32::from(peers[1].client.router_id),
+        peers[1].bgp_port,
+    );
+
+    // Should receive route monitoring messages (2 routes per peer = 4 total in mesh)
+    // Each peer's Adj-RIB-In contains routes received from the other peer too
+    let rm1 = bmp_server.read_route_monitoring().await;
+    let rm2 = bmp_server.read_route_monitoring().await;
+    let rm3 = bmp_server.read_route_monitoring().await;
+    let rm4 = bmp_server.read_route_monitoring().await;
+
+    // Both routes in mesh
+    let route_1 = [IpNetwork::V4(Ipv4Net {
+        address: Ipv4Addr::new(10, 0, 0, 0),
+        prefix_length: 24,
+    })];
+    let route_2 = [IpNetwork::V4(Ipv4Net {
+        address: Ipv4Addr::new(10, 0, 1, 0),
+        prefix_length: 24,
+    })];
+
+    // Verify each message
+    for rm in &[&rm1, &rm2, &rm3, &rm4] {
+        let peer_addr = rm.peer_header().peer_address;
+        let peer = peers.iter().find(|p| p.address == peer_addr).unwrap();
+        let nlri = rm.bgp_update().nlri_list();
+
+        // Must be one of the two routes
+        assert!(nlri == &route_1[..] || nlri == &route_2[..]);
+
+        assert_bmp_route_monitoring_msg(
+            rm,
+            peer.address,
+            peer.asn as u32,
+            u32::from(peer.client.router_id),
+            0, // peer_flags (L=0 for pre-policy)
+            nlri,
+            &[], // no withdrawals
+        );
+    }
 }
 
 #[tokio::test]
 async fn test_peer_up_down() {
     let mut bmp_server = FakeBmpServer::new().await;
-    let bmp_addr = bmp_server.address();
+    let mut server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
 
-    let mut server1 = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-        true,
-    ))
-    .await;
-
-    let server2 = start_test_server(Config::new(
-        65002,
-        "127.0.0.2:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-        true,
-    ))
-    .await;
-
-    // Add BMP server to server1
-    server1
-        .client
-        .add_bmp_server(bmp_addr.clone())
-        .await
-        .unwrap();
-
-    // Accept BMP connection
-    bmp_server.accept().await;
-
-    // Read Initiation message sent immediately upon adding destination
-    bmp_server.read_initiation().await;
+    setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
 
     // Add BGP peer
-    server1
-        .client
-        .add_peer(format!("{}:{}", server2.address, server2.bgp_port), None)
-        .await
-        .unwrap();
+    server1.add_peer(&server2).await;
 
     // Wait for peer to establish
-    poll_until(
-        || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Established as i32
-        },
-        "Timeout waiting for peer to establish",
-    )
-    .await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
 
-    // Read PeerUp message (only from server1, which has BMP configured)
-    bmp_server.read_peer_up().await;
+    // Read and verify PeerUp message
+    bmp_server
+        .assert_peer_up(
+            server1.address,
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            server2.bgp_port,
+        )
+        .await;
 
     // Remove peer
-    server1
+    server1.remove_peer(&server2).await;
+
+    // Wait for peer to be removed
+    poll_peers(&server1, vec![]).await;
+
+    // Read and verify PeerDown message
+    bmp_server
+        .assert_peer_down(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            &bgpgg::types::PeerDownReason::PeerDeConfigured,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_route_monitoring_on_updates() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let (mut server1, mut server2) = setup_two_peered_servers(Some(90)).await;
+
+    setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
+
+    // Read PeerUp message (sent when BMP server added to already-established peer)
+    let _peer_up = bmp_server.read_peer_up().await;
+
+    // Announce routes from server2
+    server2
         .client
-        .remove_peer(server2.address.clone())
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
         .await
         .unwrap();
 
-    // Wait for peer to be removed
+    server2
+        .client
+        .add_route(
+            "10.0.1.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for routes to be received
     poll_until(
         || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.is_empty()
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 2
         },
-        "Timeout waiting for peer to be removed",
+        "Timeout waiting for routes",
     )
     .await;
 
-    // Read PeerDown message (only from server1)
-    bmp_server.read_peer_down().await;
+    // Should receive 2 RouteMonitoring messages (one per UPDATE from peer)
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0, // peer_flags (L=0 for pre-policy)
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })],
+            &[], // no withdrawals
+        )
+        .await;
+
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 1, 0),
+                prefix_length: 24,
+            })],
+            &[],
+        )
+        .await;
+
+    // Withdraw one route
+    server2
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+
+    // Wait for route to be withdrawn
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 1
+        },
+        "Timeout waiting for route withdrawal",
+    )
+    .await;
+
+    // Add a new route
+    server2
+        .client
+        .add_route(
+            "10.0.2.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for new route
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 2
+        },
+        "Timeout waiting for new route",
+    )
+    .await;
+
+    // Should receive RouteMonitoring for withdrawal
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[], // no announcements
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })],
+        )
+        .await;
+
+    // Should receive RouteMonitoring for new announcement
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 2, 0),
+                prefix_length: 24,
+            })],
+            &[], // no withdrawals
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_bmp_termination_on_remove() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let mut server = start_test_server(test_config(65001, 1)).await;
+
+    setup_bmp_monitoring(&mut server, &mut bmp_server).await;
+
+    // Remove the BMP server destination
+    server
+        .client
+        .remove_bmp_server(bmp_server.address())
+        .await
+        .unwrap();
+
+    // Should receive Termination message with reason code PermanentlyAdminClose
+    bmp_server
+        .assert_termination(TerminationReason::PermanentlyAdminClose)
+        .await;
+}
+
+#[tokio::test]
+async fn test_bmp_statistics() {
+    use bgpgg::bmp::msg_statistics::StatType;
+
+    let mut bmp_server = FakeBmpServer::new().await;
+    let mut server1 = start_test_server(test_config(65001, 1)).await;
+    let mut server2 = start_test_server(test_config(65002, 2)).await;
+
+    // Add BMP server with statistics enabled (1 second interval)
+    server1
+        .client
+        .add_bmp_server(bmp_server.address(), Some(1))
+        .await
+        .unwrap();
+
+    // Accept BMP connection and read initiation
+    bmp_server.accept().await;
+    let _initiation = bmp_server.read_initiation().await;
+
+    // Add BGP peer
+    server1.add_peer(&server2).await;
+
+    // Wait for peer to establish
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+    // Read PeerUp message
+    let _peer_up = bmp_server.read_peer_up().await;
+
+    // Add routes from server2
+    server2
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    server2
+        .client
+        .add_route(
+            "10.0.1.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for routes to be received
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 2
+        },
+        "Timeout waiting for routes",
+    )
+    .await;
+
+    // Read route monitoring messages
+    let _rm1 = bmp_server.read_route_monitoring().await;
+    let _rm2 = bmp_server.read_route_monitoring().await;
+
+    // Wait for statistics message (should arrive within ~1-2 seconds)
+    bmp_server
+        .assert_statistics(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            &[(StatType::RoutesInAdjRibIn as u16, 2)],
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_configured_bmp_server() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let bmp_addr = bmp_server.address();
+
+    // Create config with BMP server configured
+    let mut config = test_config(65001, 1);
+    config.bmp_servers.push(BmpConfig {
+        address: bmp_addr.to_string(),
+        statistics_timeout: None,
+    });
+
+    let server = start_test_server(config).await;
+
+    // BMP client should automatically connect and send initiation
+    bmp_server.accept().await;
+    bmp_server
+        .assert_bmp_initiation(&server.config.sys_name(), &server.config.sys_descr())
+        .await;
+
+    // Verify server is in the list
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0], bmp_addr.to_string());
 }

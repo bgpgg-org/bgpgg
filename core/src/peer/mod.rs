@@ -18,6 +18,7 @@ use crate::bgp::msg_update::UpdateMessage;
 use crate::config::PeerConfig;
 use crate::debug;
 use crate::rib::rib_in::AdjRibIn;
+use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use std::fmt;
@@ -90,6 +91,7 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
     GetStatistics(oneshot::Sender<PeerStatistics>),
+    GetAdjRibIn(oneshot::Sender<Vec<Route>>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
     /// RFC 4271 Event 1: ManualStart - admin starts the peer connection
@@ -129,6 +131,7 @@ pub struct PeerStatistics {
     pub keepalive_received: u64,
     pub update_received: u64,
     pub notification_received: u64,
+    pub adj_rib_in_count: u64,
 }
 
 /// TCP connection state - only present when connected

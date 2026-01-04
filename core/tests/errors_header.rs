@@ -14,8 +14,8 @@
 
 //! Tests for BGP message header error handling per RFC 4271 Section 6.1
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg::BGP_MARKER;
 use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError};

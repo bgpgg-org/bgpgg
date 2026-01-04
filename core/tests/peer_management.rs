@@ -14,8 +14,8 @@
 
 //! Tests for peer management: add, remove, configure, passive mode, delay open, manual stop, MRAI
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::Config;
@@ -55,7 +55,7 @@ async fn test_remove_peer() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address,
+                &server2.address.to_string(),
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -115,7 +115,7 @@ async fn test_remove_peer_withdraw_routes() {
             prefix: "10.2.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address, // eBGP: NEXT_HOP rewritten to sender's local address
+                &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -173,8 +173,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -190,8 +190,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -207,8 +207,8 @@ async fn test_remove_peer_four_node_mesh() {
                 prefix: "10.4.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65004])],
-                    &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.clone(),
+                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    server4.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -224,7 +224,7 @@ async fn test_remove_peer_four_node_mesh() {
     // Remove Server4's peer from Server1 via API call
     server1
         .client
-        .remove_peer(server4.address.clone())
+        .remove_peer(server4.address.to_string())
         .await
         .expect("Failed to remove peer");
 
@@ -241,8 +241,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65002, 65004])],
-                        &server2.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server2.address.clone(),
+                        &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server2.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -258,8 +258,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65004])],
-                        &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.clone(),
+                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server4.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -275,8 +275,8 @@ async fn test_remove_peer_four_node_mesh() {
                     prefix: "10.4.0.0/24".to_string(),
                     paths: vec![build_path(
                         vec![as_sequence(vec![65004])],
-                        &server4.address, // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.clone(),
+                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        server4.address.to_string(),
                         Origin::Igp,
                         Some(100),
                         None,
@@ -351,30 +351,18 @@ async fn test_manually_stopped_no_auto_reconnect() {
     // Disable the peer
     server1
         .client
-        .disable_peer(server2.address.clone())
+        .disable_peer(server2.address.to_string())
         .await
         .unwrap();
 
-    // Wait for Idle with admin_state Down
-    poll_until(
-        || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1
-                && peers[0].state == BgpState::Idle as i32
-                && peers[0].admin_state == AdminState::Down as i32
-        },
-        "Timeout waiting for Idle/Down",
-    )
-    .await;
-
-    // Verify peer stays in Idle (no auto-reconnect despite idle_hold_time=0)
-    poll_while(
+    // Wait for Idle with admin_state Down, verify no auto-reconnect
+    poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
         },
         std::time::Duration::from_secs(2),
-        "Manually stopped peer should not auto-reconnect",
+        "Manually stopped peer should stay in Idle",
     )
     .await;
 }
@@ -396,15 +384,9 @@ async fn test_reject_unconfigured_peer() {
         .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     configured_peer.handshake_keepalive().await;
-    poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![configured_peer.to_peer(BgpState::Established, true)],
-            )
-            .await
-        },
-        "configured peer should be established",
+    poll_peers(
+        &server,
+        vec![configured_peer.to_peer(BgpState::Established, true)],
     )
     .await;
 
@@ -494,7 +476,7 @@ async fn test_manual_stop() {
         // Send ManualStop
         server
             .client
-            .disable_peer(fake_peer.address.clone())
+            .disable_peer(fake_peer.address.to_string())
             .await
             .expect("Failed to disable peer");
 

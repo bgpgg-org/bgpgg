@@ -14,8 +14,8 @@
 
 //! Basic management operation tests
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin};
@@ -44,23 +44,13 @@ async fn test_add_peer_failure() {
     assert!(result.is_ok());
 
     // RFC 4271 Event 18: Connection fails without DelayOpenTimer -> Idle
-    poll_until(
-        || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
-        },
-        "Peer should reach Idle state after connection failure",
-    )
-    .await;
-
-    // Verify peer stays in Idle (will retry via IdleHoldTimer)
-    poll_while(
+    poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
             peers.len() == 1 && peers[0].state == BgpState::Idle as i32
         },
         std::time::Duration::from_secs(1),
-        "Peer should stay in Idle state",
+        "Peer should be in Idle state",
     )
     .await;
 }
@@ -85,11 +75,7 @@ async fn test_add_peer_success() {
     .await;
 
     // Add peer via gRPC (should succeed - server2 is listening)
-    let result = server1
-        .client
-        .add_peer(format!("127.0.0.1:{}", server2.bgp_port), None)
-        .await;
-    assert!(result.is_ok());
+    server1.add_peer(&server2).await;
 
     // Wait for peering to establish
     // server1 connected to server2, so server2 is configured from server1's view
@@ -132,8 +118,7 @@ async fn test_remove_peer_success() {
     assert_eq!(peers.len(), 1);
 
     // Remove peer
-    let result = server1.client.remove_peer(server2.address.clone()).await;
-    assert!(result.is_ok());
+    server1.remove_peer(&server2).await;
 
     // Verify peer is gone
     let peers = server1.client.get_peers().await.unwrap();
@@ -161,7 +146,7 @@ async fn test_get_peers_with_peers() {
 
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].address, server2.address);
+    assert_eq!(peers[0].address, server2.address.to_string());
     assert_eq!(peers[0].asn, server2.asn as u32);
     assert_eq!(peers[0].state, BgpState::Established as i32);
 }
@@ -187,12 +172,12 @@ async fn test_get_peer_success() {
 
     let (peer_opt, stats_opt) = server1
         .client
-        .get_peer(server2.address.clone())
+        .get_peer(server2.address.to_string())
         .await
         .unwrap();
 
     let peer = peer_opt.unwrap();
-    assert_eq!(peer.address, server2.address);
+    assert_eq!(peer.address, server2.address.to_string());
     assert_eq!(peer.asn, server2.asn as u32);
     assert_eq!(peer.state, BgpState::Established as i32);
 
@@ -284,7 +269,7 @@ async fn test_disable_enable_peer() {
     // Disable peer
     server1
         .client
-        .disable_peer(server2.address.clone())
+        .disable_peer(server2.address.to_string())
         .await
         .unwrap();
 
@@ -303,7 +288,7 @@ async fn test_disable_enable_peer() {
     // Enable peer
     server1
         .client
-        .enable_peer(server2.address.clone())
+        .enable_peer(server2.address.to_string())
         .await
         .unwrap();
 
@@ -336,13 +321,13 @@ async fn test_add_bmp_server() {
 
     let result = server
         .client
-        .add_bmp_server("127.0.0.1:11019".to_string())
+        .add_bmp_server("127.0.0.1:11019".to_string(), None)
         .await;
     assert!(result.is_ok());
 
     let result = server
         .client
-        .add_bmp_server("127.0.0.1:11020".to_string())
+        .add_bmp_server("127.0.0.1:11020".to_string(), None)
         .await;
     assert!(result.is_ok());
 
@@ -365,7 +350,7 @@ async fn test_remove_bmp_server() {
 
     server
         .client
-        .add_bmp_server("127.0.0.1:11019".to_string())
+        .add_bmp_server("127.0.0.1:11019".to_string(), None)
         .await
         .unwrap();
 

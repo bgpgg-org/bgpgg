@@ -17,7 +17,7 @@ use super::utils::{InformationTlv, TerminationType};
 
 #[derive(Clone, Debug)]
 pub struct TerminationMessage {
-    information: Vec<InformationTlv>,
+    pub information: Vec<InformationTlv>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -30,7 +30,7 @@ pub enum TerminationReason {
 }
 
 impl TerminationReason {
-    fn as_u16(self) -> u16 {
+    pub fn as_u16(self) -> u16 {
         match self {
             TerminationReason::AdminClose => 0,
             TerminationReason::Unspecified => 1,

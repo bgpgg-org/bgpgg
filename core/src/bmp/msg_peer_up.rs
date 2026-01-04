@@ -23,13 +23,13 @@ use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
 pub struct PeerUpMessage {
-    peer_header: PeerHeader,
-    local_address: IpAddr,
-    local_port: u16,
-    remote_port: u16,
-    sent_open_message: OpenMessage,
-    received_open_message: OpenMessage,
-    information: Vec<InformationTlv>, // Optional string TLVs (RFC 7854 Section 4.10)
+    pub peer_header: PeerHeader,
+    pub local_address: IpAddr,
+    pub local_port: u16,
+    pub remote_port: u16,
+    pub sent_open_message: OpenMessage,
+    pub received_open_message: OpenMessage,
+    pub information: Vec<InformationTlv>, // Optional string TLVs (RFC 7854 Section 4.10)
 }
 
 impl PeerUpMessage {

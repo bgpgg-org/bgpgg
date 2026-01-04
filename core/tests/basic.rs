@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route};
@@ -51,7 +51,7 @@ async fn test_announce_withdraw() {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65002])],
-                &server2.address,
+                &server2.address.to_string(),
                 peer_addr.clone(),
                 Origin::Igp,
                 Some(100),
@@ -113,8 +113,8 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address,
-                    server1.address.clone(),
+                    &server1.address.to_string(),
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -130,8 +130,8 @@ async fn test_announce_withdraw_mesh() {
                 prefix: "10.1.0.0/24".to_string(),
                 paths: vec![build_path(
                     vec![as_sequence(vec![65001])],
-                    &server1.address,
-                    server1.address.clone(),
+                    &server1.address.to_string(),
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -213,8 +213,8 @@ async fn test_announce_withdraw_four_node_mesh() {
         prefix: "10.1.0.0/24".to_string(),
         paths: vec![build_path(
             vec![as_sequence(vec![65001])],
-            &server1.address,
-            server1.address.clone(),
+            &server1.address.to_string(),
+            server1.address.to_string(),
             Origin::Igp,
             Some(100),
             None,
@@ -391,7 +391,7 @@ async fn test_ibgp_split_horizon() {
                 paths: vec![build_path(
                     vec![],        // Empty AS_PATH for locally originated route in iBGP
                     "192.168.1.1", // iBGP: NEXT_HOP preserved
-                    server1.address.clone(),
+                    server1.address.to_string(),
                     Origin::Igp,
                     Some(100),
                     None,
@@ -488,8 +488,8 @@ async fn test_as_loop_prevention() {
             prefix: "10.1.0.0/24".to_string(),
             paths: vec![build_path(
                 vec![as_sequence(vec![65001])],
-                &server1_a.address,
-                server1_a.address.clone(),
+                &server1_a.address.to_string(),
+                server1_a.address.to_string(),
                 Origin::Igp,
                 Some(100),
                 None,
@@ -507,7 +507,7 @@ async fn test_as_loop_prevention() {
         || async {
             let (_, stats) = server1_b
                 .client
-                .get_peer(server2.address.clone())
+                .get_peer(server2.address.to_string())
                 .await
                 .expect("Failed to get peer");
             stats.is_some_and(|s| s.update_received == 1)

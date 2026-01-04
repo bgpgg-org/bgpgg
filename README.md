@@ -1,6 +1,6 @@
 # bgpgg
 
-A BGP implementation written in Rust.
+A BGP router written in Rust, designed for speed and observability.
 
 ## Quick Start
 

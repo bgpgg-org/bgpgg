@@ -14,8 +14,8 @@
 
 //! Tests for BGP UPDATE message error handling per RFC 4271 Section 6.3
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};

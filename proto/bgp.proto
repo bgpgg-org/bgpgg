@@ -225,6 +225,7 @@ message UnknownAttribute {
 // BMP server management
 message AddBmpServerRequest {
     string address = 1;  // IP:PORT format (e.g., "127.0.0.1:11019")
+    optional uint64 statistics_timeout = 2;  // Statistics interval in seconds (0 or unset = disabled)
 }
 
 message AddBmpServerResponse {

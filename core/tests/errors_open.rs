@@ -14,8 +14,8 @@
 
 //! Tests for BGP OPEN message error handling per RFC 4271 Section 6.2
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg::Message;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};

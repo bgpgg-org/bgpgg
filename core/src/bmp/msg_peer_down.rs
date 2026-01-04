@@ -50,8 +50,8 @@ impl PeerDownReason {
 
 #[derive(Clone, Debug)]
 pub struct PeerDownMessage {
-    peer_header: PeerHeader,
-    reason: PeerDownReason,
+    pub peer_header: PeerHeader,
+    pub reason: PeerDownReason,
 }
 
 impl PeerDownMessage {

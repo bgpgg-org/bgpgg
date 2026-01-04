@@ -14,8 +14,8 @@
 
 //! Tests for BGP session and timer errors per RFC 4271 Sections 6.5, 6.6
 
-mod common;
-pub use common::*;
+mod utils;
+pub use utils::*;
 
 use bgpgg::bgp::msg_notification::BgpError;
 use bgpgg::config::Config;

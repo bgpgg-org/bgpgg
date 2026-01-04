@@ -35,7 +35,8 @@ pub struct TestServer {
     pub client: BgpClient,
     pub bgp_port: u16,
     pub asn: u16,
-    pub address: String, // IP address the server is bound to (no port)
+    pub address: std::net::IpAddr, // IP address the server is bound to (no port)
+    pub config: Config,
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -62,12 +63,28 @@ impl TestServer {
     /// Converts a TestServer to a Peer struct for use in test assertions
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
-            address: self.address.clone(),
+            address: self.address.to_string(),
             asn: self.asn as u32,
             state: state.into(),
             admin_state: AdminState::Up.into(),
             configured,
         }
+    }
+
+    /// Add a peer to this server
+    pub async fn add_peer(&mut self, peer: &TestServer) {
+        self.client
+            .add_peer(format!("{}:{}", peer.address, peer.bgp_port), None)
+            .await
+            .unwrap();
+    }
+
+    /// Remove a peer from this server
+    pub async fn remove_peer(&mut self, peer: &TestServer) {
+        self.client
+            .remove_peer(peer.address.to_string())
+            .await
+            .unwrap();
     }
 }
 
@@ -133,24 +150,41 @@ pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
     routes_map == expected_map
 }
 
+/// Helper to create a standard test config with sane defaults
+pub fn test_config(asn: u16, ip_last_octet: u8) -> Config {
+    let ip = format!("127.0.0.{}", ip_last_octet);
+    let mut config = Config::new(
+        asn,
+        &format!("{}:0", ip),
+        Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
+        90,
+        true,
+    );
+    config.sys_name = Some(format!("test-bgpgg-{}", ip));
+    config.sys_descr = Some("test bgpgg router".to_string());
+    config
+}
+
 /// Starts a single BGP server with gRPC interface for testing
 pub async fn start_test_server(config: Config) -> TestServer {
     use tokio::net::TcpListener;
 
     let router_id = config.router_id;
     let asn = config.asn;
-    let bind_ip = config
+    let bind_ip: std::net::IpAddr = config
         .listen_addr
         .split(':')
         .next()
         .unwrap_or("127.0.0.1")
-        .to_string();
+        .parse()
+        .expect("valid IP address");
 
     // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
 
+    let config_clone = config.clone();
     let server = BgpServer::new(config).expect("valid server config");
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
@@ -213,6 +247,7 @@ pub async fn start_test_server(config: Config) -> TestServer {
         bgp_port,
         asn,
         address: bind_ip,
+        config: config_clone,
         runtime: Some(runtime),
     }
 }
@@ -713,7 +748,7 @@ pub async fn wait_convergence(
                 }
             }
             for (server, peer, expected) in stats_expectations {
-                let Ok((_, stats)) = server.client.get_peer(peer.address.clone()).await else {
+                let Ok((_, stats)) = server.client.get_peer(peer.address.to_string()).await else {
                     return false;
                 };
                 let Some(s) = stats else {
@@ -796,6 +831,17 @@ where
     }
 }
 
+/// Wait until condition becomes true, then verify it stays stable for a duration.
+/// Combines poll_until + poll_while to prevent race conditions.
+pub async fn poll_until_stable<F, Fut>(check: F, stable_duration: Duration, fail_message: &str)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    poll_until(&check, fail_message).await;
+    poll_while(check, stable_duration, fail_message).await;
+}
+
 /// Verify peer statistics
 ///
 /// # Arguments
@@ -860,7 +906,7 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
     // Connect each server to the next one: s0 -> s1 -> s2 -> ...
     for i in 0..servers.len() - 1 {
         let next_port = servers[i + 1].bgp_port;
-        let next_address = servers[i + 1].address.clone();
+        let next_address = servers[i + 1].address;
 
         servers[i]
             .client
@@ -927,7 +973,7 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
     for i in 0..servers.len() {
         for j in (i + 1)..servers.len() {
             let peer_port = servers[j].bgp_port;
-            let peer_address = servers[j].address.clone();
+            let peer_address = servers[j].address;
 
             servers[i]
                 .client
@@ -980,6 +1026,15 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
 
     peers == expected_peers
+}
+
+/// Poll until server has expected peers
+pub async fn poll_peers(server: &TestServer, expected_peers: Vec<Peer>) {
+    poll_until(
+        || async { verify_peers(server, expected_peers.clone()).await },
+        "Timeout waiting for peers to match expected state",
+    )
+    .await;
 }
 
 /// Fake BGP peer for testing error handling

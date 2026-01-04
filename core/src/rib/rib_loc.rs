@@ -260,6 +260,7 @@ impl LocRib {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
+    use crate::bgp::utils::Ipv4Net;
     use crate::test_helpers::*;
 
     fn test_peer_ip() -> IpAddr {
@@ -301,7 +302,7 @@ mod tests {
         let peer_ip = test_peer_ip();
 
         let prefix1 = create_test_prefix();
-        let prefix2 = IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+        let prefix2 = IpNetwork::V4(Ipv4Net {
             address: Ipv4Addr::new(10, 1, 0, 0),
             prefix_length: 24,
         });

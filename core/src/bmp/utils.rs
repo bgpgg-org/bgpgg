@@ -30,7 +30,7 @@ pub(super) fn encode_ip_address(addr: IpAddr) -> [u8; 16] {
 /// Initiation message Information TLV types
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
-pub(super) enum InitiationType {
+pub enum InitiationType {
     String = 0,
     SysDescr = 1,
     SysName = 2,
@@ -39,7 +39,7 @@ pub(super) enum InitiationType {
 /// Termination message Information TLV types
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
-pub(super) enum TerminationType {
+pub enum TerminationType {
     String = 0,
     Reason = 1,
 }
@@ -89,15 +89,15 @@ impl PeerDistinguisher {
     }
 }
 
-/// Information TLV used in Initiation and Termination messages (internal)
+/// Information TLV used in Initiation and Termination messages
 #[derive(Clone, Debug)]
-pub(super) struct InformationTlv {
-    info_type: u16,
-    info_value: Vec<u8>,
+pub struct InformationTlv {
+    pub info_type: u16,
+    pub info_value: Vec<u8>,
 }
 
 impl InformationTlv {
-    pub(super) fn new(info_type: u16, value: impl Into<Vec<u8>>) -> Self {
+    pub fn new(info_type: u16, value: impl Into<Vec<u8>>) -> Self {
         Self {
             info_type,
             info_value: value.into(),
@@ -113,9 +113,12 @@ impl InformationTlv {
     }
 }
 
-/// Per-Peer Header used in most BMP messages (internal encoding detail)
+/// Per-Peer Header size in bytes (RFC 7854 Section 4.2)
+pub const PEER_HEADER_SIZE: usize = 42;
+
+/// Per-Peer Header used in most BMP messages
 #[derive(Clone, Debug)]
-pub(super) struct PeerHeader {
+pub struct PeerHeader {
     pub peer_distinguisher: PeerDistinguisher,
     pub peer_flags: u8,
     pub peer_address: IpAddr,

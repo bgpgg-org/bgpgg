@@ -134,6 +134,7 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+    use crate::bgp::utils::Ipv4Net;
     use crate::config::MaxPrefixSetting;
     use crate::peer::BgpState;
     use std::net::{IpAddr, Ipv4Addr};
@@ -261,7 +262,7 @@ mod tests {
             if initial > 0 {
                 let initial_nlri: Vec<_> = (0..initial)
                     .map(|i| {
-                        crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+                        IpNetwork::V4(Ipv4Net {
                             address: Ipv4Addr::new(192, 168, i as u8, 0),
                             prefix_length: 24,
                         })

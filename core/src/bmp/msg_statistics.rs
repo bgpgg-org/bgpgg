@@ -40,8 +40,8 @@ pub enum StatType {
 /// Statistics TLV
 #[derive(Clone, Debug)]
 pub struct StatisticsTlv {
-    stat_type: u16,
-    stat_value: Vec<u8>,
+    pub stat_type: u16,
+    pub stat_value: Vec<u8>,
 }
 
 impl StatisticsTlv {
@@ -71,8 +71,8 @@ impl StatisticsTlv {
 /// Statistics Report message
 #[derive(Clone, Debug)]
 pub struct StatisticsReportMessage {
-    peer_header: PeerHeader,
-    statistics: Vec<StatisticsTlv>,
+    pub peer_header: PeerHeader,
+    pub statistics: Vec<StatisticsTlv>,
 }
 
 impl StatisticsReportMessage {
