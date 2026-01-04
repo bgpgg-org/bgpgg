@@ -24,6 +24,7 @@ use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
 use bgpgg::bmp::msg_route_monitoring::RouteMonitoringMessage;
+use bgpgg::bmp::msg_statistics::{StatisticsReportMessage, StatisticsTlv};
 use bgpgg::bmp::msg_termination::{TerminationMessage, TerminationReason};
 use bgpgg::bmp::utils::{
     InformationTlv, InitiationType, PeerHeader, TerminationType, PEER_HEADER_SIZE,
@@ -349,12 +350,63 @@ impl FakeBmpServer {
         let msg = self.read_termination().await;
         assert_bmp_termination_msg(&msg, expected_reason);
     }
+
+    pub async fn read_statistics(&mut self) -> StatisticsReportMessage {
+        let (message_type, body) = self.read_message().await;
+        assert_eq!(
+            message_type,
+            BmpMessageType::StatisticsReport.as_u8(),
+            "Expected Statistics Report message"
+        );
+
+        let peer_header = parse_peer_header(&body);
+        let offset = PEER_HEADER_SIZE;
+
+        // Stats count (4 bytes)
+        let stats_count =
+            u32::from_be_bytes(body[offset..offset + 4].try_into().unwrap()) as usize;
+        let mut offset = offset + 4;
+
+        // Parse statistics TLVs
+        let mut statistics = Vec::new();
+        for _ in 0..stats_count {
+            let stat_type = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+            offset += 2;
+
+            let stat_len = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+            offset += 2;
+
+            let stat_value = body[offset..offset + stat_len].to_vec();
+            offset += stat_len;
+
+            statistics.push(StatisticsTlv {
+                stat_type,
+                stat_value,
+            });
+        }
+
+        StatisticsReportMessage {
+            peer_header,
+            statistics,
+        }
+    }
+
+    pub async fn assert_statistics(
+        &mut self,
+        peer_addr: std::net::IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        expected_stats: &[(u16, u64)],
+    ) {
+        let msg = self.read_statistics().await;
+        assert_bmp_statistics_msg(&msg, peer_addr, peer_as, peer_bgp_id, expected_stats);
+    }
 }
 
 pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
     server
         .client
-        .add_bmp_server(bmp_server.address())
+        .add_bmp_server(bmp_server.address(), None)
         .await
         .unwrap();
     bmp_server.accept().await;
@@ -518,4 +570,46 @@ pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason: Ter
         expected_reason.as_u16(),
         "Termination reason code mismatch"
     );
+}
+
+/// Assert that a Statistics Report message matches expected values
+pub fn assert_bmp_statistics_msg(
+    actual: &StatisticsReportMessage,
+    expected_peer_address: IpAddr,
+    expected_peer_as: u32,
+    expected_peer_bgp_id: u32,
+    expected_stats: &[(u16, u64)],
+) {
+    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
+    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
+    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
+
+    // Check statistics match
+    assert_eq!(
+        actual.statistics.len(),
+        expected_stats.len(),
+        "Statistics count mismatch"
+    );
+
+    for (stat_tlv, (expected_type, expected_value)) in
+        actual.statistics.iter().zip(expected_stats.iter())
+    {
+        assert_eq!(
+            stat_tlv.stat_type, *expected_type,
+            "Stat type mismatch"
+        );
+
+        // Decode value based on length (4 bytes = u32, 8 bytes = u64)
+        let actual_value = match stat_tlv.stat_value.len() {
+            4 => u32::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()) as u64,
+            8 => u64::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()),
+            _ => panic!("Unexpected stat value length: {}", stat_tlv.stat_value.len()),
+        };
+
+        assert_eq!(
+            actual_value, *expected_value,
+            "Stat value mismatch for type {}",
+            expected_type
+        );
+    }
 }

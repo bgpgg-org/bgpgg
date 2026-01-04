@@ -123,6 +123,9 @@ impl Default for PeerConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BmpConfig {
     pub address: String,
+    /// Statistics reporting interval in seconds. 0 or None disables statistics.
+    #[serde(default)]
+    pub statistics_timeout: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

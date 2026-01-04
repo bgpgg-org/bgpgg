@@ -18,6 +18,7 @@ use crate::bmp::msg_initiation::InitiationMessage;
 use crate::bmp::msg_peer_down::PeerDownMessage;
 use crate::bmp::msg_peer_up::PeerUpMessage;
 use crate::bmp::msg_route_monitoring::RouteMonitoringMessage;
+use crate::bmp::msg_statistics::{StatType, StatisticsReportMessage, StatisticsTlv};
 use crate::bmp::msg_termination::{TerminationMessage, TerminationReason};
 use crate::bmp::utils::PeerDistinguisher;
 use crate::info;
@@ -199,6 +200,28 @@ impl BmpSender {
                     false, // legacy_as_path
                     Some(SystemTime::now()),
                     update,
+                )))
+            }
+            BmpOp::Statistics {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                adj_rib_in_count,
+            } => {
+                info!("BMP: Statistics Report", "peer_ip" => &peer_ip);
+
+                let stats = vec![StatisticsTlv::new_counter64(
+                    StatType::RoutesInAdjRibIn,
+                    adj_rib_in_count,
+                )];
+
+                Some(BmpMessage::StatisticsReport(StatisticsReportMessage::new(
+                    PeerDistinguisher::Global,
+                    peer_ip,
+                    peer_as,
+                    peer_bgp_id,
+                    Some(SystemTime::now()),
+                    stats,
                 )))
             }
             BmpOp::AddDestination { .. }

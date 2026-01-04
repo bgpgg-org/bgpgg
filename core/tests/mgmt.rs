@@ -321,13 +321,13 @@ async fn test_add_bmp_server() {
 
     let result = server
         .client
-        .add_bmp_server("127.0.0.1:11019".to_string())
+        .add_bmp_server("127.0.0.1:11019".to_string(), None)
         .await;
     assert!(result.is_ok());
 
     let result = server
         .client
-        .add_bmp_server("127.0.0.1:11020".to_string())
+        .add_bmp_server("127.0.0.1:11020".to_string(), None)
         .await;
     assert!(result.is_ok());
 
@@ -350,7 +350,7 @@ async fn test_remove_bmp_server() {
 
     server
         .client
-        .add_bmp_server("127.0.0.1:11019".to_string())
+        .add_bmp_server("127.0.0.1:11019".to_string(), None)
         .await
         .unwrap();
 

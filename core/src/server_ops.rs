@@ -20,7 +20,7 @@ use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
 use crate::rib::Route;
 use crate::server::{
-    AdminState, BgpServer, BmpOp, ConnectionInfo, ConnectionType, GetPeerResponse,
+    AdminState, BgpServer, BmpOp, BmpPeerStats, ConnectionInfo, ConnectionType, GetPeerResponse,
     GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
 use crate::types::PeerDownReason;
@@ -88,14 +88,22 @@ impl BgpServer {
             MgmtOp::GetServerInfo { response } => {
                 let _ = response.send((self.local_addr, self.local_port));
             }
-            MgmtOp::AddBmpServer { addr, response } => {
-                self.handle_add_bmp_server(addr, response).await;
+            MgmtOp::AddBmpServer {
+                addr,
+                statistics_timeout,
+                response,
+            } => {
+                self.handle_add_bmp_server(addr, statistics_timeout, response)
+                    .await;
             }
             MgmtOp::RemoveBmpServer { addr, response } => {
                 self.handle_remove_bmp_server(addr, response);
             }
             MgmtOp::GetBmpServers { response } => {
                 self.handle_get_bmp_servers(response);
+            }
+            MgmtOp::GetBmpStatistics { response } => {
+                self.handle_get_bmp_statistics(response).await;
             }
         }
     }
@@ -690,6 +698,7 @@ impl BgpServer {
     async fn handle_add_bmp_server(
         &self,
         addr: SocketAddr,
+        statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         // Add BMP destination
@@ -698,6 +707,7 @@ impl BgpServer {
             addr,
             sys_name: self.config.sys_name(),
             sys_descr: self.config.sys_descr(),
+            statistics_timeout,
             response: tx,
         });
 
@@ -758,5 +768,41 @@ impl BgpServer {
                 }
             }
         });
+    }
+
+    async fn handle_get_bmp_statistics(&self, response: oneshot::Sender<Vec<BmpPeerStats>>) {
+        let mut stats = Vec::new();
+
+        for (peer_ip, peer_info) in &self.peers {
+            if peer_info.state != BgpState::Established {
+                continue;
+            }
+
+            let Some(peer_tx) = &peer_info.peer_tx else {
+                continue;
+            };
+            let Some(asn) = peer_info.asn else {
+                continue;
+            };
+            let Some(bgp_id) = peer_info.bgp_id else {
+                continue;
+            };
+
+            let (tx, rx) = oneshot::channel();
+            if peer_tx.send(PeerOp::GetStatistics(tx)).is_err() {
+                continue;
+            }
+
+            if let Ok(peer_stats) = rx.await {
+                stats.push(BmpPeerStats {
+                    peer_ip: *peer_ip,
+                    peer_as: asn as u32,
+                    peer_bgp_id: bgp_id,
+                    adj_rib_in_count: peer_stats.adj_rib_in_count,
+                });
+            }
+        }
+
+        let _ = response.send(stats);
     }
 }

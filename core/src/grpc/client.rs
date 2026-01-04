@@ -201,10 +201,17 @@ impl BgpClient {
     }
 
     /// Add a BMP server destination
-    pub async fn add_bmp_server(&mut self, address: String) -> Result<String, tonic::Status> {
+    pub async fn add_bmp_server(
+        &mut self,
+        address: String,
+        statistics_timeout: Option<u64>,
+    ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
-            .add_bmp_server(AddBmpServerRequest { address })
+            .add_bmp_server(AddBmpServerRequest {
+                address,
+                statistics_timeout,
+            })
             .await?
             .into_inner();
 

@@ -171,7 +171,9 @@ impl Peer {
                             }
                         }
                         PeerOp::GetStatistics(response) => {
-                            let _ = response.send(self.statistics.clone());
+                            let mut stats = self.statistics.clone();
+                            stats.adj_rib_in_count = self.rib_in.prefix_count() as u64;
+                            let _ = response.send(stats);
                         }
                         PeerOp::GetAdjRibIn(response) => {
                             let routes = self.rib_in.get_all_routes();

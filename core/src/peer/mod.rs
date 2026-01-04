@@ -130,6 +130,7 @@ pub struct PeerStatistics {
     pub keepalive_received: u64,
     pub update_received: u64,
     pub notification_received: u64,
+    pub adj_rib_in_count: u64,
 }
 
 /// TCP connection state - only present when connected

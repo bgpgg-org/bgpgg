@@ -31,7 +31,7 @@ async fn test_add_bmp_server_sends_initiation() {
 
     let mut server = start_test_server(test_config(65001, 1)).await;
 
-    server.client.add_bmp_server(bmp_addr).await.unwrap();
+    server.client.add_bmp_server(bmp_addr, None).await.unwrap();
 
     bmp_server.accept().await;
     let msg = bmp_server.read_initiation().await;
@@ -385,5 +385,89 @@ async fn test_bmp_termination_on_remove() {
     // Should receive Termination message with reason code PermanentlyAdminClose
     bmp_server
         .assert_termination(TerminationReason::PermanentlyAdminClose)
+        .await;
+}
+
+#[tokio::test]
+async fn test_bmp_statistics() {
+    use bgpgg::bmp::msg_statistics::StatType;
+
+    let mut bmp_server = FakeBmpServer::new().await;
+    let mut server1 = start_test_server(test_config(65001, 1)).await;
+    let mut server2 = start_test_server(test_config(65002, 2)).await;
+
+    // Add BMP server with statistics enabled (1 second interval)
+    server1
+        .client
+        .add_bmp_server(bmp_server.address(), Some(1))
+        .await
+        .unwrap();
+
+    // Accept BMP connection and read initiation
+    bmp_server.accept().await;
+    let _initiation = bmp_server.read_initiation().await;
+
+    // Add BGP peer
+    server1.add_peer(&server2).await;
+
+    // Wait for peer to establish
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+    // Read PeerUp message
+    let _peer_up = bmp_server.read_peer_up().await;
+
+    // Add routes from server2
+    server2
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    server2
+        .client
+        .add_route(
+            "10.0.1.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for routes to be received
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 2
+        },
+        "Timeout waiting for routes",
+    )
+    .await;
+
+    // Read route monitoring messages
+    let _rm1 = bmp_server.read_route_monitoring().await;
+    let _rm2 = bmp_server.read_route_monitoring().await;
+
+    // Wait for statistics message (should arrive within ~1-2 seconds)
+    bmp_server
+        .assert_statistics(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            &[(StatType::RoutesInAdjRibIn as u16, 2)],
+        )
         .await;
 }

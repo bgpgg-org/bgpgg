@@ -17,7 +17,6 @@ use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
-use crate::bmp::sender::BmpSender;
 use crate::config::{Config, PeerConfig};
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
@@ -99,6 +98,14 @@ pub struct GetPeerResponse {
     pub statistics: PeerStatistics,
 }
 
+#[derive(Debug, Clone)]
+pub struct BmpPeerStats {
+    pub peer_ip: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub adj_rib_in_count: u64,
+}
+
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
     AddPeer {
@@ -148,6 +155,7 @@ pub enum MgmtOp {
     },
     AddBmpServer {
         addr: SocketAddr,
+        statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveBmpServer {
@@ -156,6 +164,9 @@ pub enum MgmtOp {
     },
     GetBmpServers {
         response: oneshot::Sender<Vec<String>>,
+    },
+    GetBmpStatistics {
+        response: oneshot::Sender<Vec<BmpPeerStats>>,
     },
 }
 
@@ -228,6 +239,7 @@ pub enum BmpOp {
         addr: SocketAddr,
         sys_name: String,
         sys_descr: String,
+        statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveDestination {
@@ -237,6 +249,76 @@ pub enum BmpOp {
     GetDestinations {
         response: oneshot::Sender<Vec<String>>,
     },
+    Statistics {
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        adj_rib_in_count: u64,
+    },
+}
+
+impl Clone for BmpOp {
+    fn clone(&self) -> Self {
+        match self {
+            BmpOp::PeerUp {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                local_address,
+                local_port,
+                remote_port,
+                sent_open,
+                received_open,
+            } => BmpOp::PeerUp {
+                peer_ip: *peer_ip,
+                peer_as: *peer_as,
+                peer_bgp_id: *peer_bgp_id,
+                local_address: *local_address,
+                local_port: *local_port,
+                remote_port: *remote_port,
+                sent_open: sent_open.clone(),
+                received_open: received_open.clone(),
+            },
+            BmpOp::PeerDown {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                reason,
+            } => BmpOp::PeerDown {
+                peer_ip: *peer_ip,
+                peer_as: *peer_as,
+                peer_bgp_id: *peer_bgp_id,
+                reason: reason.clone(),
+            },
+            BmpOp::RouteMonitoring {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                update,
+            } => BmpOp::RouteMonitoring {
+                peer_ip: *peer_ip,
+                peer_as: *peer_as,
+                peer_bgp_id: *peer_bgp_id,
+                update: update.clone(),
+            },
+            BmpOp::Statistics {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                adj_rib_in_count,
+            } => BmpOp::Statistics {
+                peer_ip: *peer_ip,
+                peer_as: *peer_as,
+                peer_bgp_id: *peer_bgp_id,
+                adj_rib_in_count: *adj_rib_in_count,
+            },
+            BmpOp::AddDestination { .. }
+            | BmpOp::RemoveDestination { .. }
+            | BmpOp::GetDestinations { .. } => {
+                panic!("Management BmpOp variants should not be cloned")
+            }
+        }
+    }
 }
 
 /// Connection info (stored only while peer is Established)
@@ -409,25 +491,11 @@ impl BgpServer {
             return;
         };
 
-        let bmp_servers = self.config.bmp_servers.clone();
+        let mgmt_tx = self.mgmt_tx.clone();
+
         tokio::spawn(async move {
-            let mut sender = BmpSender::new(bmp_rx);
-
-            for bmp_cfg in bmp_servers {
-                if let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() {
-                    info!("BMP destination added", "addr" => &addr.to_string());
-                    sender.add_destination(
-                        addr,
-                        crate::bmp::destination::BmpDestination::TcpClient(
-                            crate::bmp::destination::BmpTcpClient::new(addr),
-                        ),
-                    );
-                } else {
-                    error!("Invalid BMP server address", "addr" => &bmp_cfg.address);
-                }
-            }
-
-            sender.run().await;
+            let manager = crate::bmp::manager::BmpClientManager::new(bmp_rx, mgmt_tx);
+            manager.run().await;
         });
     }
 
