@@ -299,7 +299,7 @@ pub(super) mod tests {
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::peer::fsm::BgpOpenParams;
-    use crate::peer::{BgpState, Fsm};
+    use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Duration;
@@ -340,8 +340,8 @@ pub(super) mod tests {
             }),
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
-            session_type: Some(crate::peer::SessionType::Ebgp),
-            statistics: crate::peer::PeerStatistics::default(),
+            session_type: Some(SessionType::Ebgp),
+            statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
             peer_rx,
             server_tx,

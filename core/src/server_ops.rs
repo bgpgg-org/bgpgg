@@ -16,12 +16,13 @@ use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
+use crate::peer::outgoing::batch_announcements_by_path;
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
-use crate::rib::Route;
+use crate::rib::{Path, Route};
 use crate::server::{
-    AdminState, BgpServer, BmpOp, BmpPeerStats, ConnectionInfo, ConnectionType, GetPeerResponse,
-    GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
+    AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
+    GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
 use crate::types::PeerDownReason;
 use crate::{error, info};
@@ -108,17 +109,18 @@ impl BgpServer {
     pub(crate) async fn handle_server_op(&mut self, op: ServerOp) {
         match op {
             ServerOp::PeerStateChanged { peer_ip, state } => {
-                // Update session state
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.state = state;
                     info!("peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                }
 
-                    // Send BMP PeerUp when transitioning to Established
-                    if state == BgpState::Established {
+                // Send BMP PeerUp when transitioning to Established
+                if state == BgpState::Established {
+                    if let Some(peer) = self.peers.get(&peer_ip) {
                         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
                             (peer.asn, peer.bgp_id, &peer.conn_info)
                         {
-                            let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerUp {
+                            self.broadcast_bmp(BmpOp::PeerUp {
                                 peer_ip,
                                 peer_as: asn as u32,
                                 peer_bgp_id: bgp_id,
@@ -127,7 +129,7 @@ impl BgpServer {
                                 remote_port: conn_info.remote_port,
                                 sent_open: conn_info.sent_open.clone(),
                                 received_open: conn_info.received_open.clone(),
-                            }));
+                            });
                         }
                     }
                 }
@@ -168,13 +170,8 @@ impl BgpServer {
 
                     // BMP: Send route monitoring for this update
                     if let (Some(asn), Some(bgp_id)) = (peer_asn, peer_bgp_id) {
-                        send_bmp_route_monitoring(
-                            &self.bmp_tx,
-                            peer_ip,
-                            asn as u32,
-                            bgp_id,
-                            &withdrawn,
-                            &announced,
+                        self.send_bmp_route_monitoring(
+                            peer_ip, asn as u32, bgp_id, &withdrawn, &announced,
                         );
                     }
                 } else {
@@ -242,12 +239,12 @@ impl BgpServer {
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
                 if let Some((peer_as, peer_bgp_id)) = bmp_peer_info {
-                    let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerDown {
+                    self.broadcast_bmp(BmpOp::PeerDown {
                         peer_ip,
                         peer_as,
                         peer_bgp_id,
                         reason,
-                    }));
+                    });
                 }
             }
             ServerOp::SetAdminState { peer_ip, state } => {
@@ -349,29 +346,26 @@ impl BgpServer {
             }
         };
 
-        // Get peer entry (keep it in map for now to send BMP PeerDown)
-        let entry = self.peers.get_mut(&peer_ip);
-
-        if entry.is_none() {
+        // Send graceful shutdown notification if peer_tx is active
+        if let Some(entry) = self.peers.get(&peer_ip) {
+            if let Some(peer_tx) = &entry.peer_tx {
+                let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+            }
+        } else {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
 
-        let entry = entry.unwrap();
-
         // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
-        if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
-            let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerDown {
-                peer_ip,
-                peer_as: asn as u32,
-                peer_bgp_id: bgp_id,
-                reason: PeerDownReason::PeerDeConfigured,
-            }));
-        }
-
-        // Send graceful shutdown notification if peer_tx is active
-        if let Some(peer_tx) = &entry.peer_tx {
-            let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+        if let Some(entry) = self.peers.get(&peer_ip) {
+            if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
+                self.broadcast_bmp(BmpOp::PeerDown {
+                    peer_ip,
+                    peer_as: asn as u32,
+                    peer_bgp_id: bgp_id,
+                    reason: PeerDownReason::PeerDeConfigured,
+                });
+            }
         }
 
         // Now remove the peer from the map
@@ -541,152 +535,11 @@ impl BgpServer {
         }));
     }
 
-    fn handle_get_routes(&self, response: oneshot::Sender<Vec<crate::rib::Route>>) {
+    fn handle_get_routes(&self, response: oneshot::Sender<Vec<Route>>) {
         let routes = self.loc_rib.get_all_routes();
         let _ = response.send(routes);
     }
-}
 
-/// Convert routes to UpdateMessages, batching by shared path attributes
-fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
-    use crate::peer::outgoing::batch_announcements_by_path;
-    use std::sync::Arc;
-
-    // Convert routes to (prefix, path) tuples for batching
-    let announcements: Vec<(IpNetwork, Arc<crate::rib::Path>)> = routes
-        .iter()
-        .flat_map(|route| {
-            route
-                .paths
-                .iter()
-                .map(|path| (route.prefix, Arc::clone(path)))
-        })
-        .collect();
-
-    // Batch announcements by path attributes
-    let batches = batch_announcements_by_path(&announcements);
-
-    // Convert each batch to an UpdateMessage
-    batches
-        .into_iter()
-        .map(|batch| {
-            UpdateMessage::new(
-                batch.path.origin,
-                batch.path.as_path.clone(),
-                batch.path.next_hop,
-                batch.prefixes,
-                batch.path.local_pref,
-                batch.path.med,
-                batch.path.atomic_aggregate,
-                batch.path.communities.clone(),
-                batch.path.unknown_attrs.clone(),
-            )
-        })
-        .collect()
-}
-
-/// Query peer's Adj-RIB-In
-async fn get_peer_adj_rib_in(
-    peer_tx: &mpsc::UnboundedSender<PeerOp>,
-) -> Result<Vec<crate::rib::Route>, ()> {
-    let (tx, rx) = oneshot::channel();
-    let _ = peer_tx.send(PeerOp::GetAdjRibIn(tx));
-    rx.await.map_err(|_| ())
-}
-
-/// Send BMP route monitoring messages for a route update
-fn send_bmp_route_monitoring(
-    bmp_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
-    peer_ip: IpAddr,
-    peer_as: u32,
-    peer_bgp_id: u32,
-    withdrawn: &[IpNetwork],
-    announced: &[(IpNetwork, Arc<crate::rib::Path>)],
-) {
-    use crate::peer::outgoing::batch_announcements_by_path;
-
-    // Send withdrawals if any
-    if !withdrawn.is_empty() {
-        let update = UpdateMessage::new_withdraw(withdrawn.to_vec());
-        let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
-            peer_ip,
-            peer_as,
-            peer_bgp_id,
-            update,
-        }));
-    }
-
-    // Send announcements batched by path attributes
-    if !announced.is_empty() {
-        let batches = batch_announcements_by_path(announced);
-        for batch in batches {
-            let update = UpdateMessage::new(
-                batch.path.origin,
-                batch.path.as_path.clone(),
-                batch.path.next_hop,
-                batch.prefixes,
-                batch.path.local_pref,
-                batch.path.med,
-                batch.path.atomic_aggregate,
-                batch.path.communities.clone(),
-                batch.path.unknown_attrs.clone(),
-            );
-            let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                update,
-            }));
-        }
-    }
-}
-
-/// Send initial BMP messages for existing peers after BMP server connects
-async fn send_initial_bmp_state(
-    bmp_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
-    established_peers: Vec<(IpAddr, &PeerInfo)>,
-    response: oneshot::Sender<Result<(), String>>,
-) {
-    // Send all PeerUp messages first
-    for (peer_ip, peer_info) in &established_peers {
-        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-            (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
-        {
-            let _ = bmp_tx.send(Arc::new(BmpOp::PeerUp {
-                peer_ip: *peer_ip,
-                peer_as: asn as u32,
-                peer_bgp_id: bgp_id,
-                local_address: conn_info.local_address,
-                local_port: conn_info.local_port,
-                remote_port: conn_info.remote_port,
-                sent_open: conn_info.sent_open.clone(),
-                received_open: conn_info.received_open.clone(),
-            }));
-        }
-    }
-
-    // Then send all RouteMonitoring messages
-    for (peer_ip, peer_info) in established_peers {
-        if let (Some(asn), Some(bgp_id), Some(peer_tx)) =
-            (peer_info.asn, peer_info.bgp_id, &peer_info.peer_tx)
-        {
-            if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
-                let updates = routes_to_update_messages(&routes);
-                for update in updates {
-                    let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
-                        peer_ip,
-                        peer_as: asn as u32,
-                        peer_bgp_id: bgp_id,
-                        update,
-                    }));
-                }
-            }
-        }
-    }
-    let _ = response.send(Ok(()));
-}
-
-impl BgpServer {
     fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
         self.peers
             .iter()
@@ -696,80 +549,91 @@ impl BgpServer {
     }
 
     async fn handle_add_bmp_server(
-        &self,
+        &mut self,
         addr: SocketAddr,
         statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // Add BMP destination
-        let (tx, rx) = oneshot::channel();
-        let _ = self.bmp_tx.send(Arc::new(BmpOp::AddDestination {
-            addr,
-            sys_name: self.config.sys_name(),
-            sys_descr: self.config.sys_descr(),
-            statistics_timeout,
-            response: tx,
-        }));
+        // Spawn new BmpTask
+        let task_tx = self.spawn_bmp_task(addr, statistics_timeout);
 
-        let result = match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                let _ = response.send(Err("BMP sender task not responding".to_string()));
-                return;
-            }
-        };
+        // Store in HashMap
+        let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
+        self.bmp_tasks.insert(addr, task_info);
 
-        if let Err(e) = result {
-            let _ = response.send(Err(e));
-            return;
-        }
+        info!("BMP task added", "addr" => &addr.to_string());
 
-        // AddDestination succeeded, send initial state
+        // Send initial state to new BMP destination
         let established_peers = self.get_established_peers();
-        send_initial_bmp_state(&self.bmp_tx, established_peers, response).await;
+        send_initial_bmp_state_to_task(
+            &self.bmp_tasks.get(&addr).unwrap().task_tx,
+            established_peers,
+            response,
+        )
+        .await;
     }
 
     fn handle_remove_bmp_server(
-        &self,
+        &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .bmp_tx
-            .send(Arc::new(BmpOp::RemoveDestination { addr, response: tx }));
-
-        tokio::spawn(async move {
-            match rx.await {
-                Ok(Ok(())) => {
-                    let _ = response.send(Ok(()));
-                }
-                Ok(Err(e)) => {
-                    let _ = response.send(Err(e));
-                }
-                Err(_) => {
-                    let _ = response.send(Err("BMP sender task not responding".to_string()));
-                }
-            }
-        });
+        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
+            drop(task_info.task_tx); // Channel drop triggers graceful shutdown
+            info!("BMP task removed", "addr" => &addr.to_string());
+            let _ = response.send(Ok(()));
+        } else {
+            let _ = response.send(Err(format!("BMP server not found: {}", addr)));
+        }
     }
 
     fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .bmp_tx
-            .send(Arc::new(BmpOp::GetDestinations { response: tx }));
+        let addrs: Vec<String> = self.bmp_tasks.keys().map(|a| a.to_string()).collect();
+        let _ = response.send(addrs);
+    }
 
-        tokio::spawn(async move {
-            match rx.await {
-                Ok(addrs) => {
-                    let _ = response.send(addrs);
-                }
-                Err(_) => {
-                    let _ = response.send(Vec::new());
-                }
+    fn send_bmp_route_monitoring(
+        &self,
+        peer_ip: IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        withdrawn: &[IpNetwork],
+        announced: &[(IpNetwork, Arc<Path>)],
+    ) {
+        // Send withdrawals if any
+        if !withdrawn.is_empty() {
+            let update = UpdateMessage::new_withdraw(withdrawn.to_vec());
+            self.broadcast_bmp(BmpOp::RouteMonitoring {
+                peer_ip,
+                peer_as,
+                peer_bgp_id,
+                update,
+            });
+        }
+
+        // Send announcements batched by path attributes
+        if !announced.is_empty() {
+            let batches = batch_announcements_by_path(announced);
+            for batch in batches {
+                let update = UpdateMessage::new(
+                    batch.path.origin,
+                    batch.path.as_path.clone(),
+                    batch.path.next_hop,
+                    batch.prefixes,
+                    batch.path.local_pref,
+                    batch.path.med,
+                    batch.path.atomic_aggregate,
+                    batch.path.communities.clone(),
+                    batch.path.unknown_attrs.clone(),
+                );
+                self.broadcast_bmp(BmpOp::RouteMonitoring {
+                    peer_ip,
+                    peer_as,
+                    peer_bgp_id,
+                    update,
+                });
             }
-        });
+        }
     }
 
     async fn handle_get_bmp_statistics(&self, response: oneshot::Sender<Vec<BmpPeerStats>>) {
@@ -803,4 +667,91 @@ impl BgpServer {
 
         let _ = response.send(stats);
     }
+}
+
+/// Convert routes to UpdateMessages, batching by shared path attributes
+fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
+    // Convert routes to (prefix, path) tuples for batching
+    let announcements: Vec<(IpNetwork, Arc<Path>)> = routes
+        .iter()
+        .flat_map(|route| {
+            route
+                .paths
+                .iter()
+                .map(|path| (route.prefix, Arc::clone(path)))
+        })
+        .collect();
+
+    // Batch announcements by path attributes
+    let batches = batch_announcements_by_path(&announcements);
+
+    // Convert each batch to an UpdateMessage
+    batches
+        .into_iter()
+        .map(|batch| {
+            UpdateMessage::new(
+                batch.path.origin,
+                batch.path.as_path.clone(),
+                batch.path.next_hop,
+                batch.prefixes,
+                batch.path.local_pref,
+                batch.path.med,
+                batch.path.atomic_aggregate,
+                batch.path.communities.clone(),
+                batch.path.unknown_attrs.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Query peer's Adj-RIB-In
+async fn get_peer_adj_rib_in(peer_tx: &mpsc::UnboundedSender<PeerOp>) -> Result<Vec<Route>, ()> {
+    let (tx, rx) = oneshot::channel();
+    let _ = peer_tx.send(PeerOp::GetAdjRibIn(tx));
+    rx.await.map_err(|_| ())
+}
+
+/// Send initial BMP messages for existing peers after BMP server connects
+async fn send_initial_bmp_state_to_task(
+    task_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
+    established_peers: Vec<(IpAddr, &PeerInfo)>,
+    response: oneshot::Sender<Result<(), String>>,
+) {
+    // Send all PeerUp messages first
+    for (peer_ip, peer_info) in &established_peers {
+        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
+            (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
+        {
+            let _ = task_tx.send(Arc::new(BmpOp::PeerUp {
+                peer_ip: *peer_ip,
+                peer_as: asn as u32,
+                peer_bgp_id: bgp_id,
+                local_address: conn_info.local_address,
+                local_port: conn_info.local_port,
+                remote_port: conn_info.remote_port,
+                sent_open: conn_info.sent_open.clone(),
+                received_open: conn_info.received_open.clone(),
+            }));
+        }
+    }
+
+    // Then send all RouteMonitoring messages
+    for (peer_ip, peer_info) in established_peers {
+        if let (Some(asn), Some(bgp_id), Some(peer_tx)) =
+            (peer_info.asn, peer_info.bgp_id, &peer_info.peer_tx)
+        {
+            if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
+                let updates = routes_to_update_messages(&routes);
+                for update in updates {
+                    let _ = task_tx.send(Arc::new(BmpOp::RouteMonitoring {
+                        peer_ip,
+                        peer_as: asn as u32,
+                        peer_bgp_id: bgp_id,
+                        update,
+                    }));
+                }
+            }
+        }
+    }
+    let _ = response.send(Ok(()));
 }

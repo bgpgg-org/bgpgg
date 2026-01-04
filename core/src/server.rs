@@ -17,6 +17,8 @@ use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
+use crate::bmp::destination::{BmpDestination, BmpTcpClient};
+use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
@@ -26,6 +28,7 @@ use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
 use crate::policy::Policy;
 use crate::rib::rib_loc::LocRib;
+use crate::rib::{Path, Route};
 use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::collections::HashMap;
@@ -149,7 +152,7 @@ pub enum MgmtOp {
         response: oneshot::Sender<Option<GetPeerResponse>>,
     },
     GetRoutes {
-        response: oneshot::Sender<Vec<crate::rib::Route>>,
+        response: oneshot::Sender<Vec<Route>>,
     },
     GetServerInfo {
         response: oneshot::Sender<(Ipv4Addr, u16)>,
@@ -196,7 +199,7 @@ pub enum ServerOp {
     PeerUpdate {
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, std::sync::Arc<crate::rib::Path>)>,
+        announced: Vec<(IpNetwork, Arc<Path>)>,
     },
     PeerDisconnected {
         peer_ip: IpAddr,
@@ -237,26 +240,27 @@ pub enum BmpOp {
         peer_bgp_id: u32,
         update: UpdateMessage,
     },
-    AddDestination {
+}
+
+/// BMP task tracking info (one per BMP destination)
+pub struct BmpTaskInfo {
+    pub addr: SocketAddr,
+    pub statistics_timeout: Option<u64>,
+    pub task_tx: mpsc::UnboundedSender<Arc<BmpOp>>,
+}
+
+impl BmpTaskInfo {
+    pub fn new(
         addr: SocketAddr,
-        sys_name: String,
-        sys_descr: String,
         statistics_timeout: Option<u64>,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemoveDestination {
-        addr: SocketAddr,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    GetDestinations {
-        response: oneshot::Sender<Vec<String>>,
-    },
-    Statistics {
-        peer_ip: IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        adj_rib_in_count: u64,
-    },
+        task_tx: mpsc::UnboundedSender<Arc<BmpOp>>,
+    ) -> Self {
+        Self {
+            addr,
+            statistics_timeout,
+            task_tx,
+        }
+    }
 }
 
 /// Connection info (stored only while peer is Established)
@@ -339,8 +343,7 @@ pub struct BgpServer {
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
-    pub(crate) bmp_tx: mpsc::UnboundedSender<Arc<BmpOp>>,
-    bmp_rx: Option<mpsc::UnboundedReceiver<Arc<BmpOp>>>,
+    pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
 }
 
 impl BgpServer {
@@ -355,7 +358,6 @@ impl BgpServer {
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
-        let (bmp_tx, bmp_rx) = mpsc::unbounded_channel();
 
         Ok(BgpServer {
             peers: HashMap::new(),
@@ -368,8 +370,7 @@ impl BgpServer {
             mgmt_rx,
             op_tx,
             op_rx,
-            bmp_tx,
-            bmp_rx: Some(bmp_rx),
+            bmp_tasks: HashMap::new(),
         })
     }
 
@@ -424,23 +425,8 @@ impl BgpServer {
         false // Accept new connection
     }
 
-    fn run_bmp(&mut self) {
-        let Some(bmp_rx) = self.bmp_rx.take() else {
-            return;
-        };
-
-        let server_tx = self.op_tx.clone();
-
-        tokio::spawn(async move {
-            let manager = crate::bmp::task::BmpTaskManager::new(bmp_rx, server_tx);
-            manager.run().await;
-        });
-    }
-
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
-
-        self.run_bmp();
 
         let listener = TcpListener::bind(&self.config.listen_addr)
             .await
@@ -449,6 +435,7 @@ impl BgpServer {
 
         let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);
+        self.init_configured_bmp_servers();
 
         loop {
             tokio::select! {
@@ -496,6 +483,21 @@ impl BgpServer {
                 }
             }
             info!("configured peer", "peer_ip" => peer_ip.to_string(), "passive" => passive);
+        }
+    }
+
+    fn init_configured_bmp_servers(&mut self) {
+        for bmp_cfg in &self.config.bmp_servers.clone() {
+            let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() else {
+                error!("invalid BMP server address in config", "addr" => &bmp_cfg.address);
+                continue;
+            };
+
+            let task_tx = self.spawn_bmp_task(addr, bmp_cfg.statistics_timeout);
+            let task_info = BmpTaskInfo::new(addr, bmp_cfg.statistics_timeout, task_tx);
+            self.bmp_tasks.insert(addr, task_info);
+
+            info!("configured BMP server", "addr" => addr.to_string());
         }
     }
 
@@ -628,6 +630,42 @@ impl BgpServer {
         let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
 
         Some(peer_tx)
+    }
+
+    /// Spawn a BMP task for a destination
+    pub(crate) fn spawn_bmp_task(
+        &self,
+        addr: SocketAddr,
+        statistics_timeout: Option<u64>,
+    ) -> mpsc::UnboundedSender<Arc<BmpOp>> {
+        let (task_tx, task_rx) = mpsc::unbounded_channel();
+
+        let destination = BmpDestination::TcpClient(BmpTcpClient::new(addr));
+
+        let task = BmpTask::new(
+            addr,
+            destination,
+            task_rx,
+            self.op_tx.clone(),
+            statistics_timeout,
+        );
+
+        let sys_name = self.config.sys_name();
+        let sys_descr = self.config.sys_descr();
+
+        tokio::spawn(async move {
+            task.run(sys_name, sys_descr).await;
+        });
+
+        task_tx
+    }
+
+    /// Broadcast a BMP operation to all active BMP tasks
+    pub(crate) fn broadcast_bmp(&self, op: BmpOp) {
+        let op = Arc::new(op);
+        for task_info in self.bmp_tasks.values() {
+            let _ = task_info.task_tx.send(Arc::clone(&op));
+        }
     }
 
     /// Propagate route changes to all established peers (except the originating peer)

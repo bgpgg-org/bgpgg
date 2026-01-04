@@ -21,6 +21,7 @@ pub use utils::*;
 
 use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use bgpgg::bmp::msg_termination::TerminationReason;
+use bgpgg::config::BmpConfig;
 use bgpgg::grpc::proto::{BgpState, Origin};
 use std::net::Ipv4Addr;
 
@@ -34,8 +35,9 @@ async fn test_add_bmp_server_sends_initiation() {
     server.client.add_bmp_server(bmp_addr, None).await.unwrap();
 
     bmp_server.accept().await;
-    let msg = bmp_server.read_initiation().await;
-    assert_bmp_initiation_msg(&msg, &server.config.sys_name(), &server.config.sys_descr());
+    bmp_server
+        .assert_bmp_initiation(&server.config.sys_name(), &server.config.sys_descr())
+        .await;
 }
 
 #[tokio::test]
@@ -470,4 +472,30 @@ async fn test_bmp_statistics() {
             &[(StatType::RoutesInAdjRibIn as u16, 2)],
         )
         .await;
+}
+
+#[tokio::test]
+async fn test_configured_bmp_server() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let bmp_addr = bmp_server.address();
+
+    // Create config with BMP server configured
+    let mut config = test_config(65001, 1);
+    config.bmp_servers.push(BmpConfig {
+        address: bmp_addr.to_string(),
+        statistics_timeout: None,
+    });
+
+    let server = start_test_server(config).await;
+
+    // BMP client should automatically connect and send initiation
+    bmp_server.accept().await;
+    bmp_server
+        .assert_bmp_initiation(&server.config.sys_name(), &server.config.sys_descr())
+        .await;
+
+    // Verify server is in the list
+    let servers = server.client.get_bmp_servers().await.unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0], bmp_addr.to_string());
 }

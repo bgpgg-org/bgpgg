@@ -351,6 +351,15 @@ impl FakeBmpServer {
         assert_bmp_termination_msg(&msg, expected_reason);
     }
 
+    pub async fn assert_bmp_initiation(
+        &mut self,
+        expected_sys_name: &str,
+        expected_sys_descr: &str,
+    ) {
+        let msg = self.read_initiation().await;
+        assert_bmp_initiation_msg(&msg, expected_sys_name, expected_sys_descr);
+    }
+
     pub async fn read_statistics(&mut self) -> StatisticsReportMessage {
         let (message_type, body) = self.read_message().await;
         assert_eq!(
@@ -410,8 +419,9 @@ pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut Fake
         .await
         .unwrap();
     bmp_server.accept().await;
-    let msg = bmp_server.read_initiation().await;
-    assert_bmp_initiation_msg(&msg, &server.config.sys_name(), &server.config.sys_descr());
+    bmp_server
+        .assert_bmp_initiation(&server.config.sys_name(), &server.config.sys_descr())
+        .await;
 }
 
 /// Assert that an InitiationMessage contains expected sysName and sysDescr

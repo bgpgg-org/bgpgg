@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::destination::{BmpDestination, BmpTcpClient};
+use super::destination::BmpDestination;
 use super::msg::BmpMessage;
 use super::msg_initiation::InitiationMessage;
 use super::msg_peer_down::PeerDownMessage;
@@ -23,7 +23,6 @@ use super::msg_termination::{TerminationMessage, TerminationReason};
 use super::utils::PeerDistinguisher;
 use crate::info;
 use crate::server::{BmpOp, ServerOp};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -33,111 +32,6 @@ use tokio::time::Instant;
 // Batching constants
 const MAX_BATCH_SIZE: usize = 100;
 const MAX_BATCH_TIME: Duration = Duration::from_millis(100);
-
-/// Manages all BMP tasks (one per destination)
-pub struct BmpTaskManager {
-    rx: mpsc::UnboundedReceiver<Arc<BmpOp>>,
-    tasks: HashMap<SocketAddr, mpsc::UnboundedSender<Arc<BmpOp>>>,
-    server_tx: mpsc::UnboundedSender<ServerOp>,
-}
-
-impl BmpTaskManager {
-    pub fn new(
-        rx: mpsc::UnboundedReceiver<Arc<BmpOp>>,
-        server_tx: mpsc::UnboundedSender<ServerOp>,
-    ) -> Self {
-        Self {
-            rx,
-            tasks: HashMap::new(),
-            server_tx,
-        }
-    }
-
-    pub async fn run(mut self) {
-        info!("BMP task manager starting");
-
-        while let Some(op) = self.rx.recv().await {
-            // Inspect variant type
-            match op.as_ref() {
-                BmpOp::AddDestination { .. }
-                | BmpOp::RemoveDestination { .. }
-                | BmpOp::GetDestinations { .. } => {
-                    // Management ops: unwrap Arc (should always succeed - only one reference)
-                    let op = match Arc::try_unwrap(op) {
-                        Ok(op) => op,
-                        Err(_) => panic!("management op should have single reference"),
-                    };
-                    match op {
-                        BmpOp::AddDestination {
-                            addr,
-                            sys_name,
-                            sys_descr,
-                            statistics_timeout,
-                            response,
-                        } => {
-                            self.add_task(addr, sys_name, sys_descr, statistics_timeout)
-                                .await;
-                            let _ = response.send(Ok(()));
-                        }
-                        BmpOp::RemoveDestination { addr, response } => {
-                            self.remove_task(addr);
-                            let _ = response.send(Ok(()));
-                        }
-                        BmpOp::GetDestinations { response } => {
-                            let addrs: Vec<String> =
-                                self.tasks.keys().map(|a| a.to_string()).collect();
-                            let _ = response.send(addrs);
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                _ => {
-                    // Broadcast operations
-                    self.broadcast(op).await;
-                }
-            }
-        }
-    }
-
-    async fn add_task(
-        &mut self,
-        addr: SocketAddr,
-        sys_name: String,
-        sys_descr: String,
-        statistics_timeout: Option<u64>,
-    ) {
-        let (tx, rx) = mpsc::unbounded_channel();
-
-        let destination = BmpDestination::TcpClient(BmpTcpClient::new(addr));
-        let task = BmpTask::new(
-            addr,
-            destination,
-            rx,
-            self.server_tx.clone(),
-            statistics_timeout,
-        );
-
-        tokio::spawn(async move {
-            task.run(sys_name, sys_descr).await;
-        });
-
-        self.tasks.insert(addr, tx);
-        info!("BMP task added", "addr" => &addr.to_string());
-    }
-
-    fn remove_task(&mut self, addr: SocketAddr) {
-        if let Some(tx) = self.tasks.remove(&addr) {
-            drop(tx); // Drop channel, task will exit
-            info!("BMP task removed", "addr" => &addr.to_string());
-        }
-    }
-
-    async fn broadcast(&self, op: Arc<BmpOp>) {
-        for tx in self.tasks.values() {
-            let _ = tx.send(Arc::clone(&op));
-        }
-    }
-}
 
 /// Individual BMP task handling one destination
 pub struct BmpTask {
@@ -178,21 +72,8 @@ impl BmpTask {
         let initiation = BmpMessage::Initiation(InitiationMessage::new(&sys_name, &sys_descr, &[]));
         self.destination.send(&initiation).await;
 
-        // Spawn statistics timer if configured
-        let stats_rx = if let Some(timeout_secs) = self.statistics_timeout {
-            if timeout_secs > 0 {
-                let (tx, rx) = mpsc::unbounded_channel();
-                self.spawn_statistics_timer(timeout_secs, tx);
-                Some(rx)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         // Main event loop
-        self.event_loop(stats_rx).await;
+        self.event_loop().await;
 
         // Flush any pending batched messages before sending Termination
         if !self.batch.is_empty() {
@@ -209,7 +90,15 @@ impl BmpTask {
         info!("BMP task exiting", "addr" => &self.addr.to_string());
     }
 
-    async fn event_loop(&mut self, mut stats_rx: Option<mpsc::UnboundedReceiver<()>>) {
+    async fn event_loop(&mut self) {
+        let mut stats_interval = self.statistics_timeout.and_then(|timeout_secs| {
+            if timeout_secs > 0 {
+                Some(tokio::time::interval(Duration::from_secs(timeout_secs)))
+            } else {
+                None
+            }
+        });
+
         loop {
             tokio::select! {
                 op = self.rx.recv() => {
@@ -227,9 +116,9 @@ impl BmpTask {
                         None => break, // Channel closed, exit
                     }
                 }
-                Some(_) = async {
-                    match &mut stats_rx {
-                        Some(rx) => rx.recv().await,
+                _ = async {
+                    match &mut stats_interval {
+                        Some(interval) => interval.tick().await,
                         None => std::future::pending().await,
                     }
                 } => {
@@ -316,25 +205,7 @@ impl BmpTask {
                 Some(SystemTime::now()),
                 update.clone(),
             ))),
-            BmpOp::Statistics { .. } => None, // Ignore broadcast stats
-            BmpOp::AddDestination { .. }
-            | BmpOp::RemoveDestination { .. }
-            | BmpOp::GetDestinations { .. } => None,
         }
-    }
-
-    fn spawn_statistics_timer(&self, timeout_secs: u64, tx: mpsc::UnboundedSender<()>) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(timeout_secs));
-            interval.tick().await; // Skip first immediate tick
-
-            loop {
-                interval.tick().await;
-                if tx.send(()).is_err() {
-                    break; // Task died
-                }
-            }
-        });
     }
 
     async fn send_statistics(&mut self) {

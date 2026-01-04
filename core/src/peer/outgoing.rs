@@ -336,6 +336,7 @@ mod tests {
     use super::*;
     use crate::bgp::msg_update::Origin;
     use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::policy::action::Accept;
     use crate::policy::Statement;
     use crate::rib::RouteSource;
     use std::collections::HashSet;
@@ -702,7 +703,7 @@ mod tests {
         // RFC 4271 Section 9.2: Messages exceeding MAX_MESSAGE_SIZE must not be sent
         let (tx, mut rx) = mpsc::unbounded_channel();
         let peer_addr = test_ip(1);
-        let policy = Policy::new().with(Statement::new().then(crate::policy::action::Accept));
+        let policy = Policy::new().with(Statement::new().then(Accept));
 
         // Create huge AS_PATH to make UPDATE message exceed 4096 bytes
         // Multiple AS_SEQUENCE segments with 255 ASNs each = ~4000 bytes total
