@@ -416,9 +416,12 @@ impl BgpServer {
             for bmp_cfg in bmp_servers {
                 if let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() {
                     info!("BMP destination added", "addr" => &addr.to_string());
-                    sender.add_destination(crate::bmp::destination::BmpDestination::TcpClient(
-                        crate::bmp::destination::BmpTcpClient::new(addr),
-                    ));
+                    sender.add_destination(
+                        addr,
+                        crate::bmp::destination::BmpDestination::TcpClient(
+                            crate::bmp::destination::BmpTcpClient::new(addr),
+                        ),
+                    );
                 } else {
                     error!("Invalid BMP server address", "addr" => &bmp_cfg.address);
                 }

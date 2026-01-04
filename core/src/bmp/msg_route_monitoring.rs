@@ -22,8 +22,8 @@ use std::time::SystemTime;
 /// Route Monitoring message - carries BGP UPDATE messages (RFC 7854 Section 5)
 #[derive(Clone, Debug)]
 pub struct RouteMonitoringMessage {
-    peer_header: PeerHeader,
-    bgp_update: UpdateMessage,
+    pub peer_header: PeerHeader,
+    pub bgp_update: UpdateMessage,
 }
 
 impl RouteMonitoringMessage {
@@ -48,13 +48,6 @@ impl RouteMonitoringMessage {
                 legacy_as_path,
                 timestamp,
             ),
-            bgp_update,
-        }
-    }
-
-    pub fn from_parts(peer_header: PeerHeader, bgp_update: UpdateMessage) -> Self {
-        Self {
-            peer_header,
             bgp_update,
         }
     }

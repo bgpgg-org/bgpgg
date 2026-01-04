@@ -20,6 +20,7 @@ pub use utils::bmp::*;
 pub use utils::*;
 
 use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::grpc::proto::{BgpState, Origin};
 use std::net::Ipv4Addr;
 
@@ -364,5 +365,25 @@ async fn test_route_monitoring_on_updates() {
             })],
             &[], // no withdrawals
         )
+        .await;
+}
+
+#[tokio::test]
+async fn test_bmp_termination_on_remove() {
+    let mut bmp_server = FakeBmpServer::new().await;
+    let mut server = start_test_server(test_config(65001, 1)).await;
+
+    setup_bmp_monitoring(&mut server, &mut bmp_server).await;
+
+    // Remove the BMP server destination
+    server
+        .client
+        .remove_bmp_server(bmp_server.address())
+        .await
+        .unwrap();
+
+    // Should receive Termination message with reason code PermanentlyAdminClose
+    bmp_server
+        .assert_termination(TerminationReason::PermanentlyAdminClose.as_u16())
         .await;
 }

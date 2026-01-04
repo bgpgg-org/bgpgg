@@ -18,9 +18,12 @@ use crate::bmp::msg_initiation::InitiationMessage;
 use crate::bmp::msg_peer_down::PeerDownMessage;
 use crate::bmp::msg_peer_up::PeerUpMessage;
 use crate::bmp::msg_route_monitoring::RouteMonitoringMessage;
+use crate::bmp::msg_termination::{TerminationMessage, TerminationReason};
 use crate::bmp::utils::PeerDistinguisher;
 use crate::info;
 use crate::server::BmpOp;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -31,7 +34,7 @@ const MAX_BATCH_TIME: Duration = Duration::from_millis(100);
 
 pub struct BmpSender {
     receiver: mpsc::UnboundedReceiver<BmpOp>,
-    destinations: Vec<BmpDestination>,
+    destinations: HashMap<SocketAddr, BmpDestination>,
 
     // Batching state
     batch: Vec<BmpMessage>,
@@ -42,14 +45,15 @@ impl BmpSender {
     pub fn new(receiver: mpsc::UnboundedReceiver<BmpOp>) -> Self {
         Self {
             receiver,
-            destinations: Vec::new(),
+            destinations: HashMap::new(),
             batch: Vec::new(),
             last_flush: Instant::now(),
         }
     }
 
-    pub fn add_destination(&mut self, dest: BmpDestination) {
-        self.destinations.push(dest);
+    /// Add a destination during initialization (before run() is called)
+    pub fn add_destination(&mut self, addr: SocketAddr, dest: BmpDestination) {
+        self.destinations.insert(addr, dest);
     }
 
     pub async fn run(mut self) {
@@ -79,20 +83,34 @@ impl BmpSender {
                             ));
                             dest.send(&initiation).await;
 
-                            self.destinations.push(dest);
+                            self.destinations.insert(addr, dest);
                             let _ = response.send(Ok(()));
                         }
                         BmpOp::RemoveDestination { addr, response } => {
                             info!("BMP: Removing destination", "addr" => &addr.to_string());
-                            self.destinations.retain(|d| match d {
-                                BmpDestination::TcpClient(client) => client.addr() != addr,
-                            });
+
+                            // Flush any pending batched messages before sending Termination
+                            if !self.batch.is_empty() {
+                                self.flush().await;
+                            }
+
+                            // Send Termination message before removing destination
+                            if let Some(dest) = self.destinations.get_mut(&addr) {
+                                let termination = BmpMessage::Termination(TerminationMessage::new(
+                                    TerminationReason::PermanentlyAdminClose,
+                                    &[],
+                                ));
+                                dest.send(&termination).await;
+                            }
+
+                            // Remove destination from HashMap (TCP connection closes when dropped)
+                            self.destinations.remove(&addr);
                             let _ = response.send(Ok(()));
                         }
                         BmpOp::GetDestinations { response } => {
-                            let addrs: Vec<String> = self.destinations.iter().map(|d| match d {
-                                BmpDestination::TcpClient(client) => client.addr().to_string(),
-                            }).collect();
+                            let addrs: Vec<String> = self.destinations.keys()
+                                .map(|addr| addr.to_string())
+                                .collect();
                             let _ = response.send(addrs);
                         }
                         _ => {
@@ -200,7 +218,7 @@ impl BmpSender {
         info!("BMP: Flushing batch", "count" => self.batch.len());
 
         // Send batch to all destinations
-        for dest in &mut self.destinations {
+        for dest in self.destinations.values_mut() {
             dest.send_batch(&self.batch).await;
         }
 

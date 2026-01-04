@@ -24,7 +24,10 @@ use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
 use bgpgg::bmp::msg_route_monitoring::RouteMonitoringMessage;
-use bgpgg::bmp::utils::{InformationTlv, InitiationType, PeerHeader, PEER_HEADER_SIZE};
+use bgpgg::bmp::msg_termination::TerminationMessage;
+use bgpgg::bmp::utils::{
+    InformationTlv, InitiationType, PeerHeader, TerminationType, PEER_HEADER_SIZE,
+};
 use bgpgg::types::PeerDownReason;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
@@ -264,7 +267,38 @@ impl FakeBmpServer {
         let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
         let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec()).unwrap();
 
-        RouteMonitoringMessage::from_parts(peer_header, bgp_update)
+        RouteMonitoringMessage {
+            peer_header,
+            bgp_update,
+        }
+    }
+
+    pub async fn read_termination(&mut self) -> TerminationMessage {
+        let (message_type, body) = self.read_message().await;
+        assert_eq!(
+            message_type,
+            BmpMessageType::Termination.as_u8(),
+            "Expected Termination message"
+        );
+
+        let mut information = Vec::new();
+        let mut offset = 0;
+
+        while offset < body.len() {
+            let info_type = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+            offset += 2;
+
+            let info_length =
+                u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+            offset += 2;
+
+            let info_value = body[offset..offset + info_length].to_vec();
+            offset += info_length;
+
+            information.push(InformationTlv::new(info_type, info_value));
+        }
+
+        TerminationMessage { information }
     }
 
     pub async fn assert_route_monitoring(
@@ -309,6 +343,11 @@ impl FakeBmpServer {
     ) {
         let msg = self.read_peer_down().await;
         assert_bmp_peer_down_msg(&msg, peer_addr, peer_as, peer_bgp_id, reason);
+    }
+
+    pub async fn assert_termination(&mut self, expected_reason_code: u16) {
+        let msg = self.read_termination().await;
+        assert_bmp_termination_msg(&msg, expected_reason_code);
     }
 }
 
@@ -461,5 +500,21 @@ pub fn assert_bmp_route_monitoring_msg(
     assert_eq!(
         actual_withdrawn, expected_withdrawn_vec,
         "Withdrawn routes mismatch"
+    );
+}
+
+/// Assert that a Termination message has the expected reason code
+pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason_code: u16) {
+    // Extract reason code from the Reason TLV
+    let actual_reason_code = msg
+        .information
+        .iter()
+        .find(|tlv| tlv.info_type == TerminationType::Reason as u16)
+        .map(|tlv| u16::from_be_bytes(tlv.info_value[..2].try_into().unwrap()))
+        .unwrap_or(1);
+
+    assert_eq!(
+        actual_reason_code, expected_reason_code,
+        "Termination reason code mismatch"
     );
 }

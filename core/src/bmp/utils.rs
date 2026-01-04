@@ -39,7 +39,7 @@ pub enum InitiationType {
 /// Termination message Information TLV types
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
-pub(super) enum TerminationType {
+pub enum TerminationType {
     String = 0,
     Reason = 1,
 }
