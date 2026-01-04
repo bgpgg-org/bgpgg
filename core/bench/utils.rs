@@ -1,0 +1,146 @@
+// Copyright 2026 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::server::{Server, ServerConfig};
+use bgpgg::config::Config;
+use bgpgg::grpc::proto::Origin;
+use std::fs;
+use std::net::Ipv4Addr;
+
+#[path = "../tests/utils/common.rs"]
+#[allow(dead_code)]
+mod common;
+
+pub use common::{poll_until, start_test_server, TestServer};
+
+// Memory utilities
+
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    pub rss_kb: usize,
+    #[allow(dead_code)]
+    pub vms_kb: usize,
+}
+
+pub fn get_process_memory() -> MemoryStats {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+
+    let mut rss_kb = 0;
+    let mut vms_kb = 0;
+
+    for line in status.lines() {
+        if line.starts_with("VmRSS:") {
+            rss_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if line.starts_with("VmSize:") {
+            vms_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+
+    MemoryStats { rss_kb, vms_kb }
+}
+
+// Route generation utilities
+
+pub fn generate_routes_for_spoke(spoke_id: u32, count: usize) -> Vec<(String, String, Origin)> {
+    let mut routes = Vec::with_capacity(count);
+
+    let base_offset = spoke_id * count as u32;
+
+    for i in 0..count {
+        let prefix_num = base_offset + i as u32;
+        let octet1 = 10 + (prefix_num / 65536) as u8;
+        let octet2 = ((prefix_num / 256) % 256) as u8;
+        let octet3 = (prefix_num % 256) as u8;
+
+        let prefix = format!("{}.{}.{}.0/24", octet1, octet2, octet3);
+        let next_hop = format!("192.168.{}.1", spoke_id % 256);
+
+        routes.push((prefix, next_hop, Origin::Igp));
+    }
+
+    routes
+}
+
+// Topology utilities
+
+pub async fn setup_topology(
+    num_senders: usize,
+    num_receivers: usize,
+    server_config: ServerConfig,
+) -> Result<(Server, Vec<TestServer>, Vec<TestServer>), Box<dyn std::error::Error>> {
+    println!("Creating server...");
+    let server_asn = 65000;
+    let server_router_id = Ipv4Addr::new(0, 0, 0, 1);
+    let server_bind_addr = "127.0.0.1:0".to_string();
+    let server_grpc_port = 50051;
+
+    let server = Server::start(server_asn, server_router_id, server_bind_addr.clone(), server_grpc_port, server_config).await?;
+
+    println!("Creating {} senders...", num_senders);
+    let mut senders = Vec::with_capacity(num_senders);
+    for i in 0..num_senders {
+        let asn = (i + 1) as u16;
+        let offset = i + 1;  // Start from .1 not .0
+        let octet1 = (offset / 256) as u8;
+        let octet2 = (offset % 256) as u8;
+        let router_id = Ipv4Addr::new(0, 0, octet1, octet2);
+        let bind_addr = format!("127.0.{}.{}:0", octet1, octet2);
+
+        let config = Config::new(asn, &bind_addr, router_id, 90, true);
+        let mut sender = start_test_server(config).await;
+
+        // Peer sender to server
+        sender
+            .client
+            .add_peer(server_bind_addr.clone(), None)
+            .await?;
+
+        senders.push(sender);
+
+        if (i + 1) % 100 == 0 {
+            println!("  Created {} senders", i + 1);
+        }
+    }
+
+    println!("Creating {} receivers...", num_receivers);
+    let mut receivers = Vec::with_capacity(num_receivers);
+    for i in 0..num_receivers {
+        let asn = (70001 + i) as u16;
+        let octet = (i + 4) as u8;
+        let router_id = Ipv4Addr::new(0, 4, 0, octet);
+        let bind_addr = format!("127.0.4.{}:0", octet);
+
+        let config = Config::new(asn, &bind_addr, router_id, 90, true);
+        let mut receiver = start_test_server(config).await;
+
+        // Peer receiver to server
+        receiver
+            .client
+            .add_peer(server_bind_addr.clone(), None)
+            .await?;
+
+        receivers.push(receiver);
+    }
+
+    println!("Topology created!");
+    Ok((server, senders, receivers))
+}

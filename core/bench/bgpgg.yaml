@@ -1,0 +1,19 @@
+daemon_bin: cargo
+daemon_args:
+  - run
+  - --release
+  - --bin
+  - bgpggd
+  - --
+  - --config
+  - "{config_file}"
+
+config_template: |
+  asn: {asn}
+  listen_addr: "{bind_addr}"
+  router_id: "{router_id}"
+  grpc_listen_addr: "[::1]:{grpc_port}"
+
+control:
+  type: grpc
+  endpoint: "http://[::1]:{grpc_port}"

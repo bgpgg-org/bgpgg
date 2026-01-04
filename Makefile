@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt release setup
+.PHONY: all build clean run test fmt release setup bench
 
 all: build
 
@@ -23,3 +23,6 @@ test: setup
 
 fmt:
 	cargo fmt
+
+bench: setup
+	./script/run-bench.sh $(impl)
