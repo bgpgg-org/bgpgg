@@ -266,6 +266,50 @@ impl FakeBmpServer {
 
         RouteMonitoringMessage::from_parts(peer_header, bgp_update)
     }
+
+    pub async fn assert_route_monitoring(
+        &mut self,
+        peer_addr: std::net::IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        peer_flags: u8,
+        expected_nlri: &[bgpgg::bgp::utils::IpNetwork],
+        expected_withdrawn: &[bgpgg::bgp::utils::IpNetwork],
+    ) {
+        let msg = self.read_route_monitoring().await;
+        assert_bmp_route_monitoring_msg(
+            &msg,
+            peer_addr,
+            peer_as,
+            peer_bgp_id,
+            peer_flags,
+            expected_nlri,
+            expected_withdrawn,
+        );
+    }
+
+    pub async fn assert_peer_up(
+        &mut self,
+        local_addr: std::net::IpAddr,
+        peer_addr: std::net::IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        peer_port: u16,
+    ) {
+        let msg = self.read_peer_up().await;
+        assert_bmp_peer_up_msg(&msg, local_addr, peer_addr, peer_as, peer_bgp_id, peer_port);
+    }
+
+    pub async fn assert_peer_down(
+        &mut self,
+        peer_addr: std::net::IpAddr,
+        peer_as: u32,
+        peer_bgp_id: u32,
+        reason: &bgpgg::types::PeerDownReason,
+    ) {
+        let msg = self.read_peer_down().await;
+        assert_bmp_peer_down_msg(&msg, peer_addr, peer_as, peer_bgp_id, reason);
+    }
 }
 
 pub async fn setup_bmp_monitoring(server: &mut TestServer, bmp_server: &mut FakeBmpServer) {
@@ -308,7 +352,7 @@ pub fn assert_bmp_initiation_msg(
 }
 
 /// Assert that a PeerDownMessage matches expected values (ignoring timestamp)
-pub fn assert_bmp_peer_down_msg(
+fn assert_bmp_peer_down_msg(
     actual: &PeerDownMessage,
     expected_peer_address: IpAddr,
     expected_peer_as: u32,

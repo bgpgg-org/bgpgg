@@ -186,15 +186,15 @@ async fn test_peer_up_down() {
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
 
     // Read and verify PeerUp message
-    let peer_up = bmp_server.read_peer_up().await;
-    assert_bmp_peer_up_msg(
-        &peer_up,
-        server1.address,
-        server2.address,
-        server2.asn as u32,
-        u32::from(server2.client.router_id),
-        server2.bgp_port,
-    );
+    bmp_server
+        .assert_peer_up(
+            server1.address,
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            server2.bgp_port,
+        )
+        .await;
 
     // Remove peer
     server1.remove_peer(&server2).await;
@@ -203,14 +203,14 @@ async fn test_peer_up_down() {
     poll_peers(&server1, vec![]).await;
 
     // Read and verify PeerDown message
-    let peer_down = bmp_server.read_peer_down().await;
-    assert_bmp_peer_down_msg(
-        &peer_down,
-        server2.address,
-        server2.asn as u32,
-        u32::from(server2.client.router_id),
-        &bgpgg::types::PeerDownReason::PeerDeConfigured,
-    );
+    bmp_server
+        .assert_peer_down(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            &bgpgg::types::PeerDownReason::PeerDeConfigured,
+        )
+        .await;
 }
 
 #[tokio::test]
@@ -265,39 +265,33 @@ async fn test_route_monitoring_on_updates() {
     .await;
 
     // Should receive 2 RouteMonitoring messages (one per UPDATE from peer)
-    let rm1 = bmp_server.read_route_monitoring().await;
-    let rm2 = bmp_server.read_route_monitoring().await;
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0, // peer_flags (L=0 for pre-policy)
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })],
+            &[], // no withdrawals
+        )
+        .await;
 
-    let route1 = vec![IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 0, 0, 0),
-        prefix_length: 24,
-    })];
-    let route2 = vec![IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 0, 1, 0),
-        prefix_length: 24,
-    })];
-
-    // Verify first RouteMonitoring message
-    assert_bmp_route_monitoring_msg(
-        &rm1,
-        server2.address,
-        server2.asn as u32,
-        u32::from(server2.client.router_id),
-        0, // peer_flags (L=0 for pre-policy)
-        &route1,
-        &[], // no withdrawals
-    );
-
-    // Verify second RouteMonitoring message
-    assert_bmp_route_monitoring_msg(
-        &rm2,
-        server2.address,
-        server2.asn as u32,
-        u32::from(server2.client.router_id),
-        0,
-        &route2,
-        &[],
-    );
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 1, 0),
+                prefix_length: 24,
+            })],
+            &[],
+        )
+        .await;
 
     // Withdraw one route
     server2
@@ -316,21 +310,59 @@ async fn test_route_monitoring_on_updates() {
     )
     .await;
 
+    // Add a new route
+    server2
+        .client
+        .add_route(
+            "10.0.2.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // Wait for new route
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 2
+        },
+        "Timeout waiting for new route",
+    )
+    .await;
+
     // Should receive RouteMonitoring for withdrawal
-    let rm_withdraw = bmp_server.read_route_monitoring().await;
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[], // no announcements
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })],
+        )
+        .await;
 
-    let withdrawn_route = vec![IpNetwork::V4(Ipv4Net {
-        address: Ipv4Addr::new(10, 0, 0, 0),
-        prefix_length: 24,
-    })];
-
-    assert_bmp_route_monitoring_msg(
-        &rm_withdraw,
-        server2.address,
-        server2.asn as u32,
-        u32::from(server2.client.router_id),
-        0,
-        &[], // no announcements
-        &withdrawn_route,
-    );
+    // Should receive RouteMonitoring for new announcement
+    bmp_server
+        .assert_route_monitoring(
+            server2.address,
+            server2.asn as u32,
+            u32::from(server2.client.router_id),
+            0,
+            &[IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 2, 0),
+                prefix_length: 24,
+            })],
+            &[], // no withdrawals
+        )
+        .await;
 }
