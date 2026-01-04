@@ -363,8 +363,7 @@ impl FakeBmpServer {
         let offset = PEER_HEADER_SIZE;
 
         // Stats count (4 bytes)
-        let stats_count =
-            u32::from_be_bytes(body[offset..offset + 4].try_into().unwrap()) as usize;
+        let stats_count = u32::from_be_bytes(body[offset..offset + 4].try_into().unwrap()) as usize;
         let mut offset = offset + 4;
 
         // Parse statistics TLVs
@@ -373,7 +372,8 @@ impl FakeBmpServer {
             let stat_type = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
             offset += 2;
 
-            let stat_len = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+            let stat_len =
+                u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
 
             let stat_value = body[offset..offset + stat_len].to_vec();
@@ -594,16 +594,16 @@ pub fn assert_bmp_statistics_msg(
     for (stat_tlv, (expected_type, expected_value)) in
         actual.statistics.iter().zip(expected_stats.iter())
     {
-        assert_eq!(
-            stat_tlv.stat_type, *expected_type,
-            "Stat type mismatch"
-        );
+        assert_eq!(stat_tlv.stat_type, *expected_type, "Stat type mismatch");
 
         // Decode value based on length (4 bytes = u32, 8 bytes = u64)
         let actual_value = match stat_tlv.stat_value.len() {
             4 => u32::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()) as u64,
             8 => u64::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()),
-            _ => panic!("Unexpected stat value length: {}", stat_tlv.stat_value.len()),
+            _ => panic!(
+                "Unexpected stat value length: {}",
+                stat_tlv.stat_value.len()
+            ),
         };
 
         assert_eq!(

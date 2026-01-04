@@ -102,9 +102,6 @@ impl BgpServer {
             MgmtOp::GetBmpServers { response } => {
                 self.handle_get_bmp_servers(response);
             }
-            MgmtOp::GetBmpStatistics { response } => {
-                self.handle_get_bmp_statistics(response).await;
-            }
         }
     }
 
@@ -121,7 +118,7 @@ impl BgpServer {
                         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
                             (peer.asn, peer.bgp_id, &peer.conn_info)
                         {
-                            let _ = self.bmp_tx.send(BmpOp::PeerUp {
+                            let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerUp {
                                 peer_ip,
                                 peer_as: asn as u32,
                                 peer_bgp_id: bgp_id,
@@ -130,7 +127,7 @@ impl BgpServer {
                                 remote_port: conn_info.remote_port,
                                 sent_open: conn_info.sent_open.clone(),
                                 received_open: conn_info.received_open.clone(),
-                            });
+                            }));
                         }
                     }
                 }
@@ -245,18 +242,21 @@ impl BgpServer {
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
                 if let Some((peer_as, peer_bgp_id)) = bmp_peer_info {
-                    let _ = self.bmp_tx.send(BmpOp::PeerDown {
+                    let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerDown {
                         peer_ip,
                         peer_as,
                         peer_bgp_id,
                         reason,
-                    });
+                    }));
                 }
             }
             ServerOp::SetAdminState { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.admin_state = state;
                 }
+            }
+            ServerOp::GetBmpStatistics { response } => {
+                self.handle_get_bmp_statistics(response).await;
             }
         }
     }
@@ -361,12 +361,12 @@ impl BgpServer {
 
         // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
         if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
-            let _ = self.bmp_tx.send(BmpOp::PeerDown {
+            let _ = self.bmp_tx.send(Arc::new(BmpOp::PeerDown {
                 peer_ip,
                 peer_as: asn as u32,
                 peer_bgp_id: bgp_id,
                 reason: PeerDownReason::PeerDeConfigured,
-            });
+            }));
         }
 
         // Send graceful shutdown notification if peer_tx is active
@@ -596,7 +596,7 @@ async fn get_peer_adj_rib_in(
 
 /// Send BMP route monitoring messages for a route update
 fn send_bmp_route_monitoring(
-    bmp_tx: &mpsc::UnboundedSender<BmpOp>,
+    bmp_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
     peer_ip: IpAddr,
     peer_as: u32,
     peer_bgp_id: u32,
@@ -608,12 +608,12 @@ fn send_bmp_route_monitoring(
     // Send withdrawals if any
     if !withdrawn.is_empty() {
         let update = UpdateMessage::new_withdraw(withdrawn.to_vec());
-        let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+        let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
             peer_ip,
             peer_as,
             peer_bgp_id,
             update,
-        });
+        }));
     }
 
     // Send announcements batched by path attributes
@@ -631,19 +631,19 @@ fn send_bmp_route_monitoring(
                 batch.path.communities.clone(),
                 batch.path.unknown_attrs.clone(),
             );
-            let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+            let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
                 peer_bgp_id,
                 update,
-            });
+            }));
         }
     }
 }
 
 /// Send initial BMP messages for existing peers after BMP server connects
 async fn send_initial_bmp_state(
-    bmp_tx: &mpsc::UnboundedSender<BmpOp>,
+    bmp_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
     established_peers: Vec<(IpAddr, &PeerInfo)>,
     response: oneshot::Sender<Result<(), String>>,
 ) {
@@ -652,7 +652,7 @@ async fn send_initial_bmp_state(
         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
             (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
         {
-            let _ = bmp_tx.send(BmpOp::PeerUp {
+            let _ = bmp_tx.send(Arc::new(BmpOp::PeerUp {
                 peer_ip: *peer_ip,
                 peer_as: asn as u32,
                 peer_bgp_id: bgp_id,
@@ -661,7 +661,7 @@ async fn send_initial_bmp_state(
                 remote_port: conn_info.remote_port,
                 sent_open: conn_info.sent_open.clone(),
                 received_open: conn_info.received_open.clone(),
-            });
+            }));
         }
     }
 
@@ -673,12 +673,12 @@ async fn send_initial_bmp_state(
             if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
                 let updates = routes_to_update_messages(&routes);
                 for update in updates {
-                    let _ = bmp_tx.send(BmpOp::RouteMonitoring {
+                    let _ = bmp_tx.send(Arc::new(BmpOp::RouteMonitoring {
                         peer_ip,
                         peer_as: asn as u32,
                         peer_bgp_id: bgp_id,
                         update,
-                    });
+                    }));
                 }
             }
         }
@@ -703,13 +703,13 @@ impl BgpServer {
     ) {
         // Add BMP destination
         let (tx, rx) = oneshot::channel();
-        let _ = self.bmp_tx.send(BmpOp::AddDestination {
+        let _ = self.bmp_tx.send(Arc::new(BmpOp::AddDestination {
             addr,
             sys_name: self.config.sys_name(),
             sys_descr: self.config.sys_descr(),
             statistics_timeout,
             response: tx,
-        });
+        }));
 
         let result = match rx.await {
             Ok(result) => result,
@@ -737,7 +737,7 @@ impl BgpServer {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .bmp_tx
-            .send(BmpOp::RemoveDestination { addr, response: tx });
+            .send(Arc::new(BmpOp::RemoveDestination { addr, response: tx }));
 
         tokio::spawn(async move {
             match rx.await {
@@ -756,7 +756,9 @@ impl BgpServer {
 
     fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
         let (tx, rx) = oneshot::channel();
-        let _ = self.bmp_tx.send(BmpOp::GetDestinations { response: tx });
+        let _ = self
+            .bmp_tx
+            .send(Arc::new(BmpOp::GetDestinations { response: tx }));
 
         tokio::spawn(async move {
             match rx.await {
@@ -773,11 +775,7 @@ impl BgpServer {
     async fn handle_get_bmp_statistics(&self, response: oneshot::Sender<Vec<BmpPeerStats>>) {
         let mut stats = Vec::new();
 
-        for (peer_ip, peer_info) in &self.peers {
-            if peer_info.state != BgpState::Established {
-                continue;
-            }
-
+        for (peer_ip, peer_info) in self.get_established_peers() {
             let Some(peer_tx) = &peer_info.peer_tx else {
                 continue;
             };
@@ -795,7 +793,7 @@ impl BgpServer {
 
             if let Ok(peer_stats) = rx.await {
                 stats.push(BmpPeerStats {
-                    peer_ip: *peer_ip,
+                    peer_ip,
                     peer_as: asn as u32,
                     peer_bgp_id: bgp_id,
                     adj_rib_in_count: peer_stats.adj_rib_in_count,

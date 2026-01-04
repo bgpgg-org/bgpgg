@@ -31,6 +31,7 @@ use crate::{error, info};
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -165,9 +166,6 @@ pub enum MgmtOp {
     GetBmpServers {
         response: oneshot::Sender<Vec<String>>,
     },
-    GetBmpStatistics {
-        response: oneshot::Sender<Vec<BmpPeerStats>>,
-    },
 }
 
 // Server operations sent from peer tasks to the main server loop
@@ -208,6 +206,10 @@ pub enum ServerOp {
     SetAdminState {
         peer_ip: IpAddr,
         state: AdminState,
+    },
+    /// Query BMP statistics for all established peers
+    GetBmpStatistics {
+        response: oneshot::Sender<Vec<BmpPeerStats>>,
     },
 }
 
@@ -255,70 +257,6 @@ pub enum BmpOp {
         peer_bgp_id: u32,
         adj_rib_in_count: u64,
     },
-}
-
-impl Clone for BmpOp {
-    fn clone(&self) -> Self {
-        match self {
-            BmpOp::PeerUp {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                local_address,
-                local_port,
-                remote_port,
-                sent_open,
-                received_open,
-            } => BmpOp::PeerUp {
-                peer_ip: *peer_ip,
-                peer_as: *peer_as,
-                peer_bgp_id: *peer_bgp_id,
-                local_address: *local_address,
-                local_port: *local_port,
-                remote_port: *remote_port,
-                sent_open: sent_open.clone(),
-                received_open: received_open.clone(),
-            },
-            BmpOp::PeerDown {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                reason,
-            } => BmpOp::PeerDown {
-                peer_ip: *peer_ip,
-                peer_as: *peer_as,
-                peer_bgp_id: *peer_bgp_id,
-                reason: reason.clone(),
-            },
-            BmpOp::RouteMonitoring {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                update,
-            } => BmpOp::RouteMonitoring {
-                peer_ip: *peer_ip,
-                peer_as: *peer_as,
-                peer_bgp_id: *peer_bgp_id,
-                update: update.clone(),
-            },
-            BmpOp::Statistics {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                adj_rib_in_count,
-            } => BmpOp::Statistics {
-                peer_ip: *peer_ip,
-                peer_as: *peer_as,
-                peer_bgp_id: *peer_bgp_id,
-                adj_rib_in_count: *adj_rib_in_count,
-            },
-            BmpOp::AddDestination { .. }
-            | BmpOp::RemoveDestination { .. }
-            | BmpOp::GetDestinations { .. } => {
-                panic!("Management BmpOp variants should not be cloned")
-            }
-        }
-    }
 }
 
 /// Connection info (stored only while peer is Established)
@@ -401,8 +339,8 @@ pub struct BgpServer {
     mgmt_rx: mpsc::Receiver<MgmtOp>,
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
-    pub(crate) bmp_tx: mpsc::UnboundedSender<BmpOp>,
-    bmp_rx: Option<mpsc::UnboundedReceiver<BmpOp>>,
+    pub(crate) bmp_tx: mpsc::UnboundedSender<Arc<BmpOp>>,
+    bmp_rx: Option<mpsc::UnboundedReceiver<Arc<BmpOp>>>,
 }
 
 impl BgpServer {
@@ -491,10 +429,10 @@ impl BgpServer {
             return;
         };
 
-        let mgmt_tx = self.mgmt_tx.clone();
+        let server_tx = self.op_tx.clone();
 
         tokio::spawn(async move {
-            let manager = crate::bmp::manager::BmpClientManager::new(bmp_rx, mgmt_tx);
+            let manager = crate::bmp::task::BmpTaskManager::new(bmp_rx, server_tx);
             manager.run().await;
         });
     }

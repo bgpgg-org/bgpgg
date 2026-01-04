@@ -39,12 +39,6 @@ impl BmpTcpClient {
         self.addr
     }
 
-    pub async fn shutdown(&mut self) {
-        if let Some(conn) = &mut self.conn {
-            let _ = conn.shutdown().await;
-        }
-    }
-
     async fn ensure_connected(&mut self) -> bool {
         if self.conn.is_some() {
             return true;
@@ -115,15 +109,6 @@ impl BmpDestination {
         match self {
             Self::TcpClient(client) => {
                 client.send_raw(&buffer).await;
-            }
-        }
-    }
-
-    /// Gracefully shutdown the connection
-    pub async fn shutdown(&mut self) {
-        match self {
-            Self::TcpClient(client) => {
-                client.shutdown().await;
             }
         }
     }

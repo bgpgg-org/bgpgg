@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod client;
 pub mod destination;
-pub mod manager;
 pub mod msg;
 pub mod msg_initiation;
 pub mod msg_peer_down;
@@ -23,4 +21,5 @@ pub mod msg_route_mirroring;
 pub mod msg_route_monitoring;
 pub mod msg_statistics;
 pub mod msg_termination;
+pub mod task;
 pub mod utils;
