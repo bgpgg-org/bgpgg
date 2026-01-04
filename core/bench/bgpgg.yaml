@@ -13,6 +13,8 @@ config_template: |
   listen_addr: "{bind_addr}"
   router_id: "{router_id}"
   grpc_listen_addr: "[::1]:{grpc_port}"
+  accept_unconfigured_peers: true
+  log_level: "error"
 
 control:
   type: grpc

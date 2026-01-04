@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::grpc::BgpClient;
+use bgpgg::grpc::{proto::SessionConfig, BgpClient};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::process::{Child, Command};
@@ -30,7 +30,9 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ControlConfig {
-    Grpc { endpoint: String },
+    Grpc {
+        endpoint: String,
+    },
     Cli {
         get_routes_cmd: Vec<String>,
         routes_count_regex: String,
@@ -75,14 +77,17 @@ impl Server {
         let config_file = format!("/tmp/bgp_bench_hub_{}.toml", asn);
         std::fs::write(&config_file, config_content)?;
 
-        // Spawn daemon
+        // Spawn daemon with stderr redirected to avoid shutdown noise
         let args: Vec<String> = config
             .daemon_args
             .iter()
             .map(|arg| arg.replace("{config_file}", &config_file))
             .collect();
 
-        let daemon_process = Command::new(&config.daemon_bin).args(&args).spawn()?;
+        let daemon_process = Command::new(&config.daemon_bin)
+            .args(&args)
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
 
         // Wait for daemon to be ready
         sleep(Duration::from_secs(2)).await;
@@ -169,5 +174,24 @@ impl Server {
                 Ok(0)
             }
         }
+    }
+
+    pub async fn add_peer(
+        &mut self,
+        addr: String,
+        config: Option<SessionConfig>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match &mut self.control {
+            ControlMethod::Grpc(client) => {
+                client.add_peer(addr, config).await?;
+                Ok(())
+            }
+            ControlMethod::Cli { .. } => Err("add_peer not supported for CLI control".into()),
+        }
+    }
+
+    pub fn shutdown(mut self) {
+        let _ = self.daemon_process.kill();
+        let _ = self.daemon_process.wait();
     }
 }

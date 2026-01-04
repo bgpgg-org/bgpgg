@@ -12,7 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::SystemTime;
+
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(1); // 0=debug, 1=info, 2=warn, 3=error
+
+pub fn set_log_level(level: &str) {
+    let level_num = match level.to_lowercase().as_str() {
+        "debug" => 0,
+        "info" => 1,
+        "warn" => 2,
+        "error" => 3,
+        _ => 1, // default to info
+    };
+    LOG_LEVEL.store(level_num, Ordering::Relaxed);
+}
+
+pub fn should_log(level: u8) -> bool {
+    level >= LOG_LEVEL.load(Ordering::Relaxed)
+}
 
 pub fn get_timestamp() -> String {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
@@ -37,21 +55,25 @@ pub fn get_timestamp() -> String {
 #[macro_export]
 macro_rules! info {
     ($msg:expr) => {
-        println!("{}", serde_json::json!({
-            "timestamp": $crate::log::get_timestamp(),
-            "level": "INFO",
-            "message": $msg
-        }));
+        if $crate::log::should_log(1) {
+            println!("{}", serde_json::json!({
+                "timestamp": $crate::log::get_timestamp(),
+                "level": "INFO",
+                "message": $msg
+            }));
+        }
     };
     ($msg:expr, $($key:tt => $val:expr),+ $(,)?) => {
-        println!("{}", serde_json::json!({
-            "timestamp": $crate::log::get_timestamp(),
-            "level": "INFO",
-            "message": $msg,
-            $(
-                $key: $val
-            ),+
-        }));
+        if $crate::log::should_log(1) {
+            println!("{}", serde_json::json!({
+                "timestamp": $crate::log::get_timestamp(),
+                "level": "INFO",
+                "message": $msg,
+                $(
+                    $key: $val
+                ),+
+            }));
+        }
     };
 }
 
@@ -100,20 +122,24 @@ macro_rules! error {
 #[macro_export]
 macro_rules! debug {
     ($msg:expr) => {
-        println!("{}", serde_json::json!({
-            "timestamp": $crate::log::get_timestamp(),
-            "level": "DEBUG",
-            "message": $msg
-        }));
+        if $crate::log::should_log(0) {
+            println!("{}", serde_json::json!({
+                "timestamp": $crate::log::get_timestamp(),
+                "level": "DEBUG",
+                "message": $msg
+            }));
+        }
     };
     ($msg:expr, $($key:tt => $val:expr),+ $(,)?) => {
-        println!("{}", serde_json::json!({
-            "timestamp": $crate::log::get_timestamp(),
-            "level": "DEBUG",
-            "message": $msg,
-            $(
-                $key: $val
-            ),+
-        }));
+        if $crate::log::should_log(0) {
+            println!("{}", serde_json::json!({
+                "timestamp": $crate::log::get_timestamp(),
+                "level": "DEBUG",
+                "message": $msg,
+                $(
+                    $key: $val
+                ),+
+            }));
+        }
     };
 }

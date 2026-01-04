@@ -22,6 +22,7 @@ use std::net::Ipv4Addr;
 use tonic::transport::Channel;
 
 /// Simplified wrapper around the gRPC client that hides boilerplate
+#[derive(Clone)]
 pub struct BgpClient {
     inner: BgpServiceClient<Channel>,
     /// Router ID of the BGP server this client is connected to.
@@ -172,27 +173,43 @@ impl BgpClient {
     /// Add multiple routes using streaming API for better performance
     pub async fn add_route_stream(
         &mut self,
-        routes: Vec<(String, String, Origin, Vec<AsPathSegment>, Option<u32>, Option<u32>, bool, Vec<u32>)>,
+        routes: Vec<(
+            String,
+            String,
+            Origin,
+            Vec<AsPathSegment>,
+            Option<u32>,
+            Option<u32>,
+            bool,
+            Vec<u32>,
+        )>,
     ) -> Result<u64, tonic::Status> {
-        let requests = routes.into_iter().map(|(prefix, next_hop, origin, as_path, local_pref, med, atomic_aggregate, communities)| {
-            AddRouteRequest {
+        let requests = routes.into_iter().map(
+            |(
                 prefix,
                 next_hop,
-                origin: origin.into(),
+                origin,
                 as_path,
                 local_pref,
                 med,
                 atomic_aggregate,
                 communities,
-            }
-        });
+            )| {
+                AddRouteRequest {
+                    prefix,
+                    next_hop,
+                    origin: origin.into(),
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    communities,
+                }
+            },
+        );
 
         let stream = tokio_stream::iter(requests);
-        let resp = self
-            .inner
-            .add_route_stream(stream)
-            .await?
-            .into_inner();
+        let resp = self.inner.add_route_stream(stream).await?.into_inner();
 
         Ok(resp.count)
     }

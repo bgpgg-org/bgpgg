@@ -348,6 +348,9 @@ pub struct BgpServer {
 
 impl BgpServer {
     pub fn new(config: Config) -> Result<Self, ServerError> {
+        // Set log level from config
+        crate::log::set_log_level(&config.log_level);
+
         let local_bgp_id = u32::from(config.router_id);
         let sock_addr: SocketAddr = config
             .listen_addr

@@ -22,7 +22,7 @@ use std::net::Ipv4Addr;
 #[allow(dead_code)]
 mod common;
 
-pub use common::{poll_until, start_test_server, TestServer};
+pub use common::{poll_until, poll_until_with_timeout, start_test_server, TestServer};
 
 // Memory utilities
 
@@ -60,7 +60,19 @@ pub fn get_process_memory() -> MemoryStats {
 
 // Route generation utilities
 
-pub fn generate_routes_for_spoke(spoke_id: u32, count: usize) -> Vec<(String, String, Origin)> {
+pub fn generate_routes_for_spoke(
+    spoke_id: u32,
+    count: usize,
+) -> Vec<(
+    String,
+    String,
+    Origin,
+    Vec<bgpgg::grpc::proto::AsPathSegment>,
+    Option<u32>,
+    Option<u32>,
+    bool,
+    Vec<u32>,
+)> {
     let mut routes = Vec::with_capacity(count);
 
     let base_offset = spoke_id * count as u32;
@@ -72,9 +84,29 @@ pub fn generate_routes_for_spoke(spoke_id: u32, count: usize) -> Vec<(String, St
         let octet3 = (prefix_num % 256) as u8;
 
         let prefix = format!("{}.{}.{}.0/24", octet1, octet2, octet3);
-        let next_hop = format!("192.168.{}.1", spoke_id % 256);
 
-        routes.push((prefix, next_hop, Origin::Igp));
+        // Vary next_hop every 50 routes - keeps batches smaller
+        let next_hop_variant = (i / 50) as u8;
+        let next_hop = format!("192.168.{}.{}", spoke_id % 256, next_hop_variant);
+
+        // Vary communities every 25 routes - combined with next_hop gives ~25 routes per batch
+        let community = if (i / 25) % 2 == 0 {
+            vec![65000u32 << 16 | 100]
+        } else {
+            vec![65000u32 << 16 | 200]
+        };
+
+        // (prefix, next_hop, origin, as_path, local_pref, med, atomic_aggregate, communities)
+        routes.push((
+            prefix,
+            next_hop,
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            community,
+        ));
     }
 
     routes
@@ -90,29 +122,31 @@ pub async fn setup_topology(
     println!("Creating server...");
     let server_asn = 65000;
     let server_router_id = Ipv4Addr::new(0, 0, 0, 1);
-    let server_bind_addr = "127.0.0.1:0".to_string();
+    let server_bind_addr = "127.0.1.1:0".to_string();
     let server_grpc_port = 50051;
 
-    let server = Server::start(server_asn, server_router_id, server_bind_addr.clone(), server_grpc_port, server_config).await?;
+    let mut server = Server::start(
+        server_asn,
+        server_router_id,
+        server_bind_addr.clone(),
+        server_grpc_port,
+        server_config,
+    )
+    .await?;
 
     println!("Creating {} senders...", num_senders);
     let mut senders = Vec::with_capacity(num_senders);
     for i in 0..num_senders {
         let asn = (i + 1) as u16;
-        let offset = i + 1;  // Start from .1 not .0
-        let octet1 = (offset / 256) as u8;
-        let octet2 = (offset % 256) as u8;
-        let router_id = Ipv4Addr::new(0, 0, octet1, octet2);
-        let bind_addr = format!("127.0.{}.{}:0", octet1, octet2);
+        // Start from 127.0.2.1 to avoid conflicts with hub at 127.0.1.1
+        let offset = i + 1;
+        let octet = (offset % 254) as u8 + 1; // 1-254
+        let router_id = Ipv4Addr::new(0, 0, 2, octet);
+        let bind_addr = format!("127.0.2.{}:0", octet);
 
-        let config = Config::new(asn, &bind_addr, router_id, 90, true);
-        let mut sender = start_test_server(config).await;
-
-        // Peer sender to server
-        sender
-            .client
-            .add_peer(server_bind_addr.clone(), None)
-            .await?;
+        let mut config = Config::new(asn, &bind_addr, router_id, 90, true);
+        config.log_level = "error".to_string(); // Suppress logs during load test
+        let sender = start_test_server(config).await;
 
         senders.push(sender);
 
@@ -129,17 +163,29 @@ pub async fn setup_topology(
         let router_id = Ipv4Addr::new(0, 4, 0, octet);
         let bind_addr = format!("127.0.4.{}:0", octet);
 
-        let config = Config::new(asn, &bind_addr, router_id, 90, true);
-        let mut receiver = start_test_server(config).await;
-
-        // Peer receiver to server
-        receiver
-            .client
-            .add_peer(server_bind_addr.clone(), None)
-            .await?;
+        let mut config = Config::new(asn, &bind_addr, router_id, 90, true);
+        config.log_level = "error".to_string(); // Suppress logs during load test
+        let receiver = start_test_server(config).await;
 
         receivers.push(receiver);
     }
+
+    println!(
+        "Peering server with {} senders and {} receivers...",
+        num_senders, num_receivers
+    );
+    for sender in &senders {
+        let peer_addr = format!("{}:{}", sender.address, sender.bgp_port);
+        server.add_peer(peer_addr, None).await?;
+    }
+    for receiver in &receivers {
+        let peer_addr = format!("{}:{}", receiver.address, receiver.bgp_port);
+        server.add_peer(peer_addr, None).await?;
+    }
+
+    // Wait for BGP sessions to establish
+    println!("Waiting for BGP sessions to establish...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     println!("Topology created!");
     Ok((server, senders, receivers))

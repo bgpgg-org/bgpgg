@@ -153,6 +153,13 @@ pub struct Config {
     /// BMP sysDescr (RFC 7854). Defaults to "bgpgg version {VERSION}".
     #[serde(default)]
     pub sys_descr: Option<String>,
+    /// Log level: "debug", "info", "warn", "error". Defaults to "info".
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -188,6 +195,7 @@ impl Config {
             bmp_servers: Vec::new(),
             sys_name: None,
             sys_descr: None,
+            log_level: default_log_level(),
         }
     }
 
@@ -241,6 +249,7 @@ impl Default for Config {
             bmp_servers: Vec::new(),
             sys_name: None,
             sys_descr: None,
+            log_level: default_log_level(),
         }
     }
 }
