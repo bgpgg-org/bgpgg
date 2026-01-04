@@ -384,6 +384,6 @@ async fn test_bmp_termination_on_remove() {
 
     // Should receive Termination message with reason code PermanentlyAdminClose
     bmp_server
-        .assert_termination(TerminationReason::PermanentlyAdminClose.as_u16())
+        .assert_termination(TerminationReason::PermanentlyAdminClose)
         .await;
 }

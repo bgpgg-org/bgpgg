@@ -24,7 +24,7 @@ use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
 use bgpgg::bmp::msg_peer_up::PeerUpMessage;
 use bgpgg::bmp::msg_route_monitoring::RouteMonitoringMessage;
-use bgpgg::bmp::msg_termination::TerminationMessage;
+use bgpgg::bmp::msg_termination::{TerminationMessage, TerminationReason};
 use bgpgg::bmp::utils::{
     InformationTlv, InitiationType, PeerHeader, TerminationType, PEER_HEADER_SIZE,
 };
@@ -345,9 +345,9 @@ impl FakeBmpServer {
         assert_bmp_peer_down_msg(&msg, peer_addr, peer_as, peer_bgp_id, reason);
     }
 
-    pub async fn assert_termination(&mut self, expected_reason_code: u16) {
+    pub async fn assert_termination(&mut self, expected_reason: TerminationReason) {
         let msg = self.read_termination().await;
-        assert_bmp_termination_msg(&msg, expected_reason_code);
+        assert_bmp_termination_msg(&msg, expected_reason);
     }
 }
 
@@ -504,7 +504,7 @@ pub fn assert_bmp_route_monitoring_msg(
 }
 
 /// Assert that a Termination message has the expected reason code
-pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason_code: u16) {
+pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason: TerminationReason) {
     // Extract reason code from the Reason TLV
     let actual_reason_code = msg
         .information
@@ -514,7 +514,8 @@ pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason_code
         .unwrap_or(1);
 
     assert_eq!(
-        actual_reason_code, expected_reason_code,
+        actual_reason_code,
+        expected_reason.as_u16(),
         "Termination reason code mismatch"
     );
 }
