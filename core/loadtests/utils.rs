@@ -22,7 +22,7 @@ use std::net::Ipv4Addr;
 #[allow(dead_code)]
 mod common;
 
-pub use common::{poll_until, poll_until_with_timeout, start_test_server, TestServer};
+pub use common::{start_test_server, TestServer};
 
 // Memory utilities
 
@@ -60,8 +60,8 @@ pub fn get_process_memory() -> MemoryStats {
 
 // Route generation utilities
 
-pub fn generate_routes_for_spoke(
-    spoke_id: u32,
+pub fn generate_routes_for_sender(
+    sender_id: u32,
     count: usize,
 ) -> Vec<(
     String,
@@ -75,7 +75,7 @@ pub fn generate_routes_for_spoke(
 )> {
     let mut routes = Vec::with_capacity(count);
 
-    let base_offset = spoke_id * count as u32;
+    let base_offset = sender_id * count as u32;
 
     for i in 0..count {
         let prefix_num = base_offset + i as u32;
@@ -87,7 +87,7 @@ pub fn generate_routes_for_spoke(
 
         // Vary next_hop every 50 routes - keeps batches smaller
         let next_hop_variant = (i / 50) as u8;
-        let next_hop = format!("192.168.{}.{}", spoke_id % 256, next_hop_variant);
+        let next_hop = format!("192.168.{}.{}", sender_id % 256, next_hop_variant);
 
         // Vary communities every 25 routes - combined with next_hop gives ~25 routes per batch
         let community = if (i / 25) % 2 == 0 {
@@ -122,10 +122,10 @@ pub async fn setup_topology(
     println!("Creating server...");
     let server_asn = 65000;
     let server_router_id = Ipv4Addr::new(0, 0, 0, 1);
-    let server_bind_addr = "127.0.1.1:0".to_string();
+    let server_bind_addr = "127.0.1.1:17900".to_string();
     let server_grpc_port = 50051;
 
-    let mut server = Server::start(
+    let server = Server::start(
         server_asn,
         server_router_id,
         server_bind_addr.clone(),
@@ -170,23 +170,6 @@ pub async fn setup_topology(
         receivers.push(receiver);
     }
 
-    println!(
-        "Peering server with {} senders and {} receivers...",
-        num_senders, num_receivers
-    );
-    for sender in &senders {
-        let peer_addr = format!("{}:{}", sender.address, sender.bgp_port);
-        server.add_peer(peer_addr, None).await?;
-    }
-    for receiver in &receivers {
-        let peer_addr = format!("{}:{}", receiver.address, receiver.bgp_port);
-        server.add_peer(peer_addr, None).await?;
-    }
-
-    // Wait for BGP sessions to establish
-    println!("Waiting for BGP sessions to establish...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-    println!("Topology created!");
+    println!("Topology created (peers not yet connected)!");
     Ok((server, senders, receivers))
 }

@@ -15,13 +15,11 @@
 
 set -e
 
-IMPL_NAME=${1:-bgpgg}
-
 # Increase file descriptor limit for 1000+ connections
 ulimit -n 10000
 
-# Build release binary
-cargo build --release --bin load_test
+# Build all release binaries
+cargo build --release
 
-# Run benchmark
-exec cargo run --release --bin load_test -- "$IMPL_NAME"
+# Run benchmark, forward all arguments
+exec cargo run --release --bin load_test -- "${@:-bgpgg}"

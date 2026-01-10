@@ -1,6 +1,6 @@
 /target
 /release
 
-# Bench configs (keep only bgpgg.yaml)
-core/bench/*.yaml
-!core/bench/bgpgg.yaml
+# Loadtest configs (keep only bgpgg.yaml)
+core/loadtests/*.yaml
+!core/loadtests/bgpgg.yaml

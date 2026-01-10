@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt release setup bench
+.PHONY: all build clean run test fmt release setup loadtests
 
 all: build
 
@@ -24,5 +24,9 @@ test: setup
 fmt:
 	cargo fmt
 
-bench: setup
-	./script/run-bench.sh $(impl)
+# Load tests
+# Usage:
+#   make loadtests                                  # Run with defaults (bgpgg, 10 senders, 10 receivers, 1000 routes)
+#   make loadtests args="--senders 100 --routes 10000"  # Custom config
+loadtests: setup
+	./script/run-loadtests.sh $(impl) $(args)

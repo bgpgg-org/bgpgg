@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bgpgg::grpc::proto::BgpState;
+use clap::Parser;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -20,21 +22,39 @@ mod server;
 mod utils;
 
 use server::ServerConfig;
-use utils::{generate_routes_for_spoke, get_process_memory, setup_topology, TestServer};
+use utils::{generate_routes_for_sender, get_process_memory, setup_topology, TestServer};
+
+#[derive(Parser)]
+#[command(name = "load_test")]
+#[command(about = "BGP load testing tool")]
+struct Args {
+    /// BGP implementation to test (config file name without .yaml)
+    #[arg(default_value = "bgpgg")]
+    implementation: String,
+
+    /// Number of sender peers
+    #[arg(long, default_value = "10")]
+    senders: usize,
+
+    /// Number of receiver peers
+    #[arg(long, default_value = "10")]
+    receivers: usize,
+
+    /// Routes per sender
+    #[arg(long, default_value = "1000")]
+    routes: usize,
+}
 
 #[tokio::main]
 async fn main() {
-    let impl_name = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "bgpgg".to_string());
+    let args = Args::parse();
 
-    // Load config for server under test
-    let config_path = format!("core/bench/{}.yaml", impl_name);
+    let config_path = format!("core/loadtests/{}.yaml", args.implementation);
     if !Path::new(&config_path).exists() {
         eprintln!("Config not found: {}", config_path);
         eprintln!(
-            "Create core/bench/{}.yaml to test this implementation",
-            impl_name
+            "Create core/loadtests/{}.yaml to test this implementation",
+            args.implementation
         );
         std::process::exit(1);
     }
@@ -43,41 +63,93 @@ async fn main() {
     let server_config: ServerConfig =
         serde_yaml::from_str(&config_content).expect("Failed to parse config");
 
-    println!("=== BGP Load Test ({}) ===\n", impl_name);
-    run_test(server_config).await.expect("Test failed");
+    println!("=== BGP Load Test ({}) ===", args.implementation);
+    println!(
+        "Config: {} senders, {} receivers, {} routes/sender\n",
+        args.senders, args.receivers, args.routes
+    );
+    run_test(server_config, args.senders, args.receivers, args.routes)
+        .await
+        .expect("Test failed");
 }
 
-async fn run_test(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Setup topology
-    let num_senders = 10;
-    let num_receivers = 2;
-    let routes_per_sender = 100;
-    let expected_total = num_senders * routes_per_sender;
+async fn run_test(
+    server_config: ServerConfig,
+    num_senders: usize,
+    num_receivers: usize,
+    routes_per_sender: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    test_route_ingestion(server_config.clone(), num_senders, routes_per_sender).await?;
+    test_route_propagation(server_config, num_senders, num_receivers, routes_per_sender).await?;
 
-    println!(
-        "Setting up topology ({} senders + 1 server + {} receivers)...",
-        num_senders, num_receivers
-    );
-    let setup_start = Instant::now();
-    let (server, mut senders, receivers) =
-        setup_topology(num_senders, num_receivers, server_config).await?;
-    println!("Setup: {:?}\n", setup_start.elapsed());
+    println!("=== Load Test Complete ===");
 
-    // 2. Test ingestion
+    Ok(())
+}
+
+async fn test_route_ingestion(
+    server_config: ServerConfig,
+    num_senders: usize,
+    routes_per_sender: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "Test 1: Route ingestion ({} senders × {} routes -> server)",
+        "Test: Route ingestion ({} senders × {} routes -> server)",
         num_senders, routes_per_sender
     );
+
+    let (server, mut senders, _receivers) = setup_topology(num_senders, 0, server_config).await?;
+
+    let expected_total = num_senders * routes_per_sender;
+
+    // Connect peers first
+    println!("  Connecting peers...");
+    let server_bgp_addr = "127.0.1.1:17900";
+    for sender in &mut senders {
+        sender
+            .client
+            .add_peer(server_bgp_addr.to_string(), None)
+            .await?;
+    }
+
+    // Wait for sessions to establish
+    println!("  Waiting for BGP sessions to establish...");
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let mut all_established = true;
+        for sender in &senders {
+            let peers = sender.client.get_peers().await.unwrap_or_default();
+            if !peers
+                .iter()
+                .any(|p| p.state == BgpState::Established as i32)
+            {
+                all_established = false;
+                break;
+            }
+        }
+
+        if all_established {
+            println!("  All sessions established!");
+            break;
+        }
+    }
+
+    // Now load routes and measure ingestion
+    println!("  Loading routes into senders...");
     let mem_before = get_process_memory();
     let start = Instant::now();
+
     load_routes_parallel(&mut senders, routes_per_sender).await?;
     poll_server_routes(&server, expected_total).await;
+
     let elapsed = start.elapsed();
     let mem_after = get_process_memory();
 
-    let routes_per_sec = expected_total as f64 / elapsed.as_secs_f64();
     println!("  Time: {:.2}s", elapsed.as_secs_f64());
-    println!("  Throughput: {:.0} routes/sec", routes_per_sec);
+    println!(
+        "  Throughput: {:.0} routes/sec",
+        expected_total as f64 / elapsed.as_secs_f64()
+    );
     println!(
         "  Memory: {} KB -> {} KB (delta: {} KB)\n",
         mem_before.rss_kb,
@@ -85,48 +157,92 @@ async fn run_test(server_config: ServerConfig) -> Result<(), Box<dyn std::error:
         mem_after.rss_kb.saturating_sub(mem_before.rss_kb)
     );
 
-    // 3. Test propagation to 1 receiver
-    println!("Test 2: Route propagation (server -> 1 receiver)");
-    let start = Instant::now();
-    poll_receiver_routes(&receivers[0], expected_total).await;
-    let elapsed = start.elapsed();
-    println!("  Time: {:.2}s", elapsed.as_secs_f64());
-    println!(
-        "  Throughput: {:.0} routes/sec\n",
-        expected_total as f64 / elapsed.as_secs_f64()
-    );
+    drop(senders);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    server.shutdown();
 
-    // 4. Test propagation to all receivers
+    Ok(())
+}
+
+async fn test_route_propagation(
+    server_config: ServerConfig,
+    num_senders: usize,
+    num_receivers: usize,
+    routes_per_sender: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "Test 3: Route propagation (server -> {} receivers)",
+        "Test: Route propagation (server -> {} receivers)",
         num_receivers
     );
+
+    let (server, mut senders, mut receivers) =
+        setup_topology(num_senders, num_receivers, server_config).await?;
+
+    let expected_total = num_senders * routes_per_sender;
+
+    // Connect senders to server
+    println!("  Connecting senders...");
+    let server_bgp_addr = "127.0.1.1:17900";
+    for sender in &mut senders {
+        sender
+            .client
+            .add_peer(server_bgp_addr.to_string(), None)
+            .await?;
+    }
+
+    // Wait for sessions to establish
+    println!("  Waiting for BGP sessions to establish...");
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let mut all_established = true;
+        for sender in &senders {
+            let peers = sender.client.get_peers().await.unwrap_or_default();
+            if !peers
+                .iter()
+                .any(|p| p.state == BgpState::Established as i32)
+            {
+                all_established = false;
+                break;
+            }
+        }
+
+        if all_established {
+            println!("  All sessions established!");
+            break;
+        }
+    }
+
+    // Load routes into senders
+    println!("  Loading routes into senders...");
+    load_routes_parallel(&mut senders, routes_per_sender).await?;
+
+    // Wait for server to receive routes
+    poll_server_routes(&server, expected_total).await;
+
+    // Connect receivers and measure propagation
+    println!("  Connecting receivers...");
     let start = Instant::now();
+
+    for receiver in &mut receivers {
+        receiver
+            .client
+            .add_peer(server_bgp_addr.to_string(), None)
+            .await?;
+    }
+
     poll_all_receivers_routes(&receivers, expected_total).await;
     let elapsed = start.elapsed();
+
     println!("  Time: {:.2}s", elapsed.as_secs_f64());
     println!(
         "  Per-receiver avg: {:.2}s\n",
         elapsed.as_secs_f64() / num_receivers as f64
     );
 
-    // 5. Test stats collection
-    println!("Test 4: Statistics collection");
-    let start = Instant::now();
-    let peer_count = server.get_peer_count().await?;
-    let elapsed = start.elapsed();
-    println!("  Time: {:?} for {} peers\n", elapsed, peer_count);
-
-    println!("=== Load Test Complete ===");
-
-    // Drop senders and receivers first so they disconnect cleanly
     drop(senders);
     drop(receivers);
-
-    // Give them a moment to close connections
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Then shutdown the hub
     server.shutdown();
 
     Ok(())
@@ -145,7 +261,7 @@ async fn load_routes_parallel(
 
     for (idx, sender) in senders.iter_mut().enumerate() {
         let sender_id = (idx + 1) as u32;
-        let routes = generate_routes_for_spoke(sender_id, routes_per_sender);
+        let routes = generate_routes_for_sender(sender_id, routes_per_sender);
 
         // Spawn parallel task for each sender
         let mut client = sender.client.clone();

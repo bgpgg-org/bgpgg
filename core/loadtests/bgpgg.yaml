@@ -1,10 +1,5 @@
-daemon_bin: cargo
+daemon_bin: target/release/bgpggd
 daemon_args:
-  - run
-  - --release
-  - --bin
-  - bgpggd
-  - --
   - --config
   - "{config_file}"
 
@@ -16,6 +11,5 @@ config_template: |
   accept_unconfigured_peers: true
   log_level: "error"
 
-control:
-  type: grpc
-  endpoint: "http://[::1]:{grpc_port}"
+get_routes_cmd: ["target/release/bgpgg", "--addr", "http://[::1]:{grpc_port}", "global", "summary"]
+routes_count_regex: "Total Routes:\\s+(\\d+)"

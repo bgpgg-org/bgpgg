@@ -10,6 +10,7 @@ prost.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true
+clap.workspace = true
 tokio-stream = "0.1"
 regex = "1"
 
@@ -22,4 +23,4 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "load_test"
-path = "bench/load_test.rs"
+path = "loadtests/main.rs"
