@@ -19,7 +19,7 @@ run: setup
 
 test: setup
 	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test
+	cargo test --workspace --exclude loadtests
 
 fmt:
 	cargo fmt

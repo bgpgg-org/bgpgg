@@ -17,6 +17,7 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::config::PeerConfig;
 use crate::debug;
+use crate::log::Logger;
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
@@ -24,6 +25,7 @@ use crate::types::PeerDownReason;
 use std::fmt;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -161,6 +163,7 @@ pub struct Peer {
     consecutive_down_count: u32,
     /// Connection type for collision detection
     conn_type: ConnectionType,
+    logger: Arc<Logger>,
     /// True if ManualStop was received - disables auto-reconnect until ManualStart
     manually_stopped: bool,
     /// Timestamp when Established state was entered (for stability-based damping reset)
@@ -192,6 +195,7 @@ impl Peer {
         local_addr: SocketAddr,
         config: PeerConfig,
         connect_retry_secs: u64,
+        logger: Arc<Logger>,
     ) -> Self {
         let local_ip = match local_addr.ip() {
             IpAddr::V4(ip) => ip,
@@ -229,6 +233,7 @@ impl Peer {
             established_at: None,
             sent_open: None,
             received_open: None,
+            logger,
         }
     }
 
@@ -236,7 +241,7 @@ impl Peer {
     /// Runs forever, handling all FSM states including Idle, Connect, Active.
     pub async fn run(mut self) {
         let peer_ip = self.addr;
-        debug!("starting peer task", "peer_ip" => peer_ip.to_string());
+        debug!(&self.logger, "starting peer task", "peer_ip" => peer_ip.to_string());
 
         loop {
             match self.fsm.state() {
@@ -373,6 +378,7 @@ pub mod test_helpers {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
+            logger: Arc::new(Logger::default()),
         }
     }
 }

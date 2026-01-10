@@ -18,11 +18,12 @@ use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::bgp::utils::IpNetwork;
+use crate::log::Logger;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
-use crate::{error, info};
+use crate::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -171,6 +172,7 @@ pub fn send_withdrawals_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
+    logger: &Arc<Logger>,
 ) {
     if to_withdraw.is_empty() {
         return;
@@ -178,9 +180,9 @@ pub fn send_withdrawals_to_peer(
 
     let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
-        error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+        error!(logger, "failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
     } else {
-        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
+        info!(logger, "propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
     }
 }
 
@@ -242,6 +244,7 @@ fn build_export_next_hop(
 
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
+#[allow(clippy::too_many_arguments)]
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
@@ -250,6 +253,7 @@ pub fn send_announcements_to_peer(
     peer_asn: u16,
     local_router_id: Ipv4Addr,
     export_policy: &Policy,
+    logger: &Arc<Logger>,
 ) {
     if to_announce.is_empty() {
         return;
@@ -296,7 +300,12 @@ pub fn send_announcements_to_peer(
             .cloned()
             .collect();
 
-        info!("exporting route", "peer_ip" => peer_addr.to_string(), "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
+        debug!(logger, "exporting route",
+            "peer_ip" => peer_addr.to_string(),
+            "path_local_pref" => format!("{:?}", batch.path.local_pref),
+            "export_local_pref" => format!("{:?}", local_pref),
+            "path_med" => format!("{:?}", batch.path.med),
+            "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
@@ -313,20 +322,18 @@ pub fn send_announcements_to_peer(
         // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            error!(
-                "UPDATE message exceeds maximum size, not advertising",
+            warn!(logger, "UPDATE message exceeds maximum size, not advertising",
                 "peer_ip" => peer_addr.to_string(),
                 "prefix_count" => batch.prefixes.len(),
                 "size" => serialized.len(),
-                "max_size" => MAX_MESSAGE_SIZE
-            );
+                "max_size" => MAX_MESSAGE_SIZE);
             continue;
         }
 
         if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
-            error!("failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+            error!(logger, "failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
         } else {
-            info!("propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
+            info!(logger, "propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
         }
     }
 }
@@ -734,6 +741,7 @@ mod tests {
         let routes = vec![(prefix, Arc::new(path))];
 
         // Send announcements - should skip due to size
+        let logger = Arc::new(Logger::default());
         send_announcements_to_peer(
             peer_addr,
             &tx,
@@ -742,6 +750,7 @@ mod tests {
             65001,
             Ipv4Addr::new(1, 1, 1, 1),
             &policy,
+            &logger,
         );
 
         // Verify no message was sent

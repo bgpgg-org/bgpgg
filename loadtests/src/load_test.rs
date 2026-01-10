@@ -38,6 +38,7 @@ impl BgpggProcess {
             bmp_servers: vec![],
             sys_name: None,
             sys_descr: None,
+            log_level: "error".to_string(),
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -131,7 +132,12 @@ async fn test_route_ingestion_10_peers_100k_routes() {
         // This is necessary because bgpgg identifies peers by source IP address
         let bind_addr: SocketAddr = format!("127.0.0.{}:0", 1 + i).parse().unwrap();
 
-        tracing::info!("Connecting peer {} (AS{}) from {}...", i, sender_asn, bind_addr.ip());
+        tracing::info!(
+            "Connecting peer {} (AS{}) from {}...",
+            i,
+            sender_asn,
+            bind_addr.ip()
+        );
 
         match crate::sender::establish_connection(
             target,

@@ -46,13 +46,13 @@ impl Peer {
                     match result {
                         Ok(message) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
                         Err(e) => {
-                            error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                            error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
                                 self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -78,13 +78,13 @@ impl Peer {
                             let _ = response.send(routes);
                         }
                         PeerOp::Shutdown(subcode) => {
-                            info!("shutdown requested", "peer_ip" => peer_ip.to_string());
+                            info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
                         PeerOp::ManualStop => {
-                            info!("ManualStop received", "peer_ip" => peer_ip.to_string());
+                            info!(&self.logger, "ManualStop received", "peer_ip" => peer_ip.to_string());
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
                         }
@@ -101,7 +101,7 @@ impl Peer {
                 _ = timer_interval.tick() => {
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
-                        error!("hold timer expired", "peer_ip" => peer_ip.to_string());
+                        error!(&self.logger, "hold timer expired", "peer_ip" => peer_ip.to_string());
                         self.try_process_event(&FsmEvent::HoldTimerExpires).await;
                         return false;
                     }
@@ -109,7 +109,7 @@ impl Peer {
                     // Keepalive timer check
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
-                            error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(&self.logger, "failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
@@ -128,10 +128,10 @@ impl Peer {
     /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
     pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
         let event = if notif.is_version_error() {
-            debug!("NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
+            debug!(&self.logger, "NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
             FsmEvent::NotifMsgVerErr(notif.clone())
         } else {
-            debug!("NOTIFICATION received", "peer_ip" => self.addr.to_string());
+            debug!(&self.logger, "NOTIFICATION received", "peer_ip" => self.addr.to_string());
             FsmEvent::NotifMsg(notif.clone())
         };
         self.try_process_event(&event).await;
@@ -143,7 +143,7 @@ impl Peer {
         tcp_tx: OwnedWriteHalf,
         tcp_rx: OwnedReadHalf,
     ) {
-        debug!("TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
+        debug!(&self.logger, "TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
         self.conn = Some(TcpConnection {
             tx: tcp_tx,
             rx: tcp_rx,
@@ -153,7 +153,7 @@ impl Peer {
         if self.config.delay_open_time_secs.is_some() {
             self.fsm.timers.start_delay_open_timer();
         } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-            error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+            error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
             self.disconnect(
                 true,
                 PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
@@ -193,7 +193,7 @@ impl Peer {
     /// Process FSM event and log any errors.
     pub(super) async fn try_process_event(&mut self, event: &FsmEvent) {
         if let Err(e) = self.process_event(event).await {
-            error!("failed to process event",
+            error!(&self.logger, "failed to process event",
                 "peer_ip" => self.addr.to_string(),
                 "event" => format!("{:?}", event),
                 "error" => e.to_string());
@@ -298,10 +298,12 @@ pub(super) mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
+    use crate::log::Logger;
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
@@ -356,6 +358,7 @@ pub(super) mod tests {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
+            logger: Arc::new(Logger::default()),
         }
     }
 

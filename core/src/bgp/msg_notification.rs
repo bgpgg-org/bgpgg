@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::warn;
-
 use super::msg::{Message, MessageType};
 use super::utils::ParserError;
 
@@ -171,28 +169,40 @@ impl BgpError {
             ErrorCode::MessageHeaderError => {
                 let err = MessageHeaderError::from(err_sub_code);
                 if matches!(err, MessageHeaderError::Unknown(_)) {
-                    warn!("received NOTIFICATION with unknown MessageHeaderError subcode", "subcode" => err_sub_code);
+                    eprintln!(
+                        "Warning: received NOTIFICATION with unknown MessageHeaderError subcode, subcode={:?}",
+                        err_sub_code
+                    );
                 }
                 BgpError::MessageHeaderError(err)
             }
             ErrorCode::OpenMessageError => {
                 let err = OpenMessageError::from(err_sub_code);
                 if matches!(err, OpenMessageError::Unknown(_)) {
-                    warn!("received NOTIFICATION with unknown OpenMessageError subcode", "subcode" => err_sub_code);
+                    eprintln!(
+                        "Warning: received NOTIFICATION with unknown OpenMessageError subcode, subcode={:?}",
+                        err_sub_code
+                    );
                 }
                 BgpError::OpenMessageError(err)
             }
             ErrorCode::UpdateMessageError => {
                 let err = UpdateMessageError::from(err_sub_code);
                 if matches!(err, UpdateMessageError::Unknown(_)) {
-                    warn!("received NOTIFICATION with unknown UpdateMessageError subcode", "subcode" => err_sub_code);
+                    eprintln!(
+                        "Warning: received NOTIFICATION with unknown UpdateMessageError subcode, subcode={:?}",
+                        err_sub_code
+                    );
                 }
                 BgpError::UpdateMessageError(err)
             }
             ErrorCode::HoldTimerExpired => BgpError::HoldTimerExpired,
             ErrorCode::FiniteStateMachineError => BgpError::FiniteStateMachineError,
             ErrorCode::Unknown => {
-                warn!("received NOTIFICATION with unknown error code", "code" => err_code);
+                eprintln!(
+                    "Warning: received NOTIFICATION with unknown error code, code={:?}",
+                    err_code
+                );
                 BgpError::Unknown
             }
         }
@@ -280,7 +290,10 @@ impl NotificationMessage {
         // RFC 4271: errors in NOTIFICATION messages cannot be reported back via NOTIFICATION,
         // so we log locally and return Unknown for malformed messages.
         if bytes.len() < 2 {
-            warn!("received malformed NOTIFICATION message", "len" => bytes.len());
+            eprintln!(
+                "Warning: received malformed NOTIFICATION message, len={:?}",
+                bytes.len()
+            );
             return NotificationMessage {
                 error: BgpError::Unknown,
                 data: bytes,

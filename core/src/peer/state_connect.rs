@@ -34,7 +34,7 @@ impl Peer {
             if self.config.delay_open_time_secs.is_some() {
                 self.fsm.timers.start_delay_open_timer();
             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                 self.disconnect(
                     true,
                     PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
@@ -64,7 +64,7 @@ impl Peer {
                 result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
                     match result {
                         Ok(stream) => {
-                            info!("TCP connection established", "peer_ip" => self.addr.to_string());
+                            info!(&self.logger, "TCP connection established", "peer_ip" => self.addr.to_string());
                             let (rx, tx) = stream.into_split();
                             self.conn = Some(TcpConnection { tx, rx });
                             self.fsm.timers.stop_connect_retry();
@@ -72,18 +72,18 @@ impl Peer {
                             if self.config.delay_open_time_secs.is_some() {
                                 self.fsm.timers.start_delay_open_timer();
                             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-                                error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                                error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                                 self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed));
                             }
                         }
                         Err(e) => {
-                            debug!("TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            debug!(&self.logger, "TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                             self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                         }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
-                    debug!("ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
+                    debug!(&self.logger, "ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
@@ -111,7 +111,7 @@ impl Peer {
             result = read_bgp_message(&mut conn.rx) => {
                 match result {
                     Ok(BgpMessage::Open(open)) => {
-                        debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
                             peer_asn: open.asn,
@@ -121,7 +121,7 @@ impl Peer {
                             peer_bgp_id: open.bgp_identifier,
                         });
                         if let Err(e) = self.process_event(&event).await {
-                            error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            error!(&self.logger, "failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                             self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
@@ -129,11 +129,11 @@ impl Peer {
                         self.handle_notification_received(&notif).await;
                     }
                     Ok(_) => {
-                        error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
+                        error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
                     Err(e) => {
-                        debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         // RFC 4271 Events 21, 22: Determine error type and send appropriate event
                         let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                             match notif.error() {
@@ -151,12 +151,12 @@ impl Peer {
             _ = timer_interval.tick() => {
                 // RFC 4271 8.2.2: Check ConnectRetryTimer first (Event 9 in Connect state)
                 if self.fsm.timers.connect_retry_expired() {
-                    debug!("ConnectRetryTimer expired in Connect while DelayOpen running", "peer_ip" => self.addr.to_string());
+                    debug!(&self.logger, "ConnectRetryTimer expired in Connect while DelayOpen running", "peer_ip" => self.addr.to_string());
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 } else if self.fsm.timers.delay_open_timer_expired() {
-                    debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
+                    debug!(&self.logger, "DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
-                        error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::DelayOpenTimerExpires));
                     }
                 }
@@ -167,7 +167,7 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
                         drop(tcp_tx);
                         drop(tcp_rx);
                     }
