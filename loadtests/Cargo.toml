@@ -1,0 +1,18 @@
+[package]
+name = "loadtests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bgpgg = { path = "../core", package = "core" }
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_yaml.workspace = true
+tempfile = "3"
+
+[dev-dependencies]
+# For running actual load tests
