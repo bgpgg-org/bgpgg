@@ -37,6 +37,83 @@ use super::proto::{
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
 
+type PeerStream =
+    std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<ProtoPeer, Status>> + Send>>;
+type RouteStream =
+    std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<ProtoRoute, Status>> + Send>>;
+
+/// Convert internal route to proto Route
+fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
+    let prefix_str = match route.prefix {
+        IpNetwork::V4(v4) => {
+            format!("{}/{}", v4.address, v4.prefix_length)
+        }
+        IpNetwork::V6(_) => {
+            // IPv6 not yet supported
+            "".to_string()
+        }
+    };
+
+    let proto_paths: Vec<ProtoPath> = route
+        .paths
+        .into_iter()
+        .map(|path| ProtoPath {
+            origin: match path.origin {
+                Origin::IGP => 0,
+                Origin::EGP => 1,
+                Origin::INCOMPLETE => 2,
+            },
+            as_path: path
+                .as_path
+                .iter()
+                .map(|segment| proto::AsPathSegment {
+                    segment_type: match segment.segment_type {
+                        AsPathSegmentType::AsSet => proto::AsPathSegmentType::AsSet as i32,
+                        AsPathSegmentType::AsSequence => {
+                            proto::AsPathSegmentType::AsSequence as i32
+                        }
+                    },
+                    asns: segment.asn_list.iter().map(|asn| *asn as u32).collect(),
+                })
+                .collect(),
+            next_hop: path.next_hop.to_string(),
+            peer_address: match path.source {
+                RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr.to_string(),
+                RouteSource::Local => LOCAL_ROUTE_SOURCE_STR.to_string(),
+            },
+            local_pref: path.local_pref,
+            med: path.med,
+            atomic_aggregate: path.atomic_aggregate,
+            unknown_attributes: path
+                .unknown_attrs
+                .iter()
+                .filter_map(|attr| {
+                    if let PathAttrValue::Unknown {
+                        type_code,
+                        flags,
+                        data,
+                    } = &attr.value
+                    {
+                        Some(proto::UnknownAttribute {
+                            attr_type: *type_code as u32,
+                            flags: *flags as u32,
+                            value: data.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            communities: path.communities.clone(),
+        })
+        .collect();
+
+    ProtoRoute {
+        prefix: prefix_str,
+        paths: proto_paths,
+    }
+}
+
 /// Parse an AddRouteRequest into internal types
 fn parse_add_route_request(
     req: &AddRouteRequest,
@@ -162,6 +239,9 @@ impl BgpGrpcService {
 
 #[tonic::async_trait]
 impl BgpService for BgpGrpcService {
+    type ListPeersStreamStream = PeerStream;
+    type ListRoutesStreamStream = RouteStream;
+
     async fn add_peer(
         &self,
         request: Request<AddPeerRequest>,
@@ -303,6 +383,36 @@ impl BgpService for BgpGrpcService {
             .collect();
 
         Ok(Response::new(ListPeersResponse { peers: proto_peers }))
+    }
+
+    async fn list_peers_stream(
+        &self,
+        _request: Request<ListPeersRequest>,
+    ) -> Result<Response<Self::ListPeersStreamStream>, Status> {
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+        use tokio_stream::StreamExt;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        // Send streaming request to BGP server
+        let mgmt_req = MgmtOp::GetPeersStream { tx };
+        self.mgmt_request_tx
+            .send(mgmt_req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        // Convert channel receiver to gRPC stream
+        let stream = UnboundedReceiverStream::new(rx).map(|peer| {
+            Ok(ProtoPeer {
+                address: peer.address,
+                asn: peer.asn.unwrap_or(0) as u32,
+                state: to_proto_state(peer.state),
+                admin_state: to_proto_admin_state(peer.admin_state),
+                configured: peer.configured,
+            })
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_peer(
@@ -528,85 +638,33 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         // Convert Rust routes to proto routes
-        let proto_routes: Vec<ProtoRoute> = routes
-            .into_iter()
-            .map(|route| {
-                let prefix_str = match route.prefix {
-                    IpNetwork::V4(v4) => {
-                        format!("{}/{}", v4.address, v4.prefix_length)
-                    }
-                    IpNetwork::V6(_) => {
-                        // IPv6 not yet supported
-                        "".to_string()
-                    }
-                };
-
-                let proto_paths: Vec<ProtoPath> = route
-                    .paths
-                    .into_iter()
-                    .map(|path| ProtoPath {
-                        origin: match path.origin {
-                            Origin::IGP => 0,
-                            Origin::EGP => 1,
-                            Origin::INCOMPLETE => 2,
-                        },
-                        as_path: path
-                            .as_path
-                            .iter()
-                            .map(|segment| proto::AsPathSegment {
-                                segment_type: match segment.segment_type {
-                                    AsPathSegmentType::AsSet => {
-                                        proto::AsPathSegmentType::AsSet as i32
-                                    }
-                                    AsPathSegmentType::AsSequence => {
-                                        proto::AsPathSegmentType::AsSequence as i32
-                                    }
-                                },
-                                asns: segment.asn_list.iter().map(|asn| *asn as u32).collect(),
-                            })
-                            .collect(),
-                        next_hop: path.next_hop.to_string(),
-                        peer_address: match path.source {
-                            RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr.to_string(),
-                            RouteSource::Local => LOCAL_ROUTE_SOURCE_STR.to_string(),
-                        },
-                        local_pref: path.local_pref,
-                        med: path.med,
-                        atomic_aggregate: path.atomic_aggregate,
-                        unknown_attributes: path
-                            .unknown_attrs
-                            .iter()
-                            .filter_map(|attr| {
-                                if let PathAttrValue::Unknown {
-                                    type_code,
-                                    flags,
-                                    data,
-                                } = &attr.value
-                                {
-                                    Some(proto::UnknownAttribute {
-                                        attr_type: *type_code as u32,
-                                        flags: *flags as u32,
-                                        value: data.clone(),
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
-                        communities: path.communities.clone(),
-                    })
-                    .collect();
-
-                ProtoRoute {
-                    prefix: prefix_str,
-                    paths: proto_paths,
-                }
-            })
-            .collect();
+        let proto_routes: Vec<ProtoRoute> = routes.into_iter().map(route_to_proto).collect();
 
         Ok(Response::new(ListRoutesResponse {
             routes: proto_routes,
         }))
+    }
+
+    async fn list_routes_stream(
+        &self,
+        _request: Request<ListRoutesRequest>,
+    ) -> Result<Response<Self::ListRoutesStreamStream>, Status> {
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+        use tokio_stream::StreamExt;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        // Send streaming request to BGP server
+        let mgmt_req = MgmtOp::GetRoutesStream { tx };
+        self.mgmt_request_tx
+            .send(mgmt_req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        // Convert channel receiver to gRPC stream
+        let stream = UnboundedReceiverStream::new(rx).map(|route| Ok(route_to_proto(route)));
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_server_info(

@@ -87,6 +87,11 @@ impl LocRib {
         self.routes.values().cloned().collect()
     }
 
+    /// Get iterator over routes for streaming
+    pub fn iter_routes(&self) -> impl Iterator<Item = &Route> {
+        self.routes.values()
+    }
+
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
     /// Applies import policy (via closure) before adding routes
     /// Returns the set of prefixes where the best path actually changed

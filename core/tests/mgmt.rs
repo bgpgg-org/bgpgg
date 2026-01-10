@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -496,4 +496,69 @@ async fn test_add_route_stream_with_invalid_route() {
     // Verify only valid routes are in RIB
     let routes = server.client.get_routes().await.unwrap();
     assert_eq!(routes.len(), 2);
+}
+
+#[tokio::test]
+async fn test_list_routes_stream() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Add routes and build expected list
+    let mut expected = vec![];
+    for i in 0..10 {
+        let prefix = format!("10.{}.0.0/24", i);
+        server
+            .client
+            .add_route(
+                prefix.clone(),
+                "192.168.1.1".to_string(),
+                Origin::Igp,
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        expected.push(Route {
+            prefix,
+            paths: vec![build_path(
+                vec![],
+                "192.168.1.1",
+                "127.0.0.1".to_string(),
+                Origin::Igp,
+                Some(100),
+                None,
+                false,
+                vec![],
+                vec![],
+            )],
+        });
+    }
+
+    // Get routes via streaming
+    let routes = server.client.get_routes_stream().await.unwrap();
+
+    // Verify routes match expected
+    assert!(routes_match(&routes, &expected));
+}
+
+#[tokio::test]
+async fn test_list_peers_stream() {
+    let (server1, server2) = setup_two_peered_servers(None).await;
+
+    let peers = server1.client.get_peers_stream().await.unwrap();
+    assert_eq!(peers.len(), 1);
+
+    // Verify peer matches expected
+    let expected_peer = server2.to_peer(BgpState::Established, true);
+    assert_eq!(peers[0], expected_peer);
 }

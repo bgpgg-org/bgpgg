@@ -58,6 +58,24 @@ impl BgpClient {
             .routes)
     }
 
+    /// Get all routes from the Loc-RIB using streaming
+    pub async fn get_routes_stream(&self) -> Result<Vec<Route>, tonic::Status> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {})
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
+    }
+
     /// Get all configured peers
     pub async fn get_peers(&self) -> Result<Vec<Peer>, tonic::Status> {
         Ok(self
@@ -67,6 +85,24 @@ impl BgpClient {
             .await?
             .into_inner()
             .peers)
+    }
+
+    /// Get all configured peers using streaming
+    pub async fn get_peers_stream(&self) -> Result<Vec<Peer>, tonic::Status> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_peers_stream(ListPeersRequest {})
+            .await?
+            .into_inner();
+
+        let mut peers = Vec::new();
+        while let Some(peer) = stream.next().await {
+            peers.push(peer?);
+        }
+        Ok(peers)
     }
 
     /// Get a specific peer with statistics

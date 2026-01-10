@@ -11,11 +11,13 @@ service BgpService {
     rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
     rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
     rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+    rpc ListPeersStream(ListPeersRequest) returns (stream Peer);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
     rpc AddRouteStream(stream AddRouteRequest) returns (AddRouteStreamResponse);
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+    rpc ListRoutesStream(ListRoutesRequest) returns (stream Route);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
     rpc AddBmpServer(AddBmpServerRequest) returns (AddBmpServerResponse);
     rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);

@@ -154,6 +154,12 @@ pub enum MgmtOp {
     GetRoutes {
         response: oneshot::Sender<Vec<Route>>,
     },
+    GetRoutesStream {
+        tx: mpsc::UnboundedSender<Route>,
+    },
+    GetPeersStream {
+        tx: mpsc::UnboundedSender<GetPeersResponse>,
+    },
     GetServerInfo {
         response: oneshot::Sender<(Ipv4Addr, u16)>,
     },

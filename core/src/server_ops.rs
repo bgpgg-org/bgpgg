@@ -86,6 +86,12 @@ impl BgpServer {
             MgmtOp::GetRoutes { response } => {
                 self.handle_get_routes(response);
             }
+            MgmtOp::GetRoutesStream { tx } => {
+                self.handle_get_routes_stream(tx);
+            }
+            MgmtOp::GetPeersStream { tx } => {
+                self.handle_get_peers_stream(tx);
+            }
             MgmtOp::GetServerInfo { response } => {
                 let _ = response.send((self.local_addr, self.local_port));
             }
@@ -538,6 +544,29 @@ impl BgpServer {
     fn handle_get_routes(&self, response: oneshot::Sender<Vec<Route>>) {
         let routes = self.loc_rib.get_all_routes();
         let _ = response.send(routes);
+    }
+
+    fn handle_get_routes_stream(&self, tx: mpsc::UnboundedSender<Route>) {
+        for route in self.loc_rib.iter_routes() {
+            if tx.send(route.clone()).is_err() {
+                break; // Client disconnected
+            }
+        }
+    }
+
+    fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
+        for (addr, entry) in self.peers.iter() {
+            let peer = GetPeersResponse {
+                address: addr.to_string(),
+                asn: entry.asn,
+                state: entry.state,
+                admin_state: entry.admin_state,
+                configured: entry.configured,
+            };
+            if tx.send(peer).is_err() {
+                break;
+            }
+        }
     }
 
     fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
