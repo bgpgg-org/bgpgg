@@ -93,7 +93,8 @@ impl BgpServer {
                 self.handle_get_peers_stream(tx);
             }
             MgmtOp::GetServerInfo { response } => {
-                let _ = response.send((self.local_addr, self.local_port));
+                let num_routes = self.loc_rib.routes_len() as u64;
+                let _ = response.send((self.local_addr, self.local_port, num_routes));
             }
             MgmtOp::AddBmpServer {
                 addr,

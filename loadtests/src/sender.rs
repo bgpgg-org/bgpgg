@@ -97,7 +97,8 @@ pub async fn establish_connection(
         TcpStream::connect(target_addr).await?
     };
 
-    bgp_handshake(&mut stream, local_asn, local_router_id, peer_asn, 180).await?;
+    // Use very long hold time (3600s = 1 hour) so we don't need to send KEEPALIVEs during test
+    bgp_handshake(&mut stream, local_asn, local_router_id, peer_asn, 3600).await?;
 
     Ok(SenderConnection {
         stream,
@@ -107,19 +108,22 @@ pub async fn establish_connection(
 }
 
 /// Send routes on an already-established connection
-/// Spawns a background task to keep the connection alive and drain incoming messages
+/// Returns the connection so caller can keep it alive
 pub async fn send_routes(
     mut conn: SenderConnection,
     routes: Vec<IpNetwork>,
     batch_size: usize,
-) -> io::Result<SenderStats> {
+) -> io::Result<(SenderConnection, SenderStats)> {
     if routes.is_empty() {
-        return Ok(SenderStats {
-            routes_sent: 0,
-            duration: Duration::from_secs(0),
-            start_time: Instant::now(),
-            end_time: Instant::now(),
-        });
+        return Ok((
+            conn,
+            SenderStats {
+                routes_sent: 0,
+                duration: Duration::from_secs(0),
+                start_time: Instant::now(),
+                end_time: Instant::now(),
+            },
+        ));
     }
 
     // Pre-serialize all UPDATE messages
@@ -147,24 +151,5 @@ pub async fn send_routes(
         end_time,
     };
 
-    // Spawn a task to keep draining incoming BGP messages (bgpgg sends UPDATEs back)
-    // This prevents the TCP receive buffer from filling up and keeps the connection alive
-    tokio::spawn(async move {
-        use std::time::Duration;
-        loop {
-            // Read BGP messages properly to maintain framing
-            match bgpgg::bgp::msg::read_bgp_message(&mut conn.stream).await {
-                Ok(_msg) => {
-                    // Successfully read a message, continue immediately
-                }
-                Err(_) => {
-                    // Error reading - sleep briefly to avoid tight error loop
-                    // This could be a transient error or connection close
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            }
-        }
-    });
-
-    Ok(stats)
+    Ok((conn, stats))
 }

@@ -679,13 +679,14 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
-        let (listen_addr, listen_port) = rx
+        let (listen_addr, listen_port, num_routes) = rx
             .await
             .map_err(|_| Status::internal("request processing failed"))?;
 
         Ok(Response::new(GetServerInfoResponse {
             listen_addr: listen_addr.to_string(),
             listen_port: listen_port as u32,
+            num_routes,
         }))
     }
 

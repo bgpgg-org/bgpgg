@@ -29,6 +29,7 @@ message GetServerInfoRequest {}
 message GetServerInfoResponse {
     string listen_addr = 1;
     uint32 listen_port = 2;
+    uint64 num_routes = 3;  // Total number of routes in RIB
 }
 
 // Action when max prefix limit is reached

@@ -162,7 +162,7 @@ pub enum MgmtOp {
         tx: mpsc::UnboundedSender<GetPeersResponse>,
     },
     GetServerInfo {
-        response: oneshot::Sender<(Ipv4Addr, u16)>,
+        response: oneshot::Sender<(Ipv4Addr, u16, u64)>,
     },
     AddBmpServer {
         addr: SocketAddr,

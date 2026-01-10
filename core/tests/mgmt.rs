@@ -562,3 +562,54 @@ async fn test_list_peers_stream() {
     let expected_peer = server2.to_peer(BgpState::Established, true);
     assert_eq!(peers[0], expected_peer);
 }
+
+#[tokio::test]
+async fn test_get_server_info() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Initially should have 0 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 0).await;
+
+    // Add some routes
+    for i in 0..5 {
+        server
+            .client
+            .add_route(
+                format!("10.{}.0.0/24", i),
+                "192.168.1.1".to_string(),
+                Origin::Igp,
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Should now have 5 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 5).await;
+
+    // Remove 2 routes
+    server
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+    server
+        .client
+        .remove_route("10.1.0.0/24".to_string())
+        .await
+        .unwrap();
+
+    // Should now have 3 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 3).await;
+}

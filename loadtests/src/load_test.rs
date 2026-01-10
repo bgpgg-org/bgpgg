@@ -8,6 +8,13 @@ use tonic::transport::Channel;
 
 type BgpClient = BgpServiceClient<Channel>;
 
+// === Load Test Configuration ===
+// Easily adjust these constants to change test parameters
+const NUM_PEERS: usize = 10;
+const NUM_ROUTES_PER_PEER: usize = 100_000; // 10 peers * 100k routes = 1M total
+const ROUTES_PER_UPDATE: usize = 100; // Routes per BGP UPDATE message
+const ROUTE_PROCESSING_TIMEOUT_SECS: u64 = 300; // Time to wait for all routes to be processed
+
 /// Helper to spawn bgpggd binary with a config file
 struct BgpggProcess {
     process: Child,
@@ -96,11 +103,20 @@ impl Drop for BgpggProcess {
 }
 
 #[tokio::test]
-async fn test_route_ingestion_10_peers_100k_routes() {
+async fn test_route_ingestion_load() {
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .try_init()
         .ok();
+
+    let total_routes = NUM_PEERS * NUM_ROUTES_PER_PEER;
+
+    tracing::info!(
+        "Starting load test: {} peers × {} routes/peer = {} total routes",
+        NUM_PEERS,
+        NUM_ROUTES_PER_PEER,
+        total_routes
+    );
 
     // Spawn bgpggd binary
     let mut bgpgg = BgpggProcess::spawn(65000, Ipv4Addr::new(1, 1, 1, 1))
@@ -115,15 +131,14 @@ async fn test_route_ingestion_10_peers_100k_routes() {
 
     tracing::info!("bgpggd listening on BGP port {}", bgpgg.bgp_port);
 
-    // Generate 100,000 test routes
-    let all_routes = crate::generate_test_routes(Ipv4Addr::new(10, 0, 0, 0), 100_000, 24);
+    // Generate test routes
+    let all_routes = crate::generate_test_routes(Ipv4Addr::new(10, 0, 0, 0), total_routes, 24);
 
     // PHASE 1: Establish all peer connections
-    tracing::info!("Phase 1: Establishing 10 peer connections...");
+    tracing::info!("Phase 1: Establishing {} peer connections...", NUM_PEERS);
     let mut connections = Vec::new();
-    let mut route_chunks = Vec::new();
 
-    for (i, chunk) in all_routes.chunks(10_000).enumerate() {
+    for i in 0..NUM_PEERS {
         let target: SocketAddr = bgp_addr.parse().unwrap();
         let sender_asn = 65001 + i as u16;
         let sender_router_id = Ipv4Addr::new(2, 0, 0, 1 + i as u8);
@@ -152,7 +167,6 @@ async fn test_route_ingestion_10_peers_100k_routes() {
             Ok(conn) => {
                 tracing::info!("Peer {} connected successfully", i);
                 connections.push(conn);
-                route_chunks.push(chunk.to_vec());
             }
             Err(e) => {
                 tracing::error!("Failed to connect peer {}: {:?}", i, e);
@@ -186,32 +200,41 @@ async fn test_route_ingestion_10_peers_100k_routes() {
 
     // PHASE 3: Blast routes from all peers in parallel
     tracing::info!(
-        "Phase 3: Blasting 100k routes from {} peers...",
+        "Phase 3: Blasting {} routes from {} peers...",
+        total_routes,
         connections.len()
     );
 
-    // Channel to receive results but keep connections alive
-    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(10);
+    // Channel to receive results AND connections to keep them alive
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<(
+        usize,
+        Result<crate::sender::SenderStats, std::io::Error>,
+        Option<crate::sender::SenderConnection>,
+    )>(NUM_PEERS);
     let start_time = Instant::now();
 
-    for (i, (conn, routes)) in connections.into_iter().zip(route_chunks).enumerate() {
+    // Chunk routes and distribute to connections
+    for (i, (conn, chunk)) in connections
+        .into_iter()
+        .zip(all_routes.chunks(NUM_ROUTES_PER_PEER))
+        .enumerate()
+    {
         let tx = result_tx.clone();
+        let routes = chunk.to_vec();
         tokio::spawn(async move {
-            match crate::sender::send_routes(conn, routes, 100).await {
-                Ok(stats) => {
-                    let _ = tx.send((i, Ok(stats))).await;
-                }
-                Err(e) => {
-                    let _ = tx.send((i, Err(e))).await;
-                }
-            }
+            let result = match crate::sender::send_routes(conn, routes, ROUTES_PER_UPDATE).await {
+                Ok((returned_conn, stats)) => (i, Ok(stats), Some(returned_conn)),
+                Err(e) => (i, Err(e), None),
+            };
+            let _ = tx.send(result).await;
         });
     }
     drop(result_tx); // Drop original so channel closes after all senders report
 
-    // Collect results
+    // Collect results and keep connections alive (prevent EOF)
     let mut sender_stats = Vec::new();
-    while let Some((i, result)) = result_rx.recv().await {
+    let mut _live_connections = Vec::new();
+    while let Some((i, result, conn_opt)) = result_rx.recv().await {
         match result {
             Ok(stats) => {
                 tracing::info!(
@@ -222,6 +245,10 @@ async fn test_route_ingestion_10_peers_100k_routes() {
                     stats.routes_sent as f64 / stats.duration.as_secs_f64()
                 );
                 sender_stats.push(stats);
+                // Keep connection alive to prevent EOF
+                if let Some(conn) = conn_opt {
+                    _live_connections.push(conn);
+                }
             }
             Err(e) => {
                 tracing::error!("Peer {} failed to send routes: {:?}", i, e);
@@ -237,20 +264,16 @@ async fn test_route_ingestion_10_peers_100k_routes() {
     let start = Instant::now();
     let mut success = false;
     let mut last_count = 0;
-    while start.elapsed().as_secs() < 60 {
+    while start.elapsed().as_secs() < ROUTE_PROCESSING_TIMEOUT_SECS {
         match client
-            .list_routes_stream(bgpgg::grpc::proto::ListRoutesRequest {})
+            .get_server_info(bgpgg::grpc::proto::GetServerInfoRequest {})
             .await
         {
             Ok(response) => {
-                let mut stream = response.into_inner();
-                let mut count = 0;
-                use tokio_stream::StreamExt;
-                while let Some(Ok(_)) = stream.next().await {
-                    count += 1;
-                }
+                let info = response.into_inner();
+                let count = info.num_routes;
                 tracing::info!("Current route count: {}", count);
-                if count == 100_000 {
+                if count == total_routes as u64 {
                     success = true;
                     break;
                 }
@@ -262,15 +285,20 @@ async fn test_route_ingestion_10_peers_100k_routes() {
                 last_count = count;
             }
             Err(e) => {
-                tracing::warn!("Failed to list routes: {:?}", e);
+                tracing::warn!("Failed to get server info: {:?}", e);
             }
         }
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_secs(2)).await;
     }
 
-    assert!(success, "Timeout waiting for 100k routes in RIB");
+    assert!(
+        success,
+        "Timeout waiting for {} routes in RIB (last count: {})",
+        total_routes, last_count
+    );
 
     // Verify per-peer statistics
+    let expected_updates_per_peer = NUM_ROUTES_PER_PEER / ROUTES_PER_UPDATE;
     let peers_response = client
         .list_peers(bgpgg::grpc::proto::ListPeersRequest {})
         .await
@@ -295,9 +323,9 @@ async fn test_route_ingestion_10_peers_100k_routes() {
             );
 
             assert_eq!(
-                stats.update_received, 100,
-                "Peer {} should have received 100 UPDATEs",
-                peer.address
+                stats.update_received, expected_updates_per_peer as u64,
+                "Peer {} should have received {} UPDATEs",
+                peer.address, expected_updates_per_peer
             );
         }
     }
