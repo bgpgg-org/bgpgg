@@ -13,6 +13,7 @@ service BgpService {
     rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
+    rpc AddRouteStream(stream AddRouteRequest) returns (AddRouteStreamResponse);
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
@@ -157,6 +158,11 @@ message AddRouteRequest {
 
 message AddRouteResponse {
     bool success = 1;
+    string message = 2;
+}
+
+message AddRouteStreamResponse {
+    uint64 count = 1;  // Number of routes successfully added
     string message = 2;
 }
 

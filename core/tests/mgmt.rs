@@ -381,3 +381,119 @@ async fn test_get_bmp_servers_empty() {
     let servers = server.client.get_bmp_servers().await.unwrap();
     assert_eq!(servers.len(), 0);
 }
+
+#[tokio::test]
+async fn test_add_route_stream() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Initially no routes
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 0);
+
+    // Create multiple routes
+    let routes_to_add = vec![
+        (
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.1.0/24".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.2.0/24".to_string(),
+            "192.168.1.3".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+    ];
+
+    // Add routes using streaming API
+    let count = server.client.add_route_stream(routes_to_add).await.unwrap();
+
+    // Should have added 3 routes
+    assert_eq!(count, 3);
+
+    // Verify routes are in RIB
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 3);
+}
+
+#[tokio::test]
+async fn test_add_route_stream_with_invalid_route() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Create routes with one invalid prefix
+    let routes_to_add = vec![
+        (
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "invalid-prefix".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.2.0/24".to_string(),
+            "192.168.1.3".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+    ];
+
+    // Add routes using streaming API
+    let count = server.client.add_route_stream(routes_to_add).await.unwrap();
+
+    // Should have added 2 routes (invalid one skipped)
+    assert_eq!(count, 2);
+
+    // Verify only valid routes are in RIB
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 2);
+}

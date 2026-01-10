@@ -169,6 +169,51 @@ impl BgpClient {
         }
     }
 
+    /// Add multiple routes using streaming API for better performance
+    #[allow(clippy::type_complexity)]
+    pub async fn add_route_stream(
+        &mut self,
+        routes: Vec<(
+            String,
+            String,
+            Origin,
+            Vec<AsPathSegment>,
+            Option<u32>,
+            Option<u32>,
+            bool,
+            Vec<u32>,
+        )>,
+    ) -> Result<u64, tonic::Status> {
+        let requests = routes.into_iter().map(
+            |(
+                prefix,
+                next_hop,
+                origin,
+                as_path,
+                local_pref,
+                med,
+                atomic_aggregate,
+                communities,
+            )| {
+                AddRouteRequest {
+                    prefix,
+                    next_hop,
+                    origin: origin.into(),
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    communities,
+                }
+            },
+        );
+
+        let stream = tokio_stream::iter(requests);
+        let resp = self.inner.add_route_stream(stream).await?.into_inner();
+
+        Ok(resp.count)
+    }
+
     /// Remove a route from all established peers
     pub async fn remove_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
         let resp = self
