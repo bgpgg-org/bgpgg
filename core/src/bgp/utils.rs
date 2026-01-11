@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::net::{IpNetwork, Ipv4Net};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, PartialEq)]
 pub enum ParserError {
@@ -35,31 +36,6 @@ impl Display for ParserError {
 }
 
 impl Error for ParserError {}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum IpNetwork {
-    V4(Ipv4Net),
-    V6(Ipv6Net),
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Ipv4Net {
-    pub address: Ipv4Addr,
-    pub prefix_length: u8,
-}
-
-impl Ipv4Net {
-    /// Returns true if this is a multicast prefix (224.0.0.0/4).
-    fn is_multicast(&self) -> bool {
-        self.address.octets()[0] >= 224 && self.address.octets()[0] <= 239
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Ipv6Net {
-    pub address: Ipv6Addr,
-    pub prefix_length: u8,
-}
 
 pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
     use super::msg_notification::{BgpError, UpdateMessageError};

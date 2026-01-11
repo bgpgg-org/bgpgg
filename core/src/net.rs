@@ -19,6 +19,107 @@ use tokio::net::{TcpSocket, TcpStream};
 /// BGP protocol port number
 pub const BGP_PORT: u16 = 179;
 
+/// IP network prefix (IPv4 or IPv6)
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum IpNetwork {
+    V4(Ipv4Net),
+    V6(Ipv6Net),
+}
+
+impl IpNetwork {
+    /// Get the prefix length of this network
+    pub fn prefix_len(&self) -> u8 {
+        match self {
+            IpNetwork::V4(net) => net.prefix_length,
+            IpNetwork::V6(net) => net.prefix_length,
+        }
+    }
+
+    /// Check if another prefix is contained within this network
+    pub fn contains(&self, other: &IpNetwork) -> bool {
+        match (self, other) {
+            (IpNetwork::V4(net), IpNetwork::V4(p)) => {
+                let net_addr = u32::from_be_bytes(net.address.octets());
+                let p_addr = u32::from_be_bytes(p.address.octets());
+                let mask = !0u32 << (32 - net.prefix_length);
+                (net_addr & mask) == (p_addr & mask)
+            }
+            (IpNetwork::V6(net), IpNetwork::V6(p)) => {
+                let net_addr = u128::from_be_bytes(net.address.octets());
+                let p_addr = u128::from_be_bytes(p.address.octets());
+                let mask = !0u128 << (128 - net.prefix_length);
+                (net_addr & mask) == (p_addr & mask)
+            }
+            _ => false, // IPv4 vs IPv6 mismatch
+        }
+    }
+}
+
+/// IPv4 network prefix
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct Ipv4Net {
+    pub address: Ipv4Addr,
+    pub prefix_length: u8,
+}
+
+impl Ipv4Net {
+    /// Returns true if this is a multicast prefix (224.0.0.0/4).
+    pub fn is_multicast(&self) -> bool {
+        self.address.octets()[0] >= 224 && self.address.octets()[0] <= 239
+    }
+}
+
+/// IPv6 network prefix
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct Ipv6Net {
+    pub address: Ipv6Addr,
+    pub prefix_length: u8,
+}
+
+/// Parse CIDR notation string into IpNetwork
+impl std::str::FromStr for IpNetwork {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('/').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid CIDR format '{}' (expected address/length)",
+                s
+            ));
+        }
+
+        let addr = parts[0];
+        let prefix_len = parts[1]
+            .parse::<u8>()
+            .map_err(|_| format!("invalid prefix length '{}'", parts[1]))?;
+
+        // Try IPv4 first
+        if let Ok(ipv4_addr) = addr.parse::<Ipv4Addr>() {
+            if prefix_len > 32 {
+                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_len));
+            }
+            return Ok(IpNetwork::V4(Ipv4Net {
+                address: ipv4_addr,
+                prefix_length: prefix_len,
+            }));
+        }
+
+        // Try IPv6
+        if let Ok(ipv6_addr) = addr.parse::<Ipv6Addr>() {
+            if prefix_len > 128 {
+                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_len));
+            }
+            return Ok(IpNetwork::V6(Ipv6Net {
+                address: ipv6_addr,
+                prefix_length: prefix_len,
+            }));
+        }
+
+        Err(format!("invalid IP address '{}'", addr))
+    }
+}
+
 /// Extract IPv4 address from a SocketAddr, returns None for IPv6.
 pub fn ipv4_from_sockaddr(addr: SocketAddr) -> Option<Ipv4Addr> {
     match addr.ip() {
@@ -250,5 +351,97 @@ mod tests {
             local_ip(&client_stream),
             Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
         );
+    }
+
+    #[test]
+    fn test_ipv4net_is_multicast() {
+        let multicast = Ipv4Net {
+            address: Ipv4Addr::new(224, 0, 0, 1),
+            prefix_length: 24,
+        };
+        assert!(multicast.is_multicast());
+
+        let unicast = Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        };
+        assert!(!unicast.is_multicast());
+    }
+
+    #[test]
+    fn test_ipnetwork_from_str() {
+        use std::str::FromStr;
+
+        // Valid IPv4
+        assert_eq!(
+            IpNetwork::from_str("10.0.0.0/24").unwrap(),
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })
+        );
+
+        // Valid IPv6
+        assert_eq!(
+            IpNetwork::from_str("2001:db8::/32").unwrap(),
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                prefix_length: 32,
+            })
+        );
+
+        // Invalid format
+        assert!(IpNetwork::from_str("10.0.0.0").is_err());
+        assert!(IpNetwork::from_str("10.0.0.0/24/32").is_err());
+
+        // Invalid prefix length
+        assert!(IpNetwork::from_str("10.0.0.0/33").is_err());
+        assert!(IpNetwork::from_str("2001:db8::/129").is_err());
+
+        // Invalid IP
+        assert!(IpNetwork::from_str("999.999.999.999/24").is_err());
+    }
+
+    #[test]
+    fn test_ipnetwork_contains() {
+        let net = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 8,
+        });
+
+        let contained = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 1, 2, 0),
+            prefix_length: 24,
+        });
+
+        let not_contained = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(192, 168, 1, 0),
+            prefix_length: 24,
+        });
+
+        assert!(net.contains(&contained));
+        assert!(!net.contains(&not_contained));
+
+        // IPv4 vs IPv6 mismatch
+        let ipv6_net = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        });
+        assert!(!net.contains(&ipv6_net));
+    }
+
+    #[test]
+    fn test_ipnetwork_prefix_len() {
+        let v4 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        assert_eq!(v4.prefix_len(), 24);
+
+        let v6 = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 48,
+        });
+        assert_eq!(v6.prefix_len(), 48);
     }
 }

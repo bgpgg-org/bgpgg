@@ -19,10 +19,10 @@ mod utils;
 pub use utils::bmp::*;
 pub use utils::*;
 
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
 use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::config::BmpConfig;
 use bgpgg::grpc::proto::{BgpState, Origin};
+use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
 #[tokio::test]

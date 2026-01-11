@@ -1,6 +1,9 @@
-use crate::bgp::utils::IpNetwork;
+use crate::config::MatchOptionConfig;
+use crate::net::IpNetwork;
+use crate::policy::sets::{AsPathSet, CommunitySet, NeighborSet, PrefixSet};
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 /// A condition that can match against a route
 pub trait Condition: std::fmt::Debug + Send + Sync {
@@ -115,11 +118,165 @@ impl Condition for CommunityCondition {
     }
 }
 
+/// Match routes against a prefix-set
+#[derive(Debug, Clone)]
+pub struct PrefixSetCondition {
+    pub prefix_set: Arc<PrefixSet>,
+    pub match_option: MatchOptionConfig,
+}
+
+impl PrefixSetCondition {
+    pub fn new(prefix_set: Arc<PrefixSet>, match_option: MatchOptionConfig) -> Self {
+        Self {
+            prefix_set,
+            match_option,
+        }
+    }
+}
+
+impl Condition for PrefixSetCondition {
+    fn matches(&self, prefix: &IpNetwork, _path: &Path) -> bool {
+        match self.match_option {
+            MatchOptionConfig::Any => self
+                .prefix_set
+                .prefixes
+                .iter()
+                .any(|pm| pm.contains(prefix)),
+            MatchOptionConfig::All => self
+                .prefix_set
+                .prefixes
+                .iter()
+                .all(|pm| pm.contains(prefix)),
+            MatchOptionConfig::Invert => !self
+                .prefix_set
+                .prefixes
+                .iter()
+                .any(|pm| pm.contains(prefix)),
+        }
+    }
+}
+
+/// Match routes against a neighbor-set
+#[derive(Debug, Clone)]
+pub struct NeighborSetCondition {
+    pub neighbor_set: Arc<NeighborSet>,
+    pub match_option: MatchOptionConfig,
+}
+
+impl NeighborSetCondition {
+    pub fn new(neighbor_set: Arc<NeighborSet>, match_option: MatchOptionConfig) -> Self {
+        Self {
+            neighbor_set,
+            match_option,
+        }
+    }
+}
+
+impl Condition for NeighborSetCondition {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
+        let peer_ip = match &path.source {
+            RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr,
+            RouteSource::Local => return false,
+        };
+
+        match self.match_option {
+            MatchOptionConfig::Any => self.neighbor_set.neighbors.contains(&peer_ip),
+            MatchOptionConfig::All => self.neighbor_set.neighbors.iter().all(|n| *n == peer_ip),
+            MatchOptionConfig::Invert => !self.neighbor_set.neighbors.contains(&peer_ip),
+        }
+    }
+}
+
+/// Match routes against an AS-PATH set (regex patterns)
+#[derive(Debug, Clone)]
+pub struct AsPathSetCondition {
+    pub as_path_set: Arc<AsPathSet>,
+    pub match_option: MatchOptionConfig,
+}
+
+impl AsPathSetCondition {
+    pub fn new(as_path_set: Arc<AsPathSet>, match_option: MatchOptionConfig) -> Self {
+        Self {
+            as_path_set,
+            match_option,
+        }
+    }
+}
+
+impl Condition for AsPathSetCondition {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
+        // Convert AS_PATH to string for regex matching
+        let as_path_str = path
+            .as_path
+            .iter()
+            .flat_map(|segment| segment.asn_list.iter())
+            .map(|asn| asn.to_string())
+            .collect::<Vec<_>>()
+            .join("_");
+
+        match self.match_option {
+            MatchOptionConfig::Any => self
+                .as_path_set
+                .patterns
+                .iter()
+                .any(|r| r.is_match(&as_path_str)),
+            MatchOptionConfig::All => self
+                .as_path_set
+                .patterns
+                .iter()
+                .all(|r| r.is_match(&as_path_str)),
+            MatchOptionConfig::Invert => !self
+                .as_path_set
+                .patterns
+                .iter()
+                .any(|r| r.is_match(&as_path_str)),
+        }
+    }
+}
+
+/// Match routes against a community-set
+#[derive(Debug, Clone)]
+pub struct CommunitySetCondition {
+    pub community_set: Arc<CommunitySet>,
+    pub match_option: MatchOptionConfig,
+}
+
+impl CommunitySetCondition {
+    pub fn new(community_set: Arc<CommunitySet>, match_option: MatchOptionConfig) -> Self {
+        Self {
+            community_set,
+            match_option,
+        }
+    }
+}
+
+impl Condition for CommunitySetCondition {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
+        match self.match_option {
+            MatchOptionConfig::Any => self
+                .community_set
+                .communities
+                .iter()
+                .any(|comm| path.communities.contains(comm)),
+            MatchOptionConfig::All => self
+                .community_set
+                .communities
+                .iter()
+                .all(|comm| path.communities.contains(comm)),
+            MatchOptionConfig::Invert => !self
+                .community_set
+                .communities
+                .iter()
+                .any(|comm| path.communities.contains(comm)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
     use crate::rib::RouteSource;
     use std::net::Ipv4Addr;

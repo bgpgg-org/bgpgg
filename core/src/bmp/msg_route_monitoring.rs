@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn test_route_monitoring_message() {
         use crate::bgp::msg_update::UpdateMessage;
-        use crate::bgp::utils::{IpNetwork, Ipv4Net};
         use crate::bmp::utils::PeerDistinguisher;
+        use crate::net::{IpNetwork, Ipv4Net};
         use std::net::Ipv4Addr;
 
         // Create a withdrawal UPDATE message

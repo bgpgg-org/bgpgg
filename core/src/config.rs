@@ -74,6 +74,12 @@ pub struct PeerConfig {
     /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
     #[serde(default)]
     pub min_route_advertisement_interval_secs: Option<u64>,
+    /// List of import policy names to apply (evaluated in order)
+    #[serde(default, rename = "import-policy")]
+    pub import_policy: Vec<String>,
+    /// List of export policy names to apply (evaluated in order)
+    #[serde(default, rename = "export-policy")]
+    pub export_policy: Vec<String>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -117,6 +123,8 @@ impl Default for PeerConfig {
             send_notification_without_open: false,
             collision_detect_established_state: false,
             min_route_advertisement_interval_secs: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
         }
     }
 }
@@ -127,6 +135,173 @@ pub struct BmpConfig {
     /// Statistics reporting interval in seconds. 0 or None disables statistics.
     #[serde(default)]
     pub statistics_timeout: Option<u64>,
+}
+
+/// Container for all defined sets used in policy matching (YAML representation)
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DefinedSetsConfig {
+    #[serde(default)]
+    pub prefix_sets: Vec<PrefixSetConfig>,
+    #[serde(default)]
+    pub neighbor_sets: Vec<NeighborSetConfig>,
+    #[serde(default)]
+    pub as_path_sets: Vec<AsPathSetConfig>,
+    #[serde(default)]
+    pub community_sets: Vec<CommunitySetConfig>,
+}
+
+/// Named prefix set with masklength range support (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PrefixSetConfig {
+    pub name: String,
+    pub prefixes: Vec<PrefixMatchConfig>,
+}
+
+/// Prefix with optional masklength range (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct PrefixMatchConfig {
+    /// CIDR prefix like "10.0.0.0/8"
+    pub prefix: String,
+    /// Optional masklength range: "exact", "21..24", or "10.." for "le 10"
+    #[serde(default)]
+    pub masklength_range: Option<String>,
+}
+
+/// Named neighbor (IP address) set (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NeighborSetConfig {
+    pub name: String,
+    pub neighbors: Vec<String>, // IpAddr as strings
+}
+
+/// Named AS path set with regex patterns (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AsPathSetConfig {
+    pub name: String,
+    pub patterns: Vec<String>, // Regex patterns
+}
+
+/// Named community set (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommunitySetConfig {
+    pub name: String,
+    pub communities: Vec<String>, // "65000:100" format or decimal
+}
+
+/// Named policy definition from YAML config
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyDefinitionConfig {
+    pub name: String,
+    pub statements: Vec<StatementDefinitionConfig>,
+}
+
+/// Statement definition from YAML
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StatementDefinitionConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub conditions: ConditionsDefinitionConfig,
+    pub actions: ActionsDefinitionConfig,
+}
+
+/// Conditions that must match for a statement to apply
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ConditionsDefinitionConfig {
+    // Set-based conditions (OpenConfig style)
+    #[serde(default)]
+    pub match_prefix_set: Option<MatchSetRefConfig>,
+    #[serde(default)]
+    pub match_neighbor_set: Option<MatchSetRefConfig>,
+    #[serde(default)]
+    pub match_as_path_set: Option<MatchSetRefConfig>,
+    #[serde(default)]
+    pub match_community_set: Option<MatchSetRefConfig>,
+
+    // Direct conditions (backward compatibility)
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub neighbor: Option<String>,
+    #[serde(default)]
+    pub has_asn: Option<u16>,
+    #[serde(default)]
+    pub route_type: Option<String>, // "ebgp", "ibgp", "local"
+    #[serde(default)]
+    pub community: Option<String>, // Single community value
+}
+
+/// Reference to a defined set with match option
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MatchSetRefConfig {
+    pub set_name: String,
+    #[serde(default = "default_match_option")]
+    pub match_option: MatchOptionConfig,
+}
+
+fn default_match_option() -> MatchOptionConfig {
+    MatchOptionConfig::Any
+}
+
+/// Match option for set-based conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchOptionConfig {
+    /// At least one element in the set must match
+    Any,
+    /// All elements in the set must match
+    All,
+    /// No elements in the set must match (invert)
+    Invert,
+}
+
+/// Actions to apply when conditions match
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ActionsDefinitionConfig {
+    #[serde(default)]
+    pub accept: Option<bool>,
+    #[serde(default)]
+    pub reject: Option<bool>,
+    #[serde(default)]
+    pub local_pref: Option<LocalPrefActionConfig>,
+    #[serde(default)]
+    pub med: Option<MedActionConfig>,
+    #[serde(default)]
+    pub community: Option<CommunityActionConfig>,
+}
+
+/// Local preference action
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum LocalPrefActionConfig {
+    /// Simple set: local-pref: 200
+    Set(u32),
+    /// Force override: local-pref: { value: 200, force: true }
+    Force { value: u32, force: bool },
+}
+
+/// MED action
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MedActionConfig {
+    /// Simple set: med: 100
+    Set(u32),
+    /// Remove: med: { remove: true }
+    Remove { remove: bool },
+}
+
+/// Community action
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommunityActionConfig {
+    /// Operation: "add", "remove", "replace"
+    pub operation: String,
+    /// Community values to add/remove/replace
+    pub communities: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -157,6 +332,12 @@ pub struct Config {
     /// Log level: "error", "warn", "info" (default), "debug"
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Defined sets for policy matching
+    #[serde(default, rename = "defined-sets")]
+    pub defined_sets: DefinedSetsConfig,
+    /// Policy definitions
+    #[serde(default, rename = "policy-definitions")]
+    pub policy_definitions: Vec<PolicyDefinitionConfig>,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -197,6 +378,8 @@ impl Config {
             sys_name: None,
             sys_descr: None,
             log_level: default_log_level(),
+            defined_sets: DefinedSetsConfig::default(),
+            policy_definitions: Vec::new(),
         }
     }
 
@@ -259,6 +442,8 @@ impl Default for Config {
             sys_name: None,
             sys_descr: None,
             log_level: default_log_level(),
+            defined_sets: DefinedSetsConfig::default(),
+            policy_definitions: Vec::new(),
         }
     }
 }

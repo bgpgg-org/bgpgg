@@ -28,7 +28,7 @@ pub mod types;
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
-    use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;

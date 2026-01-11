@@ -18,7 +18,7 @@ use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
-use crate::bgp::utils::IpNetwork;
+use crate::net::IpNetwork;
 use crate::rib::Path;
 use crate::server::ServerOp;
 use crate::{debug, info, warn};

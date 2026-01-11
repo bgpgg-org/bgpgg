@@ -1,22 +1,27 @@
 pub mod action;
 pub mod condition;
+pub mod sets;
 pub mod statement;
 
 pub use statement::{
-    stmt_default_local_pref, stmt_reject_as_loop, stmt_reject_ibgp, Policy, Statement,
+    stmt_default_local_pref, stmt_reject_as_loop, stmt_reject_ibgp, Policy, PolicyResult, Statement,
 };
 
 // Re-export commonly used conditions and actions
 pub use action::{Accept, CommunityOp, Reject, SetCommunity, SetLocalPref, SetMed};
 pub use condition::{
-    AsPathCondition, CommunityCondition, NeighborCondition, PrefixCondition, RouteType,
+    AsPathCondition, AsPathSetCondition, CommunityCondition, CommunitySetCondition,
+    NeighborCondition, NeighborSetCondition, PrefixCondition, PrefixSetCondition, RouteType,
     RouteTypeCondition,
 };
+
+// Re-export runtime structures
+pub use sets::DefinedSets;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::Origin;
-    use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
     use std::net::Ipv4Addr;
 

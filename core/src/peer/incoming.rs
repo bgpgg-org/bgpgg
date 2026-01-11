@@ -14,8 +14,8 @@
 
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
 use crate::bgp::msg_update::UpdateMessage;
-use crate::bgp::utils::IpNetwork;
 use crate::config::MaxPrefixAction;
+use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
 use crate::{info, warn};
 use std::sync::Arc;
@@ -134,8 +134,8 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
-    use crate::bgp::utils::Ipv4Net;
     use crate::config::MaxPrefixSetting;
+    use crate::net::Ipv4Net;
     use crate::peer::BgpState;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -288,7 +288,7 @@ mod tests {
 
             let nlri: Vec<_> = (0..new_prefixes)
                 .map(|i| {
-                    crate::bgp::utils::IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+                    IpNetwork::V4(Ipv4Net {
                         address: Ipv4Addr::new(10, 0, i as u8, 0),
                         prefix_length: 24,
                     })

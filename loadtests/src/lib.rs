@@ -10,7 +10,7 @@ use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::io;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;

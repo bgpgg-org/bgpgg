@@ -47,6 +47,8 @@ impl BgpggProcess {
             accept_unconfigured_peers: true,
             peers: vec![],
             bmp_servers: vec![],
+            defined_sets: Default::default(),
+            policy_definitions: vec![],
             sys_name: None,
             sys_descr: None,
             log_level: "error".to_string(),

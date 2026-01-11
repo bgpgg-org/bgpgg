@@ -10,6 +10,7 @@ prost.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true
+regex.workspace = true
 tokio-stream = "0.1"
 
 [build-dependencies]

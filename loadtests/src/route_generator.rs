@@ -1,5 +1,5 @@
 use bgpgg::bgp::msg_update_types::Origin;
-use bgpgg::bgp::utils::{IpNetwork, Ipv4Net};
+use bgpgg::net::{IpNetwork, Ipv4Net};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
