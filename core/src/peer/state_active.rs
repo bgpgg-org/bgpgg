@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg::{read_bgp_message, BgpMessage};
+use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::types::PeerDownReason;
 use crate::{debug, error};
@@ -57,9 +57,9 @@ impl Peer {
         let mut timer_interval = tokio::time::interval(Duration::from_millis(100));
 
         tokio::select! {
-            result = read_bgp_message(&mut conn.rx) => {
+            result = conn.msg_rx.recv() => {
                 match result {
-                    Ok(BgpMessage::Open(open)) => {
+                    Some(Ok(BgpMessage::Open(open))) => {
                         debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
@@ -74,14 +74,14 @@ impl Peer {
                             self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
-                    Ok(BgpMessage::Notification(notif)) => {
+                    Some(Ok(BgpMessage::Notification(notif))) => {
                         self.handle_notification_received(&notif).await;
                     }
-                    Ok(_) => {
+                    Some(Ok(_)) => {
                         error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                             match notif.error() {
@@ -93,6 +93,11 @@ impl Peer {
                             FsmEvent::TcpConnectionFails
                         };
                         self.try_process_event(&event).await;
+                    }
+                    None => {
+                        // Read task exited without error - connection failure
+                        debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
+                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                     }
                 }
             }

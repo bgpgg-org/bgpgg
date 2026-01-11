@@ -14,7 +14,6 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
@@ -128,16 +127,16 @@ impl Peer {
             };
 
             tokio::select! {
-                result = read_bgp_message(&mut conn.rx) => {
+                result = conn.msg_rx.recv() => {
                     match result {
-                        Ok(message) => {
+                        Some(Ok(message)) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                 error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
@@ -145,6 +144,12 @@ impl Peer {
                             } else {
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
+                            return false;
+                        }
+                        None => {
+                            // Read task exited without error - connection failure
+                            error!(&self.logger, "read task exited unexpectedly", "peer_ip" => peer_ip.to_string());
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }

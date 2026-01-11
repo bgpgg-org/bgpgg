@@ -69,7 +69,7 @@ impl Peer {
                     (&self.sent_open, &self.received_open, &self.conn)
                 {
                     if let (Ok(local_addr), Ok(remote_addr)) =
-                        (conn.rx.local_addr(), conn.rx.peer_addr())
+                        (conn.tx.local_addr(), conn.tx.peer_addr())
                     {
                         let _ = self.server_tx.send(ServerOp::PeerConnectionInfo {
                             peer_ip: self.addr,

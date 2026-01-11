@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
-use crate::bgp::msg::{read_bgp_message, BgpMessage};
+use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::net::create_and_bind_tcp_socket;
 use crate::types::PeerDownReason;
@@ -66,7 +66,7 @@ impl Peer {
                         Ok(stream) => {
                             info!(&self.logger, "TCP connection established", "peer_ip" => self.addr.to_string());
                             let (rx, tx) = stream.into_split();
-                            self.conn = Some(TcpConnection { tx, rx });
+                            self.conn = Some(TcpConnection::new(tx, rx));
                             self.fsm.timers.stop_connect_retry();
 
                             if self.config.delay_open_time_secs.is_some() {
@@ -108,9 +108,9 @@ impl Peer {
         let mut timer_interval = tokio::time::interval(Duration::from_millis(100));
 
         tokio::select! {
-            result = read_bgp_message(&mut conn.rx) => {
+            result = conn.msg_rx.recv() => {
                 match result {
-                    Ok(BgpMessage::Open(open)) => {
+                    Some(Ok(BgpMessage::Open(open))) => {
                         debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
@@ -125,14 +125,14 @@ impl Peer {
                             self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
-                    Ok(BgpMessage::Notification(notif)) => {
+                    Some(Ok(BgpMessage::Notification(notif))) => {
                         self.handle_notification_received(&notif).await;
                     }
-                    Ok(_) => {
+                    Some(Ok(_)) => {
                         error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         // RFC 4271 Events 21, 22: Determine error type and send appropriate event
                         let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
@@ -145,6 +145,11 @@ impl Peer {
                             FsmEvent::TcpConnectionFails
                         };
                         self.try_process_event(&event).await;
+                    }
+                    None => {
+                        // Read task exited without error - connection failure
+                        debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
+                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                     }
                 }
             }

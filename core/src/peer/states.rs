@@ -14,7 +14,6 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
-use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::server::{AdminState, ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
@@ -42,16 +41,16 @@ impl Peer {
             };
 
             tokio::select! {
-                result = read_bgp_message(&mut conn.rx) => {
+                result = conn.msg_rx.recv() => {
                     match result {
-                        Ok(message) => {
+                        Some(Ok(message)) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                 error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
@@ -59,6 +58,12 @@ impl Peer {
                             } else {
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
+                            return false;
+                        }
+                        None => {
+                            // Read task exited without error - connection failure
+                            error!(&self.logger, "read task exited unexpectedly", "peer_ip" => peer_ip.to_string());
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }
@@ -144,10 +149,7 @@ impl Peer {
         tcp_rx: OwnedReadHalf,
     ) {
         debug!(&self.logger, "TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
-        self.conn = Some(TcpConnection {
-            tx: tcp_tx,
-            rx: tcp_rx,
-        });
+        self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
         self.conn_type = ConnectionType::Incoming;
         self.fsm.timers.stop_connect_retry();
         if self.config.delay_open_time_secs.is_some() {
@@ -336,10 +338,7 @@ pub(super) mod tests {
             addr: addr.ip(),
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
-            conn: Some(TcpConnection {
-                tx: tcp_tx,
-                rx: tcp_rx,
-            }),
+            conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),

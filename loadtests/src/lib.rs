@@ -126,11 +126,11 @@ pub fn create_update_message(
         as_path_segments,
         next_hop,
         routes,
-        None,   // local_pref
-        None,   // med
-        false,  // atomic_aggregate
+        None,               // local_pref
+        None,               // med
+        false,              // atomic_aggregate
         vec![NO_ADVERTISE], // communities
-        vec![], // unknown_attributes
+        vec![],             // unknown_attributes
     );
 
     update.serialize()

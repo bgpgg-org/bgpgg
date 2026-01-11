@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
 use crate::debug;
 use crate::log::Logger;
@@ -30,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 mod fsm;
 mod incoming;
@@ -137,9 +140,55 @@ pub struct PeerStatistics {
 }
 
 /// TCP connection state - only present when connected
+/// Spawns a dedicated read task to avoid tokio::select! cancellation issues
 struct TcpConnection {
     tx: OwnedWriteHalf,
-    rx: OwnedReadHalf,
+    msg_rx: mpsc::Receiver<Result<BgpMessage, ParserError>>,
+    read_task: JoinHandle<()>,
+}
+
+impl Drop for TcpConnection {
+    fn drop(&mut self) {
+        // Abort read task when connection is dropped
+        self.read_task.abort();
+    }
+}
+
+impl TcpConnection {
+    /// Creates a new TcpConnection and spawns a dedicated read task
+    ///
+    /// The read task runs `read_bgp_message` in a loop, sending results to a channel.
+    /// This ensures the read operation cannot be cancelled mid-execution by tokio::select!,
+    /// preventing TCP stream desynchronization.
+    fn new(tx: OwnedWriteHalf, mut rx: OwnedReadHalf) -> Self {
+        use crate::bgp::msg::read_bgp_message;
+
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+
+        let read_task = tokio::spawn(async move {
+            loop {
+                match read_bgp_message(&mut rx).await {
+                    Ok(msg) => {
+                        if msg_tx.send(Ok(msg)).await.is_err() {
+                            // Receiver dropped, exit cleanly
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // Send error and exit - connection will be torn down
+                        let _ = msg_tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        TcpConnection {
+            tx,
+            msg_rx,
+            read_task,
+        }
+    }
 }
 
 pub struct Peer {
@@ -356,10 +405,7 @@ pub mod test_helpers {
             addr: addr.ip(),
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
-            conn: Some(TcpConnection {
-                tx: tcp_tx,
-                rx: tcp_rx,
-            }),
+            conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
