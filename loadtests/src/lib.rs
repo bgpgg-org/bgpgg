@@ -5,6 +5,9 @@ pub mod sender;
 #[cfg(test)]
 mod load_test;
 
+// Re-export for convenience
+pub use route_generator::calculate_expected_best_paths;
+
 use bgpgg::bgp::msg::{BgpMessage, Message};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;

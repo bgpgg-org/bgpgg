@@ -1,5 +1,7 @@
 use crate::route_generator::PeerRoute;
 use crate::{bgp_handshake, create_update_message};
+use bgpgg::bgp::msg_update::Origin;
+use bgpgg::net::IpNetwork;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -73,23 +75,47 @@ pub async fn send_routes(
         ));
     }
 
-    // Pre-serialize all UPDATE messages
-    let mut update_messages = Vec::new();
-    for chunk in routes.chunks(batch_size) {
-        let prefixes: Vec<_> = chunk.iter().map(|r| r.prefix).collect();
+    // Group routes by their attributes (since BGP UPDATE messages share attributes across all NLRIs)
+    use std::collections::HashMap;
 
-        // Use attributes from first route in chunk (all should be similar in chunk)
-        let first = &chunk[0];
-        let msg = create_update_message(
-            prefixes,
-            conn.next_hop,
-            first.as_path.clone(),
-            first.origin,
-            first.med,
-            None, // local_pref
-            first.communities.clone(),
-        );
-        update_messages.push(msg);
+    #[derive(Hash, Eq, PartialEq, Clone)]
+    struct RouteAttributes {
+        as_path: Vec<u16>,
+        origin: Origin,
+        med: Option<u32>,
+        communities: Vec<u32>,
+    }
+
+    let mut routes_by_attrs: HashMap<RouteAttributes, Vec<IpNetwork>> = HashMap::new();
+    for route in &routes {
+        let attrs = RouteAttributes {
+            as_path: route.as_path.clone(),
+            origin: route.origin,
+            med: route.med,
+            communities: route.communities.clone(),
+        };
+        routes_by_attrs
+            .entry(attrs)
+            .or_insert_with(Vec::new)
+            .push(route.prefix);
+    }
+
+    // Pre-serialize UPDATE messages, batching prefixes with the same attributes
+    let mut update_messages = Vec::new();
+    for (attrs, prefixes) in routes_by_attrs {
+        // Batch prefixes with same attributes into UPDATE messages
+        for chunk in prefixes.chunks(batch_size) {
+            let msg = create_update_message(
+                chunk.to_vec(),
+                conn.next_hop,
+                attrs.as_path.clone(),
+                attrs.origin,
+                attrs.med,
+                None, // local_pref
+                attrs.communities.clone(),
+            );
+            update_messages.push(msg);
+        }
     }
 
     // Start timer and blast all UPDATEs

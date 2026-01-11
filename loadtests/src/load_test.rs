@@ -1,9 +1,13 @@
+use crate::calculate_expected_best_paths;
 use crate::route_generator::{
-    generate_peer_routes, AttributeConfig, OverlapConfig, PrefixLengthDistribution, RouteGenConfig,
+    generate_peer_routes, AttributeConfig, OverlapConfig, PrefixLengthDistribution,
+    RouteGenConfig,
 };
+use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_client::BgpServiceClient;
-use std::net::{Ipv4Addr, SocketAddr};
+use bgpgg::rib::{Path, RouteSource};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -16,8 +20,64 @@ type BgpClient = BgpServiceClient<Channel>;
 const NUM_PEERS: usize = 10;
 const TOTAL_ROUTES: usize = 1_000_000; // 1M total routes
 const ROUTES_PER_UPDATE: usize = 100; // Routes per BGP UPDATE message
-const ROUTE_PROCESSING_TIMEOUT_SECS: u64 = 60; // Time to wait for all routes to be processed
+const ROUTE_PROCESSING_TIMEOUT_SECS: u64 = 120; // Time to wait for all routes to be processed
 const ROUTE_GEN_SEED: u64 = 12345; // Reproducible route generation
+
+/// Convert proto::Path (from gRPC) to rib::Path for comparison
+fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<Path, String> {
+    // Convert origin
+    let origin = match proto_path.origin {
+        0 => Origin::IGP,
+        1 => Origin::EGP,
+        2 => Origin::INCOMPLETE,
+        _ => return Err(format!("Invalid origin: {}", proto_path.origin)),
+    };
+
+    // Convert AS_PATH
+    let as_path: Vec<AsPathSegment> = proto_path
+        .as_path
+        .iter()
+        .map(|seg| {
+            let segment_type = match seg.segment_type() {
+                bgpgg::grpc::proto::AsPathSegmentType::AsSet => AsPathSegmentType::AsSet,
+                bgpgg::grpc::proto::AsPathSegmentType::AsSequence => AsPathSegmentType::AsSequence,
+            };
+            AsPathSegment {
+                segment_type,
+                segment_len: seg.asns.len() as u8,
+                asn_list: seg.asns.iter().map(|asn| *asn as u16).collect(),
+            }
+        })
+        .collect();
+
+    // Parse next hop
+    let next_hop: Ipv4Addr = proto_path
+        .next_hop
+        .parse()
+        .map_err(|_| format!("Invalid next_hop: {}", proto_path.next_hop))?;
+
+    // Parse peer address for source
+    let peer_ip: IpAddr = proto_path
+        .peer_address
+        .parse()
+        .map_err(|_| format!("Invalid peer_address: {}", proto_path.peer_address))?;
+    let source = RouteSource::Ebgp(peer_ip);
+
+    // Convert communities
+    let communities: Vec<u32> = proto_path.communities.clone();
+
+    Ok(Path::from_attributes(
+        origin,
+        as_path,
+        next_hop,
+        source,
+        proto_path.local_pref,
+        proto_path.med,
+        proto_path.atomic_aggregate,
+        communities,
+        vec![], // unknown_attrs not compared
+    ))
+}
 
 /// Helper to spawn bgpggd binary with a config file
 struct BgpggProcess {
@@ -199,6 +259,22 @@ async fn test_route_ingestion_load() {
         tracing::info!("  Peer {}: {} routes", i, peer_set.routes.len());
     }
 
+    // Calculate expected best paths using BGP decision process
+    tracing::info!("Calculating expected best paths...");
+    let expected_best_paths = calculate_expected_best_paths(&peer_route_sets);
+    tracing::info!(
+        "Expected {} unique prefixes with best paths selected",
+        expected_best_paths.len()
+    );
+
+    // Debug: Count total routes being sent
+    let total_routes_to_send: usize = peer_route_sets.iter().map(|ps| ps.routes.len()).sum();
+    tracing::info!(
+        "Total routes to send: {} (across {} peers)",
+        total_routes_to_send,
+        peer_route_sets.len()
+    );
+
     // PHASE 1: Establish all peer connections
     tracing::info!("Phase 1: Establishing {} peer connections...", NUM_PEERS);
     let mut connections = Vec::new();
@@ -334,12 +410,13 @@ async fn test_route_ingestion_load() {
     let ingestion_time = Instant::now() - start_time;
     tracing::info!("All peers completed sending in {:?}", ingestion_time);
 
-    // PHASE 4: Wait for bgpgg to process all routes
+    // PHASE 4: Wait for bgpgg to process all routes and verify best paths
     tracing::info!("Phase 4: Waiting for bgpgg to process routes...");
-    let start = Instant::now();
-    let mut success = false;
+    let processing_start = Instant::now();
     let mut last_count = 0;
-    while start.elapsed().as_secs() < ROUTE_PROCESSING_TIMEOUT_SECS {
+    let mut processing_complete = false;
+    let mut processing_end = processing_start;
+    while processing_start.elapsed().as_secs() < ROUTE_PROCESSING_TIMEOUT_SECS {
         match client
             .get_server_info(bgpgg::grpc::proto::GetServerInfoRequest {})
             .await
@@ -347,15 +424,20 @@ async fn test_route_ingestion_load() {
             Ok(response) => {
                 let info = response.into_inner();
                 let count = info.num_routes;
-                tracing::info!("Current route count: {}", count);
-                if count == TOTAL_ROUTES as u64 {
-                    success = true;
+                tracing::info!("Current route count in RIB: {}", count);
+
+                // We expect the number of unique prefixes (best paths selected)
+                if count == expected_best_paths.len() as u64 {
+                    processing_end = Instant::now(); // Capture end time immediately
+                    tracing::info!("RIB has expected number of routes, verifying best paths...");
+                    last_count = count;
+                    processing_complete = true;
                     break;
                 }
                 if count < last_count {
                     tracing::warn!("Route count decreased from {} to {}", last_count, count);
                 } else if count == last_count && last_count > 0 {
-                    tracing::warn!("Route count stuck at {}", count);
+                    tracing::info!("Route count stable at {}, waiting...", count);
                 }
                 last_count = count;
             }
@@ -366,17 +448,98 @@ async fn test_route_ingestion_load() {
         sleep(Duration::from_secs(2)).await;
     }
 
-    if !success {
-        tracing::warn!(
-            "Timeout waiting for {} routes in RIB (last count: {})",
-            TOTAL_ROUTES,
+    if !processing_complete {
+        tracing::error!(
+            "Route count mismatch: expected {} unique prefixes, got {}",
+            expected_best_paths.len(),
             last_count
         );
-        // Don't panic, just log for debugging
-        tracing::info!("Test ended for debugging - not asserting on route count");
         bgpgg.kill();
-        return;
+        panic!(
+            "Expected {} routes in loc-rib, got {}",
+            expected_best_paths.len(),
+            last_count
+        );
     }
+
+    // Query GLOBAL RIB (loc-rib) to verify best paths using streaming API
+    tracing::info!("Querying GLOBAL RIB to verify best paths...");
+    use tokio_stream::StreamExt;
+
+    let mut stream = client
+        .list_routes_stream(bgpgg::grpc::proto::ListRoutesRequest {
+            rib_type: Some(bgpgg::grpc::proto::RibType::Global as i32),
+            peer_address: None,
+        })
+        .await
+        .expect("Failed to start route stream")
+        .into_inner();
+
+    // Collect all routes from the stream
+    let mut routes = Vec::new();
+    while let Some(route) = stream.next().await {
+        routes.push(route.expect("Failed to read route from stream"));
+    }
+    tracing::info!("Retrieved {} routes from GLOBAL RIB", routes.len());
+
+    // Verify each route matches our expected best path
+    let mut mismatches = Vec::new();
+    for route in &routes {
+        let prefix: bgpgg::net::IpNetwork = route.prefix.parse().expect("Failed to parse prefix");
+
+        if let Some(expected_path) = expected_best_paths.get(&prefix) {
+            // GLOBAL RIB may have multiple paths per prefix (sorted, best first)
+            // We only care about the first path (the best path)
+            if route.paths.is_empty() {
+                mismatches.push(format!("Prefix {} has no paths in GLOBAL RIB", prefix));
+                continue;
+            }
+
+            let proto_path = &route.paths[0];
+
+            // Convert proto::Path to rib::Path and use Path's equality for comparison
+            let actual_path = match proto_path_to_rib_path(proto_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    mismatches.push(format!("Prefix {}: failed to convert path: {}", prefix, e));
+                    continue;
+                }
+            };
+
+            // Use Path::eq to compare paths (reusing core logic!)
+            if &actual_path != expected_path {
+                mismatches.push(format!(
+                    "Prefix {}: best path mismatch\n  Expected: {:?}\n  Got: {:?}",
+                    prefix, expected_path, actual_path
+                ));
+            }
+        } else {
+            mismatches.push(format!(
+                "Prefix {} found in GLOBAL RIB but not in expected best paths",
+                prefix
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        tracing::error!(
+            "Found {} mismatches in best path selection:",
+            mismatches.len()
+        );
+        for (i, mismatch) in mismatches.iter().take(10).enumerate() {
+            tracing::error!("  {}: {}", i + 1, mismatch);
+        }
+        if mismatches.len() > 10 {
+            tracing::error!("  ... and {} more", mismatches.len() - 10);
+        }
+        bgpgg.kill();
+        panic!(
+            "Best path verification failed with {} mismatches",
+            mismatches.len()
+        );
+    }
+
+    tracing::info!("✓ All {} best paths verified correctly!", routes.len());
 
     // Note: With overlapping routes, we can't verify expected UPDATE count per peer
     // as each peer may send different amounts based on overlap distribution
@@ -406,7 +569,7 @@ async fn test_route_ingestion_load() {
     }
 
     // Report final statistics
-    let processing_time = Instant::now() - start;
+    let processing_time = processing_end - processing_start;
     tracing::info!("\n=== Test Results ===");
     tracing::info!("Route send time: {:?}", ingestion_time);
     tracing::info!("Route processing time: {:?}", processing_time);
