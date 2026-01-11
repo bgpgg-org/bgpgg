@@ -122,12 +122,6 @@ pub fn create_update_message(
         }]
     };
 
-    // Add NO_ADVERTISE community to prevent bgpgg from redistributing routes
-    // This eliminates TCP backpressure from route redistribution in load tests
-    const NO_ADVERTISE: u32 = 0xFFFFFF02;
-    let mut all_communities = vec![NO_ADVERTISE];
-    all_communities.extend(communities);
-
     let update = UpdateMessage::new(
         origin,
         as_path_segments,
@@ -136,7 +130,7 @@ pub fn create_update_message(
         local_pref,
         med,
         false,
-        all_communities,
+        communities,
         vec![],
     );
 

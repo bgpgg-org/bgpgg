@@ -134,6 +134,27 @@ async fn test_route_ingestion_load() {
 
     tracing::info!("bgpggd listening on BGP port {}", bgpgg.bgp_port);
 
+    // Create reject-all export policy to prevent route redistribution
+    // This eliminates TCP backpressure from route redistribution in load tests
+    tracing::info!("Creating reject-all export policy...");
+    client
+        .add_policy(bgpgg::grpc::proto::AddPolicyRequest {
+            name: "reject-all".to_string(),
+            statements: vec![bgpgg::grpc::proto::StatementConfig {
+                conditions: None,
+                actions: Some(bgpgg::grpc::proto::ActionsConfig {
+                    accept: None,
+                    reject: Some(true),
+                    local_pref: None,
+                    med: None,
+                    add_communities: vec![],
+                    remove_communities: vec![],
+                }),
+            }],
+        })
+        .await
+        .expect("Failed to create reject-all policy");
+
     // Generate realistic routes with overlap
     let config = RouteGenConfig {
         total_routes: TOTAL_ROUTES,
@@ -210,6 +231,18 @@ async fn test_route_ingestion_load() {
         {
             Ok(conn) => {
                 tracing::info!("Peer {} connected successfully", i);
+
+                // Apply reject-all export policy to prevent this peer from receiving routes
+                client
+                    .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
+                        peer_address: bind_addr.ip().to_string(),
+                        direction: "export".to_string(),
+                        policy_names: vec!["reject-all".to_string()],
+                        default_action: None,
+                    })
+                    .await
+                    .expect("Failed to set export policy");
+
                 connections.push(conn);
             }
             Err(e) => {
