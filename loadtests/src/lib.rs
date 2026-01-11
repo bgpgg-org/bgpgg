@@ -1,4 +1,5 @@
 pub mod receiver;
+pub mod route_generator;
 pub mod sender;
 
 #[cfg(test)]
@@ -106,6 +107,10 @@ pub fn create_update_message(
     routes: Vec<IpNetwork>,
     next_hop: Ipv4Addr,
     as_path: Vec<u16>,
+    origin: Origin,
+    med: Option<u32>,
+    local_pref: Option<u32>,
+    communities: Vec<u32>,
 ) -> Vec<u8> {
     let as_path_segments = if as_path.is_empty() {
         vec![]
@@ -120,17 +125,19 @@ pub fn create_update_message(
     // Add NO_ADVERTISE community to prevent bgpgg from redistributing routes
     // This eliminates TCP backpressure from route redistribution in load tests
     const NO_ADVERTISE: u32 = 0xFFFFFF02;
+    let mut all_communities = vec![NO_ADVERTISE];
+    all_communities.extend(communities);
 
     let update = UpdateMessage::new(
-        Origin::IGP,
+        origin,
         as_path_segments,
         next_hop,
         routes,
-        None,               // local_pref
-        None,               // med
-        false,              // atomic_aggregate
-        vec![NO_ADVERTISE], // communities
-        vec![],             // unknown_attributes
+        local_pref,
+        med,
+        false,
+        all_communities,
+        vec![],
     );
 
     update.serialize()

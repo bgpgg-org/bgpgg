@@ -1,5 +1,5 @@
+use crate::route_generator::PeerRoute;
 use crate::{bgp_handshake, create_update_message};
-use bgpgg::bgp::utils::IpNetwork;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -18,59 +18,6 @@ pub struct SenderStats {
     pub duration: Duration,
     pub start_time: Instant,
     pub end_time: Instant,
-}
-
-/// Run a lightweight BGP sender that blasts UPDATE messages
-pub async fn run_sender(
-    target_addr: SocketAddr,
-    local_asn: u16,
-    local_router_id: Ipv4Addr,
-    peer_asn: u16,
-    routes: Vec<IpNetwork>,
-    next_hop: Ipv4Addr,
-    batch_size: usize,
-) -> io::Result<SenderStats> {
-    // Connect to bgpgg
-    let mut stream = TcpStream::connect(target_addr).await?;
-
-    // Perform BGP handshake
-    bgp_handshake(&mut stream, local_asn, local_router_id, peer_asn, 180).await?;
-
-    // Return early if no routes to send (just establishing connection)
-    if routes.is_empty() {
-        return Ok(SenderStats {
-            routes_sent: 0,
-            duration: Duration::from_secs(0),
-            start_time: Instant::now(),
-            end_time: Instant::now(),
-        });
-    }
-
-    // Pre-serialize all UPDATE messages
-    let mut update_messages = Vec::new();
-    for chunk in routes.chunks(batch_size) {
-        let msg = create_update_message(chunk.to_vec(), next_hop, vec![local_asn]);
-        update_messages.push(msg);
-    }
-
-    // Start timer and blast all UPDATEs
-    let start_time = Instant::now();
-
-    for msg in &update_messages {
-        stream.write_all(msg).await?;
-    }
-
-    // Flush to ensure all data is sent
-    stream.flush().await?;
-
-    let end_time = Instant::now();
-
-    Ok(SenderStats {
-        routes_sent: routes.len(),
-        duration: end_time - start_time,
-        start_time,
-        end_time,
-    })
 }
 
 /// Establish BGP connection without sending routes
@@ -111,7 +58,7 @@ pub async fn establish_connection(
 /// Returns the connection so caller can keep it alive
 pub async fn send_routes(
     mut conn: SenderConnection,
-    routes: Vec<IpNetwork>,
+    routes: Vec<PeerRoute>,
     batch_size: usize,
 ) -> io::Result<(SenderConnection, SenderStats)> {
     if routes.is_empty() {
@@ -129,7 +76,19 @@ pub async fn send_routes(
     // Pre-serialize all UPDATE messages
     let mut update_messages = Vec::new();
     for chunk in routes.chunks(batch_size) {
-        let msg = create_update_message(chunk.to_vec(), conn.next_hop, vec![conn.local_asn]);
+        let prefixes: Vec<_> = chunk.iter().map(|r| r.prefix).collect();
+
+        // Use attributes from first route in chunk (all should be similar in chunk)
+        let first = &chunk[0];
+        let msg = create_update_message(
+            prefixes,
+            conn.next_hop,
+            first.as_path.clone(),
+            first.origin,
+            first.med,
+            None, // local_pref
+            first.communities.clone(),
+        );
         update_messages.push(msg);
     }
 

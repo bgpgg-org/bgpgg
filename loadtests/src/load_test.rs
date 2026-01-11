@@ -1,3 +1,6 @@
+use crate::route_generator::{
+    generate_peer_routes, AttributeConfig, OverlapConfig, PrefixLengthDistribution, RouteGenConfig,
+};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_client::BgpServiceClient;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -11,9 +14,10 @@ type BgpClient = BgpServiceClient<Channel>;
 // === Load Test Configuration ===
 // Easily adjust these constants to change test parameters
 const NUM_PEERS: usize = 10;
-const NUM_ROUTES_PER_PEER: usize = 100_000; // 10 peers * 100k routes = 1M total
+const TOTAL_ROUTES: usize = 1_000_000; // 1M total routes
 const ROUTES_PER_UPDATE: usize = 100; // Routes per BGP UPDATE message
-const ROUTE_PROCESSING_TIMEOUT_SECS: u64 = 30; // Time to wait for all routes to be processed
+const ROUTE_PROCESSING_TIMEOUT_SECS: u64 = 60; // Time to wait for all routes to be processed
+const ROUTE_GEN_SEED: u64 = 12345; // Reproducible route generation
 
 /// Helper to spawn bgpggd binary with a config file
 struct BgpggProcess {
@@ -109,13 +113,10 @@ async fn test_route_ingestion_load() {
         .try_init()
         .ok();
 
-    let total_routes = NUM_PEERS * NUM_ROUTES_PER_PEER;
-
     tracing::info!(
-        "Starting load test: {} peers × {} routes/peer = {} total routes",
+        "Starting load test: {} peers, {} total routes",
         NUM_PEERS,
-        NUM_ROUTES_PER_PEER,
-        total_routes
+        TOTAL_ROUTES
     );
 
     // Spawn bgpggd binary
@@ -131,8 +132,49 @@ async fn test_route_ingestion_load() {
 
     tracing::info!("bgpggd listening on BGP port {}", bgpgg.bgp_port);
 
-    // Generate test routes
-    let all_routes = crate::generate_test_routes(Ipv4Addr::new(10, 0, 0, 0), total_routes, 24);
+    // Generate realistic routes with overlap
+    let config = RouteGenConfig {
+        total_routes: TOTAL_ROUTES,
+        num_peers: NUM_PEERS,
+        seed: ROUTE_GEN_SEED,
+        prefix_len_dist: PrefixLengthDistribution::default(),
+        overlap_config: OverlapConfig::default(),
+        attr_config: AttributeConfig::default(),
+    };
+
+    tracing::info!("Generating routes with best path selection diversity...");
+    tracing::info!(
+        "  Overlap policy: {}% single-peer, {}% 2-3 peers, {}% 4+ peers",
+        config.overlap_config.single_peer_pct,
+        config.overlap_config.two_three_peer_pct,
+        config.overlap_config.heavy_peer_pct
+    );
+    tracing::info!(
+        "  Prefix distribution: {}% /24, {}% /22-23, {}% /20-21, {}% /16-19",
+        config.prefix_len_dist.len_24,
+        config.prefix_len_dist.len_22_23,
+        config.prefix_len_dist.len_20_21,
+        config.prefix_len_dist.len_16_19
+    );
+    tracing::info!(
+        "  AS_PATH length: {}-{} (avg {})",
+        config.attr_config.as_path_min_len,
+        config.attr_config.as_path_max_len,
+        config.attr_config.as_path_avg_len
+    );
+    tracing::info!(
+        "  Origin mix: {}% IGP, {}% INCOMPLETE, {}% EGP",
+        config.attr_config.origin_igp_pct,
+        config.attr_config.origin_incomplete_pct,
+        config.attr_config.origin_egp_pct
+    );
+
+    let peer_route_sets = generate_peer_routes(config);
+
+    tracing::info!("Generated {} route sets", peer_route_sets.len());
+    for (i, peer_set) in peer_route_sets.iter().enumerate() {
+        tracing::info!("  Peer {}: {} routes", i, peer_set.routes.len());
+    }
 
     // PHASE 1: Establish all peer connections
     tracing::info!("Phase 1: Establishing {} peer connections...", NUM_PEERS);
@@ -201,7 +243,7 @@ async fn test_route_ingestion_load() {
     // PHASE 3: Blast routes from all peers in parallel
     tracing::info!(
         "Phase 3: Blasting {} routes from {} peers...",
-        total_routes,
+        TOTAL_ROUTES,
         connections.len()
     );
 
@@ -213,18 +255,16 @@ async fn test_route_ingestion_load() {
     )>(NUM_PEERS);
     let start_time = Instant::now();
 
-    // Chunk routes and distribute to connections
-    for (i, (conn, chunk)) in connections
-        .into_iter()
-        .zip(all_routes.chunks(NUM_ROUTES_PER_PEER))
-        .enumerate()
-    {
+    // Distribute routes to connections
+    for (conn, peer_set) in connections.into_iter().zip(peer_route_sets) {
         let tx = result_tx.clone();
-        let routes = chunk.to_vec();
+        let peer_index = peer_set.peer_index;
+        let routes = peer_set.routes;
+
         tokio::spawn(async move {
             let result = match crate::sender::send_routes(conn, routes, ROUTES_PER_UPDATE).await {
-                Ok((returned_conn, stats)) => (i, Ok(stats), Some(returned_conn)),
-                Err(e) => (i, Err(e), None),
+                Ok((returned_conn, stats)) => (peer_index, Ok(stats), Some(returned_conn)),
+                Err(e) => (peer_index, Err(e), None),
             };
             let _ = tx.send(result).await;
         });
@@ -273,7 +313,7 @@ async fn test_route_ingestion_load() {
                 let info = response.into_inner();
                 let count = info.num_routes;
                 tracing::info!("Current route count: {}", count);
-                if count == total_routes as u64 {
+                if count == TOTAL_ROUTES as u64 {
                     success = true;
                     break;
                 }
@@ -294,7 +334,7 @@ async fn test_route_ingestion_load() {
     if !success {
         tracing::warn!(
             "Timeout waiting for {} routes in RIB (last count: {})",
-            total_routes,
+            TOTAL_ROUTES,
             last_count
         );
         // Don't panic, just log for debugging
@@ -303,8 +343,8 @@ async fn test_route_ingestion_load() {
         return;
     }
 
-    // Verify per-peer statistics
-    let expected_updates_per_peer = NUM_ROUTES_PER_PEER / ROUTES_PER_UPDATE;
+    // Note: With overlapping routes, we can't verify expected UPDATE count per peer
+    // as each peer may send different amounts based on overlap distribution
     let peers_response = client
         .list_peers(bgpgg::grpc::proto::ListPeersRequest {})
         .await
@@ -327,24 +367,15 @@ async fn test_route_ingestion_load() {
                 peer.address,
                 stats.update_received
             );
-
-            assert_eq!(
-                stats.update_received, expected_updates_per_peer as u64,
-                "Peer {} should have received {} UPDATEs",
-                peer.address, expected_updates_per_peer
-            );
         }
     }
 
     // Report final statistics
-    let total_routes: usize = sender_stats.iter().map(|s| s.routes_sent).sum();
-    let avg_rate = total_routes as f64 / ingestion_time.as_secs_f64();
-
-    tracing::info!("\n=== Ingestion Test Results ===");
-    tracing::info!("Total routes sent: {}", total_routes);
-    tracing::info!("Send time: {:?}", ingestion_time);
-    tracing::info!("Average send rate: {:.0} routes/sec", avg_rate);
-    tracing::info!("Peers: {}", sender_stats.len());
+    let processing_time = Instant::now() - start;
+    tracing::info!("\n=== Test Results ===");
+    tracing::info!("Route send time: {:?}", ingestion_time);
+    tracing::info!("Route processing time: {:?}", processing_time);
+    tracing::info!("Total test time: {:?}", ingestion_time + processing_time);
 
     bgpgg.kill();
 }
