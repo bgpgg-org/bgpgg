@@ -1,9 +1,8 @@
 use crate::config::{
-    ActionsDefinitionConfig, ConditionsDefinitionConfig, LocalPrefActionConfig, MatchOptionConfig,
-    MedActionConfig, PolicyDefinitionConfig, StatementDefinitionConfig,
+    ActionsConfig, ConditionsConfig, LocalPrefActionConfig, MatchOptionConfig, MedActionConfig,
+    PolicyDefinitionConfig, StatementConfig,
 };
 use crate::net::IpNetwork;
-use crate::policy::action::CommunityOp;
 use crate::policy::sets::{AsPathSet, CommunitySet, DefinedSets, NeighborSet, PrefixSet};
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
@@ -102,12 +101,20 @@ impl Condition {
     }
 }
 
-/// Route type enum (re-exported from condition module)
+/// Route type for matching route source
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteType {
     Ebgp,
     Ibgp,
     Local,
+}
+
+/// Community modification operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommunityOp {
+    Add(Vec<u32>),
+    Remove(Vec<u32>),
+    Replace(Vec<u32>),
 }
 
 /// Action enum - all possible action types
@@ -320,10 +327,7 @@ pub fn stmt_reject_ibgp() -> Statement {
 }
 
 /// Build a statement from config
-fn build_statement(
-    def: &StatementDefinitionConfig,
-    defined_sets: &DefinedSets,
-) -> Result<Statement, String> {
+fn build_statement(def: &StatementConfig, defined_sets: &DefinedSets) -> Result<Statement, String> {
     let mut stmt = Statement::new();
 
     // Add conditions
@@ -338,7 +342,7 @@ fn build_statement(
 /// Add conditions to a statement
 fn add_conditions(
     mut stmt: Statement,
-    cond: &ConditionsDefinitionConfig,
+    cond: &ConditionsConfig,
     defined_sets: &DefinedSets,
 ) -> Result<Statement, String> {
     // Set-based conditions - resolve sets at construction time
@@ -431,10 +435,7 @@ fn add_conditions(
 }
 
 /// Add actions to a statement
-fn add_actions(
-    mut stmt: Statement,
-    actions: &ActionsDefinitionConfig,
-) -> Result<Statement, String> {
+fn add_actions(mut stmt: Statement, actions: &ActionsConfig) -> Result<Statement, String> {
     // Local preference
     if let Some(ref lp_action) = actions.local_pref {
         match lp_action {
@@ -706,32 +707,32 @@ mod tests {
 
     #[test]
     fn test_policy_from_config() {
-        use crate::config::ConditionsDefinitionConfig;
+        use crate::config::ConditionsConfig;
 
         let defined_sets = DefinedSets::default();
 
         let policy_def = PolicyDefinitionConfig {
             name: "test-policy".to_string(),
             statements: vec![
-                StatementDefinitionConfig {
+                StatementConfig {
                     name: Some("stmt1".to_string()),
-                    conditions: ConditionsDefinitionConfig {
+                    conditions: ConditionsConfig {
                         prefix: Some("10.0.0.0/8".to_string()),
                         ..Default::default()
                     },
-                    actions: ActionsDefinitionConfig {
+                    actions: ActionsConfig {
                         local_pref: Some(LocalPrefActionConfig::Set(200)),
                         accept: Some(true),
                         ..Default::default()
                     },
                 },
-                StatementDefinitionConfig {
+                StatementConfig {
                     name: Some("stmt2".to_string()),
-                    conditions: ConditionsDefinitionConfig {
+                    conditions: ConditionsConfig {
                         prefix: Some("192.168.0.0/16".to_string()),
                         ..Default::default()
                     },
-                    actions: ActionsDefinitionConfig {
+                    actions: ActionsConfig {
                         reject: Some(true),
                         ..Default::default()
                     },

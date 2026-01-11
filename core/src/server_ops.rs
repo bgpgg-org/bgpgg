@@ -1216,7 +1216,7 @@ impl BgpServer {
         use crate::config::PolicyDefinitionConfig;
         use crate::policy::Policy;
 
-        // Convert PolicyStatementConfig to StatementDefinitionConfig
+        // Convert PolicyStatementConfig to StatementConfig
         let mut stmt_defs = Vec::new();
         for stmt in statements {
             match self.policy_statement_config_to_definition(stmt) {
@@ -1327,14 +1327,13 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    // Helper method to convert PolicyStatementConfig to StatementDefinitionConfig
+    // Helper method to convert PolicyStatementConfig to StatementConfig
     fn policy_statement_config_to_definition(
         &self,
         stmt: crate::server::PolicyStatementConfig,
-    ) -> Result<crate::config::StatementDefinitionConfig, String> {
+    ) -> Result<crate::config::StatementConfig, String> {
         use crate::config::{
-            ActionsDefinitionConfig, ConditionsDefinitionConfig, MatchOptionConfig,
-            MatchSetRefConfig, StatementDefinitionConfig,
+            ActionsConfig, ConditionsConfig, MatchOptionConfig, MatchSetRefConfig, StatementConfig,
         };
 
         let conditions = stmt
@@ -1348,7 +1347,7 @@ impl BgpServer {
                 neighbor: None,
             });
 
-        let conditions_def = ConditionsDefinitionConfig {
+        let conditions_def = ConditionsConfig {
             match_prefix_set: conditions
                 .match_prefix_set
                 .map(|(name, opt)| MatchSetRefConfig {
@@ -1409,7 +1408,7 @@ impl BgpServer {
             remove_communities: vec![],
         });
 
-        let actions = ActionsDefinitionConfig {
+        let actions = ActionsConfig {
             local_pref: actions_def
                 .local_pref
                 .map(crate::config::LocalPrefActionConfig::Set),
@@ -1436,7 +1435,7 @@ impl BgpServer {
             reject: actions_def.reject,
         };
 
-        Ok(StatementDefinitionConfig {
+        Ok(StatementConfig {
             name: None,
             conditions: conditions_def,
             actions,
