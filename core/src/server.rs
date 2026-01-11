@@ -91,6 +91,8 @@ pub struct GetPeersResponse {
     pub state: BgpState,
     pub admin_state: AdminState,
     pub configured: bool,
+    pub import_policies: Vec<String>,
+    pub export_policies: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +102,8 @@ pub struct GetPeerResponse {
     pub state: BgpState,
     pub admin_state: AdminState,
     pub configured: bool,
+    pub import_policies: Vec<String>,
+    pub export_policies: Vec<String>,
     pub statistics: PeerStatistics,
 }
 

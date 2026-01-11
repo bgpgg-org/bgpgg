@@ -154,6 +154,8 @@ message Peer {
     BgpState state = 3;
     AdminState admin_state = 4;
     bool configured = 5;  // true if explicitly configured, false if accepted via accept_unconfigured_peers
+    repeated string import_policies = 6;  // Names of import policies assigned to this peer
+    repeated string export_policies = 7;  // Names of export policies assigned to this peer
 }
 
 // Add route request/response

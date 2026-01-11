@@ -494,6 +494,8 @@ async fn test_auto_reconnect() {
             state: BgpState::OpenSent as i32,
             admin_state: AdminState::Up.into(),
             configured: true,
+            import_policies: vec![],
+            export_policies: vec![],
         }],
     )
     .await;

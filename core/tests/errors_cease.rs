@@ -117,6 +117,8 @@ async fn test_max_prefix_limit() {
                             state: BgpState::Idle.into(),
                             admin_state: AdminState::PrefixLimitExceeded.into(),
                             configured: true,
+                            import_policies: vec![],
+                            export_policies: vec![],
                         }],
                     )
                     .await

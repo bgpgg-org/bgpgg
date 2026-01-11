@@ -585,6 +585,18 @@ impl BgpServer {
                 state: entry.state,
                 admin_state: entry.admin_state,
                 configured: entry.configured,
+                import_policies: entry
+                    .import_policies
+                    .iter()
+                    .filter(|p| !p.built_in)
+                    .map(|p| p.name.clone())
+                    .collect(),
+                export_policies: entry
+                    .export_policies
+                    .iter()
+                    .filter(|p| !p.built_in)
+                    .map(|p| p.name.clone())
+                    .collect(),
             })
             .collect();
         let _ = response.send(peers);
@@ -616,6 +628,16 @@ impl BgpServer {
             state: entry.state,
             admin_state: entry.admin_state,
             configured: entry.configured,
+            import_policies: entry
+                .import_policies
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
+            export_policies: entry
+                .export_policies
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
             statistics: stats,
         }));
     }
@@ -768,6 +790,18 @@ impl BgpServer {
                 state: entry.state,
                 admin_state: entry.admin_state,
                 configured: entry.configured,
+                import_policies: entry
+                    .import_policies
+                    .iter()
+                    .filter(|p| !p.built_in)
+                    .map(|p| p.name.clone())
+                    .collect(),
+                export_policies: entry
+                    .export_policies
+                    .iter()
+                    .filter(|p| !p.built_in)
+                    .map(|p| p.name.clone())
+                    .collect(),
             };
             if tx.send(peer).is_err() {
                 break;
@@ -1197,6 +1231,15 @@ impl BgpServer {
     ) {
         use crate::config::PolicyDefinitionConfig;
         use crate::policy::Policy;
+
+        // Reject policy names starting with underscore (reserved for built-in policies)
+        if name.starts_with('_') {
+            let _ = response.send(Err(
+                "policy names cannot start with underscore (reserved for built-in policies)"
+                    .to_string(),
+            ));
+            return;
+        }
 
         // Build PolicyDefinitionConfig directly from received statements
         let policy_def = PolicyDefinitionConfig {

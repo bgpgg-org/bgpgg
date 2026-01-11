@@ -385,6 +385,8 @@ impl BgpService for BgpGrpcService {
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
+                import_policies: peer.import_policies.clone(),
+                export_policies: peer.export_policies.clone(),
             })
             .collect();
 
@@ -415,6 +417,8 @@ impl BgpService for BgpGrpcService {
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
+                import_policies: peer.import_policies,
+                export_policies: peer.export_policies,
             })
         });
 
@@ -452,6 +456,8 @@ impl BgpService for BgpGrpcService {
                     state: to_proto_state(peer.state),
                     admin_state: to_proto_admin_state(peer.admin_state),
                     configured: peer.configured,
+                    import_policies: peer.import_policies.clone(),
+                    export_policies: peer.export_policies.clone(),
                 };
 
                 let proto_statistics = ProtoPeerStatistics {

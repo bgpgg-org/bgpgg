@@ -585,26 +585,112 @@ async fn test_remove_policy() {
 async fn test_set_policy_assignment() {
     let (mut server1, server2) = setup_two_peered_servers(None).await;
 
-    // Create a policy on server1
+    // Create policies on server1
     server1
         .client
         .add_policy(
-            "test-policy".to_string(),
+            "import-policy".to_string(),
             vec![simple_statement_config(Some("10.0.0.0/8"), true, Some(200))],
         )
         .await
         .unwrap();
 
-    // Assign the policy to the peer for import direction
-    let result = server1
+    server1
+        .client
+        .add_policy(
+            "export-policy".to_string(),
+            vec![simple_statement_config(Some("192.168.0.0/16"), true, Some(150))],
+        )
+        .await
+        .unwrap();
+
+    // Set import policy
+    server1
         .client
         .set_policy_assignment(
             server2.address.to_string(),
             "import".to_string(),
-            vec!["test-policy".to_string()],
+            vec!["import-policy".to_string()],
             None,
+        )
+        .await
+        .unwrap();
+
+    // Assert: import policy is set, export is empty
+    let peers = server1.client.get_peers().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].import_policies, vec!["import-policy"]);
+    assert_eq!(peers[0].export_policies, Vec::<String>::new());
+
+    // Set export policy
+    server1
+        .client
+        .set_policy_assignment(
+            server2.address.to_string(),
+            "export".to_string(),
+            vec!["export-policy".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Assert: both import and export policies are set
+    let peers = server1.client.get_peers().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].import_policies, vec!["import-policy"]);
+    assert_eq!(peers[0].export_policies, vec!["export-policy"]);
+
+    // Create another policy and override import
+    server1
+        .client
+        .add_policy(
+            "new-import-policy".to_string(),
+            vec![simple_statement_config(Some("172.16.0.0/12"), true, Some(250))],
+        )
+        .await
+        .unwrap();
+
+    server1
+        .client
+        .set_policy_assignment(
+            server2.address.to_string(),
+            "import".to_string(),
+            vec!["new-import-policy".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Assert: import policy was overridden, export remains unchanged
+    let peers = server1.client.get_peers().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].import_policies, vec!["new-import-policy"]);
+    assert_eq!(peers[0].export_policies, vec!["export-policy"]);
+}
+
+#[tokio::test]
+async fn test_reject_policy_name_starting_with_underscore() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Try to create a policy starting with underscore
+    let result = server
+        .client
+        .add_policy(
+            "_my_policy".to_string(),
+            vec![simple_statement_config(Some("10.0.0.0/8"), true, None)],
         )
         .await;
 
-    assert!(result.is_ok());
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("cannot start with underscore"));
 }

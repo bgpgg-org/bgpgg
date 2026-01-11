@@ -9,6 +9,12 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Built-in policy name for default import policy
+pub const BUILTIN_POLICY_DEFAULT_IN: &str = "_default_in";
+
+/// Built-in policy name for default export policy
+pub const BUILTIN_POLICY_DEFAULT_OUT: &str = "_default_out";
+
 /// Result of policy evaluation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyResult {
@@ -357,12 +363,24 @@ impl Default for Statement {
 /// A policy consisting of multiple statements evaluated in order
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
+    pub name: String,
+    pub built_in: bool,
     statements: Vec<Statement>,
 }
 
 impl Policy {
-    pub fn new() -> Self {
+    pub fn new(name: String) -> Self {
         Self {
+            name,
+            built_in: false,
+            statements: Vec::new(),
+        }
+    }
+
+    fn new_built_in(name: String) -> Self {
+        Self {
+            name,
+            built_in: true,
             statements: Vec::new(),
         }
     }
@@ -374,7 +392,7 @@ impl Policy {
 
     /// Create a default inbound policy with AS loop prevention and default local pref
     pub fn default_in(local_asn: u16) -> Self {
-        Self::new()
+        Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
             .with(stmt_reject_as_loop(local_asn))
             .with(stmt_default_local_pref(100))
             .with(Statement::new().then(Action::Accept))
@@ -383,11 +401,12 @@ impl Policy {
     /// Create a default outbound policy with iBGP reflection prevention
     pub fn default_out(local_asn: u16, peer_asn: u16) -> Self {
         if local_asn == peer_asn {
-            Self::new()
+            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
                 .with(stmt_reject_ibgp())
                 .with(Statement::new().then(Action::Accept))
         } else {
-            Self::new().with(Statement::new().then(Action::Accept))
+            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
+                .with(Statement::new().then(Action::Accept))
         }
     }
 
@@ -396,7 +415,7 @@ impl Policy {
         def: &PolicyDefinitionConfig,
         defined_sets: &DefinedSets,
     ) -> Result<Self, String> {
-        let mut policy = Policy::new();
+        let mut policy = Policy::new(def.name.clone());
 
         for stmt_def in &def.statements {
             let stmt = build_statement(stmt_def, defined_sets)?;
@@ -439,7 +458,7 @@ impl Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self::new()
+        Self::new(String::new())
     }
 }
 
@@ -754,14 +773,14 @@ mod tests {
 
     #[test]
     fn test_policy_accept_all() {
-        let policy = Policy::new().with(Statement::new().then(Action::Accept));
+        let policy = Policy::new("test".to_string()).with(Statement::new().then(Action::Accept));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
     }
 
     #[test]
     fn test_policy_empty_rejects() {
-        let policy = Policy::new();
+        let policy = Policy::new("test".to_string());
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(!policy.accept(&test_prefix(), &mut path));
     }
@@ -773,7 +792,7 @@ mod tests {
             address: Ipv4Addr::new(192, 168, 1, 0),
             prefix_length: 24,
         });
-        let policy = Policy::new()
+        let policy = Policy::new("test".to_string())
             .with(
                 Statement::new()
                     .when(Condition::Prefix(prefix))
@@ -798,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_stmt_default_local_pref() {
-        let policy = Policy::new().with(stmt_default_local_pref(100));
+        let policy = Policy::new("test".to_string()).with(stmt_default_local_pref(100));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         assert!(policy.accept(&test_prefix(), &mut path));
         assert_eq!(path.local_pref, Some(100));
@@ -806,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_stmt_reject_as_loop() {
-        let policy = Policy::new().with(stmt_reject_as_loop(65000));
+        let policy = Policy::new("test".to_string()).with(stmt_reject_as_loop(65000));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
@@ -818,7 +837,7 @@ mod tests {
 
     #[test]
     fn test_stmt_reject_ibgp() {
-        let policy = Policy::new()
+        let policy = Policy::new("test".to_string())
             .with(stmt_reject_ibgp())
             .with(Statement::new().then(Action::Accept));
         let mut ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
@@ -883,7 +902,7 @@ mod tests {
         let actual = Policy::from_config(&policy_def, &defined_sets).unwrap();
 
         // Build expected policy manually
-        let expected = Policy::new()
+        let expected = Policy::new("test-policy".to_string())
             .with(
                 Statement::new()
                     .when(Condition::Prefix("10.0.0.0/8".parse().unwrap()))
