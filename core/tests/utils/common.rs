@@ -885,6 +885,56 @@ pub async fn verify_peer_statistics(
     );
 }
 
+/// Parameters for announcing a route
+#[derive(Default)]
+pub struct RouteParams {
+    pub prefix: String,
+    pub next_hop: String,
+    pub origin: Option<Origin>,
+    pub as_path: Vec<AsPathSegment>,
+    pub local_pref: Option<u32>,
+    pub med: Option<u32>,
+    pub atomic_aggregate: bool,
+    pub communities: Vec<u32>,
+}
+
+/// Announce a route with customizable attributes
+///
+/// # Example
+/// ```
+/// // Simple announcement with defaults
+/// announce_route(server, RouteParams {
+///     prefix: "10.0.0.0/24".to_string(),
+///     next_hop: "192.168.1.1".to_string(),
+///     ..Default::default()
+/// }).await;
+///
+/// // With custom attributes
+/// announce_route(server, RouteParams {
+///     prefix: "10.0.0.0/24".to_string(),
+///     next_hop: "192.168.1.1".to_string(),
+///     med: Some(100),
+///     communities: vec![65000 << 16 | 100],
+///     ..Default::default()
+/// }).await;
+/// ```
+pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
+    server
+        .client
+        .add_route(
+            params.prefix,
+            params.next_hop,
+            params.origin.unwrap_or(Origin::Igp),
+            params.as_path,
+            params.local_pref,
+            params.med,
+            params.atomic_aggregate,
+            params.communities,
+        )
+        .await
+        .unwrap();
+}
+
 /// Chains BGP servers together in a linear topology
 ///
 /// Connects each server to the previous one in the chain (server[i] connects to server[i-1]).
