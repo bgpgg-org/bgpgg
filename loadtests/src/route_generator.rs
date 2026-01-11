@@ -237,11 +237,7 @@ fn generate_prefix_pool(config: &RouteGenConfig, rng: &mut StdRng) -> Vec<IpNetw
 }
 
 /// Generate prefixes for a specific prefix length
-fn generate_prefixes_for_length(
-    prefixes: &mut Vec<IpNetwork>,
-    count: usize,
-    prefix_len: u8,
-) {
+fn generate_prefixes_for_length(prefixes: &mut Vec<IpNetwork>, count: usize, prefix_len: u8) {
     // Start from 10.0.0.0 base address
     let base = u32::from(Ipv4Addr::new(10, 0, 0, 0));
     let increment = 1u32 << (32 - prefix_len);
