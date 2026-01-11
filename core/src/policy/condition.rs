@@ -1,12 +1,13 @@
-use crate::bgp::utils::IpNetwork;
 use crate::config::MatchOptionConfig;
-use crate::policy::defined_sets::DefinedSets;
+use crate::net::IpNetwork;
+use crate::policy::sets::{AsPathSet, CommunitySet, NeighborSet, PrefixSet};
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 /// A condition that can match against a route
 pub trait Condition: std::fmt::Debug + Send + Sync {
-    fn matches(&self, prefix: &IpNetwork, path: &Path, sets: &DefinedSets) -> bool;
+    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool;
 }
 
 /// Match specific prefix
@@ -22,7 +23,7 @@ impl PrefixCondition {
 }
 
 impl Condition for PrefixCondition {
-    fn matches(&self, prefix: &IpNetwork, _path: &Path, _sets: &DefinedSets) -> bool {
+    fn matches(&self, prefix: &IpNetwork, _path: &Path) -> bool {
         prefix == &self.prefix
     }
 }
@@ -40,7 +41,7 @@ impl NeighborCondition {
 }
 
 impl Condition for NeighborCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, _sets: &DefinedSets) -> bool {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         match &path.source {
             RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr == self.neighbor,
             RouteSource::Local => false,
@@ -61,7 +62,7 @@ impl AsPathCondition {
 }
 
 impl Condition for AsPathCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, _sets: &DefinedSets) -> bool {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         path.as_path
             .iter()
             .flat_map(|segment| segment.asn_list.iter())
@@ -89,7 +90,7 @@ impl RouteTypeCondition {
 }
 
 impl Condition for RouteTypeCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, _sets: &DefinedSets) -> bool {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         matches!(
             (&self.route_type, &path.source),
             (RouteType::Ebgp, RouteSource::Ebgp(_))
@@ -112,7 +113,7 @@ impl CommunityCondition {
 }
 
 impl Condition for CommunityCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, _sets: &DefinedSets) -> bool {
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         path.communities.contains(&self.community)
     }
 }
@@ -120,29 +121,37 @@ impl Condition for CommunityCondition {
 /// Match routes against a prefix-set
 #[derive(Debug, Clone)]
 pub struct PrefixSetCondition {
-    pub set_name: String,
+    pub prefix_set: Arc<PrefixSet>,
     pub match_option: MatchOptionConfig,
 }
 
 impl PrefixSetCondition {
-    pub fn new(set_name: String, match_option: MatchOptionConfig) -> Self {
+    pub fn new(prefix_set: Arc<PrefixSet>, match_option: MatchOptionConfig) -> Self {
         Self {
-            set_name,
+            prefix_set,
             match_option,
         }
     }
 }
 
 impl Condition for PrefixSetCondition {
-    fn matches(&self, prefix: &IpNetwork, _path: &Path, sets: &DefinedSets) -> bool {
-        let Some(prefix_set) = sets.prefix_sets.get(&self.set_name) else {
-            return false;
-        };
-
+    fn matches(&self, prefix: &IpNetwork, _path: &Path) -> bool {
         match self.match_option {
-            MatchOptionConfig::Any => prefix_set.prefixes.iter().any(|pm| pm.contains(prefix)),
-            MatchOptionConfig::All => prefix_set.prefixes.iter().all(|pm| pm.contains(prefix)),
-            MatchOptionConfig::Invert => !prefix_set.prefixes.iter().any(|pm| pm.contains(prefix)),
+            MatchOptionConfig::Any => self
+                .prefix_set
+                .prefixes
+                .iter()
+                .any(|pm| pm.contains(prefix)),
+            MatchOptionConfig::All => self
+                .prefix_set
+                .prefixes
+                .iter()
+                .all(|pm| pm.contains(prefix)),
+            MatchOptionConfig::Invert => !self
+                .prefix_set
+                .prefixes
+                .iter()
+                .any(|pm| pm.contains(prefix)),
         }
     }
 }
@@ -150,34 +159,30 @@ impl Condition for PrefixSetCondition {
 /// Match routes against a neighbor-set
 #[derive(Debug, Clone)]
 pub struct NeighborSetCondition {
-    pub set_name: String,
+    pub neighbor_set: Arc<NeighborSet>,
     pub match_option: MatchOptionConfig,
 }
 
 impl NeighborSetCondition {
-    pub fn new(set_name: String, match_option: MatchOptionConfig) -> Self {
+    pub fn new(neighbor_set: Arc<NeighborSet>, match_option: MatchOptionConfig) -> Self {
         Self {
-            set_name,
+            neighbor_set,
             match_option,
         }
     }
 }
 
 impl Condition for NeighborSetCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, sets: &DefinedSets) -> bool {
-        let Some(neighbor_set) = sets.neighbor_sets.get(&self.set_name) else {
-            return false;
-        };
-
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         let peer_ip = match &path.source {
             RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr,
             RouteSource::Local => return false,
         };
 
         match self.match_option {
-            MatchOptionConfig::Any => neighbor_set.neighbors.iter().any(|n| *n == peer_ip),
-            MatchOptionConfig::All => neighbor_set.neighbors.iter().all(|n| *n == peer_ip),
-            MatchOptionConfig::Invert => !neighbor_set.neighbors.iter().any(|n| *n == peer_ip),
+            MatchOptionConfig::Any => self.neighbor_set.neighbors.contains(&peer_ip),
+            MatchOptionConfig::All => self.neighbor_set.neighbors.iter().all(|n| *n == peer_ip),
+            MatchOptionConfig::Invert => !self.neighbor_set.neighbors.contains(&peer_ip),
         }
     }
 }
@@ -185,25 +190,21 @@ impl Condition for NeighborSetCondition {
 /// Match routes against an AS-PATH set (regex patterns)
 #[derive(Debug, Clone)]
 pub struct AsPathSetCondition {
-    pub set_name: String,
+    pub as_path_set: Arc<AsPathSet>,
     pub match_option: MatchOptionConfig,
 }
 
 impl AsPathSetCondition {
-    pub fn new(set_name: String, match_option: MatchOptionConfig) -> Self {
+    pub fn new(as_path_set: Arc<AsPathSet>, match_option: MatchOptionConfig) -> Self {
         Self {
-            set_name,
+            as_path_set,
             match_option,
         }
     }
 }
 
 impl Condition for AsPathSetCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, sets: &DefinedSets) -> bool {
-        let Some(as_path_set) = sets.as_path_sets.get(&self.set_name) else {
-            return false;
-        };
-
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         // Convert AS_PATH to string for regex matching
         let as_path_str = path
             .as_path
@@ -214,15 +215,18 @@ impl Condition for AsPathSetCondition {
             .join("_");
 
         match self.match_option {
-            MatchOptionConfig::Any => as_path_set
+            MatchOptionConfig::Any => self
+                .as_path_set
                 .patterns
                 .iter()
                 .any(|r| r.is_match(&as_path_str)),
-            MatchOptionConfig::All => as_path_set
+            MatchOptionConfig::All => self
+                .as_path_set
                 .patterns
                 .iter()
                 .all(|r| r.is_match(&as_path_str)),
-            MatchOptionConfig::Invert => !as_path_set
+            MatchOptionConfig::Invert => !self
+                .as_path_set
                 .patterns
                 .iter()
                 .any(|r| r.is_match(&as_path_str)),
@@ -233,35 +237,34 @@ impl Condition for AsPathSetCondition {
 /// Match routes against a community-set
 #[derive(Debug, Clone)]
 pub struct CommunitySetCondition {
-    pub set_name: String,
+    pub community_set: Arc<CommunitySet>,
     pub match_option: MatchOptionConfig,
 }
 
 impl CommunitySetCondition {
-    pub fn new(set_name: String, match_option: MatchOptionConfig) -> Self {
+    pub fn new(community_set: Arc<CommunitySet>, match_option: MatchOptionConfig) -> Self {
         Self {
-            set_name,
+            community_set,
             match_option,
         }
     }
 }
 
 impl Condition for CommunitySetCondition {
-    fn matches(&self, _prefix: &IpNetwork, path: &Path, sets: &DefinedSets) -> bool {
-        let Some(community_set) = sets.community_sets.get(&self.set_name) else {
-            return false;
-        };
-
+    fn matches(&self, _prefix: &IpNetwork, path: &Path) -> bool {
         match self.match_option {
-            MatchOptionConfig::Any => community_set
+            MatchOptionConfig::Any => self
+                .community_set
                 .communities
                 .iter()
                 .any(|comm| path.communities.contains(comm)),
-            MatchOptionConfig::All => community_set
+            MatchOptionConfig::All => self
+                .community_set
                 .communities
                 .iter()
                 .all(|comm| path.communities.contains(comm)),
-            MatchOptionConfig::Invert => !community_set
+            MatchOptionConfig::Invert => !self
+                .community_set
                 .communities
                 .iter()
                 .any(|comm| path.communities.contains(comm)),
@@ -273,17 +276,13 @@ impl Condition for CommunitySetCondition {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
     use crate::rib::RouteSource;
     use std::net::Ipv4Addr;
 
     fn test_ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
-    }
-
-    fn empty_sets() -> DefinedSets {
-        DefinedSets::default()
     }
 
     #[test]
@@ -295,43 +294,40 @@ mod tests {
         });
         let condition = PrefixCondition::new(prefix);
         let path = create_path(RouteSource::Ebgp(test_ip(1)));
-        let sets = empty_sets();
-        assert!(condition.matches(&prefix, &path, &sets));
-        assert!(!condition.matches(&other_prefix, &path, &sets));
+        assert!(condition.matches(&prefix, &path));
+        assert!(!condition.matches(&other_prefix, &path));
     }
 
     #[test]
     fn test_neighbor_condition() {
         let condition = NeighborCondition::new(test_ip(1));
         let path1 = create_path(RouteSource::Ebgp(test_ip(1)));
-        let sets = empty_sets();
-        assert!(condition.matches(&test_prefix(), &path1, &sets));
+        assert!(condition.matches(&test_prefix(), &path1));
 
         let path2 = create_path(RouteSource::Ebgp(test_ip(2)));
-        assert!(!condition.matches(&test_prefix(), &path2, &sets));
+        assert!(!condition.matches(&test_prefix(), &path2));
 
         let path3 = create_path(RouteSource::Local);
-        assert!(!condition.matches(&test_prefix(), &path3, &sets));
+        assert!(!condition.matches(&test_prefix(), &path3));
     }
 
     #[test]
     fn test_as_path_condition() {
         let condition = AsPathCondition::new(65001);
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
-        let sets = empty_sets();
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65001, 65002],
         }];
-        assert!(condition.matches(&test_prefix(), &path, &sets));
+        assert!(condition.matches(&test_prefix(), &path));
 
         path.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65002, 65003],
         }];
-        assert!(!condition.matches(&test_prefix(), &path, &sets));
+        assert!(!condition.matches(&test_prefix(), &path));
     }
 
     #[test]
@@ -339,32 +335,30 @@ mod tests {
         let ebgp = RouteTypeCondition::new(RouteType::Ebgp);
         let ibgp = RouteTypeCondition::new(RouteType::Ibgp);
         let local = RouteTypeCondition::new(RouteType::Local);
-        let sets = empty_sets();
 
         let ebgp_path = create_path(RouteSource::Ebgp(test_ip(1)));
-        assert!(ebgp.matches(&test_prefix(), &ebgp_path, &sets));
-        assert!(!ibgp.matches(&test_prefix(), &ebgp_path, &sets));
+        assert!(ebgp.matches(&test_prefix(), &ebgp_path));
+        assert!(!ibgp.matches(&test_prefix(), &ebgp_path));
 
         let ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
-        assert!(ibgp.matches(&test_prefix(), &ibgp_path, &sets));
+        assert!(ibgp.matches(&test_prefix(), &ibgp_path));
 
         let local_path = create_path(RouteSource::Local);
-        assert!(local.matches(&test_prefix(), &local_path, &sets));
+        assert!(local.matches(&test_prefix(), &local_path));
     }
 
     #[test]
     fn test_community_condition() {
         let condition = CommunityCondition::new(65001);
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
-        let sets = empty_sets();
 
         path.communities = vec![65001, 65002];
-        assert!(condition.matches(&test_prefix(), &path, &sets));
+        assert!(condition.matches(&test_prefix(), &path));
 
         path.communities = vec![65002, 65003];
-        assert!(!condition.matches(&test_prefix(), &path, &sets));
+        assert!(!condition.matches(&test_prefix(), &path));
 
         path.communities = vec![];
-        assert!(!condition.matches(&test_prefix(), &path, &sets));
+        assert!(!condition.matches(&test_prefix(), &path));
     }
 }

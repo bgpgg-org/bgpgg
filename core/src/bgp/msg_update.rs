@@ -23,7 +23,8 @@ use super::msg_update_codec::{
     read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
-use super::utils::{parse_nlri_list, IpNetwork, ParserError};
+use super::utils::{parse_nlri_list, ParserError};
+use crate::net::IpNetwork;
 use std::net::Ipv4Addr;
 
 pub(super) const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
@@ -295,7 +296,7 @@ mod tests {
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_codec::{read_path_attribute, write_path_attribute};
     use crate::bgp::msg_update_types::AttrType;
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use std::str::FromStr;
 
     const PATH_ATTR_ORIGIN_EGP: &[u8] = &[

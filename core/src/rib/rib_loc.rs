@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::bgp::msg_update::{AsPathSegment, Origin};
-use crate::bgp::utils::IpNetwork;
 use crate::log::Logger;
+use crate::net::IpNetwork;
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
 use std::collections::hash_map::Entry;
@@ -266,7 +266,7 @@ impl LocRib {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use crate::test_helpers::*;
 
     fn test_peer_ip() -> IpAddr {

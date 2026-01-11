@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttrValue};
-use crate::bgp::utils::{IpNetwork, Ipv4Net};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
+use crate::net::{IpNetwork, Ipv4Net};
 use crate::peer::BgpState;
 use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};

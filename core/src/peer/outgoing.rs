@@ -17,13 +17,15 @@
 use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
-use crate::bgp::utils::IpNetwork;
 use crate::log::Logger;
+use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
-use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
 use crate::{debug, error, info, warn};
+
+#[cfg(test)]
+use crate::policy::Policy;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -249,7 +251,7 @@ pub fn compute_routes_for_peer(
     local_asn: u16,
     peer_asn: u16,
     local_router_id: Ipv4Addr,
-    export_policy: &Policy,
+    export_policies: &[Arc<crate::policy::Policy>],
 ) -> Vec<(IpNetwork, Path)> {
     // Apply well-known community filtering BEFORE export policy
     // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
@@ -261,7 +263,27 @@ pub fn compute_routes_for_peer(
             }
             // Clone inner Path for policy mutation
             let mut path_mut = (**path).clone();
-            if !export_policy.accept(prefix, &mut path_mut) {
+
+            // Evaluate export policies in order until Accept/Reject
+            let accepted = {
+                let mut result = false;
+                for policy in export_policies {
+                    match policy.evaluate(prefix, &mut path_mut) {
+                        crate::policy::PolicyResult::Accept => {
+                            result = true;
+                            break;
+                        }
+                        crate::policy::PolicyResult::Reject => {
+                            result = false;
+                            break;
+                        }
+                        crate::policy::PolicyResult::Continue => continue,
+                    }
+                }
+                result
+            };
+
+            if !accepted {
                 return None;
             }
 
@@ -287,7 +309,7 @@ pub fn send_announcements_to_peer(
     local_asn: u16,
     peer_asn: u16,
     local_router_id: Ipv4Addr,
-    export_policy: &Policy,
+    export_policies: &[Arc<crate::policy::Policy>],
     logger: &Arc<Logger>,
 ) {
     if to_announce.is_empty() {
@@ -300,7 +322,7 @@ pub fn send_announcements_to_peer(
         local_asn,
         peer_asn,
         local_router_id,
-        export_policy,
+        export_policies,
     );
 
     if filtered.is_empty() {
@@ -375,7 +397,7 @@ pub fn send_announcements_to_peer(
 mod tests {
     use super::*;
     use crate::bgp::msg_update::Origin;
-    use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::policy::action::Accept;
     use crate::policy::Statement;
     use crate::rib::RouteSource;
@@ -743,7 +765,7 @@ mod tests {
         // RFC 4271 Section 9.2: Messages exceeding MAX_MESSAGE_SIZE must not be sent
         let (tx, mut rx) = mpsc::unbounded_channel();
         let peer_addr = test_ip(1);
-        let policy = Policy::new().with(Statement::new().then(Accept));
+        let policy = Arc::new(Policy::new().with(Statement::new().then(Accept)));
 
         // Create huge AS_PATH to make UPDATE message exceed 4096 bytes
         // Multiple AS_SEQUENCE segments with 255 ASNs each = ~4000 bytes total
@@ -775,6 +797,7 @@ mod tests {
 
         // Send announcements - should skip due to size
         let logger = Arc::new(Logger::default());
+        let policies = vec![policy];
         send_announcements_to_peer(
             peer_addr,
             &tx,
@@ -782,7 +805,7 @@ mod tests {
             65000,
             65001,
             Ipv4Addr::new(1, 1, 1, 1),
-            &policy,
+            &policies,
             &logger,
         );
 

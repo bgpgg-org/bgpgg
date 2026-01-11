@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::utils::IpNetwork;
 use crate::config::{DefinedSetsConfig, PrefixMatchConfig};
+use crate::net::IpNetwork;
 use regex::Regex;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -76,37 +76,16 @@ impl PrefixMatch {
         })
     }
 
-    /// Check if a prefix matches this compiled prefix match
+    /// Check if a prefix matches this prefix match (within network and length range)
     pub fn contains(&self, prefix: &IpNetwork) -> bool {
-        // Extract prefix length
-        let prefix_len = match prefix {
-            IpNetwork::V4(net) => net.prefix_length,
-            IpNetwork::V6(net) => net.prefix_length,
-        };
-
         // Check if prefix length is in range
+        let prefix_len = prefix.prefix_len();
         if prefix_len < self.min_len || prefix_len > self.max_len {
             return false;
         }
 
         // Check if prefix is within network
-        match (&self.network, prefix) {
-            (IpNetwork::V4(net), IpNetwork::V4(p)) => {
-                // Check if p is within net
-                let net_addr = u32::from_be_bytes(net.address.octets());
-                let p_addr = u32::from_be_bytes(p.address.octets());
-                let mask = !0u32 << (32 - net.prefix_length);
-                (net_addr & mask) == (p_addr & mask)
-            }
-            (IpNetwork::V6(net), IpNetwork::V6(p)) => {
-                // Check if p is within net
-                let net_addr = u128::from_be_bytes(net.address.octets());
-                let p_addr = u128::from_be_bytes(p.address.octets());
-                let mask = !0u128 << (128 - net.prefix_length);
-                (net_addr & mask) == (p_addr & mask)
-            }
-            _ => false, // IPv4 vs IPv6 mismatch
-        }
+        self.network.contains(prefix)
     }
 }
 
@@ -288,7 +267,7 @@ fn parse_masklength_range(s: &str, prefix_len: u8, max_len: u8) -> Result<(u8, u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use std::net::Ipv4Addr;
 
     #[test]

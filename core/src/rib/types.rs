@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::utils::IpNetwork;
+use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
 use std::net::IpAddr;

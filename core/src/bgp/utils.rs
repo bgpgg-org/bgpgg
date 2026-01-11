@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::net::{IpNetwork, Ipv4Net};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, PartialEq)]
 pub enum ParserError {
@@ -35,31 +36,6 @@ impl Display for ParserError {
 }
 
 impl Error for ParserError {}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum IpNetwork {
-    V4(Ipv4Net),
-    V6(Ipv6Net),
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Ipv4Net {
-    pub address: Ipv4Addr,
-    pub prefix_length: u8,
-}
-
-impl Ipv4Net {
-    /// Returns true if this is a multicast prefix (224.0.0.0/4).
-    fn is_multicast(&self) -> bool {
-        self.address.octets()[0] >= 224 && self.address.octets()[0] <= 239
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Ipv6Net {
-    pub address: Ipv6Addr,
-    pub prefix_length: u8,
-}
 
 pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
     use super::msg_notification::{BgpError, UpdateMessageError};
@@ -129,50 +105,6 @@ pub fn read_u32(bytes: &[u8]) -> Result<u32, ParserError> {
 /// Returns false for 0.0.0.0, 255.255.255.255, or multicast (224.0.0.0/4).
 pub fn is_valid_unicast_ipv4(ip: u32) -> bool {
     !(ip == 0 || ip == 0xFFFFFFFF || (ip & 0xF0000000) == 0xE0000000)
-}
-
-/// Parse CIDR notation string into IpNetwork
-impl std::str::FromStr for IpNetwork {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('/').collect();
-        if parts.len() != 2 {
-            return Err(format!(
-                "invalid CIDR format '{}' (expected address/length)",
-                s
-            ));
-        }
-
-        let addr = parts[0];
-        let prefix_len = parts[1]
-            .parse::<u8>()
-            .map_err(|_| format!("invalid prefix length '{}'", parts[1]))?;
-
-        // Try IPv4 first
-        if let Ok(ipv4_addr) = addr.parse::<Ipv4Addr>() {
-            if prefix_len > 32 {
-                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_len));
-            }
-            return Ok(IpNetwork::V4(Ipv4Net {
-                address: ipv4_addr,
-                prefix_length: prefix_len,
-            }));
-        }
-
-        // Try IPv6
-        if let Ok(ipv6_addr) = addr.parse::<Ipv6Addr>() {
-            if prefix_len > 128 {
-                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_len));
-            }
-            return Ok(IpNetwork::V6(Ipv6Net {
-                address: ipv6_addr,
-                prefix_length: prefix_len,
-            }));
-        }
-
-        Err(format!("invalid IP address '{}'", addr))
-    }
 }
 
 #[cfg(test)]

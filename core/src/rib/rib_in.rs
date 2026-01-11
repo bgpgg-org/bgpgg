@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::utils::IpNetwork;
+use crate::net::IpNetwork;
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ impl AdjRibIn {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::bgp::utils::Ipv4Net;
+    use crate::net::Ipv4Net;
     use crate::test_helpers::*;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -210,7 +210,7 @@ mod tests {
 
         rib_in.add_route(create_test_prefix(), create_test_path(peer_ip));
         rib_in.add_route(
-            IpNetwork::V4(crate::bgp::utils::Ipv4Net {
+            IpNetwork::V4(Ipv4Net {
                 address: Ipv4Addr::new(10, 1, 0, 0),
                 prefix_length: 24,
             }),

@@ -14,13 +14,12 @@
 
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
-use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
+use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, compute_routes_for_peer, should_propagate_to_peer,
 };
 use crate::peer::{BgpState, PeerOp};
-use crate::policy::Policy;
 use crate::rib::{Path, Route, RouteSource};
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -156,11 +155,17 @@ impl BgpServer {
             }
             ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
                 // Update ASN and initialize policies
-                if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.asn = Some(asn);
-                    peer.import_policy = Some(Policy::default_in(self.config.asn));
-                    peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
-                    info!(&self.logger, "peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                // Clone config for immutable access, then mutate peer
+                if let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) {
+                    let import_policies = self.resolve_import_policies(&peer_config);
+                    let export_policies = self.resolve_export_policies(&peer_config, asn);
+
+                    if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                        peer.asn = Some(asn);
+                        peer.import_policies = import_policies;
+                        peer.export_policies = export_policies;
+                        info!(&self.logger, "peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                    }
                 }
             }
             ServerOp::PeerUpdate {
@@ -174,12 +179,23 @@ impl BgpServer {
                 let peer_asn = peer.asn;
                 let peer_bgp_id = peer.bgp_id;
 
-                if let Some(policy) = peer.policy_in() {
+                let import_policies = peer.policy_in();
+                if !import_policies.is_empty() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip,
                         withdrawn.clone(),
                         announced.clone(),
-                        |prefix, path| policy.accept(prefix, path),
+                        |prefix, path| {
+                            // Evaluate policies in order until Accept/Reject
+                            for policy in import_policies {
+                                match policy.evaluate(prefix, path) {
+                                    crate::policy::PolicyResult::Accept => return true,
+                                    crate::policy::PolicyResult::Reject => return false,
+                                    crate::policy::PolicyResult::Continue => continue,
+                                }
+                            }
+                            false // All policies returned Continue -> default reject
+                        },
                     );
                     info!(&self.logger, "UPDATE processing complete", "peer_ip" => &peer_ip);
 
@@ -645,10 +661,10 @@ impl BgpServer {
 
         let peer_asn = peer_info.asn.ok_or("peer ASN not set".to_string())?;
 
-        let export_policy = peer_info
-            .export_policy
-            .as_ref()
-            .ok_or("export policy not initialized".to_string())?;
+        let export_policies = &peer_info.export_policies;
+        if export_policies.is_empty() {
+            return Err("export policies not initialized".to_string());
+        }
 
         // Build to_announce list from ALL loc_rib routes (same as propagation)
         let mut to_announce = Vec::new();
@@ -675,7 +691,7 @@ impl BgpServer {
             self.config.asn,
             peer_asn,
             self.config.router_id,
-            export_policy,
+            export_policies,
         );
 
         // Group by prefix for Route struct

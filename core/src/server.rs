@@ -16,18 +16,18 @@ use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
-use crate::bgp::utils::IpNetwork;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
 use crate::log::Logger;
+use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
 use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::{DefinedSets, Policy, PolicyBuilder};
+use crate::policy::{DefinedSets, Policy};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{Path, Route};
 use crate::types::PeerDownReason;
@@ -293,8 +293,8 @@ pub struct PeerInfo {
     pub asn: Option<u16>,
     /// BGP Identifier from OPEN message, used for collision detection (RFC 4271 Section 6.8)
     pub bgp_id: Option<u32>,
-    pub import_policy: Option<Policy>,
-    pub export_policy: Option<Policy>,
+    pub import_policies: Vec<Arc<Policy>>,
+    pub export_policies: Vec<Arc<Policy>>,
     pub state: BgpState,
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     /// Per-peer session configuration
@@ -317,8 +317,8 @@ impl PeerInfo {
             configured,
             asn: None,
             bgp_id: None,
-            import_policy: None,
-            export_policy: None,
+            import_policies: Vec::new(),
+            export_policies: Vec::new(),
             state: BgpState::Idle,
             peer_tx,
             config,
@@ -334,12 +334,12 @@ impl PeerInfo {
         rx.await.ok()
     }
 
-    pub fn policy_in(&self) -> Option<&Policy> {
-        self.import_policy.as_ref()
+    pub fn policy_in(&self) -> &[Arc<Policy>] {
+        &self.import_policies
     }
 
-    pub fn policy_out(&self) -> Option<&Policy> {
-        self.export_policy.as_ref()
+    pub fn policy_out(&self) -> &[Arc<Policy>] {
+        &self.export_policies
     }
 }
 
@@ -347,7 +347,6 @@ pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
     pub(crate) config: Config,
-    defined_sets: Arc<DefinedSets>,
     policies: HashMap<String, Arc<Policy>>,
     local_bgp_id: u32,
     pub(crate) local_addr: Ipv4Addr,
@@ -376,27 +375,12 @@ impl BgpServer {
         let log_level = config.parse_log_level();
         let logger = Arc::new(Logger::new(log_level));
 
-        // Compile defined sets
-        let defined_sets =
-            Arc::new(DefinedSets::new(&config.defined_sets).map_err(|e| {
-                ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e))
-            })?);
-
-        // Build named policies
-        let builder = PolicyBuilder::new(defined_sets.clone());
-        let mut policies = HashMap::new();
-        for policy_def in &config.policy_definitions {
-            let policy = builder
-                .build(policy_def)
-                .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
-            policies.insert(policy_def.name.clone(), Arc::new(policy));
-        }
+        let policies = Self::build_policies(&config)?;
 
         Ok(BgpServer {
             peers: HashMap::new(),
             loc_rib: LocRib::new(logger.clone()),
             config,
-            defined_sets,
             policies,
             local_bgp_id,
             local_addr,
@@ -410,42 +394,59 @@ impl BgpServer {
         })
     }
 
-    /// Resolve import policies for a peer from config
-    fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        if peer_config.import_policy.is_empty() {
-            // Default: use built-in default policy
-            vec![Arc::new(Policy::default_in(self.config.asn))]
-        } else {
-            // Look up each policy by name
-            peer_config
-                .import_policy
-                .iter()
-                .filter_map(|name| {
-                    self.policies.get(name).cloned().or_else(|| {
-                        error!(&self.logger, "import policy not found", "policy" => name);
-                        None
-                    })
-                })
-                .collect()
+    /// Build policies from config by compiling defined sets and constructing Policy objects
+    fn build_policies(config: &Config) -> Result<HashMap<String, Arc<Policy>>, ServerError> {
+        // Compile defined sets
+        let defined_sets = DefinedSets::new(&config.defined_sets)
+            .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+
+        // Build named policies
+        let mut policies = HashMap::new();
+        for policy_def in &config.policy_definitions {
+            let policy = Policy::from_config(policy_def, &defined_sets)
+                .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+            policies.insert(policy_def.name.clone(), Arc::new(policy));
         }
+
+        Ok(policies)
+    }
+
+    /// Resolve import policies for a peer from config
+    pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
+        // Always start with default_in policy (AS-loop prevention, etc.)
+        let mut policies = vec![Arc::new(Policy::default_in(self.config.asn))];
+
+        // Append user-configured policies
+        for name in &peer_config.import_policy {
+            if let Some(policy) = self.policies.get(name).cloned() {
+                policies.push(policy);
+            } else {
+                error!(&self.logger, "import policy not found", "policy" => name);
+            }
+        }
+
+        policies
     }
 
     /// Resolve export policies for a peer from config
-    fn resolve_export_policies(&self, peer_config: &PeerConfig, peer_asn: u16) -> Vec<Arc<Policy>> {
-        if peer_config.export_policy.is_empty() {
-            vec![Arc::new(Policy::default_out(self.config.asn, peer_asn))]
-        } else {
-            peer_config
-                .export_policy
-                .iter()
-                .filter_map(|name| {
-                    self.policies.get(name).cloned().or_else(|| {
-                        error!(&self.logger, "export policy not found", "policy" => name);
-                        None
-                    })
-                })
-                .collect()
+    pub(crate) fn resolve_export_policies(
+        &self,
+        peer_config: &PeerConfig,
+        peer_asn: u16,
+    ) -> Vec<Arc<Policy>> {
+        // Always start with default_out policy (iBGP reflection prevention, etc.)
+        let mut policies = vec![Arc::new(Policy::default_out(self.config.asn, peer_asn))];
+
+        // Append user-configured policies
+        for name in &peer_config.export_policy {
+            if let Some(policy) = self.policies.get(name).cloned() {
+                policies.push(policy);
+            } else {
+                error!(&self.logger, "export policy not found", "policy" => name);
+            }
         }
+
+        policies
     }
 
     /// Check if a peer should be accepted.
@@ -781,8 +782,8 @@ impl BgpServer {
             // Get peer ASN, default to local ASN if not yet known
             let peer_asn = entry.asn.unwrap_or(local_asn);
 
-            // Export policy should always be Some for Established peers
-            if let Some(export_policy) = entry.policy_out() {
+            let export_policies = entry.policy_out();
+            if !export_policies.is_empty() {
                 send_withdrawals_to_peer(*peer_addr, peer_tx, &to_withdraw, &self.logger);
                 send_announcements_to_peer(
                     *peer_addr,
@@ -791,11 +792,11 @@ impl BgpServer {
                     local_asn,
                     peer_asn,
                     self.local_addr,
-                    export_policy,
+                    export_policies,
                     &self.logger,
                 );
             } else {
-                error!(&self.logger, "export policy not set for established peer", "peer_ip" => peer_addr.to_string());
+                error!(&self.logger, "export policies not set for established peer", "peer_ip" => peer_addr.to_string());
             }
         }
     }

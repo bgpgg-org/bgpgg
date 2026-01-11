@@ -18,7 +18,8 @@ use super::msg_update_types::{
     attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, NextHopAddr,
     Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
-use super::utils::{is_valid_unicast_ipv4, read_u32, IpNetwork, ParserError};
+use super::utils::{is_valid_unicast_ipv4, read_u32, ParserError};
+use crate::net::IpNetwork;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 

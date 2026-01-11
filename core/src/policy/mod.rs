@@ -1,7 +1,6 @@
 pub mod action;
-pub mod builder;
 pub mod condition;
-pub mod defined_sets;
+pub mod sets;
 pub mod statement;
 
 pub use statement::{
@@ -17,13 +16,12 @@ pub use condition::{
 };
 
 // Re-export runtime structures
-pub use builder::PolicyBuilder;
-pub use defined_sets::DefinedSets;
+pub use sets::DefinedSets;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::Origin;
-    use crate::bgp::utils::{IpNetwork, Ipv4Net};
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
     use std::net::Ipv4Addr;
 

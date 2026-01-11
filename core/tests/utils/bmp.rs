@@ -18,7 +18,6 @@ use super::common::TestServer;
 use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
-use bgpgg::bgp::utils::IpNetwork;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
@@ -29,6 +28,7 @@ use bgpgg::bmp::msg_termination::{TerminationMessage, TerminationReason};
 use bgpgg::bmp::utils::{
     InformationTlv, InitiationType, PeerHeader, TerminationType, PEER_HEADER_SIZE,
 };
+use bgpgg::net::IpNetwork;
 use bgpgg::types::PeerDownReason;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
@@ -308,8 +308,8 @@ impl FakeBmpServer {
         peer_as: u32,
         peer_bgp_id: u32,
         peer_flags: u8,
-        expected_nlri: &[bgpgg::bgp::utils::IpNetwork],
-        expected_withdrawn: &[bgpgg::bgp::utils::IpNetwork],
+        expected_nlri: &[bgpgg::net::IpNetwork],
+        expected_withdrawn: &[bgpgg::net::IpNetwork],
     ) {
         let msg = self.read_route_monitoring().await;
         assert_bmp_route_monitoring_msg(
