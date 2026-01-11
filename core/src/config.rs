@@ -190,6 +190,35 @@ pub struct CommunitySetConfig {
     pub communities: Vec<String>, // "65000:100" format or decimal
 }
 
+/// Enum wrapper for any defined set config type (used in management API)
+#[derive(Debug, Clone)]
+pub enum DefinedSetConfig {
+    PrefixSet(PrefixSetConfig),
+    NeighborSet(NeighborSetConfig),
+    AsPathSet(AsPathSetConfig),
+    CommunitySet(CommunitySetConfig),
+}
+
+impl DefinedSetConfig {
+    pub fn name(&self) -> &str {
+        match self {
+            DefinedSetConfig::PrefixSet(c) => &c.name,
+            DefinedSetConfig::NeighborSet(c) => &c.name,
+            DefinedSetConfig::AsPathSet(c) => &c.name,
+            DefinedSetConfig::CommunitySet(c) => &c.name,
+        }
+    }
+
+    pub fn set_type(&self) -> crate::policy::DefinedSetType {
+        match self {
+            DefinedSetConfig::PrefixSet(_) => crate::policy::DefinedSetType::PrefixSet,
+            DefinedSetConfig::NeighborSet(_) => crate::policy::DefinedSetType::NeighborSet,
+            DefinedSetConfig::AsPathSet(_) => crate::policy::DefinedSetType::AsPathSet,
+            DefinedSetConfig::CommunitySet(_) => crate::policy::DefinedSetType::CommunitySet,
+        }
+    }
+}
+
 /// Named policy definition from YAML config
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PolicyDefinitionConfig {

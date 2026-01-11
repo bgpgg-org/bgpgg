@@ -802,17 +802,11 @@ impl BgpService for BgpGrpcService {
             .ok_or_else(|| Status::invalid_argument("set config required"))?;
 
         // Convert proto to internal types
-        let (set_type, name, set_data) = proto_to_defined_set_data(&set_config)
+        let set = proto_to_defined_set_config(&set_config)
             .map_err(|e| Status::invalid_argument(format!("invalid set config: {}", e)))?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::AddDefinedSet {
-            set_type,
-            name,
-            set_data,
-            replace: inner.replace,
-            response: tx,
-        };
+        let req = MgmtOp::AddDefinedSet { set, response: tx };
 
         self.mgmt_request_tx
             .send(req)
@@ -836,13 +830,16 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<RemoveDefinedSetRequest>,
     ) -> Result<Response<RemoveDefinedSetResponse>, Status> {
+        use crate::policy::DefinedSetType;
+
         let inner = request.into_inner();
+
+        let set_type = DefinedSetType::parse(&inner.set_type).map_err(Status::invalid_argument)?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::RemoveDefinedSet {
-            set_type: inner.set_type,
+            set_type,
             name: inner.name,
-            all: inner.all,
             response: tx,
         };
 
@@ -868,11 +865,20 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<ListDefinedSetsRequest>,
     ) -> Result<Response<ListDefinedSetsResponse>, Status> {
+        use crate::policy::DefinedSetType;
+
         let inner = request.into_inner();
+
+        let set_type = if let Some(st) = inner.set_type {
+            Some(DefinedSetType::parse(&st).map_err(Status::invalid_argument)?)
+        } else {
+            None
+        };
+
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let req = MgmtOp::ListDefinedSets {
-            set_type: inner.set_type,
+            set_type,
             name: inner.name,
             response: tx,
         };
@@ -884,7 +890,10 @@ impl BgpService for BgpGrpcService {
 
         match rx.await {
             Ok(results) => {
-                let sets = results.into_iter().map(defined_set_info_to_proto).collect();
+                let sets = results
+                    .into_iter()
+                    .map(defined_set_config_to_proto)
+                    .collect();
                 Ok(Response::new(ListDefinedSetsResponse { sets }))
             }
             Err(_) => Err(Status::internal("request processing failed")),
@@ -1051,144 +1060,248 @@ impl BgpService for BgpGrpcService {
 // Proto conversion helpers (temporary stubs - will move to policy_proto.rs)
 // ============================================================================
 
-use super::proto::DefinedSetConfig;
-use crate::server::{
-    DefinedSetData, DefinedSetInfoResponse, PolicyInfoResponse, PolicyStatementConfig,
-    PrefixMatchData,
+use super::proto::DefinedSetConfig as ProtoDefinedSetConfig;
+use crate::config::{
+    ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
+    LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
+    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
 };
+use crate::server::PolicyInfoResponse;
 
-fn proto_to_defined_set_data(
-    proto: &DefinedSetConfig,
-) -> Result<(String, String, DefinedSetData), String> {
-    let set_type = proto.set_type.clone();
+fn proto_to_defined_set_config(
+    proto: &ProtoDefinedSetConfig,
+) -> Result<crate::config::DefinedSetConfig, String> {
     let name = proto.name.clone();
 
-    let data = match proto.config.as_ref() {
+    let config = match proto.config.as_ref() {
         Some(super::proto::defined_set_config::Config::PrefixSet(ps)) => {
             let prefixes = ps
                 .prefixes
                 .iter()
-                .map(|p| PrefixMatchData {
+                .map(|p| PrefixMatchConfig {
                     prefix: p.prefix.clone(),
                     masklength_range: p.masklength_range.clone(),
                 })
                 .collect();
-            DefinedSetData::PrefixSet(prefixes)
+            crate::config::DefinedSetConfig::PrefixSet(PrefixSetConfig { name, prefixes })
         }
         Some(super::proto::defined_set_config::Config::AsPathSet(aps)) => {
-            DefinedSetData::AsPathSet(aps.patterns.clone())
+            crate::config::DefinedSetConfig::AsPathSet(AsPathSetConfig {
+                name,
+                patterns: aps.patterns.clone(),
+            })
         }
         Some(super::proto::defined_set_config::Config::CommunitySet(cs)) => {
-            DefinedSetData::CommunitySet(cs.communities.clone())
+            crate::config::DefinedSetConfig::CommunitySet(CommunitySetConfig {
+                name,
+                communities: cs.communities.clone(),
+            })
         }
         Some(super::proto::defined_set_config::Config::NeighborSet(ns)) => {
-            DefinedSetData::NeighborSet(ns.addresses.clone())
+            crate::config::DefinedSetConfig::NeighborSet(NeighborSetConfig {
+                name,
+                neighbors: ns.addresses.clone(),
+            })
         }
         None => return Err("missing set config data".to_string()),
     };
 
-    Ok((set_type, name, data))
+    Ok(config)
 }
 
 fn proto_to_statement_config(
     proto: super::proto::StatementConfig,
-) -> Result<PolicyStatementConfig, String> {
-    use crate::server::{PolicyActionsConfig, PolicyConditionsConfig};
+) -> Result<StatementConfig, String> {
+    let conditions = proto.conditions.map(|c| {
+        let parse_match_option = |opt: String| match opt.as_str() {
+            "all" => MatchOptionConfig::All,
+            "invert" => MatchOptionConfig::Invert,
+            _ => MatchOptionConfig::Any,
+        };
 
-    let conditions = proto.conditions.map(|c| PolicyConditionsConfig {
-        match_prefix_set: c.match_prefix_set.map(|m| (m.set_name, m.match_option)),
-        match_neighbor_set: c.match_neighbor_set.map(|m| (m.set_name, m.match_option)),
-        match_as_path_set: c.match_as_path_set.map(|m| (m.set_name, m.match_option)),
-        match_community_set: c.match_community_set.map(|m| (m.set_name, m.match_option)),
-        prefix: c.prefix,
-        neighbor: c.neighbor,
+        ConditionsConfig {
+            match_prefix_set: c.match_prefix_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_neighbor_set: c.match_neighbor_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_as_path_set: c.match_as_path_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_community_set: c.match_community_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            prefix: c.prefix,
+            neighbor: c.neighbor,
+            has_asn: None,
+            route_type: None,
+            community: None,
+        }
     });
 
-    let actions = proto.actions.map(|a| PolicyActionsConfig {
+    let actions = proto.actions.map(|a| ActionsConfig {
+        local_pref: a.local_pref.map(LocalPrefActionConfig::Set),
+        med: a.med.map(MedActionConfig::Set),
+        community: if !a.add_communities.is_empty() || !a.remove_communities.is_empty() {
+            Some(CommunityActionConfig {
+                operation: if !a.add_communities.is_empty() {
+                    "add".to_string()
+                } else {
+                    "remove".to_string()
+                },
+                communities: if !a.add_communities.is_empty() {
+                    a.add_communities
+                } else {
+                    a.remove_communities
+                },
+            })
+        } else {
+            None
+        },
         accept: a.accept,
         reject: a.reject,
-        local_pref: a.local_pref,
-        med: a.med,
-        add_communities: a.add_communities,
-        remove_communities: a.remove_communities,
     });
 
-    Ok(PolicyStatementConfig {
-        conditions,
-        actions,
+    Ok(StatementConfig {
+        name: None,
+        conditions: conditions.unwrap_or_default(),
+        actions: actions.unwrap_or_default(),
     })
 }
 
-fn defined_set_info_to_proto(info: DefinedSetInfoResponse) -> DefinedSetInfo {
+fn defined_set_config_to_proto(config: crate::config::DefinedSetConfig) -> DefinedSetInfo {
     use super::proto::{
         AsPathSetData, CommunitySetData, NeighborSetData, PrefixMatch, PrefixSetData,
     };
 
-    let set_data = match info.data {
-        DefinedSetData::PrefixSet(prefixes) => Some(
-            super::proto::defined_set_info::SetData::PrefixSet(PrefixSetData {
-                prefixes: prefixes
-                    .into_iter()
-                    .map(|p| PrefixMatch {
-                        prefix: p.prefix,
-                        masklength_range: p.masklength_range,
-                    })
-                    .collect(),
-            }),
+    let (set_type, name, set_data) = match config {
+        crate::config::DefinedSetConfig::PrefixSet(ps) => (
+            "prefix-set".to_string(),
+            ps.name,
+            Some(super::proto::defined_set_info::SetData::PrefixSet(
+                PrefixSetData {
+                    prefixes: ps
+                        .prefixes
+                        .into_iter()
+                        .map(|p| PrefixMatch {
+                            prefix: p.prefix,
+                            masklength_range: p.masklength_range,
+                        })
+                        .collect(),
+                },
+            )),
         ),
-        DefinedSetData::AsPathSet(patterns) => Some(
-            super::proto::defined_set_info::SetData::AsPathSet(AsPathSetData { patterns }),
+        crate::config::DefinedSetConfig::AsPathSet(aps) => (
+            "as-path-set".to_string(),
+            aps.name,
+            Some(super::proto::defined_set_info::SetData::AsPathSet(
+                AsPathSetData {
+                    patterns: aps.patterns,
+                },
+            )),
         ),
-        DefinedSetData::CommunitySet(communities) => Some(
-            super::proto::defined_set_info::SetData::CommunitySet(CommunitySetData { communities }),
+        crate::config::DefinedSetConfig::CommunitySet(cs) => (
+            "community-set".to_string(),
+            cs.name,
+            Some(super::proto::defined_set_info::SetData::CommunitySet(
+                CommunitySetData {
+                    communities: cs.communities,
+                },
+            )),
         ),
-        DefinedSetData::NeighborSet(addresses) => Some(
-            super::proto::defined_set_info::SetData::NeighborSet(NeighborSetData { addresses }),
+        crate::config::DefinedSetConfig::NeighborSet(ns) => (
+            "neighbor-set".to_string(),
+            ns.name,
+            Some(super::proto::defined_set_info::SetData::NeighborSet(
+                NeighborSetData {
+                    addresses: ns.neighbors,
+                },
+            )),
         ),
     };
 
     DefinedSetInfo {
-        set_type: info.set_type,
-        name: info.name,
+        set_type,
+        name,
         set_data,
     }
 }
 
 fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
-    use super::proto::{ActionsConfig, ConditionsConfig, MatchSetRef, StatementInfo};
+    use super::proto::{
+        ActionsConfig as ProtoActionsConfig, ConditionsConfig as ProtoConditionsConfig,
+        MatchSetRef, StatementInfo,
+    };
 
     let statements = info
         .statements
         .into_iter()
         .map(|s| {
-            let conditions = s.conditions.map(|c| ConditionsConfig {
-                match_prefix_set: c.match_prefix_set.map(|(name, opt)| MatchSetRef {
-                    set_name: name,
-                    match_option: opt,
+            let conditions = Some(ProtoConditionsConfig {
+                match_prefix_set: s.conditions.match_prefix_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
                 }),
-                match_neighbor_set: c.match_neighbor_set.map(|(name, opt)| MatchSetRef {
-                    set_name: name,
-                    match_option: opt,
+                match_neighbor_set: s.conditions.match_neighbor_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
                 }),
-                match_as_path_set: c.match_as_path_set.map(|(name, opt)| MatchSetRef {
-                    set_name: name,
-                    match_option: opt,
+                match_as_path_set: s.conditions.match_as_path_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
                 }),
-                match_community_set: c.match_community_set.map(|(name, opt)| MatchSetRef {
-                    set_name: name,
-                    match_option: opt,
+                match_community_set: s.conditions.match_community_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
                 }),
-                prefix: c.prefix,
-                neighbor: c.neighbor,
+                prefix: s.conditions.prefix.clone(),
+                neighbor: s.conditions.neighbor.clone(),
             });
 
-            let actions = s.actions.map(|a| ActionsConfig {
-                accept: a.accept,
-                reject: a.reject,
-                local_pref: a.local_pref,
-                med: a.med,
-                add_communities: a.add_communities,
-                remove_communities: a.remove_communities,
+            let (add_communities, remove_communities) = if let Some(comm) = s.actions.community {
+                if comm.operation == "add" {
+                    (comm.communities, vec![])
+                } else {
+                    (vec![], comm.communities)
+                }
+            } else {
+                (vec![], vec![])
+            };
+
+            let actions = Some(ProtoActionsConfig {
+                accept: s.actions.accept,
+                reject: s.actions.reject,
+                local_pref: s.actions.local_pref.map(|lp| match lp {
+                    crate::config::LocalPrefActionConfig::Set(v) => v,
+                    crate::config::LocalPrefActionConfig::Force { value, .. } => value,
+                }),
+                med: s.actions.med.and_then(|m| match m {
+                    crate::config::MedActionConfig::Set(v) => Some(v),
+                    crate::config::MedActionConfig::Remove { .. } => None,
+                }),
+                add_communities,
+                remove_communities,
             });
 
             StatementInfo {

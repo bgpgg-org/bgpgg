@@ -27,7 +27,7 @@ use crate::peer::outgoing::{
 };
 use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::{DefinedSets, Policy};
+use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{Path, Route};
 use crate::types::PeerDownReason;
@@ -48,9 +48,6 @@ pub enum ServerError {
     BindError(io::Error),
     IoError(io::Error),
 }
-
-/// Type alias for build_policies return type
-type PolicyBuildResult = Result<(HashMap<String, Arc<Policy>>, Arc<DefinedSets>), ServerError>;
 
 impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -192,26 +189,22 @@ pub enum MgmtOp {
     },
     // Policy Management
     AddDefinedSet {
-        set_type: String,
-        name: String,
-        set_data: DefinedSetData,
-        replace: bool,
+        set: DefinedSetConfig,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveDefinedSet {
-        set_type: String,
+        set_type: DefinedSetType,
         name: String,
-        all: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
     ListDefinedSets {
-        set_type: Option<String>,
+        set_type: Option<DefinedSetType>,
         name: Option<String>,
-        response: oneshot::Sender<Vec<DefinedSetInfoResponse>>,
+        response: oneshot::Sender<Vec<DefinedSetConfig>>,
     },
     AddPolicy {
         name: String,
-        statements: Vec<PolicyStatementConfig>,
+        statements: Vec<crate::config::StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePolicy {
@@ -232,63 +225,12 @@ pub enum MgmtOp {
 }
 
 // Helper types for policy management operations
-#[derive(Debug, Clone)]
-pub enum DefinedSetData {
-    PrefixSet(Vec<PrefixMatchData>),
-    AsPathSet(Vec<String>),
-    CommunitySet(Vec<String>),
-    NeighborSet(Vec<String>),
-}
-
-#[derive(Debug, Clone)]
-pub struct PrefixMatchData {
-    pub prefix: String,
-    pub masklength_range: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PolicyStatementConfig {
-    pub conditions: Option<PolicyConditionsConfig>,
-    pub actions: Option<PolicyActionsConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PolicyConditionsConfig {
-    pub match_prefix_set: Option<(String, String)>, // (set_name, match_option)
-    pub match_neighbor_set: Option<(String, String)>,
-    pub match_as_path_set: Option<(String, String)>,
-    pub match_community_set: Option<(String, String)>,
-    pub prefix: Option<String>,
-    pub neighbor: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PolicyActionsConfig {
-    pub accept: Option<bool>,
-    pub reject: Option<bool>,
-    pub local_pref: Option<u32>,
-    pub med: Option<u32>,
-    pub add_communities: Vec<String>,
-    pub remove_communities: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DefinedSetInfoResponse {
-    pub set_type: String,
-    pub name: String,
-    pub data: DefinedSetData,
-}
+pub use crate::config::DefinedSetConfig;
 
 #[derive(Debug, Clone)]
 pub struct PolicyInfoResponse {
     pub name: String,
-    pub statements: Vec<PolicyStatementInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PolicyStatementInfo {
-    pub conditions: Option<PolicyConditionsConfig>,
-    pub actions: Option<PolicyActionsConfig>,
+    pub statements: Vec<crate::config::StatementConfig>,
 }
 
 // Server operations sent from peer tasks to the main server loop
@@ -456,8 +398,7 @@ pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
     pub(crate) config: Config,
-    pub(crate) policies: HashMap<String, Arc<Policy>>,
-    pub(crate) defined_sets: Arc<DefinedSets>,
+    pub(crate) policy_ctx: PolicyContext,
     local_bgp_id: u32,
     pub(crate) local_addr: Ipv4Addr,
     pub(crate) local_port: u16,
@@ -485,14 +426,14 @@ impl BgpServer {
         let log_level = config.parse_log_level();
         let logger = Arc::new(Logger::new(log_level));
 
-        let (policies, defined_sets) = Self::build_policies(&config)?;
+        let policy_ctx = PolicyContext::from_config(&config)
+            .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
         Ok(BgpServer {
             peers: HashMap::new(),
             loc_rib: LocRib::new(logger.clone()),
             config,
-            policies,
-            defined_sets,
+            policy_ctx,
             local_bgp_id,
             local_addr,
             local_port: sock_addr.port(),
@@ -505,25 +446,6 @@ impl BgpServer {
         })
     }
 
-    /// Build policies from config by compiling defined sets and constructing Policy objects
-    fn build_policies(config: &Config) -> PolicyBuildResult {
-        // Compile defined sets and store them
-        let defined_sets =
-            Arc::new(DefinedSets::new(&config.defined_sets).map_err(|e| {
-                ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e))
-            })?);
-
-        // Build named policies
-        let mut policies = HashMap::new();
-        for policy_def in &config.policy_definitions {
-            let policy = Policy::from_config(policy_def, &defined_sets)
-                .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
-            policies.insert(policy_def.name.clone(), Arc::new(policy));
-        }
-
-        Ok((policies, defined_sets))
-    }
-
     /// Resolve import policies for a peer from config
     pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
         // Always start with default_in policy (AS-loop prevention, etc.)
@@ -531,7 +453,7 @@ impl BgpServer {
 
         // Append user-configured policies
         for name in &peer_config.import_policy {
-            if let Some(policy) = self.policies.get(name).cloned() {
+            if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
             } else {
                 error!(&self.logger, "import policy not found", "policy" => name);
@@ -552,7 +474,7 @@ impl BgpServer {
 
         // Append user-configured policies
         for name in &peer_config.export_policy {
-            if let Some(policy) = self.policies.get(name).cloned() {
+            if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
             } else {
                 error!(&self.logger, "export policy not found", "policy" => name);

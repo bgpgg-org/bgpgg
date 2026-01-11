@@ -191,6 +191,140 @@ impl Statement {
         self
     }
 
+    /// Convert statement back to config format (for API responses)
+    pub fn to_config(&self) -> StatementConfig {
+        use crate::config::{CommunityActionConfig, MatchSetRefConfig};
+
+        let mut conditions = ConditionsConfig::default();
+
+        // Extract conditions
+        for condition in &self.conditions {
+            match condition {
+                Condition::PrefixSet(arc_set, opt) => {
+                    conditions.match_prefix_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::Prefix(ip) => {
+                    conditions.prefix = Some(ip.to_string());
+                }
+                Condition::NeighborSet(arc_set, opt) => {
+                    conditions.match_neighbor_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::Neighbor(ip) => {
+                    conditions.neighbor = Some(ip.to_string());
+                }
+                Condition::AsPathSet(arc_set, opt) => {
+                    conditions.match_as_path_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::AsPath(asn) => {
+                    conditions.has_asn = Some(*asn);
+                }
+                Condition::CommunitySet(arc_set, opt) => {
+                    conditions.match_community_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::Community(comm) => {
+                    let high = (*comm >> 16) as u16;
+                    let low = (*comm & 0xFFFF) as u16;
+                    conditions.community = Some(format!("{}:{}", high, low));
+                }
+                Condition::RouteType(rt) => {
+                    conditions.route_type = Some(match rt {
+                        RouteType::Ebgp => "ebgp".to_string(),
+                        RouteType::Ibgp => "ibgp".to_string(),
+                        RouteType::Local => "local".to_string(),
+                    });
+                }
+            }
+        }
+
+        let mut actions = ActionsConfig::default();
+
+        // Extract actions
+        for action in &self.actions {
+            match action {
+                Action::Accept => {
+                    actions.accept = Some(true);
+                }
+                Action::Reject => {
+                    actions.reject = Some(true);
+                }
+                Action::SetLocalPref { value, force } => {
+                    actions.local_pref = Some(if *force {
+                        LocalPrefActionConfig::Force {
+                            value: *value,
+                            force: true,
+                        }
+                    } else {
+                        LocalPrefActionConfig::Set(*value)
+                    });
+                }
+                Action::SetMed(value) => {
+                    actions.med = value
+                        .map(MedActionConfig::Set)
+                        .or(Some(MedActionConfig::Remove { remove: true }));
+                }
+                Action::SetCommunity(op) => match op {
+                    CommunityOp::Add(comms) => {
+                        actions.community = Some(CommunityActionConfig {
+                            operation: "add".to_string(),
+                            communities: comms
+                                .iter()
+                                .map(|c| {
+                                    let high = (*c >> 16) as u16;
+                                    let low = (*c & 0xFFFF) as u16;
+                                    format!("{}:{}", high, low)
+                                })
+                                .collect(),
+                        });
+                    }
+                    CommunityOp::Remove(comms) => {
+                        actions.community = Some(CommunityActionConfig {
+                            operation: "remove".to_string(),
+                            communities: comms
+                                .iter()
+                                .map(|c| {
+                                    let high = (*c >> 16) as u16;
+                                    let low = (*c & 0xFFFF) as u16;
+                                    format!("{}:{}", high, low)
+                                })
+                                .collect(),
+                        });
+                    }
+                    CommunityOp::Replace(comms) => {
+                        actions.community = Some(CommunityActionConfig {
+                            operation: "replace".to_string(),
+                            communities: comms
+                                .iter()
+                                .map(|c| {
+                                    let high = (*c >> 16) as u16;
+                                    let low = (*c & 0xFFFF) as u16;
+                                    format!("{}:{}", high, low)
+                                })
+                                .collect(),
+                        });
+                    }
+                },
+            }
+        }
+
+        StatementConfig {
+            name: None,
+            conditions,
+            actions,
+        }
+    }
+
     /// Check if all conditions match
     fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
         // Empty conditions means match everything
@@ -231,6 +365,11 @@ impl Policy {
         Self {
             statements: Vec::new(),
         }
+    }
+
+    /// Get the statements (for API responses)
+    pub fn statements(&self) -> &[Statement] {
+        &self.statements
     }
 
     /// Create a default inbound policy with AS loop prevention and default local pref

@@ -22,6 +22,38 @@ use std::str::FromStr;
 #[cfg(test)]
 use crate::config::{AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixSetConfig};
 
+/// Type of defined set
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinedSetType {
+    PrefixSet,
+    AsPathSet,
+    CommunitySet,
+    NeighborSet,
+}
+
+impl DefinedSetType {
+    /// Parse set type from string (kebab-case)
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "prefix-set" => Ok(DefinedSetType::PrefixSet),
+            "as-path-set" => Ok(DefinedSetType::AsPathSet),
+            "community-set" => Ok(DefinedSetType::CommunitySet),
+            "neighbor-set" => Ok(DefinedSetType::NeighborSet),
+            _ => Err(format!("invalid set type: {}", s)),
+        }
+    }
+
+    /// Convert set type to string (kebab-case)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DefinedSetType::PrefixSet => "prefix-set",
+            DefinedSetType::AsPathSet => "as-path-set",
+            DefinedSetType::CommunitySet => "community-set",
+            DefinedSetType::NeighborSet => "neighbor-set",
+        }
+    }
+}
+
 /// Runtime representation of defined sets with compiled regexes and parsed values
 #[derive(Debug, Clone, Default)]
 pub struct DefinedSets {
@@ -205,6 +237,36 @@ impl DefinedSets {
         }
 
         Ok(sets)
+    }
+
+    /// Check if a set with given name exists for the specified type
+    pub fn contains(&self, set_type: DefinedSetType, name: &str) -> bool {
+        match set_type {
+            DefinedSetType::PrefixSet => self.prefix_sets.contains_key(name),
+            DefinedSetType::AsPathSet => self.as_path_sets.contains_key(name),
+            DefinedSetType::CommunitySet => self.community_sets.contains_key(name),
+            DefinedSetType::NeighborSet => self.neighbor_sets.contains_key(name),
+        }
+    }
+
+    /// Remove a set with given name for the specified type, returns true if removed
+    pub fn remove(&mut self, set_type: DefinedSetType, name: &str) -> bool {
+        match set_type {
+            DefinedSetType::PrefixSet => self.prefix_sets.remove(name).is_some(),
+            DefinedSetType::AsPathSet => self.as_path_sets.remove(name).is_some(),
+            DefinedSetType::CommunitySet => self.community_sets.remove(name).is_some(),
+            DefinedSetType::NeighborSet => self.neighbor_sets.remove(name).is_some(),
+        }
+    }
+
+    /// Clear all sets of the specified type
+    pub fn clear(&mut self, set_type: DefinedSetType) {
+        match set_type {
+            DefinedSetType::PrefixSet => self.prefix_sets.clear(),
+            DefinedSetType::AsPathSet => self.as_path_sets.clear(),
+            DefinedSetType::CommunitySet => self.community_sets.clear(),
+            DefinedSetType::NeighborSet => self.neighbor_sets.clear(),
+        }
     }
 }
 
