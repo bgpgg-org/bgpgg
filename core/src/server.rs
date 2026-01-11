@@ -49,6 +49,9 @@ pub enum ServerError {
     IoError(io::Error),
 }
 
+/// Type alias for build_policies return type
+type PolicyBuildResult = Result<(HashMap<String, Arc<Policy>>, Arc<DefinedSets>), ServerError>;
+
 impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -195,29 +198,29 @@ pub enum MgmtOp {
         replace: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
-    DeleteDefinedSet {
+    RemoveDefinedSet {
         set_type: String,
         name: String,
         all: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
-    GetDefinedSetsStream {
+    ListDefinedSets {
         set_type: Option<String>,
         name: Option<String>,
-        tx: mpsc::UnboundedSender<DefinedSetInfoResponse>,
+        response: oneshot::Sender<Vec<DefinedSetInfoResponse>>,
     },
     AddPolicy {
         name: String,
         statements: Vec<PolicyStatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     },
-    DeletePolicy {
+    RemovePolicy {
         name: String,
         response: oneshot::Sender<Result<(), String>>,
     },
-    GetPoliciesStream {
+    ListPolicies {
         name: Option<String>,
-        tx: mpsc::UnboundedSender<PolicyInfoResponse>,
+        response: oneshot::Sender<Vec<PolicyInfoResponse>>,
     },
     SetPolicyAssignment {
         peer_addr: IpAddr,
@@ -453,8 +456,8 @@ pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
     pub(crate) config: Config,
-    policies: HashMap<String, Arc<Policy>>,
-    defined_sets: Arc<DefinedSets>,
+    pub(crate) policies: HashMap<String, Arc<Policy>>,
+    pub(crate) defined_sets: Arc<DefinedSets>,
     local_bgp_id: u32,
     pub(crate) local_addr: Ipv4Addr,
     pub(crate) local_port: u16,
@@ -503,9 +506,7 @@ impl BgpServer {
     }
 
     /// Build policies from config by compiling defined sets and constructing Policy objects
-    fn build_policies(
-        config: &Config,
-    ) -> Result<(HashMap<String, Arc<Policy>>, Arc<DefinedSets>), ServerError> {
+    fn build_policies(config: &Config) -> PolicyBuildResult {
         // Compile defined sets and store them
         let defined_sets =
             Arc::new(DefinedSets::new(&config.defined_sets).map_err(|e| {

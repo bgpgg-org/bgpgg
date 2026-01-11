@@ -25,11 +25,11 @@ service BgpService {
 
     // Policy management
     rpc AddDefinedSet(AddDefinedSetRequest) returns (AddDefinedSetResponse);
-    rpc DeleteDefinedSet(DeleteDefinedSetRequest) returns (DeleteDefinedSetResponse);
-    rpc ListDefinedSet(ListDefinedSetRequest) returns (stream DefinedSetInfo);
+    rpc RemoveDefinedSet(RemoveDefinedSetRequest) returns (RemoveDefinedSetResponse);
+    rpc ListDefinedSets(ListDefinedSetsRequest) returns (ListDefinedSetsResponse);
     rpc AddPolicy(AddPolicyRequest) returns (AddPolicyResponse);
-    rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
-    rpc ListPolicy(ListPolicyRequest) returns (stream PolicyInfo);
+    rpc RemovePolicy(RemovePolicyRequest) returns (RemovePolicyResponse);
+    rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
     rpc SetPolicyAssignment(SetPolicyAssignmentRequest) returns (SetPolicyAssignmentResponse);
 }
 
@@ -291,20 +291,24 @@ message AddDefinedSetResponse {
     string message = 2;
 }
 
-message DeleteDefinedSetRequest {
+message RemoveDefinedSetRequest {
     string set_type = 1;  // "prefix-set", "as-path-set", "community-set", "neighbor-set"
     string name = 2;
-    bool all = 3;  // Delete all sets of this type
+    bool all = 3;  // Remove all sets of this type
 }
 
-message DeleteDefinedSetResponse {
+message RemoveDefinedSetResponse {
     bool success = 1;
     string message = 2;
 }
 
-message ListDefinedSetRequest {
+message ListDefinedSetsRequest {
     optional string set_type = 1;  // Filter by type, empty = all types
     optional string name = 2;      // Filter by name
+}
+
+message ListDefinedSetsResponse {
+    repeated DefinedSetInfo sets = 1;
 }
 
 message DefinedSetInfo {
@@ -390,17 +394,21 @@ message ActionsConfig {
     repeated string remove_communities = 6;
 }
 
-message DeletePolicyRequest {
+message RemovePolicyRequest {
     string name = 1;
 }
 
-message DeletePolicyResponse {
+message RemovePolicyResponse {
     bool success = 1;
     string message = 2;
 }
 
-message ListPolicyRequest {
+message ListPoliciesRequest {
     optional string name = 1;  // Filter by name
+}
+
+message ListPoliciesResponse {
+    repeated PolicyInfo policies = 1;
 }
 
 message PolicyInfo {

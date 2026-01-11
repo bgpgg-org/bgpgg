@@ -31,13 +31,13 @@ pub struct DefinedSets {
     pub community_sets: HashMap<String, CommunitySet>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrefixSet {
     pub name: String,
     pub prefixes: Vec<PrefixMatch>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrefixMatch {
     pub network: IpNetwork,
     pub min_len: u8,
@@ -89,7 +89,7 @@ impl PrefixMatch {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NeighborSet {
     pub name: String,
     pub neighbors: Vec<IpAddr>,
@@ -101,7 +101,21 @@ pub struct AsPathSet {
     pub patterns: Vec<Regex>,
 }
 
-#[derive(Debug, Clone)]
+// Manual PartialEq for AsPathSet since Regex doesn't implement PartialEq
+impl PartialEq for AsPathSet {
+    fn eq(&self, other: &Self) -> bool {
+        if self.name != other.name || self.patterns.len() != other.patterns.len() {
+            return false;
+        }
+        // Compare regex pattern strings
+        self.patterns
+            .iter()
+            .zip(other.patterns.iter())
+            .all(|(a, b)| a.as_str() == b.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommunitySet {
     pub name: String,
     pub communities: Vec<u32>,

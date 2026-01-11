@@ -131,16 +131,20 @@ impl BgpServer {
             } => {
                 self.handle_add_defined_set(set_type, name, set_data, replace, response);
             }
-            MgmtOp::DeleteDefinedSet {
+            MgmtOp::RemoveDefinedSet {
                 set_type,
                 name,
                 all,
                 response,
             } => {
-                self.handle_delete_defined_set(set_type, name, all, response);
+                self.handle_remove_defined_set(set_type, name, all, response);
             }
-            MgmtOp::GetDefinedSetsStream { set_type, name, tx } => {
-                self.handle_get_defined_sets_stream(set_type, name, tx);
+            MgmtOp::ListDefinedSets {
+                set_type,
+                name,
+                response,
+            } => {
+                self.handle_list_defined_sets(set_type, name, response);
             }
             MgmtOp::AddPolicy {
                 name,
@@ -149,11 +153,11 @@ impl BgpServer {
             } => {
                 self.handle_add_policy(name, statements, response);
             }
-            MgmtOp::DeletePolicy { name, response } => {
-                self.handle_delete_policy(name, response);
+            MgmtOp::RemovePolicy { name, response } => {
+                self.handle_remove_policy(name, response);
             }
-            MgmtOp::GetPoliciesStream { name, tx } => {
-                self.handle_get_policies_stream(name, tx);
+            MgmtOp::ListPolicies { name, response } => {
+                self.handle_list_policies(name, response);
             }
             MgmtOp::SetPolicyAssignment {
                 peer_addr,
@@ -905,74 +909,563 @@ impl BgpServer {
     // Policy management handlers
     fn handle_add_defined_set(
         &mut self,
-        _set_type: String,
-        _name: String,
-        _set_data: crate::server::DefinedSetData,
-        _replace: bool,
+        set_type: String,
+        name: String,
+        set_data: crate::server::DefinedSetData,
+        replace: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // TODO: Implement actual logic
-        let _ = response.send(Err("AddDefinedSet not yet implemented".to_string()));
+        use crate::policy::sets::{AsPathSet, CommunitySet, NeighborSet, PrefixMatch, PrefixSet};
+        use regex::Regex;
+        use std::net::IpAddr;
+        use std::str::FromStr;
+
+        // Clone current defined sets (clone-on-write pattern)
+        let mut new_sets = (*self.defined_sets).clone();
+
+        // Check if set already exists (if not replace)
+        let exists = match set_type.as_str() {
+            "prefix-set" => new_sets.prefix_sets.contains_key(&name),
+            "as-path-set" => new_sets.as_path_sets.contains_key(&name),
+            "community-set" => new_sets.community_sets.contains_key(&name),
+            "neighbor-set" => new_sets.neighbor_sets.contains_key(&name),
+            _ => {
+                let _ = response.send(Err(format!("invalid set type: {}", set_type)));
+                return;
+            }
+        };
+
+        if exists && !replace {
+            let _ = response.send(Err(format!("defined set '{}' already exists", name)));
+            return;
+        }
+
+        // Add or update the set
+        match set_type.as_str() {
+            "prefix-set" => {
+                if let crate::server::DefinedSetData::PrefixSet(prefixes) = set_data {
+                    let mut prefix_matches = Vec::new();
+                    for p in prefixes {
+                        let pm_config = crate::config::PrefixMatchConfig {
+                            prefix: p.prefix,
+                            masklength_range: p.masklength_range,
+                        };
+                        match PrefixMatch::new(&pm_config) {
+                            Ok(pm) => prefix_matches.push(pm),
+                            Err(e) => {
+                                let _ = response.send(Err(format!("invalid prefix: {}", e)));
+                                return;
+                            }
+                        }
+                    }
+                    new_sets.prefix_sets.insert(
+                        name.clone(),
+                        PrefixSet {
+                            name: name.clone(),
+                            prefixes: prefix_matches,
+                        },
+                    );
+                } else {
+                    let _ = response.send(Err("mismatched set data type".to_string()));
+                    return;
+                }
+            }
+            "as-path-set" => {
+                if let crate::server::DefinedSetData::AsPathSet(patterns) = set_data {
+                    let mut regexes = Vec::new();
+                    for pattern in &patterns {
+                        match Regex::new(pattern) {
+                            Ok(r) => regexes.push(r),
+                            Err(e) => {
+                                let _ = response.send(Err(format!(
+                                    "invalid regex pattern '{}': {}",
+                                    pattern, e
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    new_sets.as_path_sets.insert(
+                        name.clone(),
+                        AsPathSet {
+                            name: name.clone(),
+                            patterns: regexes,
+                        },
+                    );
+                } else {
+                    let _ = response.send(Err("mismatched set data type".to_string()));
+                    return;
+                }
+            }
+            "community-set" => {
+                if let crate::server::DefinedSetData::CommunitySet(communities) = set_data {
+                    let mut community_values = Vec::new();
+                    for comm_str in &communities {
+                        match parse_community_str(comm_str) {
+                            Ok(val) => community_values.push(val),
+                            Err(e) => {
+                                let _ = response.send(Err(format!("invalid community: {}", e)));
+                                return;
+                            }
+                        }
+                    }
+                    new_sets.community_sets.insert(
+                        name.clone(),
+                        CommunitySet {
+                            name: name.clone(),
+                            communities: community_values,
+                        },
+                    );
+                } else {
+                    let _ = response.send(Err("mismatched set data type".to_string()));
+                    return;
+                }
+            }
+            "neighbor-set" => {
+                if let crate::server::DefinedSetData::NeighborSet(addresses) = set_data {
+                    let mut neighbor_addrs = Vec::new();
+                    for addr_str in &addresses {
+                        match IpAddr::from_str(addr_str) {
+                            Ok(addr) => neighbor_addrs.push(addr),
+                            Err(e) => {
+                                let _ = response.send(Err(format!("invalid IP address: {}", e)));
+                                return;
+                            }
+                        }
+                    }
+                    new_sets.neighbor_sets.insert(
+                        name.clone(),
+                        NeighborSet {
+                            name: name.clone(),
+                            neighbors: neighbor_addrs,
+                        },
+                    );
+                } else {
+                    let _ = response.send(Err("mismatched set data type".to_string()));
+                    return;
+                }
+            }
+            _ => {
+                let _ = response.send(Err(format!("invalid set type: {}", set_type)));
+                return;
+            }
+        }
+
+        // Replace the Arc (atomic update)
+        self.defined_sets = Arc::new(new_sets);
+
+        let _ = response.send(Ok(()));
     }
 
-    fn handle_delete_defined_set(
+    fn handle_remove_defined_set(
         &mut self,
-        _set_type: String,
-        _name: String,
-        _all: bool,
+        set_type: String,
+        name: String,
+        all: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // TODO: Implement actual logic
-        let _ = response.send(Err("DeleteDefinedSet not yet implemented".to_string()));
+        // Clone current defined sets (clone-on-write pattern)
+        let mut new_sets = (*self.defined_sets).clone();
+
+        if all {
+            // Delete all sets of this type
+            match set_type.as_str() {
+                "prefix-set" => new_sets.prefix_sets.clear(),
+                "as-path-set" => new_sets.as_path_sets.clear(),
+                "community-set" => new_sets.community_sets.clear(),
+                "neighbor-set" => new_sets.neighbor_sets.clear(),
+                _ => {
+                    let _ = response.send(Err(format!("invalid set type: {}", set_type)));
+                    return;
+                }
+            }
+            self.defined_sets = Arc::new(new_sets);
+            let _ = response.send(Ok(()));
+        } else {
+            // Delete specific set
+            let removed = match set_type.as_str() {
+                "prefix-set" => new_sets.prefix_sets.remove(&name).is_some(),
+                "as-path-set" => new_sets.as_path_sets.remove(&name).is_some(),
+                "community-set" => new_sets.community_sets.remove(&name).is_some(),
+                "neighbor-set" => new_sets.neighbor_sets.remove(&name).is_some(),
+                _ => {
+                    let _ = response.send(Err(format!("invalid set type: {}", set_type)));
+                    return;
+                }
+            };
+
+            if removed {
+                self.defined_sets = Arc::new(new_sets);
+                let _ = response.send(Ok(()));
+            } else {
+                let _ = response.send(Err(format!("defined set '{}' not found", name)));
+            }
+        }
     }
 
-    fn handle_get_defined_sets_stream(
+    fn handle_list_defined_sets(
         &self,
-        _set_type: Option<String>,
-        _name: Option<String>,
-        _tx: mpsc::UnboundedSender<crate::server::DefinedSetInfoResponse>,
+        set_type: Option<String>,
+        name: Option<String>,
+        response: oneshot::Sender<Vec<crate::server::DefinedSetInfoResponse>>,
     ) {
-        // TODO: Implement actual logic - stream defined sets from self.defined_sets
+        use crate::server::{DefinedSetData, DefinedSetInfoResponse, PrefixMatchData};
+
+        let mut results = Vec::new();
+
+        // Collect prefix sets
+        if set_type.is_none() || set_type.as_deref() == Some("prefix-set") {
+            for (set_name, prefix_set) in &self.defined_sets.prefix_sets {
+                if name.is_some() && name.as_ref() != Some(set_name) {
+                    continue;
+                }
+                let prefixes = prefix_set
+                    .prefixes
+                    .iter()
+                    .map(|pm| PrefixMatchData {
+                        prefix: pm.network.to_string(),
+                        masklength_range: if pm.min_len == pm.max_len {
+                            None
+                        } else {
+                            Some(format!("{}..{}", pm.min_len, pm.max_len))
+                        },
+                    })
+                    .collect();
+
+                results.push(DefinedSetInfoResponse {
+                    set_type: "prefix-set".to_string(),
+                    name: set_name.clone(),
+                    data: DefinedSetData::PrefixSet(prefixes),
+                });
+            }
+        }
+
+        // Collect neighbor sets
+        if set_type.is_none() || set_type.as_deref() == Some("neighbor-set") {
+            for (set_name, neighbor_set) in &self.defined_sets.neighbor_sets {
+                if name.is_some() && name.as_ref() != Some(set_name) {
+                    continue;
+                }
+                let addresses = neighbor_set
+                    .neighbors
+                    .iter()
+                    .map(|addr| addr.to_string())
+                    .collect();
+
+                results.push(DefinedSetInfoResponse {
+                    set_type: "neighbor-set".to_string(),
+                    name: set_name.clone(),
+                    data: DefinedSetData::NeighborSet(addresses),
+                });
+            }
+        }
+
+        // Collect AS path sets
+        if set_type.is_none() || set_type.as_deref() == Some("as-path-set") {
+            for (set_name, as_path_set) in &self.defined_sets.as_path_sets {
+                if name.is_some() && name.as_ref() != Some(set_name) {
+                    continue;
+                }
+                let patterns = as_path_set
+                    .patterns
+                    .iter()
+                    .map(|r| r.as_str().to_string())
+                    .collect();
+
+                results.push(DefinedSetInfoResponse {
+                    set_type: "as-path-set".to_string(),
+                    name: set_name.clone(),
+                    data: DefinedSetData::AsPathSet(patterns),
+                });
+            }
+        }
+
+        // Collect community sets
+        if set_type.is_none() || set_type.as_deref() == Some("community-set") {
+            for (set_name, community_set) in &self.defined_sets.community_sets {
+                if name.is_some() && name.as_ref() != Some(set_name) {
+                    continue;
+                }
+                let communities = community_set
+                    .communities
+                    .iter()
+                    .map(|c| {
+                        let high = (*c >> 16) as u16;
+                        let low = (*c & 0xFFFF) as u16;
+                        format!("{}:{}", high, low)
+                    })
+                    .collect();
+
+                results.push(DefinedSetInfoResponse {
+                    set_type: "community-set".to_string(),
+                    name: set_name.clone(),
+                    data: DefinedSetData::CommunitySet(communities),
+                });
+            }
+        }
+
+        let _ = response.send(results);
     }
 
     fn handle_add_policy(
         &mut self,
-        _name: String,
-        _statements: Vec<crate::server::PolicyStatementConfig>,
+        name: String,
+        statements: Vec<crate::server::PolicyStatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // TODO: Implement actual logic
-        let _ = response.send(Err("AddPolicy not yet implemented".to_string()));
+        use crate::config::PolicyDefinitionConfig;
+        use crate::policy::Policy;
+
+        // Convert PolicyStatementConfig to StatementDefinitionConfig
+        let mut stmt_defs = Vec::new();
+        for stmt in statements {
+            match self.policy_statement_config_to_definition(stmt) {
+                Ok(def) => stmt_defs.push(def),
+                Err(e) => {
+                    let _ = response.send(Err(format!("invalid statement config: {}", e)));
+                    return;
+                }
+            }
+        }
+
+        // Build PolicyDefinitionConfig
+        let policy_def = PolicyDefinitionConfig {
+            name: name.clone(),
+            statements: stmt_defs,
+        };
+
+        // Build Policy from definition using current defined_sets
+        match Policy::from_config(&policy_def, &self.defined_sets) {
+            Ok(policy) => {
+                self.policies.insert(name, Arc::new(policy));
+                let _ = response.send(Ok(()));
+            }
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to build policy: {}", e)));
+            }
+        }
     }
 
-    fn handle_delete_policy(
+    fn handle_remove_policy(
         &mut self,
-        _name: String,
+        name: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // TODO: Implement actual logic
-        let _ = response.send(Err("DeletePolicy not yet implemented".to_string()));
+        if self.policies.remove(&name).is_some() {
+            let _ = response.send(Ok(()));
+        } else {
+            let _ = response.send(Err(format!("policy '{}' not found", name)));
+        }
     }
 
-    fn handle_get_policies_stream(
+    fn handle_list_policies(
         &self,
-        _name: Option<String>,
-        _tx: mpsc::UnboundedSender<crate::server::PolicyInfoResponse>,
+        name: Option<String>,
+        response: oneshot::Sender<Vec<crate::server::PolicyInfoResponse>>,
     ) {
-        // TODO: Implement actual logic - stream policies from self.policies
+        use crate::server::PolicyInfoResponse;
+
+        // Note: We can't easily reconstruct full PolicyInfoResponse from compiled Policy objects
+        // because they don't store the original config. For now, return empty info.
+        // Full implementation would require storing PolicyDefinitionConfig alongside Policy.
+
+        let mut results = Vec::new();
+
+        for policy_name in self.policies.keys() {
+            if name.is_some() && name.as_ref() != Some(policy_name) {
+                continue;
+            }
+
+            results.push(PolicyInfoResponse {
+                name: policy_name.clone(),
+                statements: vec![], // Cannot reconstruct from compiled Policy
+            });
+        }
+
+        let _ = response.send(results);
     }
 
     fn handle_set_policy_assignment(
         &mut self,
-        _peer_addr: IpAddr,
-        _direction: crate::server::PolicyDirection,
-        _policy_names: Vec<String>,
+        peer_addr: IpAddr,
+        direction: crate::server::PolicyDirection,
+        policy_names: Vec<String>,
         _default_action: Option<crate::policy::PolicyResult>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // TODO: Implement actual logic
-        let _ = response.send(Err("SetPolicyAssignment not yet implemented".to_string()));
+        // Check if peer exists
+        let peer = match self.peers.get_mut(&peer_addr) {
+            Some(p) => p,
+            None => {
+                let _ = response.send(Err(format!("peer {} not found", peer_addr)));
+                return;
+            }
+        };
+
+        // Resolve policy names to Policy objects
+        let mut resolved_policies = Vec::new();
+        for name in &policy_names {
+            match self.policies.get(name) {
+                Some(policy) => resolved_policies.push(policy.clone()),
+                None => {
+                    let _ = response.send(Err(format!("policy '{}' not found", name)));
+                    return;
+                }
+            }
+        }
+
+        // Update peer's policy list
+        match direction {
+            crate::server::PolicyDirection::Import => {
+                peer.import_policies = resolved_policies;
+            }
+            crate::server::PolicyDirection::Export => {
+                peer.export_policies = resolved_policies;
+            }
+        }
+
+        let _ = response.send(Ok(()));
     }
+
+    // Helper method to convert PolicyStatementConfig to StatementDefinitionConfig
+    fn policy_statement_config_to_definition(
+        &self,
+        stmt: crate::server::PolicyStatementConfig,
+    ) -> Result<crate::config::StatementDefinitionConfig, String> {
+        use crate::config::{
+            ActionsDefinitionConfig, ConditionsDefinitionConfig, MatchOptionConfig,
+            MatchSetRefConfig, StatementDefinitionConfig,
+        };
+
+        let conditions = stmt
+            .conditions
+            .unwrap_or(crate::server::PolicyConditionsConfig {
+                match_prefix_set: None,
+                match_neighbor_set: None,
+                match_as_path_set: None,
+                match_community_set: None,
+                prefix: None,
+                neighbor: None,
+            });
+
+        let conditions_def = ConditionsDefinitionConfig {
+            match_prefix_set: conditions
+                .match_prefix_set
+                .map(|(name, opt)| MatchSetRefConfig {
+                    set_name: name,
+                    match_option: match opt.as_str() {
+                        "any" => MatchOptionConfig::Any,
+                        "all" => MatchOptionConfig::All,
+                        "invert" => MatchOptionConfig::Invert,
+                        _ => MatchOptionConfig::Any,
+                    },
+                }),
+            match_neighbor_set: conditions.match_neighbor_set.map(|(name, opt)| {
+                MatchSetRefConfig {
+                    set_name: name,
+                    match_option: match opt.as_str() {
+                        "any" => MatchOptionConfig::Any,
+                        "all" => MatchOptionConfig::All,
+                        "invert" => MatchOptionConfig::Invert,
+                        _ => MatchOptionConfig::Any,
+                    },
+                }
+            }),
+            match_as_path_set: conditions
+                .match_as_path_set
+                .map(|(name, opt)| MatchSetRefConfig {
+                    set_name: name,
+                    match_option: match opt.as_str() {
+                        "any" => MatchOptionConfig::Any,
+                        "all" => MatchOptionConfig::All,
+                        "invert" => MatchOptionConfig::Invert,
+                        _ => MatchOptionConfig::Any,
+                    },
+                }),
+            match_community_set: conditions.match_community_set.map(|(name, opt)| {
+                MatchSetRefConfig {
+                    set_name: name,
+                    match_option: match opt.as_str() {
+                        "any" => MatchOptionConfig::Any,
+                        "all" => MatchOptionConfig::All,
+                        "invert" => MatchOptionConfig::Invert,
+                        _ => MatchOptionConfig::Any,
+                    },
+                }
+            }),
+            prefix: conditions.prefix,
+            neighbor: conditions.neighbor,
+            has_asn: None,
+            route_type: None,
+            community: None,
+        };
+
+        let actions_def = stmt.actions.unwrap_or(crate::server::PolicyActionsConfig {
+            accept: None,
+            reject: None,
+            local_pref: None,
+            med: None,
+            add_communities: vec![],
+            remove_communities: vec![],
+        });
+
+        let actions = ActionsDefinitionConfig {
+            local_pref: actions_def
+                .local_pref
+                .map(crate::config::LocalPrefActionConfig::Set),
+            med: actions_def.med.map(crate::config::MedActionConfig::Set),
+            community: if !actions_def.add_communities.is_empty()
+                || !actions_def.remove_communities.is_empty()
+            {
+                Some(crate::config::CommunityActionConfig {
+                    operation: if !actions_def.add_communities.is_empty() {
+                        "add".to_string()
+                    } else {
+                        "remove".to_string()
+                    },
+                    communities: if !actions_def.add_communities.is_empty() {
+                        actions_def.add_communities
+                    } else {
+                        actions_def.remove_communities
+                    },
+                })
+            } else {
+                None
+            },
+            accept: actions_def.accept,
+            reject: actions_def.reject,
+        };
+
+        Ok(StatementDefinitionConfig {
+            name: None,
+            conditions: conditions_def,
+            actions,
+        })
+    }
+}
+
+/// Parse community string in format "65000:100" or decimal
+fn parse_community_str(s: &str) -> Result<u32, String> {
+    // Try decimal format first
+    if let Ok(val) = s.parse::<u32>() {
+        return Ok(val);
+    }
+
+    // Try "65000:100" format
+    if let Some((high, low)) = s.split_once(':') {
+        let high_val = high
+            .parse::<u16>()
+            .map_err(|_| format!("invalid high part '{}'", high))?;
+        let low_val = low
+            .parse::<u16>()
+            .map_err(|_| format!("invalid low part '{}'", low))?;
+        return Ok((high_val as u32) << 16 | (low_val as u32));
+    }
+
+    Err(format!(
+        "invalid community format '{}' (expected '65000:100' or decimal)",
+        s
+    ))
 }
 
 /// Convert routes to UpdateMessages, batching by shared path attributes

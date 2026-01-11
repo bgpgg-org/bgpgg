@@ -27,16 +27,16 @@ use super::proto::{
     self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
     AddDefinedSetRequest, AddDefinedSetResponse, AddPeerRequest, AddPeerResponse, AddPolicyRequest,
     AddPolicyResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
-    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DefinedSetInfo,
-    DeleteDefinedSetRequest, DeleteDefinedSetResponse, DeletePolicyRequest, DeletePolicyResponse,
-    DisablePeerRequest, DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest,
-    GetPeerResponse, GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest,
-    ListBmpServersResponse, ListDefinedSetRequest, ListPeersRequest, ListPeersResponse,
-    ListPolicyRequest, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
-    PeerStatistics as ProtoPeerStatistics, PolicyInfo, RemoveBmpServerRequest,
-    RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse, RemoveRouteRequest,
-    RemoveRouteResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
-    SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
+    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DefinedSetInfo, DisablePeerRequest,
+    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
+    GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
+    ListDefinedSetsRequest, ListDefinedSetsResponse, ListPeersRequest, ListPeersResponse,
+    ListPoliciesRequest, ListPoliciesResponse, ListRoutesRequest, ListRoutesResponse,
+    Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, PolicyInfo,
+    RemoveBmpServerRequest, RemoveBmpServerResponse, RemoveDefinedSetRequest,
+    RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
+    RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
+    SessionConfig as ProtoSessionConfig, SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -247,10 +247,6 @@ impl BgpGrpcService {
 impl BgpService for BgpGrpcService {
     type ListPeersStreamStream = PeerStream;
     type ListRoutesStreamStream = RouteStream;
-    type ListDefinedSetStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DefinedSetInfo, Status>> + Send>>;
-    type ListPolicyStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<PolicyInfo, Status>> + Send>>;
 
     async fn add_peer(
         &self,
@@ -836,14 +832,14 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn delete_defined_set(
+    async fn remove_defined_set(
         &self,
-        request: Request<DeleteDefinedSetRequest>,
-    ) -> Result<Response<DeleteDefinedSetResponse>, Status> {
+        request: Request<RemoveDefinedSetRequest>,
+    ) -> Result<Response<RemoveDefinedSetResponse>, Status> {
         let inner = request.into_inner();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::DeleteDefinedSet {
+        let req = MgmtOp::RemoveDefinedSet {
             set_type: inner.set_type,
             name: inner.name,
             all: inner.all,
@@ -856,11 +852,11 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("failed to send request"))?;
 
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(DeleteDefinedSetResponse {
+            Ok(Ok(())) => Ok(Response::new(RemoveDefinedSetResponse {
                 success: true,
-                message: "defined set deleted".to_string(),
+                message: "defined set removed".to_string(),
             })),
-            Ok(Err(e)) => Ok(Response::new(DeleteDefinedSetResponse {
+            Ok(Err(e)) => Ok(Response::new(RemoveDefinedSetResponse {
                 success: false,
                 message: e,
             })),
@@ -868,19 +864,17 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn list_defined_set(
+    async fn list_defined_sets(
         &self,
-        request: Request<ListDefinedSetRequest>,
-    ) -> Result<Response<Self::ListDefinedSetStream>, Status> {
-        use tokio_stream::wrappers::UnboundedReceiverStream;
-
+        request: Request<ListDefinedSetsRequest>,
+    ) -> Result<Response<ListDefinedSetsResponse>, Status> {
         let inner = request.into_inner();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
-        let req = MgmtOp::GetDefinedSetsStream {
+        let req = MgmtOp::ListDefinedSets {
             set_type: inner.set_type,
             name: inner.name,
-            tx,
+            response: tx,
         };
 
         self.mgmt_request_tx
@@ -888,9 +882,13 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
-        let stream =
-            UnboundedReceiverStream::new(rx).map(|info| Ok(defined_set_info_to_proto(info)));
-        Ok(Response::new(Box::pin(stream)))
+        match rx.await {
+            Ok(results) => {
+                let sets = results.into_iter().map(defined_set_info_to_proto).collect();
+                Ok(Response::new(ListDefinedSetsResponse { sets }))
+            }
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
     }
 
     async fn add_policy(
@@ -932,14 +930,14 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn delete_policy(
+    async fn remove_policy(
         &self,
-        request: Request<DeletePolicyRequest>,
-    ) -> Result<Response<DeletePolicyResponse>, Status> {
+        request: Request<RemovePolicyRequest>,
+    ) -> Result<Response<RemovePolicyResponse>, Status> {
         let inner = request.into_inner();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::DeletePolicy {
+        let req = MgmtOp::RemovePolicy {
             name: inner.name,
             response: tx,
         };
@@ -950,11 +948,11 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("failed to send request"))?;
 
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(DeletePolicyResponse {
+            Ok(Ok(())) => Ok(Response::new(RemovePolicyResponse {
                 success: true,
-                message: "policy deleted".to_string(),
+                message: "policy removed".to_string(),
             })),
-            Ok(Err(e)) => Ok(Response::new(DeletePolicyResponse {
+            Ok(Err(e)) => Ok(Response::new(RemovePolicyResponse {
                 success: false,
                 message: e,
             })),
@@ -962,18 +960,16 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn list_policy(
+    async fn list_policies(
         &self,
-        request: Request<ListPolicyRequest>,
-    ) -> Result<Response<Self::ListPolicyStream>, Status> {
-        use tokio_stream::wrappers::UnboundedReceiverStream;
-
+        request: Request<ListPoliciesRequest>,
+    ) -> Result<Response<ListPoliciesResponse>, Status> {
         let inner = request.into_inner();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
-        let req = MgmtOp::GetPoliciesStream {
+        let req = MgmtOp::ListPolicies {
             name: inner.name,
-            tx,
+            response: tx,
         };
 
         self.mgmt_request_tx
@@ -981,8 +977,13 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
-        let stream = UnboundedReceiverStream::new(rx).map(|info| Ok(policy_info_to_proto(info)));
-        Ok(Response::new(Box::pin(stream)))
+        match rx.await {
+            Ok(results) => {
+                let policies = results.into_iter().map(policy_info_to_proto).collect();
+                Ok(Response::new(ListPoliciesResponse { policies }))
+            }
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
     }
 
     async fn set_policy_assignment(
