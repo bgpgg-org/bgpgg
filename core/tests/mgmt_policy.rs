@@ -599,7 +599,11 @@ async fn test_set_policy_assignment() {
         .client
         .add_policy(
             "export-policy".to_string(),
-            vec![simple_statement_config(Some("192.168.0.0/16"), true, Some(150))],
+            vec![simple_statement_config(
+                Some("192.168.0.0/16"),
+                true,
+                Some(150),
+            )],
         )
         .await
         .unwrap();
@@ -645,7 +649,11 @@ async fn test_set_policy_assignment() {
         .client
         .add_policy(
             "new-import-policy".to_string(),
-            vec![simple_statement_config(Some("172.16.0.0/12"), true, Some(250))],
+            vec![simple_statement_config(
+                Some("172.16.0.0/12"),
+                true,
+                Some(250),
+            )],
         )
         .await
         .unwrap();

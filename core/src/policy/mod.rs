@@ -1,17 +1,138 @@
 pub mod sets;
 pub mod statement;
 
+pub use sets::{DefinedSetType, DefinedSets};
 pub use statement::{
-    stmt_default_local_pref, stmt_reject_as_loop, stmt_reject_ibgp, CommunityOp, Policy,
-    PolicyResult, RouteType, Statement,
+    stmt_default_local_pref, stmt_reject_as_loop, stmt_reject_ibgp, CommunityOp, RouteType,
+    Statement,
 };
 
-// Re-export runtime structures
-pub use sets::{DefinedSetType, DefinedSets};
-
-use crate::config::Config;
+use crate::config::{Config, PolicyDefinitionConfig};
+use crate::net::IpNetwork;
+use crate::rib::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Built-in policy name for default import policy
+pub const BUILTIN_POLICY_DEFAULT_IN: &str = "_default_in";
+
+/// Built-in policy name for default export policy
+pub const BUILTIN_POLICY_DEFAULT_OUT: &str = "_default_out";
+
+/// Result of policy evaluation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyResult {
+    /// Accept route, stop processing
+    Accept,
+    /// Reject route, stop processing
+    Reject,
+    /// No match, try next policy
+    Continue,
+}
+
+/// A policy consisting of multiple statements evaluated in order
+#[derive(Debug, Clone, PartialEq)]
+pub struct Policy {
+    pub name: String,
+    pub built_in: bool,
+    statements: Vec<Statement>,
+}
+
+impl Policy {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            built_in: false,
+            statements: Vec::new(),
+        }
+    }
+
+    fn new_built_in(name: String) -> Self {
+        Self {
+            name,
+            built_in: true,
+            statements: Vec::new(),
+        }
+    }
+
+    /// Get the statements (for API responses)
+    pub fn statements(&self) -> &[Statement] {
+        &self.statements
+    }
+
+    /// Create a default inbound policy with AS loop prevention and default local pref
+    pub fn default_in(local_asn: u16) -> Self {
+        use statement::{stmt_default_local_pref, stmt_reject_as_loop, Action};
+        Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
+            .with(stmt_reject_as_loop(local_asn))
+            .with(stmt_default_local_pref(100))
+            .with(Statement::new().then(Action::Accept))
+    }
+
+    /// Create a default outbound policy with iBGP reflection prevention
+    pub fn default_out(local_asn: u16, peer_asn: u16) -> Self {
+        use statement::{stmt_reject_ibgp, Action};
+        if local_asn == peer_asn {
+            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
+                .with(stmt_reject_ibgp())
+                .with(Statement::new().then(Action::Accept))
+        } else {
+            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
+                .with(Statement::new().then(Action::Accept))
+        }
+    }
+
+    /// Create a policy from YAML config
+    pub fn from_config(
+        def: &PolicyDefinitionConfig,
+        defined_sets: &DefinedSets,
+    ) -> Result<Self, String> {
+        let mut policy = Policy::new(def.name.clone());
+
+        for stmt_def in &def.statements {
+            let stmt = statement::build_statement(stmt_def, defined_sets)?;
+            policy = policy.with(stmt);
+        }
+
+        Ok(policy)
+    }
+
+    /// Add a statement to the policy
+    pub fn with(mut self, statement: Statement) -> Self {
+        self.statements.push(statement);
+        self
+    }
+
+    /// Evaluate the policy against a route
+    /// Returns PolicyResult indicating whether to Accept, Reject, or Continue
+    pub fn evaluate(&self, prefix: &IpNetwork, path: &mut Path) -> PolicyResult {
+        // Try each statement in order
+        for statement in &self.statements {
+            if let Some(accept) = statement.apply(prefix, path) {
+                return if accept {
+                    PolicyResult::Accept
+                } else {
+                    PolicyResult::Reject
+                };
+            }
+        }
+        // No statement matched - continue to next policy
+        PolicyResult::Continue
+    }
+
+    /// Evaluate the policy against a route (convenience wrapper)
+    /// Returns true if the route is accepted, false if rejected
+    /// If no statements match, rejects the route
+    pub fn accept(&self, prefix: &IpNetwork, path: &mut Path) -> bool {
+        matches!(self.evaluate(prefix, path), PolicyResult::Accept)
+    }
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
 
 /// Policy context containing compiled policies and defined sets
 pub struct PolicyContext {

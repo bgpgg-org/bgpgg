@@ -1,6 +1,6 @@
 use crate::config::{
     ActionsConfig, ConditionsConfig, LocalPrefActionConfig, MatchOptionConfig, MedActionConfig,
-    PolicyDefinitionConfig, StatementConfig,
+    StatementConfig,
 };
 use crate::net::IpNetwork;
 use crate::policy::sets::{AsPathSet, CommunitySet, DefinedSets, NeighborSet, PrefixSet};
@@ -9,103 +9,9 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// Built-in policy name for default import policy
-pub const BUILTIN_POLICY_DEFAULT_IN: &str = "_default_in";
-
-/// Built-in policy name for default export policy
-pub const BUILTIN_POLICY_DEFAULT_OUT: &str = "_default_out";
-
-/// Result of policy evaluation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyResult {
-    /// Accept route, stop processing
-    Accept,
-    /// Reject route, stop processing
-    Reject,
-    /// No match, try next policy
-    Continue,
-}
-
-/// Condition enum - all possible condition types
-#[derive(Debug, Clone, PartialEq)]
-pub enum Condition {
-    Prefix(IpNetwork),
-    PrefixSet(Arc<PrefixSet>, MatchOptionConfig),
-    Neighbor(IpAddr),
-    NeighborSet(Arc<NeighborSet>, MatchOptionConfig),
-    AsPath(u16),
-    AsPathSet(Arc<AsPathSet>, MatchOptionConfig),
-    Community(u32),
-    CommunitySet(Arc<CommunitySet>, MatchOptionConfig),
-    RouteType(RouteType),
-}
-
-impl Condition {
-    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
-        match self {
-            Condition::Prefix(p) => prefix == p,
-            Condition::PrefixSet(set, match_opt) => match match_opt {
-                MatchOptionConfig::Any => set.prefixes.iter().any(|pm| pm.contains(prefix)),
-                MatchOptionConfig::All => set.prefixes.iter().all(|pm| pm.contains(prefix)),
-                MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
-            },
-            Condition::Neighbor(neighbor) => match &path.source {
-                RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr == *neighbor,
-                RouteSource::Local => false,
-            },
-            Condition::NeighborSet(set, match_opt) => {
-                let peer_ip = match &path.source {
-                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr,
-                    RouteSource::Local => return false,
-                };
-                match match_opt {
-                    MatchOptionConfig::Any => set.neighbors.contains(&peer_ip),
-                    MatchOptionConfig::All => set.neighbors.iter().all(|n| *n == peer_ip),
-                    MatchOptionConfig::Invert => !set.neighbors.contains(&peer_ip),
-                }
-            }
-            Condition::AsPath(asn) => path
-                .as_path
-                .iter()
-                .flat_map(|segment| segment.asn_list.iter())
-                .any(|&path_asn| path_asn == *asn),
-            Condition::AsPathSet(set, match_opt) => {
-                let as_path_str = path
-                    .as_path
-                    .iter()
-                    .flat_map(|segment| segment.asn_list.iter())
-                    .map(|asn| asn.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_");
-                match match_opt {
-                    MatchOptionConfig::Any => set.patterns.iter().any(|r| r.is_match(&as_path_str)),
-                    MatchOptionConfig::All => set.patterns.iter().all(|r| r.is_match(&as_path_str)),
-                    MatchOptionConfig::Invert => {
-                        !set.patterns.iter().any(|r| r.is_match(&as_path_str))
-                    }
-                }
-            }
-            Condition::Community(community) => path.communities.contains(community),
-            Condition::CommunitySet(set, match_opt) => match match_opt {
-                MatchOptionConfig::Any => {
-                    path.communities.iter().any(|c| set.communities.contains(c))
-                }
-                MatchOptionConfig::All => {
-                    path.communities.iter().all(|c| set.communities.contains(c))
-                }
-                MatchOptionConfig::Invert => {
-                    !path.communities.iter().any(|c| set.communities.contains(c))
-                }
-            },
-            Condition::RouteType(route_type) => matches!(
-                (route_type, &path.source),
-                (RouteType::Ebgp, RouteSource::Ebgp(_))
-                    | (RouteType::Ibgp, RouteSource::Ibgp(_))
-                    | (RouteType::Local, RouteSource::Local)
-            ),
-        }
-    }
-}
+// ============================================================================
+// Public types (re-exported)
+// ============================================================================
 
 /// Route type for matching route source
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,52 +29,9 @@ pub enum CommunityOp {
     Replace(Vec<u32>),
 }
 
-/// Action enum - all possible action types
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    Accept,
-    Reject,
-    SetLocalPref { value: u32, force: bool },
-    SetMed(Option<u32>),
-    SetCommunity(CommunityOp),
-}
-
-impl Action {
-    fn apply(&self, path: &mut Path) -> bool {
-        match self {
-            Action::Accept => true,
-            Action::Reject => false,
-            Action::SetLocalPref { value, force } => {
-                if *force || path.local_pref.is_none() {
-                    path.local_pref = Some(*value);
-                }
-                true
-            }
-            Action::SetMed(value) => {
-                path.med = *value;
-                true
-            }
-            Action::SetCommunity(op) => {
-                match op {
-                    CommunityOp::Add(to_add) => {
-                        for &comm in to_add {
-                            if !path.communities.contains(&comm) {
-                                path.communities.push(comm);
-                            }
-                        }
-                    }
-                    CommunityOp::Remove(to_remove) => {
-                        path.communities.retain(|comm| !to_remove.contains(comm));
-                    }
-                    CommunityOp::Replace(new_communities) => {
-                        path.communities = new_communities.clone();
-                    }
-                }
-                true
-            }
-        }
-    }
-}
+// ============================================================================
+// Statement - the main type
+// ============================================================================
 
 /// A policy statement: if conditions match, apply actions
 #[derive(Debug, Clone, PartialEq)]
@@ -339,7 +202,7 @@ impl Statement {
 
     /// Apply all actions if conditions match
     /// Returns None if no match, Some(accept) if matched
-    fn apply(&self, prefix: &IpNetwork, path: &mut Path) -> Option<bool> {
+    pub(super) fn apply(&self, prefix: &IpNetwork, path: &mut Path) -> Option<bool> {
         if self.matches(prefix, path) {
             let mut accept = true;
             for action in &self.actions {
@@ -360,107 +223,145 @@ impl Default for Statement {
     }
 }
 
-/// A policy consisting of multiple statements evaluated in order
+// ============================================================================
+// Action - what statements do
+// ============================================================================
+
+/// Action enum - all possible action types
 #[derive(Debug, Clone, PartialEq)]
-pub struct Policy {
-    pub name: String,
-    pub built_in: bool,
-    statements: Vec<Statement>,
+pub enum Action {
+    Accept,
+    Reject,
+    SetLocalPref { value: u32, force: bool },
+    SetMed(Option<u32>),
+    SetCommunity(CommunityOp),
 }
 
-impl Policy {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            built_in: false,
-            statements: Vec::new(),
-        }
-    }
-
-    fn new_built_in(name: String) -> Self {
-        Self {
-            name,
-            built_in: true,
-            statements: Vec::new(),
-        }
-    }
-
-    /// Get the statements (for API responses)
-    pub fn statements(&self) -> &[Statement] {
-        &self.statements
-    }
-
-    /// Create a default inbound policy with AS loop prevention and default local pref
-    pub fn default_in(local_asn: u16) -> Self {
-        Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
-            .with(stmt_reject_as_loop(local_asn))
-            .with(stmt_default_local_pref(100))
-            .with(Statement::new().then(Action::Accept))
-    }
-
-    /// Create a default outbound policy with iBGP reflection prevention
-    pub fn default_out(local_asn: u16, peer_asn: u16) -> Self {
-        if local_asn == peer_asn {
-            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
-                .with(stmt_reject_ibgp())
-                .with(Statement::new().then(Action::Accept))
-        } else {
-            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
-                .with(Statement::new().then(Action::Accept))
-        }
-    }
-
-    /// Create a policy from YAML config
-    pub fn from_config(
-        def: &PolicyDefinitionConfig,
-        defined_sets: &DefinedSets,
-    ) -> Result<Self, String> {
-        let mut policy = Policy::new(def.name.clone());
-
-        for stmt_def in &def.statements {
-            let stmt = build_statement(stmt_def, defined_sets)?;
-            policy = policy.with(stmt);
-        }
-
-        Ok(policy)
-    }
-
-    /// Add a statement to the policy
-    pub fn with(mut self, statement: Statement) -> Self {
-        self.statements.push(statement);
-        self
-    }
-
-    /// Evaluate the policy against a route
-    /// Returns PolicyResult indicating whether to Accept, Reject, or Continue
-    pub fn evaluate(&self, prefix: &IpNetwork, path: &mut Path) -> PolicyResult {
-        // Try each statement in order
-        for statement in &self.statements {
-            if let Some(accept) = statement.apply(prefix, path) {
-                return if accept {
-                    PolicyResult::Accept
-                } else {
-                    PolicyResult::Reject
-                };
+impl Action {
+    fn apply(&self, path: &mut Path) -> bool {
+        match self {
+            Action::Accept => true,
+            Action::Reject => false,
+            Action::SetLocalPref { value, force } => {
+                if *force || path.local_pref.is_none() {
+                    path.local_pref = Some(*value);
+                }
+                true
+            }
+            Action::SetMed(value) => {
+                path.med = *value;
+                true
+            }
+            Action::SetCommunity(op) => {
+                match op {
+                    CommunityOp::Add(to_add) => {
+                        for &comm in to_add {
+                            if !path.communities.contains(&comm) {
+                                path.communities.push(comm);
+                            }
+                        }
+                    }
+                    CommunityOp::Remove(to_remove) => {
+                        path.communities.retain(|comm| !to_remove.contains(comm));
+                    }
+                    CommunityOp::Replace(new_communities) => {
+                        path.communities = new_communities.clone();
+                    }
+                }
+                true
             }
         }
-        // No statement matched - continue to next policy
-        PolicyResult::Continue
-    }
-
-    /// Evaluate the policy against a route (convenience wrapper)
-    /// Returns true if the route is accepted, false if rejected
-    /// If no statements match, rejects the route
-    pub fn accept(&self, prefix: &IpNetwork, path: &mut Path) -> bool {
-        matches!(self.evaluate(prefix, path), PolicyResult::Accept)
     }
 }
 
-impl Default for Policy {
-    fn default() -> Self {
-        Self::new(String::new())
+// ============================================================================
+// Condition - what statements match
+// ============================================================================
+
+/// Condition enum - all possible condition types
+#[derive(Debug, Clone, PartialEq)]
+pub enum Condition {
+    Prefix(IpNetwork),
+    PrefixSet(Arc<PrefixSet>, MatchOptionConfig),
+    Neighbor(IpAddr),
+    NeighborSet(Arc<NeighborSet>, MatchOptionConfig),
+    AsPath(u16),
+    AsPathSet(Arc<AsPathSet>, MatchOptionConfig),
+    Community(u32),
+    CommunitySet(Arc<CommunitySet>, MatchOptionConfig),
+    RouteType(RouteType),
+}
+
+impl Condition {
+    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
+        match self {
+            Condition::Prefix(p) => prefix == p,
+            Condition::PrefixSet(set, match_opt) => match match_opt {
+                MatchOptionConfig::Any => set.prefixes.iter().any(|pm| pm.contains(prefix)),
+                MatchOptionConfig::All => set.prefixes.iter().all(|pm| pm.contains(prefix)),
+                MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
+            },
+            Condition::Neighbor(neighbor) => match &path.source {
+                RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr == *neighbor,
+                RouteSource::Local => false,
+            },
+            Condition::NeighborSet(set, match_opt) => {
+                let peer_ip = match &path.source {
+                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr,
+                    RouteSource::Local => return false,
+                };
+                match match_opt {
+                    MatchOptionConfig::Any => set.neighbors.contains(&peer_ip),
+                    MatchOptionConfig::All => set.neighbors.iter().all(|n| *n == peer_ip),
+                    MatchOptionConfig::Invert => !set.neighbors.contains(&peer_ip),
+                }
+            }
+            Condition::AsPath(asn) => path
+                .as_path
+                .iter()
+                .flat_map(|segment| segment.asn_list.iter())
+                .any(|&path_asn| path_asn == *asn),
+            Condition::AsPathSet(set, match_opt) => {
+                let as_path_str = path
+                    .as_path
+                    .iter()
+                    .flat_map(|segment| segment.asn_list.iter())
+                    .map(|asn| asn.to_string())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                match match_opt {
+                    MatchOptionConfig::Any => set.patterns.iter().any(|r| r.is_match(&as_path_str)),
+                    MatchOptionConfig::All => set.patterns.iter().all(|r| r.is_match(&as_path_str)),
+                    MatchOptionConfig::Invert => {
+                        !set.patterns.iter().any(|r| r.is_match(&as_path_str))
+                    }
+                }
+            }
+            Condition::Community(community) => path.communities.contains(community),
+            Condition::CommunitySet(set, match_opt) => match match_opt {
+                MatchOptionConfig::Any => {
+                    path.communities.iter().any(|c| set.communities.contains(c))
+                }
+                MatchOptionConfig::All => {
+                    path.communities.iter().all(|c| set.communities.contains(c))
+                }
+                MatchOptionConfig::Invert => {
+                    !path.communities.iter().any(|c| set.communities.contains(c))
+                }
+            },
+            Condition::RouteType(route_type) => matches!(
+                (route_type, &path.source),
+                (RouteType::Ebgp, RouteSource::Ebgp(_))
+                    | (RouteType::Ibgp, RouteSource::Ibgp(_))
+                    | (RouteType::Local, RouteSource::Local)
+            ),
+        }
     }
 }
+
+// ============================================================================
+// Public helper functions
+// ============================================================================
 
 /// Set default local preference if not already set
 pub fn stmt_default_local_pref(value: u32) -> Statement {
@@ -484,8 +385,15 @@ pub fn stmt_reject_ibgp() -> Statement {
         .then(Action::Reject)
 }
 
+// ============================================================================
+// Internal functions (config parsing)
+// ============================================================================
+
 /// Build a statement from config
-fn build_statement(def: &StatementConfig, defined_sets: &DefinedSets) -> Result<Statement, String> {
+pub(super) fn build_statement(
+    def: &StatementConfig,
+    defined_sets: &DefinedSets,
+) -> Result<Statement, String> {
     let mut stmt = Statement::new();
 
     // Add conditions
@@ -685,8 +593,10 @@ fn parse_community_value(s: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
+    use crate::config::PolicyDefinitionConfig;
     use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
+    use crate::policy::Policy;
     use crate::rib::RouteSource;
     use std::net::{IpAddr, Ipv4Addr};
 
