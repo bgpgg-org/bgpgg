@@ -124,9 +124,7 @@ pub fn generate_peer_routes(config: RouteGenConfig) -> Vec<PeerRouteSet> {
     let peer_assignments = distribute_with_overlap(templates, &config, &mut rng);
 
     // Step 4: Generate diverse attributes for each peer's version
-    let peer_route_sets = generate_peer_attributes(peer_assignments, &config, &mut rng);
-
-    peer_route_sets
+    generate_peer_attributes(peer_assignments, &config, &mut rng)
 }
 
 /// Generate unique prefixes with realistic length distribution

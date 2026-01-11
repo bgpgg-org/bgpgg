@@ -52,7 +52,10 @@ impl BgpClient {
         Ok(self
             .inner
             .clone()
-            .list_routes(ListRoutesRequest {})
+            .list_routes(ListRoutesRequest {
+                rib_type: None,
+                peer_address: None,
+            })
             .await?
             .into_inner()
             .routes)
@@ -65,7 +68,92 @@ impl BgpClient {
         let mut stream = self
             .inner
             .clone()
-            .list_routes_stream(ListRoutesRequest {})
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: None,
+                peer_address: None,
+            })
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
+    }
+
+    /// Get routes from a specific peer's Adj-RIB-In
+    pub async fn get_adj_rib_in(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+
+        Ok(self
+            .inner
+            .clone()
+            .list_routes(ListRoutesRequest {
+                rib_type: Some(RibType::AdjIn as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner()
+            .routes)
+    }
+
+    /// Get routes from a specific peer's Adj-RIB-Out (computed on-demand)
+    pub async fn get_adj_rib_out(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+
+        Ok(self
+            .inner
+            .clone()
+            .list_routes(ListRoutesRequest {
+                rib_type: Some(RibType::AdjOut as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner()
+            .routes)
+    }
+
+    /// Get routes from Adj-RIB-In using streaming
+    pub async fn get_adj_rib_in_stream(
+        &self,
+        peer_address: &str,
+    ) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: Some(RibType::AdjIn as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
+    }
+
+    /// Get routes from Adj-RIB-Out using streaming
+    pub async fn get_adj_rib_out_stream(
+        &self,
+        peer_address: &str,
+    ) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: Some(RibType::AdjOut as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
             .await?
             .into_inner();
 

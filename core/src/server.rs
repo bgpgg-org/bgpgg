@@ -153,9 +153,13 @@ pub enum MgmtOp {
         response: oneshot::Sender<Option<GetPeerResponse>>,
     },
     GetRoutes {
-        response: oneshot::Sender<Vec<Route>>,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        response: oneshot::Sender<Result<Vec<Route>, String>>,
     },
     GetRoutesStream {
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
         tx: mpsc::UnboundedSender<Route>,
     },
     GetPeersStream {

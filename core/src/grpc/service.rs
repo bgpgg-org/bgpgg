@@ -621,21 +621,28 @@ impl BgpService for BgpGrpcService {
 
     async fn list_routes(
         &self,
-        _request: Request<ListRoutesRequest>,
+        request: Request<ListRoutesRequest>,
     ) -> Result<Response<ListRoutesResponse>, Status> {
+        let req = request.into_inner();
+
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::GetRoutes { response: tx };
+        let mgmt_req = MgmtOp::GetRoutes {
+            rib_type: req.rib_type,
+            peer_address: req.peer_address,
+            response: tx,
+        };
 
         self.mgmt_request_tx
-            .send(req)
+            .send(mgmt_req)
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
         // Wait for response
         let routes = rx
             .await
-            .map_err(|_| Status::internal("request processing failed"))?;
+            .map_err(|_| Status::internal("request processing failed"))?
+            .map_err(Status::invalid_argument)?;
 
         // Convert Rust routes to proto routes
         let proto_routes: Vec<ProtoRoute> = routes.into_iter().map(route_to_proto).collect();
@@ -647,15 +654,20 @@ impl BgpService for BgpGrpcService {
 
     async fn list_routes_stream(
         &self,
-        _request: Request<ListRoutesRequest>,
+        request: Request<ListRoutesRequest>,
     ) -> Result<Response<Self::ListRoutesStreamStream>, Status> {
         use tokio_stream::wrappers::UnboundedReceiverStream;
         use tokio_stream::StreamExt;
 
+        let req = request.into_inner();
         let (tx, rx) = mpsc::unbounded_channel();
 
         // Send streaming request to BGP server
-        let mgmt_req = MgmtOp::GetRoutesStream { tx };
+        let mgmt_req = MgmtOp::GetRoutesStream {
+            rib_type: req.rib_type,
+            peer_address: req.peer_address,
+            tx,
+        };
         self.mgmt_request_tx
             .send(mgmt_req)
             .await

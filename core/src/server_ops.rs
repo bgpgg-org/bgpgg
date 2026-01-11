@@ -16,16 +16,19 @@ use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
-use crate::peer::outgoing::batch_announcements_by_path;
+use crate::peer::outgoing::{
+    batch_announcements_by_path, compute_routes_for_peer, should_propagate_to_peer,
+};
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
-use crate::rib::{Path, Route};
+use crate::rib::{Path, Route, RouteSource};
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
     GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
 use crate::types::PeerDownReason;
 use crate::{error, info};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -83,11 +86,21 @@ impl BgpServer {
             MgmtOp::GetPeer { addr, response } => {
                 self.handle_get_peer(addr, response).await;
             }
-            MgmtOp::GetRoutes { response } => {
-                self.handle_get_routes(response);
+            MgmtOp::GetRoutes {
+                rib_type,
+                peer_address,
+                response,
+            } => {
+                self.handle_get_routes(rib_type, peer_address, response)
+                    .await;
             }
-            MgmtOp::GetRoutesStream { tx } => {
-                self.handle_get_routes_stream(tx);
+            MgmtOp::GetRoutesStream {
+                rib_type,
+                peer_address,
+                tx,
+            } => {
+                self.handle_get_routes_stream(rib_type, peer_address, tx)
+                    .await;
             }
             MgmtOp::GetPeersStream { tx } => {
                 self.handle_get_peers_stream(tx);
@@ -542,17 +555,144 @@ impl BgpServer {
         }));
     }
 
-    fn handle_get_routes(&self, response: oneshot::Sender<Vec<Route>>) {
-        let routes = self.loc_rib.get_all_routes();
-        let _ = response.send(routes);
+    async fn handle_get_routes(
+        &self,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        response: oneshot::Sender<Result<Vec<Route>, String>>,
+    ) {
+        use crate::grpc::proto::RibType;
+
+        let rib_type_enum = match rib_type {
+            Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
+            None => RibType::Global,
+        };
+
+        let result = match rib_type_enum {
+            RibType::Global => Ok(self.loc_rib.get_all_routes()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
+            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+        };
+
+        let _ = response.send(result);
     }
 
-    fn handle_get_routes_stream(&self, tx: mpsc::UnboundedSender<Route>) {
-        for route in self.loc_rib.iter_routes() {
-            if tx.send(route.clone()).is_err() {
-                break; // Client disconnected
+    async fn handle_get_routes_stream(
+        &self,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        tx: mpsc::UnboundedSender<Route>,
+    ) {
+        use crate::grpc::proto::RibType;
+
+        let rib_type_enum = match rib_type {
+            Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
+            None => RibType::Global,
+        };
+
+        let routes = match rib_type_enum {
+            RibType::Global => Ok(self.loc_rib.get_all_routes()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
+            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+        };
+
+        if let Ok(routes) = routes {
+            for route in routes {
+                if tx.send(route).is_err() {
+                    break; // Client disconnected
+                }
             }
         }
+    }
+
+    async fn get_adj_rib_in(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+        use std::net::IpAddr;
+
+        let peer_addr = peer_address
+            .ok_or("peer_address required for ADJ_IN".to_string())?
+            .parse::<IpAddr>()
+            .map_err(|e| format!("invalid peer address: {}", e))?;
+
+        let peer_info = self
+            .peers
+            .get(&peer_addr)
+            .ok_or(format!("peer {} not found", peer_addr))?;
+
+        let peer_tx = peer_info
+            .peer_tx
+            .as_ref()
+            .ok_or("peer task not running".to_string())?;
+
+        // Reuse existing GetAdjRibIn operation
+        let (tx, rx) = oneshot::channel();
+        peer_tx
+            .send(PeerOp::GetAdjRibIn(tx))
+            .map_err(|_| "failed to send to peer".to_string())?;
+
+        rx.await.map_err(|_| "peer task closed".to_string())
+    }
+
+    fn compute_adj_rib_out(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+        let peer_addr = peer_address
+            .ok_or("peer_address required for ADJ_OUT".to_string())?
+            .parse::<IpAddr>()
+            .map_err(|e| format!("invalid peer address: {}", e))?;
+
+        let peer_info = self
+            .peers
+            .get(&peer_addr)
+            .ok_or(format!("peer {} not found", peer_addr))?;
+
+        let peer_asn = peer_info.asn.ok_or("peer ASN not set".to_string())?;
+
+        let export_policy = peer_info
+            .export_policy
+            .as_ref()
+            .ok_or("export policy not initialized".to_string())?;
+
+        // Build to_announce list from ALL loc_rib routes (same as propagation)
+        let mut to_announce = Vec::new();
+        for route in self.loc_rib.iter_routes() {
+            if let Some(best_path) = self.loc_rib.get_best_path(&route.prefix) {
+                // Extract originating_peer from path.source
+                let originating_peer = match best_path.source {
+                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => Some(addr),
+                    RouteSource::Local => None,
+                };
+
+                // Apply EXACT same check as propagation
+                if !should_propagate_to_peer(peer_addr, peer_info.state, originating_peer) {
+                    continue;
+                }
+
+                to_announce.push((route.prefix, best_path.clone()));
+            }
+        }
+
+        // Use EXACT same filtering + transformation logic
+        let filtered = compute_routes_for_peer(
+            &to_announce,
+            self.config.asn,
+            peer_asn,
+            self.config.router_id,
+            export_policy,
+        );
+
+        // Group by prefix for Route struct
+        let mut routes_map: HashMap<IpNetwork, Vec<Path>> = HashMap::new();
+        for (prefix, path) in filtered {
+            routes_map.entry(prefix).or_default().push(path);
+        }
+
+        let adj_out_routes: Vec<Route> = routes_map
+            .into_iter()
+            .map(|(prefix, paths)| Route {
+                prefix,
+                paths: paths.into_iter().map(Arc::new).collect(),
+            })
+            .collect();
+
+        Ok(adj_out_routes)
     }
 
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
