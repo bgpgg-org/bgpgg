@@ -79,20 +79,16 @@ async fn test_origin_preservation() {
     ];
 
     for (prefix, next_hop, origin) in test_routes {
-        server1
-            .client
-            .add_route(
-                prefix.to_string(),
-                next_hop.to_string(),
-                origin,
-                vec![],
-                None,
-                None,
-                false,
-                vec![],
-            )
-            .await
-            .expect("Failed to announce route");
+        announce_route(
+            server1,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: next_hop.to_string(),
+                origin: Some(origin),
+                ..Default::default()
+            },
+        )
+        .await;
     }
 
     // Helper to build expected routes with different AS_PATH, next_hop, and peer_address
@@ -186,20 +182,15 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     .await;
 
     // S1 originates a route (starts with empty AS_PATH)
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify AS_PATH and NEXT_HOP at each hop:
     //
@@ -300,20 +291,15 @@ async fn test_originating_speaker_as_path() {
     .await;
 
     // S1 originates a route
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify AS_PATH and NEXT_HOP at each hop:
     //
@@ -389,23 +375,19 @@ async fn test_ebgp_prepend_as_before_as_set() {
     .await;
 
     // S1 adds a route with AS_SET as the first segment
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            as_path: vec![
                 as_set(vec![65003, 65004]), // AS_SET as first segment
                 as_sequence(vec![65005]),   // AS_SEQUENCE after
             ],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to add route from server 1");
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify S2 receives the route with AS_SEQUENCE[65001] prepended
     // Result: AS_SEQUENCE[65001], AS_SET[65003, 65004], AS_SEQUENCE[65005]
@@ -472,20 +454,15 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     .await;
 
     // S1 originates a route with NEXT_HOP unspecified (0.0.0.0)
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "0.0.0.0".to_string(), // Unspecified NEXT_HOP
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "0.0.0.0".to_string(), // Unspecified NEXT_HOP,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // RFC expectation: S2 should receive the route with NEXT_HOP set to S1's local address
     // (the interface address used for the peering session)
@@ -551,20 +528,15 @@ async fn test_next_hop_rewrite_to_ebgp() {
     .await;
 
     // S1 originates a route with explicit NEXT_HOP
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.100".to_string(), // Arbitrary NEXT_HOP
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.100".to_string(), // Arbitrary NEXT_HOP,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify NEXT_HOP handling:
     // S1 -> S2 (iBGP): NEXT_HOP preserved as 192.168.1.100
@@ -651,20 +623,15 @@ async fn test_local_pref_send_to_ibgp() {
     .await;
 
     // S1 originates a route
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify:
     // S2 (eBGP): receives route with LOCAL_PREF=100 (set by DefaultLocalPref policy)
@@ -754,20 +721,16 @@ async fn test_local_pref_not_sent_to_ebgp() {
     .await;
 
     // S1 originates a route with LOCAL_PREF=200
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            Some(200), // Explicitly set LOCAL_PREF to 200
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            local_pref: Some(200), // Explicitly set LOCAL_PREF to 200,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify S2 first (iBGP): receives route with LOCAL_PREF=200 (preserved from S1)
     poll_route_propagation(&[(
@@ -854,20 +817,16 @@ async fn test_med_propagation_over_ibgp() {
     .await;
 
     // S1 originates a route with MED=50
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            Some(50), // Set MED=50
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            med: Some(50), // Set MED=50,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify:
     // S2 (eBGP): receives route with MED=50
@@ -954,20 +913,16 @@ async fn test_med_not_propagated_to_other_as() {
     .await;
 
     // S1 originates a route with MED=50
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            Some(50), // Set MED=50
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            med: Some(50), // Set MED=50,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify S2 first (eBGP): receives route with MED=50
     poll_route_propagation(&[(
@@ -1054,20 +1009,16 @@ async fn test_atomic_aggregate_propagation() {
     .await;
 
     // S1 originates a route with ATOMIC_AGGREGATE=true
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            true, // ATOMIC_AGGREGATE=true
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            atomic_aggregate: true, // ATOMIC_AGGREGATE=true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify S2 (eBGP): receives route with ATOMIC_AGGREGATE=true
     poll_route_propagation(&[(
@@ -1274,50 +1225,38 @@ async fn test_med_comparison_restricted_to_same_as() {
     .await;
 
     // All announce same prefix with different MEDs
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            Some(100),
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            med: Some(100),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server2
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.2.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            Some(50),
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.2.1".to_string(),
+            med: Some(50),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server3
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.3.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            Some(10),
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server3,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.3.1".to_string(),
+            med: Some(10),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // S4 should select S2's route (AS65001, MED=50)
     // This proves: MED compared within AS65001 (S2 beat S1)
@@ -1352,20 +1291,16 @@ async fn test_normal_community_propagation() {
         community::from_asn_value(65001, 300),
     ];
 
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            communities.clone(),
-        )
-        .await
-        .expect("Failed to add route");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            communities: communities.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     poll_route_propagation(&[(
         &server2,
@@ -1392,66 +1327,49 @@ async fn test_well_known_communities() {
     let (mut server1, server2) = setup_two_peered_servers(None).await;
 
     // Add routes with well-known communities (should be filtered)
-    server1
-        .client
-        .add_route(
-            "10.1.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![community::NO_ADVERTISE],
-        )
-        .await
-        .expect("Failed to add route");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            communities: vec![community::NO_ADVERTISE],
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server1
-        .client
-        .add_route(
-            "10.2.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![community::NO_EXPORT],
-        )
-        .await
-        .expect("Failed to add route");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.2.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            communities: vec![community::NO_EXPORT],
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server1
-        .client
-        .add_route(
-            "10.3.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![community::NO_EXPORT_SUBCONFED],
-        )
-        .await
-        .expect("Failed to add route");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.3.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            communities: vec![community::NO_EXPORT_SUBCONFED],
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Add normal route (should propagate)
-    server1
-        .client
-        .add_route(
-            "10.4.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to add route");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.4.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for route to propagate, then verify stability
     poll_until_stable(

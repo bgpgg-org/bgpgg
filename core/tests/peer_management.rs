@@ -28,20 +28,15 @@ async fn test_remove_peer() {
     let (mut server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
     // Server2 announces a route to Server1 via gRPC
-    server2
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route");
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Get the actual peer address (with OS-allocated port)
     let peers = server1.client.get_peers().await.unwrap();
@@ -88,20 +83,15 @@ async fn test_remove_peer_withdraw_routes() {
     let (mut server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
     // Server2 announces a route
-    server2
-        .client
-        .add_route(
-            "10.2.0.0/24".to_string(),
-            "192.168.2.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 2");
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.2.0.0/24".to_string(),
+            next_hop: "192.168.2.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Get the actual peer address
     let peers = server1.client.get_peers().await.unwrap();
@@ -149,20 +139,15 @@ async fn test_remove_peer_four_node_mesh() {
         setup_four_meshed_servers(Some(hold_timer_secs)).await;
 
     // Server4 announces a route
-    server4
-        .client
-        .add_route(
-            "10.4.0.0/24".to_string(),
-            "192.168.4.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 4");
+    announce_route(
+        &mut server4,
+        RouteParams {
+            prefix: "10.4.0.0/24".to_string(),
+            next_hop: "192.168.4.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Poll for route to propagate to all peers
     // eBGP: NEXT_HOP rewritten to router IDs

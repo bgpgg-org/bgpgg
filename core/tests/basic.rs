@@ -24,20 +24,15 @@ async fn test_announce_withdraw() {
     let (server1, mut server2) = setup_two_peered_servers(None).await;
 
     // Server2 announces a route to Server1 via gRPC
-    server2
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route");
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Get the actual peer address (with OS-allocated port)
     let peers = server1.client.get_peers().await.unwrap();
@@ -89,20 +84,15 @@ async fn test_announce_withdraw_mesh() {
     let (mut server1, server2, server3) = setup_three_meshed_servers(None).await;
 
     // Server1 announces a route
-    server1
-        .client
-        .add_route(
-            "10.1.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Poll for route propagation with expected AS paths
     // eBGP: NEXT_HOP rewritten to sender's local address
@@ -192,20 +182,15 @@ async fn test_announce_withdraw_four_node_mesh() {
     let (mut server1, server2, server3, server4) = setup_four_meshed_servers(None).await;
 
     // Server1 announces a route
-    server1
-        .client
-        .add_route(
-            "10.1.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for full mesh convergence: routes + UPDATE received/sent counts
     // eBGP: NEXT_HOP rewritten to sender's local address
@@ -365,20 +350,15 @@ async fn test_ibgp_split_horizon() {
     .await;
 
     // Server1 announces a route
-    server1
-        .client
-        .add_route(
-            "10.1.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1");
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Server2 should receive the route from Server1
     // Server3 should NOT receive the route (iBGP split horizon)
@@ -462,20 +442,15 @@ async fn test_as_loop_prevention() {
     .await;
 
     // Server1_A announces a route
-    server1_a
-        .client
-        .add_route(
-            "10.1.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .expect("Failed to announce route from server 1_A");
+    announce_route(
+        &mut server1_a,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Poll for route propagation to server2
     // AS path progression:

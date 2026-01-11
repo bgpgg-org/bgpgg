@@ -21,7 +21,7 @@ pub use utils::*;
 
 use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::config::BmpConfig;
-use bgpgg::grpc::proto::{BgpState, Origin};
+use bgpgg::grpc::proto::BgpState;
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
@@ -45,36 +45,26 @@ async fn test_add_bmp_server_with_existing_peers() {
     let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(90)).await;
 
     // Announce routes from peer1
-    peer1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut peer1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Announce routes from peer2
-    peer2
-        .client
-        .add_route(
-            "10.0.1.0/24".to_string(),
-            "192.168.1.2".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut peer2,
+        RouteParams {
+            prefix: "10.0.1.0/24".to_string(),
+            next_hop: "192.168.1.2".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for routes to be received
     poll_until(
@@ -227,35 +217,25 @@ async fn test_route_monitoring_on_updates() {
     let _peer_up = bmp_server.read_peer_up().await;
 
     // Announce routes from server2
-    server2
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server2
-        .client
-        .add_route(
-            "10.0.1.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.1.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for routes to be received
     poll_until(
@@ -314,20 +294,15 @@ async fn test_route_monitoring_on_updates() {
     .await;
 
     // Add a new route
-    server2
-        .client
-        .add_route(
-            "10.0.2.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.2.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for new route
     poll_until(
@@ -419,35 +394,25 @@ async fn test_bmp_statistics() {
     let _peer_up = bmp_server.read_peer_up().await;
 
     // Add routes from server2
-    server2
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    server2
-        .client
-        .add_route(
-            "10.0.1.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.1.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Wait for routes to be received
     poll_until(

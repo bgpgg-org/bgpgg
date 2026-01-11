@@ -20,8 +20,7 @@ pub use utils::*;
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::{Config, PeerConfig};
 use bgpgg::grpc::proto::{
-    AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Origin as ProtoOrigin, Peer,
-    SessionConfig,
+    AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -88,20 +87,15 @@ async fn test_max_prefix_limit() {
 
         // Server1 adds 3 routes (exceeds limit of 2)
         for i in 0..3 {
-            server1
-                .client
-                .add_route(
-                    format!("10.{}.0.0/24", i),
-                    "1.1.1.1".to_string(),
-                    ProtoOrigin::Igp,
-                    vec![],
-                    None,
-                    None,
-                    false,
-                    vec![],
-                )
-                .await
-                .expect("Failed to add route");
+            announce_route(
+                &mut server1,
+                RouteParams {
+                    prefix: format!("10.{}.0.0/24", i),
+                    next_hop: "1.1.1.1".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
 
         if expect_disconnect {
