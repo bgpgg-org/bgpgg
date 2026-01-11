@@ -122,6 +122,54 @@ impl BgpServer {
             MgmtOp::GetBmpServers { response } => {
                 self.handle_get_bmp_servers(response);
             }
+            MgmtOp::AddDefinedSet {
+                set_type,
+                name,
+                set_data,
+                replace,
+                response,
+            } => {
+                self.handle_add_defined_set(set_type, name, set_data, replace, response);
+            }
+            MgmtOp::DeleteDefinedSet {
+                set_type,
+                name,
+                all,
+                response,
+            } => {
+                self.handle_delete_defined_set(set_type, name, all, response);
+            }
+            MgmtOp::GetDefinedSetsStream { set_type, name, tx } => {
+                self.handle_get_defined_sets_stream(set_type, name, tx);
+            }
+            MgmtOp::AddPolicy {
+                name,
+                statements,
+                response,
+            } => {
+                self.handle_add_policy(name, statements, response);
+            }
+            MgmtOp::DeletePolicy { name, response } => {
+                self.handle_delete_policy(name, response);
+            }
+            MgmtOp::GetPoliciesStream { name, tx } => {
+                self.handle_get_policies_stream(name, tx);
+            }
+            MgmtOp::SetPolicyAssignment {
+                peer_addr,
+                direction,
+                policy_names,
+                default_action,
+                response,
+            } => {
+                self.handle_set_policy_assignment(
+                    peer_addr,
+                    direction,
+                    policy_names,
+                    default_action,
+                    response,
+                );
+            }
         }
     }
 
@@ -852,6 +900,78 @@ impl BgpServer {
         }
 
         let _ = response.send(stats);
+    }
+
+    // Policy management handlers
+    fn handle_add_defined_set(
+        &mut self,
+        _set_type: String,
+        _name: String,
+        _set_data: crate::server::DefinedSetData,
+        _replace: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // TODO: Implement actual logic
+        let _ = response.send(Err("AddDefinedSet not yet implemented".to_string()));
+    }
+
+    fn handle_delete_defined_set(
+        &mut self,
+        _set_type: String,
+        _name: String,
+        _all: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // TODO: Implement actual logic
+        let _ = response.send(Err("DeleteDefinedSet not yet implemented".to_string()));
+    }
+
+    fn handle_get_defined_sets_stream(
+        &self,
+        _set_type: Option<String>,
+        _name: Option<String>,
+        _tx: mpsc::UnboundedSender<crate::server::DefinedSetInfoResponse>,
+    ) {
+        // TODO: Implement actual logic - stream defined sets from self.defined_sets
+    }
+
+    fn handle_add_policy(
+        &mut self,
+        _name: String,
+        _statements: Vec<crate::server::PolicyStatementConfig>,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // TODO: Implement actual logic
+        let _ = response.send(Err("AddPolicy not yet implemented".to_string()));
+    }
+
+    fn handle_delete_policy(
+        &mut self,
+        _name: String,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // TODO: Implement actual logic
+        let _ = response.send(Err("DeletePolicy not yet implemented".to_string()));
+    }
+
+    fn handle_get_policies_stream(
+        &self,
+        _name: Option<String>,
+        _tx: mpsc::UnboundedSender<crate::server::PolicyInfoResponse>,
+    ) {
+        // TODO: Implement actual logic - stream policies from self.policies
+    }
+
+    fn handle_set_policy_assignment(
+        &mut self,
+        _peer_addr: IpAddr,
+        _direction: crate::server::PolicyDirection,
+        _policy_names: Vec<String>,
+        _default_action: Option<crate::policy::PolicyResult>,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        // TODO: Implement actual logic
+        let _ = response.send(Err("SetPolicyAssignment not yet implemented".to_string()));
     }
 }
 

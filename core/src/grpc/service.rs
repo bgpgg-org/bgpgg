@@ -25,14 +25,18 @@ use tonic::{Request, Response, Status};
 
 use super::proto::{
     self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
-    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
-    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
-    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
-    GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
-    ListPeersRequest, ListPeersResponse, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath,
-    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemoveBmpServerRequest,
+    AddDefinedSetRequest, AddDefinedSetResponse, AddPeerRequest, AddPeerResponse, AddPolicyRequest,
+    AddPolicyResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
+    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DefinedSetInfo,
+    DeleteDefinedSetRequest, DeleteDefinedSetResponse, DeletePolicyRequest, DeletePolicyResponse,
+    DisablePeerRequest, DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest,
+    GetPeerResponse, GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest,
+    ListBmpServersResponse, ListDefinedSetRequest, ListPeersRequest, ListPeersResponse,
+    ListPolicyRequest, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath, Peer as ProtoPeer,
+    PeerStatistics as ProtoPeerStatistics, PolicyInfo, RemoveBmpServerRequest,
     RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse, RemoveRouteRequest,
     RemoveRouteResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
+    SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -243,6 +247,10 @@ impl BgpGrpcService {
 impl BgpService for BgpGrpcService {
     type ListPeersStreamStream = PeerStream;
     type ListRoutesStreamStream = RouteStream;
+    type ListDefinedSetStream =
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DefinedSetInfo, Status>> + Send>>;
+    type ListPolicyStream =
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<PolicyInfo, Status>> + Send>>;
 
     async fn add_peer(
         &self,
@@ -786,5 +794,411 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         Ok(Response::new(ListBmpServersResponse { addresses }))
+    }
+
+    async fn add_defined_set(
+        &self,
+        request: Request<AddDefinedSetRequest>,
+    ) -> Result<Response<AddDefinedSetResponse>, Status> {
+        let inner = request.into_inner();
+        let set_config = inner
+            .set
+            .ok_or_else(|| Status::invalid_argument("set config required"))?;
+
+        // Convert proto to internal types
+        let (set_type, name, set_data) = proto_to_defined_set_data(&set_config)
+            .map_err(|e| Status::invalid_argument(format!("invalid set config: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddDefinedSet {
+            set_type,
+            name,
+            set_data,
+            replace: inner.replace,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddDefinedSetResponse {
+                success: true,
+                message: "defined set added".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddDefinedSetResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn delete_defined_set(
+        &self,
+        request: Request<DeleteDefinedSetRequest>,
+    ) -> Result<Response<DeleteDefinedSetResponse>, Status> {
+        let inner = request.into_inner();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::DeleteDefinedSet {
+            set_type: inner.set_type,
+            name: inner.name,
+            all: inner.all,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(DeleteDefinedSetResponse {
+                success: true,
+                message: "defined set deleted".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(DeleteDefinedSetResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_defined_set(
+        &self,
+        request: Request<ListDefinedSetRequest>,
+    ) -> Result<Response<Self::ListDefinedSetStream>, Status> {
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let req = MgmtOp::GetDefinedSetsStream {
+            set_type: inner.set_type,
+            name: inner.name,
+            tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let stream =
+            UnboundedReceiverStream::new(rx).map(|info| Ok(defined_set_info_to_proto(info)));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn add_policy(
+        &self,
+        request: Request<AddPolicyRequest>,
+    ) -> Result<Response<AddPolicyResponse>, Status> {
+        let inner = request.into_inner();
+
+        // Convert proto statements to internal format
+        let statements = inner
+            .statements
+            .into_iter()
+            .map(proto_to_statement_config)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("invalid statement config: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddPolicy {
+            name: inner.name,
+            statements,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddPolicyResponse {
+                success: true,
+                message: "policy added".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddPolicyResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn delete_policy(
+        &self,
+        request: Request<DeletePolicyRequest>,
+    ) -> Result<Response<DeletePolicyResponse>, Status> {
+        let inner = request.into_inner();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::DeletePolicy {
+            name: inner.name,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(DeletePolicyResponse {
+                success: true,
+                message: "policy deleted".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(DeletePolicyResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_policy(
+        &self,
+        request: Request<ListPolicyRequest>,
+    ) -> Result<Response<Self::ListPolicyStream>, Status> {
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let req = MgmtOp::GetPoliciesStream {
+            name: inner.name,
+            tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let stream = UnboundedReceiverStream::new(rx).map(|info| Ok(policy_info_to_proto(info)));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn set_policy_assignment(
+        &self,
+        request: Request<SetPolicyAssignmentRequest>,
+    ) -> Result<Response<SetPolicyAssignmentResponse>, Status> {
+        let inner = request.into_inner();
+
+        // Parse peer address
+        let peer_addr = inner
+            .peer_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| Status::invalid_argument("invalid peer address"))?;
+
+        // Parse direction
+        let direction = match inner.direction.as_str() {
+            "import" => crate::server::PolicyDirection::Import,
+            "export" => crate::server::PolicyDirection::Export,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "direction must be 'import' or 'export'",
+                ))
+            }
+        };
+
+        // Parse default action
+        let default_action = inner
+            .default_action
+            .as_ref()
+            .map(|action| match action.as_str() {
+                "accept" => crate::policy::PolicyResult::Accept,
+                "reject" => crate::policy::PolicyResult::Reject,
+                _ => crate::policy::PolicyResult::Reject, // Default to reject
+            });
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::SetPolicyAssignment {
+            peer_addr,
+            direction,
+            policy_names: inner.policy_names,
+            default_action,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(SetPolicyAssignmentResponse {
+                success: true,
+                message: "policy assignment set".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(SetPolicyAssignmentResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+}
+
+// ============================================================================
+// Proto conversion helpers (temporary stubs - will move to policy_proto.rs)
+// ============================================================================
+
+use super::proto::DefinedSetConfig;
+use crate::server::{
+    DefinedSetData, DefinedSetInfoResponse, PolicyInfoResponse, PolicyStatementConfig,
+    PrefixMatchData,
+};
+
+fn proto_to_defined_set_data(
+    proto: &DefinedSetConfig,
+) -> Result<(String, String, DefinedSetData), String> {
+    let set_type = proto.set_type.clone();
+    let name = proto.name.clone();
+
+    let data = match proto.config.as_ref() {
+        Some(super::proto::defined_set_config::Config::PrefixSet(ps)) => {
+            let prefixes = ps
+                .prefixes
+                .iter()
+                .map(|p| PrefixMatchData {
+                    prefix: p.prefix.clone(),
+                    masklength_range: p.masklength_range.clone(),
+                })
+                .collect();
+            DefinedSetData::PrefixSet(prefixes)
+        }
+        Some(super::proto::defined_set_config::Config::AsPathSet(aps)) => {
+            DefinedSetData::AsPathSet(aps.patterns.clone())
+        }
+        Some(super::proto::defined_set_config::Config::CommunitySet(cs)) => {
+            DefinedSetData::CommunitySet(cs.communities.clone())
+        }
+        Some(super::proto::defined_set_config::Config::NeighborSet(ns)) => {
+            DefinedSetData::NeighborSet(ns.addresses.clone())
+        }
+        None => return Err("missing set config data".to_string()),
+    };
+
+    Ok((set_type, name, data))
+}
+
+fn proto_to_statement_config(
+    proto: super::proto::StatementConfig,
+) -> Result<PolicyStatementConfig, String> {
+    use crate::server::{PolicyActionsConfig, PolicyConditionsConfig};
+
+    let conditions = proto.conditions.map(|c| PolicyConditionsConfig {
+        match_prefix_set: c.match_prefix_set.map(|m| (m.set_name, m.match_option)),
+        match_neighbor_set: c.match_neighbor_set.map(|m| (m.set_name, m.match_option)),
+        match_as_path_set: c.match_as_path_set.map(|m| (m.set_name, m.match_option)),
+        match_community_set: c.match_community_set.map(|m| (m.set_name, m.match_option)),
+        prefix: c.prefix,
+        neighbor: c.neighbor,
+    });
+
+    let actions = proto.actions.map(|a| PolicyActionsConfig {
+        accept: a.accept,
+        reject: a.reject,
+        local_pref: a.local_pref,
+        med: a.med,
+        add_communities: a.add_communities,
+        remove_communities: a.remove_communities,
+    });
+
+    Ok(PolicyStatementConfig {
+        conditions,
+        actions,
+    })
+}
+
+fn defined_set_info_to_proto(info: DefinedSetInfoResponse) -> DefinedSetInfo {
+    use super::proto::{
+        AsPathSetData, CommunitySetData, NeighborSetData, PrefixMatch, PrefixSetData,
+    };
+
+    let set_data = match info.data {
+        DefinedSetData::PrefixSet(prefixes) => Some(
+            super::proto::defined_set_info::SetData::PrefixSet(PrefixSetData {
+                prefixes: prefixes
+                    .into_iter()
+                    .map(|p| PrefixMatch {
+                        prefix: p.prefix,
+                        masklength_range: p.masklength_range,
+                    })
+                    .collect(),
+            }),
+        ),
+        DefinedSetData::AsPathSet(patterns) => Some(
+            super::proto::defined_set_info::SetData::AsPathSet(AsPathSetData { patterns }),
+        ),
+        DefinedSetData::CommunitySet(communities) => Some(
+            super::proto::defined_set_info::SetData::CommunitySet(CommunitySetData { communities }),
+        ),
+        DefinedSetData::NeighborSet(addresses) => Some(
+            super::proto::defined_set_info::SetData::NeighborSet(NeighborSetData { addresses }),
+        ),
+    };
+
+    DefinedSetInfo {
+        set_type: info.set_type,
+        name: info.name,
+        set_data,
+    }
+}
+
+fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
+    use super::proto::{ActionsConfig, ConditionsConfig, MatchSetRef, StatementInfo};
+
+    let statements = info
+        .statements
+        .into_iter()
+        .map(|s| {
+            let conditions = s.conditions.map(|c| ConditionsConfig {
+                match_prefix_set: c.match_prefix_set.map(|(name, opt)| MatchSetRef {
+                    set_name: name,
+                    match_option: opt,
+                }),
+                match_neighbor_set: c.match_neighbor_set.map(|(name, opt)| MatchSetRef {
+                    set_name: name,
+                    match_option: opt,
+                }),
+                match_as_path_set: c.match_as_path_set.map(|(name, opt)| MatchSetRef {
+                    set_name: name,
+                    match_option: opt,
+                }),
+                match_community_set: c.match_community_set.map(|(name, opt)| MatchSetRef {
+                    set_name: name,
+                    match_option: opt,
+                }),
+                prefix: c.prefix,
+                neighbor: c.neighbor,
+            });
+
+            let actions = s.actions.map(|a| ActionsConfig {
+                accept: a.accept,
+                reject: a.reject,
+                local_pref: a.local_pref,
+                med: a.med,
+                add_communities: a.add_communities,
+                remove_communities: a.remove_communities,
+            });
+
+            StatementInfo {
+                conditions,
+                actions,
+            }
+        })
+        .collect();
+
+    PolicyInfo {
+        name: info.name,
+        statements,
     }
 }

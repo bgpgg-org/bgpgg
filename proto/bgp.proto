@@ -22,6 +22,15 @@ service BgpService {
     rpc AddBmpServer(AddBmpServerRequest) returns (AddBmpServerResponse);
     rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);
     rpc ListBmpServers(ListBmpServersRequest) returns (ListBmpServersResponse);
+
+    // Policy management
+    rpc AddDefinedSet(AddDefinedSetRequest) returns (AddDefinedSetResponse);
+    rpc DeleteDefinedSet(DeleteDefinedSetRequest) returns (DeleteDefinedSetResponse);
+    rpc ListDefinedSet(ListDefinedSetRequest) returns (stream DefinedSetInfo);
+    rpc AddPolicy(AddPolicyRequest) returns (AddPolicyResponse);
+    rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+    rpc ListPolicy(ListPolicyRequest) returns (stream PolicyInfo);
+    rpc SetPolicyAssignment(SetPolicyAssignmentRequest) returns (SetPolicyAssignmentResponse);
 }
 
 message GetServerInfoRequest {}
@@ -265,4 +274,154 @@ message ListBmpServersRequest {}
 
 message ListBmpServersResponse {
     repeated string addresses = 1;
+}
+
+// ============================================================================
+// Policy Management
+// ============================================================================
+
+// Defined Set Management
+message AddDefinedSetRequest {
+    DefinedSetConfig set = 1;
+    bool replace = 2;  // If true, replace existing set
+}
+
+message AddDefinedSetResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message DeleteDefinedSetRequest {
+    string set_type = 1;  // "prefix-set", "as-path-set", "community-set", "neighbor-set"
+    string name = 2;
+    bool all = 3;  // Delete all sets of this type
+}
+
+message DeleteDefinedSetResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListDefinedSetRequest {
+    optional string set_type = 1;  // Filter by type, empty = all types
+    optional string name = 2;      // Filter by name
+}
+
+message DefinedSetInfo {
+    string set_type = 1;
+    string name = 2;
+    oneof set_data {
+        PrefixSetData prefix_set = 3;
+        AsPathSetData as_path_set = 4;
+        CommunitySetData community_set = 5;
+        NeighborSetData neighbor_set = 6;
+    }
+}
+
+message PrefixSetData {
+    repeated PrefixMatch prefixes = 1;
+}
+
+message PrefixMatch {
+    string prefix = 1;
+    optional string masklength_range = 2;
+}
+
+message AsPathSetData {
+    repeated string patterns = 1;
+}
+
+message CommunitySetData {
+    repeated string communities = 1;
+}
+
+message NeighborSetData {
+    repeated string addresses = 1;
+}
+
+// For AddDefinedSetRequest
+message DefinedSetConfig {
+    string set_type = 1;
+    string name = 2;
+    oneof config {
+        PrefixSetData prefix_set = 3;
+        AsPathSetData as_path_set = 4;
+        CommunitySetData community_set = 5;
+        NeighborSetData neighbor_set = 6;
+    }
+}
+
+// Policy Management
+message AddPolicyRequest {
+    string name = 1;
+    repeated StatementConfig statements = 2;
+}
+
+message AddPolicyResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message StatementConfig {
+    optional ConditionsConfig conditions = 1;
+    optional ActionsConfig actions = 2;
+}
+
+message ConditionsConfig {
+    optional MatchSetRef match_prefix_set = 1;
+    optional MatchSetRef match_neighbor_set = 2;
+    optional MatchSetRef match_as_path_set = 3;
+    optional MatchSetRef match_community_set = 4;
+    optional string prefix = 5;  // Direct prefix match
+    optional string neighbor = 6;  // Direct neighbor match
+}
+
+message MatchSetRef {
+    string set_name = 1;
+    string match_option = 2;  // "any", "all", "invert"
+}
+
+message ActionsConfig {
+    optional bool accept = 1;
+    optional bool reject = 2;
+    optional uint32 local_pref = 3;
+    optional uint32 med = 4;
+    repeated string add_communities = 5;
+    repeated string remove_communities = 6;
+}
+
+message DeletePolicyRequest {
+    string name = 1;
+}
+
+message DeletePolicyResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListPolicyRequest {
+    optional string name = 1;  // Filter by name
+}
+
+message PolicyInfo {
+    string name = 1;
+    repeated StatementInfo statements = 2;
+}
+
+message StatementInfo {
+    ConditionsConfig conditions = 1;
+    ActionsConfig actions = 2;
+}
+
+// Policy Assignment
+message SetPolicyAssignmentRequest {
+    string peer_address = 1;
+    string direction = 2;  // "import" or "export"
+    repeated string policy_names = 3;
+    optional string default_action = 4;  // "accept" or "reject"
+}
+
+message SetPolicyAssignmentResponse {
+    bool success = 1;
+    string message = 2;
 }
