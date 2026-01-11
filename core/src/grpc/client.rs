@@ -18,7 +18,8 @@ use super::proto::{
     DefinedSetInfo, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
     ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
     ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
-    RemovePeerRequest, RemoveRouteRequest, Route, SessionConfig, StatementConfig,
+    RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest, Route,
+    SessionConfig, SetPolicyAssignmentRequest, StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -483,5 +484,69 @@ impl BgpClient {
             .await?
             .into_inner()
             .sets)
+    }
+
+    /// Remove a defined set
+    pub async fn remove_defined_set(
+        &mut self,
+        set_type: String,
+        name: String,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .remove_defined_set(RemoveDefinedSetRequest {
+                set_type,
+                name,
+                all: false,
+            })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Remove a policy
+    pub async fn remove_policy(&mut self, name: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .remove_policy(RemovePolicyRequest { name })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Set policy assignment for a peer
+    pub async fn set_policy_assignment(
+        &mut self,
+        peer_address: String,
+        direction: String,
+        policy_names: Vec<String>,
+        default_action: Option<String>,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .set_policy_assignment(SetPolicyAssignmentRequest {
+                peer_address,
+                direction,
+                policy_names,
+                default_action,
+            })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
     }
 }
