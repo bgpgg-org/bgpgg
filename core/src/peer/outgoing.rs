@@ -18,11 +18,12 @@ use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::bgp::utils::IpNetwork;
+use crate::log::Logger;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::Policy;
 use crate::rib::{Path, RouteSource};
-use crate::{error, info};
+use crate::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -171,6 +172,7 @@ pub fn send_withdrawals_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
+    logger: &Arc<Logger>,
 ) {
     if to_withdraw.is_empty() {
         return;
@@ -178,9 +180,9 @@ pub fn send_withdrawals_to_peer(
 
     let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
-        error!("failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+        error!(logger, "failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
     } else {
-        info!("propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
+        info!(logger, "propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
     }
 }
 
@@ -240,8 +242,44 @@ fn build_export_next_hop(
     }
 }
 
+/// Compute filtered and transformed routes for a peer
+/// Returns Vec of (prefix, transformed_path) ready to advertise
+pub fn compute_routes_for_peer(
+    to_announce: &[(IpNetwork, Arc<Path>)],
+    local_asn: u16,
+    peer_asn: u16,
+    local_router_id: Ipv4Addr,
+    export_policy: &Policy,
+) -> Vec<(IpNetwork, Path)> {
+    // Apply well-known community filtering BEFORE export policy
+    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
+    to_announce
+        .iter()
+        .filter_map(|(prefix, path)| {
+            if should_filter_by_community(&path.communities, local_asn, peer_asn) {
+                return None;
+            }
+            // Clone inner Path for policy mutation
+            let mut path_mut = (**path).clone();
+            if !export_policy.accept(prefix, &mut path_mut) {
+                return None;
+            }
+
+            // Apply export attribute transformations
+            path_mut.as_path = build_export_as_path(&path_mut, local_asn, peer_asn);
+            path_mut.next_hop =
+                build_export_next_hop(&path_mut, local_router_id, local_asn, peer_asn);
+            path_mut.local_pref = build_export_local_pref(&path_mut, local_asn, peer_asn);
+            path_mut.med = build_export_med(&path_mut, local_asn, peer_asn);
+
+            Some((*prefix, path_mut))
+        })
+        .collect()
+}
+
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
+#[allow(clippy::too_many_arguments)]
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
@@ -250,41 +288,40 @@ pub fn send_announcements_to_peer(
     peer_asn: u16,
     local_router_id: Ipv4Addr,
     export_policy: &Policy,
+    logger: &Arc<Logger>,
 ) {
     if to_announce.is_empty() {
         return;
     }
 
-    // Apply well-known community filtering BEFORE export policy
-    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
-    let filtered: Vec<(IpNetwork, Arc<Path>)> = to_announce
-        .iter()
-        .filter_map(|(prefix, path)| {
-            if should_filter_by_community(&path.communities, local_asn, peer_asn) {
-                return None;
-            }
-            // Clone inner Path for policy mutation
-            let mut path_mut = (**path).clone();
-            if export_policy.accept(prefix, &mut path_mut) {
-                Some((*prefix, Arc::new(path_mut)))
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Compute filtered and transformed routes
+    let filtered = compute_routes_for_peer(
+        to_announce,
+        local_asn,
+        peer_asn,
+        local_router_id,
+        export_policy,
+    );
 
     if filtered.is_empty() {
         return;
     }
 
-    let batches = batch_announcements_by_path(&filtered);
+    // Convert back to Arc<Path> for batching
+    let filtered_arc: Vec<(IpNetwork, Arc<Path>)> = filtered
+        .into_iter()
+        .map(|(prefix, path)| (prefix, Arc::new(path)))
+        .collect();
+
+    let batches = batch_announcements_by_path(&filtered_arc);
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
-        let as_path_segments = build_export_as_path(&batch.path, local_asn, peer_asn);
-        let next_hop = build_export_next_hop(&batch.path, local_router_id, local_asn, peer_asn);
-        let local_pref = build_export_local_pref(&batch.path, local_asn, peer_asn);
-        let med = build_export_med(&batch.path, local_asn, peer_asn);
+        // Attributes already transformed in compute_routes_for_peer
+        let as_path_segments = batch.path.as_path.clone();
+        let next_hop = batch.path.next_hop;
+        let local_pref = batch.path.local_pref;
+        let med = batch.path.med;
         let atomic_aggregate = batch.path.atomic_aggregate;
 
         // RFC 4271 Section 6.3: only propagate transitive unknown attributes
@@ -296,7 +333,12 @@ pub fn send_announcements_to_peer(
             .cloned()
             .collect();
 
-        info!("exporting route", "peer_ip" => peer_addr.to_string(), "path_local_pref" => format!("{:?}", batch.path.local_pref), "export_local_pref" => format!("{:?}", local_pref), "path_med" => format!("{:?}", batch.path.med), "export_med" => format!("{:?}", med));
+        debug!(logger, "exporting route",
+            "peer_ip" => peer_addr.to_string(),
+            "path_local_pref" => format!("{:?}", batch.path.local_pref),
+            "export_local_pref" => format!("{:?}", local_pref),
+            "path_med" => format!("{:?}", batch.path.med),
+            "export_med" => format!("{:?}", med));
 
         let update_msg = UpdateMessage::new(
             batch.path.origin,
@@ -313,20 +355,18 @@ pub fn send_announcements_to_peer(
         // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            error!(
-                "UPDATE message exceeds maximum size, not advertising",
+            warn!(logger, "UPDATE message exceeds maximum size, not advertising",
                 "peer_ip" => peer_addr.to_string(),
                 "prefix_count" => batch.prefixes.len(),
                 "size" => serialized.len(),
-                "max_size" => MAX_MESSAGE_SIZE
-            );
+                "max_size" => MAX_MESSAGE_SIZE);
             continue;
         }
 
         if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
-            error!("failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+            error!(logger, "failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
         } else {
-            info!("propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
+            info!(logger, "propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
         }
     }
 }
@@ -734,6 +774,7 @@ mod tests {
         let routes = vec![(prefix, Arc::new(path))];
 
         // Send announcements - should skip due to size
+        let logger = Arc::new(Logger::default());
         send_announcements_to_peer(
             peer_addr,
             &tx,
@@ -742,6 +783,7 @@ mod tests {
             65001,
             Ipv4Addr::new(1, 1, 1, 1),
             &policy,
+            &logger,
         );
 
         // Verify no message was sent

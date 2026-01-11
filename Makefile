@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt release setup
+.PHONY: all build clean run test fmt release setup loadtest
 
 all: build
 
@@ -19,7 +19,12 @@ run: setup
 
 test: setup
 	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test
+	cargo test --workspace --exclude loadtests
 
 fmt:
 	cargo fmt
+
+loadtest: setup
+	@echo "Building bgpggd and running load tests..."
+	cargo build --bin bgpggd
+	cargo test -p loadtests --release -- --nocapture --test-threads=1

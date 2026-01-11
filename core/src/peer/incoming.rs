@@ -37,7 +37,7 @@ impl Peer {
             if let Some(leftmost_as) = update_msg.leftmost_as() {
                 if let Some(peer_asn) = self.asn {
                     if leftmost_as != peer_asn {
-                        warn!("AS_PATH first AS does not match peer AS",
+                        warn!(&self.logger, "AS_PATH first AS does not match peer AS",
                               "peer_ip" => self.addr.to_string(), "leftmost_as" => leftmost_as, "peer_asn" => peer_asn);
                         return Err(BgpError::UpdateMessageError(
                             UpdateMessageError::MalformedASPath,
@@ -56,7 +56,7 @@ impl Peer {
     fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
         let mut withdrawn = Vec::new();
         for prefix in update_msg.withdrawn_routes() {
-            info!("withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string());
+            info!(&self.logger, "withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string());
             self.rib_in.remove_route(*prefix);
             withdrawn.push(*prefix);
         }
@@ -75,12 +75,12 @@ impl Peer {
         }
         match setting.action {
             MaxPrefixAction::Terminate => {
-                warn!("max prefix limit exceeded",
+                warn!(&self.logger, "max prefix limit exceeded",
                       "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached))
             }
             MaxPrefixAction::Discard => {
-                warn!("max prefix limit reached, discarding new prefixes",
+                warn!(&self.logger, "max prefix limit reached, discarding new prefixes",
                       "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
                 Ok(false)
             }
@@ -105,14 +105,14 @@ impl Peer {
 
         let Some(path) = Path::from_update_msg(update_msg, source) else {
             if !update_msg.nlri_list().is_empty() {
-                warn!("UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => self.addr.to_string());
+                warn!(&self.logger, "UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => self.addr.to_string());
             }
             return Ok(announced);
         };
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
         if path.next_hop == self.fsm.local_addr() {
-            warn!("rejecting UPDATE: NEXT_HOP is local address",
+            warn!(&self.logger, "rejecting UPDATE: NEXT_HOP is local address",
                   "next_hop" => path.next_hop.to_string(), "peer" => &self.addr);
             return Ok(announced);
         }
@@ -121,7 +121,7 @@ impl Peer {
         let path_arc = Arc::new(path);
 
         for prefix in update_msg.nlri_list() {
-            info!("adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path_arc.med));
+            info!(&self.logger, "adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path_arc.med));
             self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
             announced.push((*prefix, Arc::clone(&path_arc)));
         }

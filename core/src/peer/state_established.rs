@@ -14,7 +14,6 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg::read_bgp_message;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
@@ -76,7 +75,7 @@ impl Peer {
                         && self.consecutive_down_count > 0
                     {
                         self.consecutive_down_count = 0;
-                        debug!("reset damping counter after stable connection",
+                        debug!(&self.logger, "reset damping counter after stable connection",
                             "peer_ip" => self.addr.to_string());
                     }
                 }
@@ -128,23 +127,29 @@ impl Peer {
             };
 
             tokio::select! {
-                result = read_bgp_message(&mut conn.rx) => {
+                result = conn.msg_rx.recv() => {
                     match result {
-                        Ok(message) => {
+                        Some(Ok(message)) => {
                             if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                error!("error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                 return false;
                             }
                         }
-                        Err(e) => {
-                            error!("error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                        Some(Err(e)) => {
+                            error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
                                 self.disconnect(true, PeerDownReason::LocalNotification(notif));
                             } else {
                                 self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             }
+                            return false;
+                        }
+                        None => {
+                            // Read task exited without error - connection failure
+                            error!(&self.logger, "read task exited unexpectedly", "peer_ip" => peer_ip.to_string());
+                            self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
                     }
@@ -160,7 +165,7 @@ impl Peer {
                             if can_send {
                                 // Send immediately
                                 if let Err(e) = self.send_update(update_msg).await {
-                                    error!("failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                    error!(&self.logger, "failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                     self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                                     return false;
                                 }
@@ -180,13 +185,13 @@ impl Peer {
                             let _ = response.send(routes);
                         }
                         PeerOp::Shutdown(subcode) => {
-                            info!("shutdown requested", "peer_ip" => peer_ip.to_string());
+                            info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
                         PeerOp::ManualStop => {
-                            info!("ManualStop received", "peer_ip" => peer_ip.to_string());
+                            info!(&self.logger, "ManualStop received", "peer_ip" => peer_ip.to_string());
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
                         }
@@ -203,7 +208,7 @@ impl Peer {
                 _ = timer_interval.tick() => {
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
-                        error!("hold timer expired", "peer_ip" => peer_ip.to_string());
+                        error!(&self.logger, "hold timer expired", "peer_ip" => peer_ip.to_string());
                         self.try_process_event(&FsmEvent::HoldTimerExpires).await;
                         return false;
                     }
@@ -211,7 +216,7 @@ impl Peer {
                     // Keepalive timer check
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
-                            error!("failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(&self.logger, "failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
@@ -223,7 +228,7 @@ impl Peer {
                     let updates = mem::take(&mut self.pending_updates);
                     for update in updates {
                         if let Err(e) = self.send_update(update).await {
-                            error!("failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(&self.logger, "failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                             return false;
                         }

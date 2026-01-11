@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg::{read_bgp_message, BgpMessage};
+use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::types::PeerDownReason;
 use crate::{debug, error};
@@ -32,7 +32,7 @@ impl Peer {
 
             tokio::select! {
                 _ = tokio::time::sleep(retry_time) => {
-                    debug!("ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
+                    debug!(&self.logger, "ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
@@ -57,10 +57,10 @@ impl Peer {
         let mut timer_interval = tokio::time::interval(Duration::from_millis(100));
 
         tokio::select! {
-            result = read_bgp_message(&mut conn.rx) => {
+            result = conn.msg_rx.recv() => {
                 match result {
-                    Ok(BgpMessage::Open(open)) => {
-                        debug!("OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
+                    Some(Ok(BgpMessage::Open(open))) => {
+                        debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
                         self.fsm.timers.stop_delay_open_timer();
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
                             peer_asn: open.asn,
@@ -70,19 +70,19 @@ impl Peer {
                             peer_bgp_id: open.bgp_identifier,
                         });
                         if let Err(e) = self.process_event(&event).await {
-                            error!("failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            error!(&self.logger, "failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                             self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
-                    Ok(BgpMessage::Notification(notif)) => {
+                    Some(Ok(BgpMessage::Notification(notif))) => {
                         self.handle_notification_received(&notif).await;
                     }
-                    Ok(_) => {
-                        error!("unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
+                    Some(Ok(_)) => {
+                        error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
-                    Err(e) => {
-                        debug!("connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                    Some(Err(e)) => {
+                        debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                             match notif.error() {
                                 BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
@@ -94,13 +94,18 @@ impl Peer {
                         };
                         self.try_process_event(&event).await;
                     }
+                    None => {
+                        // Read task exited without error - connection failure
+                        debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
+                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
+                    }
                 }
             }
             _ = timer_interval.tick() => {
                 if self.fsm.timers.delay_open_timer_expired() {
-                    debug!("DelayOpen timer expired", "peer_ip" => self.addr.to_string());
+                    debug!(&self.logger, "DelayOpen timer expired", "peer_ip" => self.addr.to_string());
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
-                        error!("failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
                         self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::DelayOpenTimerExpires));
                     }
                 }
@@ -111,7 +116,7 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        debug!("closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
                         drop(tcp_tx);
                         drop(tcp_rx);
                     }

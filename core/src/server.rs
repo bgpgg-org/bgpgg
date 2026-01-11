@@ -20,6 +20,7 @@ use crate::bgp::utils::IpNetwork;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
+use crate::log::Logger;
 use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
 use crate::peer::outgoing::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
@@ -152,10 +153,20 @@ pub enum MgmtOp {
         response: oneshot::Sender<Option<GetPeerResponse>>,
     },
     GetRoutes {
-        response: oneshot::Sender<Vec<Route>>,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        response: oneshot::Sender<Result<Vec<Route>, String>>,
+    },
+    GetRoutesStream {
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        tx: mpsc::UnboundedSender<Route>,
+    },
+    GetPeersStream {
+        tx: mpsc::UnboundedSender<GetPeersResponse>,
     },
     GetServerInfo {
-        response: oneshot::Sender<(Ipv4Addr, u16)>,
+        response: oneshot::Sender<(Ipv4Addr, u16, u64)>,
     },
     AddBmpServer {
         addr: SocketAddr,
@@ -344,6 +355,7 @@ pub struct BgpServer {
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
+    pub(crate) logger: Arc<Logger>,
 }
 
 impl BgpServer {
@@ -359,9 +371,12 @@ impl BgpServer {
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
 
+        let log_level = config.parse_log_level();
+        let logger = Arc::new(Logger::new(log_level));
+
         Ok(BgpServer {
             peers: HashMap::new(),
-            loc_rib: LocRib::new(),
+            loc_rib: LocRib::new(logger.clone()),
             config,
             local_bgp_id,
             local_addr,
@@ -371,6 +386,7 @@ impl BgpServer {
             op_tx,
             op_rx,
             bmp_tasks: HashMap::new(),
+            logger,
         })
     }
 
@@ -396,7 +412,7 @@ impl BgpServer {
 
         // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
         if peer.state == BgpState::Established && !peer.config.collision_detect_established_state {
-            info!("collision: ignoring in Established state", "peer_ip" => peer_ip.to_string());
+            info!(&self.logger, "collision: ignoring in Established state", "peer_ip" => peer_ip.to_string());
             return true; // Reject new connection
         }
 
@@ -409,12 +425,12 @@ impl BgpServer {
         };
 
         if dominated {
-            info!("collision: rejecting new connection", "peer_ip" => peer_ip.to_string());
+            info!(&self.logger, "collision: rejecting new connection", "peer_ip" => peer_ip.to_string());
             return true; // Reject new connection
         }
 
         // We win: close existing connection, accept new
-        info!("collision: closing existing", "peer_ip" => peer_ip.to_string());
+        info!(&self.logger, "collision: closing existing", "peer_ip" => peer_ip.to_string());
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if let Some(tx) = peer.peer_tx.take() {
                 let _ = tx.send(PeerOp::Shutdown(
@@ -426,7 +442,7 @@ impl BgpServer {
     }
 
     pub async fn run(mut self) -> Result<(), ServerError> {
-        info!("BGP server starting", "listen_addr" => &self.config.listen_addr);
+        info!(&self.logger, "BGP server starting", "listen_addr" => &self.config.listen_addr);
 
         let listener = TcpListener::bind(&self.config.listen_addr)
             .await
@@ -461,7 +477,7 @@ impl BgpServer {
     fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
         for peer_cfg in &self.config.peers.clone() {
             let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
-                error!("invalid peer address in config", "addr" => &peer_cfg.address);
+                error!(&self.logger, "invalid peer address in config", "addr" => &peer_cfg.address);
                 continue;
             };
             let peer_ip = peer_addr.ip();
@@ -482,14 +498,14 @@ impl BgpServer {
                     let _ = peer_tx.send(PeerOp::AutomaticStart);
                 }
             }
-            info!("configured peer", "peer_ip" => peer_ip.to_string(), "passive" => passive);
+            info!(&self.logger, "configured peer", "peer_ip" => peer_ip.to_string(), "passive" => passive);
         }
     }
 
     fn init_configured_bmp_servers(&mut self) {
         for bmp_cfg in &self.config.bmp_servers.clone() {
             let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() else {
-                error!("invalid BMP server address in config", "addr" => &bmp_cfg.address);
+                error!(&self.logger, "invalid BMP server address in config", "addr" => &bmp_cfg.address);
                 continue;
             };
 
@@ -497,7 +513,7 @@ impl BgpServer {
             let task_info = BmpTaskInfo::new(addr, bmp_cfg.statistics_timeout, task_tx);
             self.bmp_tasks.insert(addr, task_info);
 
-            info!("configured BMP server", "addr" => addr.to_string());
+            info!(&self.logger, "configured BMP server", "addr" => addr.to_string());
         }
     }
 
@@ -521,6 +537,7 @@ impl BgpServer {
             bind_addr,
             config,
             self.config.connect_retry_secs,
+            self.logger.clone(),
         );
 
         tokio::spawn(async move {
@@ -532,14 +549,14 @@ impl BgpServer {
 
     async fn accept_peer(&mut self, mut stream: TcpStream) {
         let Some(peer_ip) = peer_ip(&stream) else {
-            error!("failed to get peer address");
+            error!(&self.logger, "failed to get peer address");
             return;
         };
 
-        info!("new peer connection", "peer_ip" => peer_ip.to_string());
+        info!(&self.logger, "new peer connection", "peer_ip" => peer_ip.to_string());
 
         if !self.should_accept_peer(peer_ip) {
-            info!("rejecting unconfigured peer", "peer_ip" => peer_ip.to_string());
+            info!(&self.logger, "rejecting unconfigured peer", "peer_ip" => peer_ip.to_string());
             let notif = NotificationMessage::new(
                 BgpError::Cease(CeaseSubcode::ConnectionRejected),
                 Vec::new(),
@@ -553,7 +570,7 @@ impl BgpServer {
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if peer.state == BgpState::OpenSent && peer.bgp_id.is_none() {
                 peer.pending_incoming = Some(stream);
-                info!("collision: deferring resolution until OPEN received", "peer_ip" => peer_ip.to_string());
+                info!(&self.logger, "collision: deferring resolution until OPEN received", "peer_ip" => peer_ip.to_string());
                 return;
             }
         }
@@ -563,7 +580,7 @@ impl BgpServer {
         }
 
         self.accept_incoming_connection(stream, peer_ip);
-        info!("peer added", "peer_ip" => peer_ip.to_string(), "state" => "Idle", "total_peers" => self.peers.len());
+        info!(&self.logger, "peer added", "peer_ip" => peer_ip.to_string(), "state" => "Idle", "total_peers" => self.peers.len());
     }
 
     /// Accept an incoming TCP connection and create/update peer entry.
@@ -606,7 +623,7 @@ impl BgpServer {
     ) -> Option<mpsc::UnboundedSender<PeerOp>> {
         // RFC 4271 8.1.1: AllowAutomaticStart must be true for automatic events
         if !config.allow_automatic_start() {
-            info!("rejecting incoming: AllowAutomaticStart is false", "peer_ip" => peer_ip.to_string());
+            info!(&self.logger, "rejecting incoming: AllowAutomaticStart is false", "peer_ip" => peer_ip.to_string());
             return None;
         }
 
@@ -640,7 +657,7 @@ impl BgpServer {
     ) -> mpsc::UnboundedSender<Arc<BmpOp>> {
         let (task_tx, task_rx) = mpsc::unbounded_channel();
 
-        let destination = BmpDestination::TcpClient(BmpTcpClient::new(addr));
+        let destination = BmpDestination::TcpClient(BmpTcpClient::new(addr, self.logger.clone()));
 
         let task = BmpTask::new(
             addr,
@@ -648,6 +665,7 @@ impl BgpServer {
             task_rx,
             self.op_tx.clone(),
             statistics_timeout,
+            self.logger.clone(),
         );
 
         let sys_name = self.config.sys_name();
@@ -707,7 +725,7 @@ impl BgpServer {
 
             // Export policy should always be Some for Established peers
             if let Some(export_policy) = entry.policy_out() {
-                send_withdrawals_to_peer(*peer_addr, peer_tx, &to_withdraw);
+                send_withdrawals_to_peer(*peer_addr, peer_tx, &to_withdraw, &self.logger);
                 send_announcements_to_peer(
                     *peer_addr,
                     peer_tx,
@@ -716,9 +734,10 @@ impl BgpServer {
                     peer_asn,
                     self.local_addr,
                     export_policy,
+                    &self.logger,
                 );
             } else {
-                error!("export policy not set for established peer", "peer_ip" => peer_addr.to_string());
+                error!(&self.logger, "export policy not set for established peer", "peer_ip" => peer_addr.to_string());
             }
         }
     }

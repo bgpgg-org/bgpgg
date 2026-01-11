@@ -44,7 +44,7 @@ impl Peer {
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
         self.statistics.open_sent += 1;
-        info!("sent OPEN message", "peer_ip" => self.addr.to_string());
+        info!(&self.logger, "sent OPEN message", "peer_ip" => self.addr.to_string());
         Ok(())
     }
 
@@ -81,7 +81,7 @@ impl Peer {
             self.fsm.timers.stop_hold_timer();
         }
 
-        info!("timers initialized", "peer_ip" => self.addr.to_string(), "hold_time" => hold_time);
+        info!(&self.logger, "timers initialized", "peer_ip" => self.addr.to_string(), "hold_time" => hold_time);
 
         // Notify server that handshake is complete
         let _ = self.server_tx.send(ServerOp::PeerHandshakeComplete {
@@ -101,7 +101,7 @@ impl Peer {
         let keepalive_msg = KeepAliveMessage {};
         conn.tx.write_all(&keepalive_msg.serialize()).await?;
         self.statistics.keepalive_sent += 1;
-        debug!("sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
+        debug!(&self.logger, "sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
         // RFC 4271: Restart KeepaliveTimer unless negotiated HoldTime is zero
         if self.fsm.timers.hold_time.as_secs() > 0 {
             self.fsm.timers.start_keepalive_timer();
@@ -119,14 +119,14 @@ impl Peer {
         notif_msg: NotificationMessage,
     ) -> Result<(), io::Error> {
         if !self.can_send_notification() {
-            warn!("skipping NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
+            warn!(&self.logger, "skipping NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
             return Ok(());
         }
         // Safe: can_send_notification checks conn.is_some()
         let conn = self.conn.as_mut().unwrap();
         conn.tx.write_all(&notif_msg.serialize()).await?;
         self.statistics.notification_sent += 1;
-        warn!("sent NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
+        warn!(&self.logger, "sent NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
         Ok(())
     }
 
@@ -181,19 +181,19 @@ impl Peer {
         match message {
             BgpMessage::Open(open_msg) => {
                 self.statistics.open_received += 1;
-                info!("received OPEN from peer", "peer_ip" => self.addr.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
+                info!(&self.logger, "received OPEN from peer", "peer_ip" => self.addr.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
             }
             BgpMessage::Update(_) => {
                 self.statistics.update_received += 1;
-                info!("received UPDATE", "peer_ip" => self.addr.to_string());
+                info!(&self.logger, "received UPDATE", "peer_ip" => self.addr.to_string());
             }
             BgpMessage::KeepAlive(_) => {
                 self.statistics.keepalive_received += 1;
-                debug!("received KEEPALIVE", "peer_ip" => self.addr.to_string());
+                debug!(&self.logger, "received KEEPALIVE", "peer_ip" => self.addr.to_string());
             }
             BgpMessage::Notification(notif_msg) => {
                 self.statistics.notification_received += 1;
-                warn!("received NOTIFICATION", "peer_ip" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
+                warn!(&self.logger, "received NOTIFICATION", "peer_ip" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
             }
         }
     }
@@ -252,7 +252,7 @@ impl Peer {
                         .await?;
                         Ok(None)
                     } else {
-                        warn!("max prefix exceeded but allow_automatic_stop=false, continuing",
+                        warn!(&self.logger, "max prefix exceeded but allow_automatic_stop=false, continuing",
                               "peer_ip" => self.addr.to_string());
                         Ok(None)
                     }

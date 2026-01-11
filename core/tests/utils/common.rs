@@ -231,7 +231,7 @@ pub async fn start_test_server(config: Config) -> TestServer {
     let mut bgp_port = 0;
     for _ in 0..50 {
         match client.get_server_info().await {
-            Ok((_, port)) if port > 0 => {
+            Ok((_, port, _)) if port > 0 => {
                 bgp_port = port;
                 break;
             }
@@ -1035,6 +1035,24 @@ pub async fn poll_peers(server: &TestServer, expected_peers: Vec<Peer>) {
         "Timeout waiting for peers to match expected state",
     )
     .await;
+}
+
+/// Verify server info matches expected values
+pub async fn verify_server_info(
+    server: &TestServer,
+    expected_addr: Ipv4Addr,
+    expected_port: u16,
+    expected_num_routes: u64,
+) {
+    let (listen_addr, listen_port, num_routes) = server
+        .client
+        .get_server_info()
+        .await
+        .expect("Failed to get server info");
+
+    assert_eq!(listen_addr, expected_addr, "listen_addr mismatch");
+    assert_eq!(listen_port, expected_port, "listen_port mismatch");
+    assert_eq!(num_routes, expected_num_routes, "num_routes mismatch");
 }
 
 /// Fake BGP peer for testing error handling

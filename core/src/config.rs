@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::log::LogLevel;
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -153,6 +154,9 @@ pub struct Config {
     /// BMP sysDescr (RFC 7854). Defaults to "bgpgg version {VERSION}".
     #[serde(default)]
     pub sys_descr: Option<String>,
+    /// Log level: "error", "warn", "info" (default), "debug"
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_grpc_listen_addr() -> String {
@@ -165,6 +169,10 @@ fn default_hold_time() -> u64 {
 
 fn default_connect_retry_time() -> u64 {
     30 // RFC suggests 120s, but 30s is more practical
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 impl Config {
@@ -188,6 +196,7 @@ impl Config {
             bmp_servers: Vec::new(),
             sys_name: None,
             sys_descr: None,
+            log_level: default_log_level(),
         }
     }
 
@@ -203,6 +212,14 @@ impl Config {
         self.sys_descr
             .clone()
             .unwrap_or_else(|| format!("bgpgg version {}", env!("CARGO_PKG_VERSION")))
+    }
+
+    /// Parse log level from config string
+    pub fn parse_log_level(&self) -> LogLevel {
+        LogLevel::from_str(&self.log_level).unwrap_or_else(|e| {
+            eprintln!("Warning: {}. Defaulting to Info", e);
+            LogLevel::Info
+        })
     }
 
     /// Load configuration from a YAML file
@@ -241,6 +258,7 @@ impl Default for Config {
             bmp_servers: Vec::new(),
             sys_name: None,
             sys_descr: None,
+            log_level: default_log_level(),
         }
     }
 }

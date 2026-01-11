@@ -134,6 +134,7 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
     mut stream: R,
 ) -> Result<BgpMessage, ParserError> {
     let mut header_buffer = [0u8; BGP_HEADER_SIZE_BYTES];
+
     stream
         .read_exact(&mut header_buffer)
         .await

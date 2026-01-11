@@ -102,9 +102,10 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
         },
 
         GlobalCommands::Info => {
-            let (listen_addr, listen_port) = client.get_server_info().await?;
+            let (listen_addr, listen_port, num_routes) = client.get_server_info().await?;
             println!("BGP Server Information:");
             println!("  Listen Address: {}:{}", listen_addr, listen_port);
+            println!("  Routes in RIB: {}", num_routes);
         }
 
         GlobalCommands::Summary => {

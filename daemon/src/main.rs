@@ -15,9 +15,10 @@
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
+use bgpgg::log;
 use bgpgg::server::BgpServer;
-use bgpgg::{error, info};
 use clap::Parser;
+use serde_json::json;
 
 #[derive(Parser)]
 #[command(name = "bgpggd")]
@@ -34,18 +35,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load configuration
     let config = Config::from_file(&args.config).unwrap_or_else(|e| {
-        error!("failed to load config", "path" => &args.config, "error" => e.to_string());
-        info!("using default configuration");
+        eprintln!("Error: failed to load config from {}: {}", &args.config, e);
+        eprintln!("Info: using default configuration");
         Config::default()
     });
 
     let grpc_addr = config.grpc_listen_addr.parse()?;
 
-    info!("starting BGP daemon",
-        "bgp_addr" => &config.listen_addr,
-        "grpc_addr" => &config.grpc_listen_addr,
-        "asn" => config.asn,
-        "router_id" => config.router_id.to_string()
+    println!(
+        "{}",
+        json!({
+            "timestamp": log::get_timestamp(),
+            "level": "INFO",
+            "message": "starting BGP daemon",
+            "bgp_addr": &config.listen_addr,
+            "grpc_addr": &config.grpc_listen_addr,
+            "asn": config.asn,
+            "router_id": config.router_id.to_string()
+        })
     );
 
     // Create BGP server
@@ -58,7 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {
-                error!("BGP server error", "error" => e.to_string());
+                eprintln!("{}", json!({
+                    "timestamp": log::get_timestamp(),
+                    "level": "ERROR",
+                    "message": "BGP server error",
+                    "error": e.to_string()
+                }));
             }
         },
 
@@ -66,7 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_service(BgpServiceServer::new(grpc_service))
             .serve(grpc_addr) => {
             if let Err(e) = result {
-                error!("gRPC server error", "error" => e.to_string());
+                eprintln!("{}", json!({
+                    "timestamp": log::get_timestamp(),
+                    "level": "ERROR",
+                    "message": "gRPC server error",
+                    "error": e.to_string()
+                }));
             }
         },
     }

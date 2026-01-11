@@ -16,16 +16,19 @@ use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
 use crate::bgp::utils::IpNetwork;
 use crate::config::PeerConfig;
-use crate::peer::outgoing::batch_announcements_by_path;
+use crate::peer::outgoing::{
+    batch_announcements_by_path, compute_routes_for_peer, should_propagate_to_peer,
+};
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::Policy;
-use crate::rib::{Path, Route};
+use crate::rib::{Path, Route, RouteSource};
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
     GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
 use crate::types::PeerDownReason;
 use crate::{error, info};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -83,11 +86,28 @@ impl BgpServer {
             MgmtOp::GetPeer { addr, response } => {
                 self.handle_get_peer(addr, response).await;
             }
-            MgmtOp::GetRoutes { response } => {
-                self.handle_get_routes(response);
+            MgmtOp::GetRoutes {
+                rib_type,
+                peer_address,
+                response,
+            } => {
+                self.handle_get_routes(rib_type, peer_address, response)
+                    .await;
+            }
+            MgmtOp::GetRoutesStream {
+                rib_type,
+                peer_address,
+                tx,
+            } => {
+                self.handle_get_routes_stream(rib_type, peer_address, tx)
+                    .await;
+            }
+            MgmtOp::GetPeersStream { tx } => {
+                self.handle_get_peers_stream(tx);
             }
             MgmtOp::GetServerInfo { response } => {
-                let _ = response.send((self.local_addr, self.local_port));
+                let num_routes = self.loc_rib.routes_len() as u64;
+                let _ = response.send((self.local_addr, self.local_port, num_routes));
             }
             MgmtOp::AddBmpServer {
                 addr,
@@ -111,7 +131,7 @@ impl BgpServer {
             ServerOp::PeerStateChanged { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.state = state;
-                    info!("peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                    info!(&self.logger, "peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
                 }
 
                 // Send BMP PeerUp when transitioning to Established
@@ -140,7 +160,7 @@ impl BgpServer {
                     peer.asn = Some(asn);
                     peer.import_policy = Some(Policy::default_in(self.config.asn));
                     peer.export_policy = Some(Policy::default_out(self.config.asn, asn));
-                    info!("peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                    info!(&self.logger, "peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
                 }
             }
             ServerOp::PeerUpdate {
@@ -161,7 +181,7 @@ impl BgpServer {
                         announced.clone(),
                         |prefix, path| policy.accept(prefix, path),
                     );
-                    info!("UPDATE processing complete", "peer_ip" => &peer_ip);
+                    info!(&self.logger, "UPDATE processing complete", "peer_ip" => &peer_ip);
 
                     // Propagate changed routes to other peers
                     if !changed_prefixes.is_empty() {
@@ -175,7 +195,7 @@ impl BgpServer {
                         );
                     }
                 } else {
-                    error!("received UPDATE before handshake complete", "peer_ip" => &peer_ip);
+                    error!(&self.logger, "received UPDATE before handshake complete", "peer_ip" => &peer_ip);
                 }
             }
             ServerOp::OpenReceived {
@@ -219,14 +239,14 @@ impl BgpServer {
                     // Configured peer: update state, Peer task handles reconnection internally
                     peer.state = BgpState::Idle;
                     peer.conn_info = None;
-                    info!("peer session ended", "peer_ip" => &peer_ip);
+                    info!(&self.logger, "peer session ended", "peer_ip" => &peer_ip);
                 } else {
                     // Unconfigured peer: stop task and remove entirely
                     if let Some(peer_tx) = peer.peer_tx.take() {
                         let _ = peer_tx.send(PeerOp::ManualStop);
                     }
                     self.peers.remove(&peer_ip);
-                    info!("unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                    info!(&self.logger, "unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
                 }
 
                 // Notify Loc-RIB about disconnection and get affected prefixes
@@ -274,11 +294,11 @@ impl BgpServer {
                 // Now we have BGP ID - reuse existing collision resolution logic
                 if self.resolve_collision(peer_ip, ConnectionType::Incoming) {
                     // Outgoing wins - drop pending incoming
-                    info!("collision: outgoing wins, dropping pending incoming", "peer_ip" => peer_ip.to_string());
+                    info!(&self.logger, "collision: outgoing wins, dropping pending incoming", "peer_ip" => peer_ip.to_string());
                     drop(pending_stream);
                 } else {
                     // Incoming wins - resolve_collision already closed outgoing
-                    info!("collision: incoming wins, switching connection", "peer_ip" => peer_ip.to_string());
+                    info!(&self.logger, "collision: incoming wins, switching connection", "peer_ip" => peer_ip.to_string());
                     self.accept_incoming_connection(pending_stream, peer_ip);
                 }
             }
@@ -292,7 +312,7 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
-        info!("adding peer via request", "peer_addr" => &addr);
+        info!(&self.logger, "adding peer via request", "peer_addr" => &addr);
 
         // Parse peer address
         let peer_addr = match addr.parse::<SocketAddr>() {
@@ -326,7 +346,7 @@ impl BgpServer {
             let _ = peer_tx.send(PeerOp::ManualStart);
         }
 
-        info!("peer added", "peer_ip" => peer_ip.to_string(), "passive" => config.passive_mode, "total_peers" => self.peers.len());
+        info!(&self.logger, "peer added", "peer_ip" => peer_ip.to_string(), "passive" => config.passive_mode, "total_peers" => self.peers.len());
         let _ = response.send(Ok(()));
     }
 
@@ -335,7 +355,7 @@ impl BgpServer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!("removing peer via request", "peer_ip" => &addr);
+        info!(&self.logger, "removing peer via request", "peer_ip" => &addr);
 
         // Parse the address to get IpAddr
         let peer_ip: IpAddr = match addr.parse() {
@@ -449,7 +469,7 @@ impl BgpServer {
         communities: Vec<u32>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!("adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+        info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
         self.loc_rib.add_local_route(
@@ -474,7 +494,7 @@ impl BgpServer {
         prefix: IpNetwork,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!("removing route via request", "prefix" => format!("{:?}", prefix));
+        info!(&self.logger, "removing route via request", "prefix" => format!("{:?}", prefix));
 
         // Remove local route from Loc-RIB
         let removed = self.loc_rib.remove_local_route(prefix);
@@ -535,9 +555,159 @@ impl BgpServer {
         }));
     }
 
-    fn handle_get_routes(&self, response: oneshot::Sender<Vec<Route>>) {
-        let routes = self.loc_rib.get_all_routes();
-        let _ = response.send(routes);
+    async fn handle_get_routes(
+        &self,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        response: oneshot::Sender<Result<Vec<Route>, String>>,
+    ) {
+        use crate::grpc::proto::RibType;
+
+        let rib_type_enum = match rib_type {
+            Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
+            None => RibType::Global,
+        };
+
+        let result = match rib_type_enum {
+            RibType::Global => Ok(self.loc_rib.get_all_routes()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
+            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+        };
+
+        let _ = response.send(result);
+    }
+
+    async fn handle_get_routes_stream(
+        &self,
+        rib_type: Option<i32>,
+        peer_address: Option<String>,
+        tx: mpsc::UnboundedSender<Route>,
+    ) {
+        use crate::grpc::proto::RibType;
+
+        let rib_type_enum = match rib_type {
+            Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
+            None => RibType::Global,
+        };
+
+        let routes = match rib_type_enum {
+            RibType::Global => Ok(self.loc_rib.get_all_routes()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
+            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+        };
+
+        if let Ok(routes) = routes {
+            for route in routes {
+                if tx.send(route).is_err() {
+                    break; // Client disconnected
+                }
+            }
+        }
+    }
+
+    async fn get_adj_rib_in(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+        use std::net::IpAddr;
+
+        let peer_addr = peer_address
+            .ok_or("peer_address required for ADJ_IN".to_string())?
+            .parse::<IpAddr>()
+            .map_err(|e| format!("invalid peer address: {}", e))?;
+
+        let peer_info = self
+            .peers
+            .get(&peer_addr)
+            .ok_or(format!("peer {} not found", peer_addr))?;
+
+        let peer_tx = peer_info
+            .peer_tx
+            .as_ref()
+            .ok_or("peer task not running".to_string())?;
+
+        // Reuse existing GetAdjRibIn operation
+        let (tx, rx) = oneshot::channel();
+        peer_tx
+            .send(PeerOp::GetAdjRibIn(tx))
+            .map_err(|_| "failed to send to peer".to_string())?;
+
+        rx.await.map_err(|_| "peer task closed".to_string())
+    }
+
+    fn compute_adj_rib_out(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+        let peer_addr = peer_address
+            .ok_or("peer_address required for ADJ_OUT".to_string())?
+            .parse::<IpAddr>()
+            .map_err(|e| format!("invalid peer address: {}", e))?;
+
+        let peer_info = self
+            .peers
+            .get(&peer_addr)
+            .ok_or(format!("peer {} not found", peer_addr))?;
+
+        let peer_asn = peer_info.asn.ok_or("peer ASN not set".to_string())?;
+
+        let export_policy = peer_info
+            .export_policy
+            .as_ref()
+            .ok_or("export policy not initialized".to_string())?;
+
+        // Build to_announce list from ALL loc_rib routes (same as propagation)
+        let mut to_announce = Vec::new();
+        for route in self.loc_rib.iter_routes() {
+            if let Some(best_path) = self.loc_rib.get_best_path(&route.prefix) {
+                // Extract originating_peer from path.source
+                let originating_peer = match best_path.source {
+                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => Some(addr),
+                    RouteSource::Local => None,
+                };
+
+                // Apply EXACT same check as propagation
+                if !should_propagate_to_peer(peer_addr, peer_info.state, originating_peer) {
+                    continue;
+                }
+
+                to_announce.push((route.prefix, best_path.clone()));
+            }
+        }
+
+        // Use EXACT same filtering + transformation logic
+        let filtered = compute_routes_for_peer(
+            &to_announce,
+            self.config.asn,
+            peer_asn,
+            self.config.router_id,
+            export_policy,
+        );
+
+        // Group by prefix for Route struct
+        let mut routes_map: HashMap<IpNetwork, Vec<Path>> = HashMap::new();
+        for (prefix, path) in filtered {
+            routes_map.entry(prefix).or_default().push(path);
+        }
+
+        let adj_out_routes: Vec<Route> = routes_map
+            .into_iter()
+            .map(|(prefix, paths)| Route {
+                prefix,
+                paths: paths.into_iter().map(Arc::new).collect(),
+            })
+            .collect();
+
+        Ok(adj_out_routes)
+    }
+
+    fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
+        for (addr, entry) in self.peers.iter() {
+            let peer = GetPeersResponse {
+                address: addr.to_string(),
+                asn: entry.asn,
+                state: entry.state,
+                admin_state: entry.admin_state,
+                configured: entry.configured,
+            };
+            if tx.send(peer).is_err() {
+                break;
+            }
+        }
     }
 
     fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
@@ -561,7 +731,7 @@ impl BgpServer {
         let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
         self.bmp_tasks.insert(addr, task_info);
 
-        info!("BMP task added", "addr" => &addr.to_string());
+        info!(&self.logger, "BMP task added", "addr" => &addr.to_string());
 
         // Send initial state to new BMP destination
         let established_peers = self.get_established_peers();
@@ -580,7 +750,7 @@ impl BgpServer {
     ) {
         if let Some(task_info) = self.bmp_tasks.remove(&addr) {
             drop(task_info.task_tx); // Channel drop triggers graceful shutdown
-            info!("BMP task removed", "addr" => &addr.to_string());
+            info!(&self.logger, "BMP task removed", "addr" => &addr.to_string());
             let _ = response.send(Ok(()));
         } else {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));

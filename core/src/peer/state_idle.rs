@@ -40,12 +40,12 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStartPassive) => {
-                        debug!("ManualStartPassive received", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "ManualStartPassive received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
                         self.try_process_event(&FsmEvent::ManualStartPassive).await;
                     }
                     Some(PeerOp::AutomaticStartPassive) => {
-                        debug!("AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
                         self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
                     }
                     Some(PeerOp::Shutdown(_)) => return true,
@@ -58,7 +58,7 @@ impl Peer {
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                        debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
                         drop(tcp_tx);
                         drop(tcp_rx);
                     }
@@ -68,7 +68,7 @@ impl Peer {
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
                 // RFC 4271 Event 13: IdleHoldTimer_Expires
-                debug!("IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
                 self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
             }
         }
@@ -85,12 +85,12 @@ impl Peer {
             op = self.peer_rx.recv() => {
                 match op {
                     Some(PeerOp::ManualStart) => {
-                        debug!("ManualStart received", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "ManualStart received", "peer_ip" => self.addr.to_string());
                         self.manually_stopped = false;
                         self.try_process_event(&FsmEvent::ManualStart).await;
                     }
                     Some(PeerOp::AutomaticStart) => {
-                        debug!("AutomaticStart received", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "AutomaticStart received", "peer_ip" => self.addr.to_string());
                         self.try_process_event(&FsmEvent::AutomaticStart).await;
                     }
                     Some(PeerOp::Shutdown(_)) => return true,
@@ -103,7 +103,7 @@ impl Peer {
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                        debug!("connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                        debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
                         drop(tcp_tx);
                         drop(tcp_rx);
                     }
@@ -113,7 +113,7 @@ impl Peer {
             }
             _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
                 // RFC 4271 Event 13: IdleHoldTimer_Expires
-                debug!("IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
                 self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
             }
         }

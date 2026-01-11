@@ -11,10 +11,13 @@ service BgpService {
     rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
     rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
     rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+    rpc ListPeersStream(ListPeersRequest) returns (stream Peer);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
     rpc AddRoute(AddRouteRequest) returns (AddRouteResponse);
+    rpc AddRouteStream(stream AddRouteRequest) returns (AddRouteStreamResponse);
     rpc RemoveRoute(RemoveRouteRequest) returns (RemoveRouteResponse);
     rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+    rpc ListRoutesStream(ListRoutesRequest) returns (stream Route);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
     rpc AddBmpServer(AddBmpServerRequest) returns (AddBmpServerResponse);
     rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);
@@ -26,6 +29,7 @@ message GetServerInfoRequest {}
 message GetServerInfoResponse {
     string listen_addr = 1;
     uint32 listen_port = 2;
+    uint64 num_routes = 3;  // Total number of routes in RIB
 }
 
 // Action when max prefix limit is reached
@@ -160,6 +164,11 @@ message AddRouteResponse {
     string message = 2;
 }
 
+message AddRouteStreamResponse {
+    uint64 count = 1;  // Number of routes successfully added
+    string message = 2;
+}
+
 // Remove route request/response
 message RemoveRouteRequest {
     string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
@@ -189,8 +198,18 @@ message AsPathSegment {
     repeated uint32 asns = 2;
 }
 
+// Table type for route queries
+enum RibType {
+    GLOBAL = 0;   // Global RIB (Loc-RIB)
+    ADJ_IN = 1;   // Per-peer Adj-RIB-In
+    ADJ_OUT = 2;  // Per-peer Adj-RIB-Out (computed on-demand)
+}
+
 // List routes request/response
-message ListRoutesRequest {}
+message ListRoutesRequest {
+    optional RibType rib_type = 1;  // Defaults to GLOBAL
+    optional string peer_address = 2;    // Required for ADJ_IN and ADJ_OUT
+}
 
 message ListRoutesResponse {
     repeated Route routes = 1;

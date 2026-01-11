@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::warn;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -99,7 +98,10 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
 
         // Semantic check: skip multicast prefixes (224.0.0.0/4)
         if net.is_multicast() {
-            warn!("ignoring multicast NLRI prefix", "prefix" => format!("{:?}", net));
+            eprintln!(
+                "Warning: ignoring multicast NLRI prefix, prefix={:?}",
+                format!("{:?}", net)
+            );
             cursor += byte_len;
             continue;
         }

@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -380,4 +380,323 @@ async fn test_get_bmp_servers_empty() {
 
     let servers = server.client.get_bmp_servers().await.unwrap();
     assert_eq!(servers.len(), 0);
+}
+
+#[tokio::test]
+async fn test_add_route_stream() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Initially no routes
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 0);
+
+    // Create multiple routes
+    let routes_to_add = vec![
+        (
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.1.0/24".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.2.0/24".to_string(),
+            "192.168.1.3".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+    ];
+
+    // Add routes using streaming API
+    let count = server.client.add_route_stream(routes_to_add).await.unwrap();
+
+    // Should have added 3 routes
+    assert_eq!(count, 3);
+
+    // Verify routes are in RIB
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 3);
+}
+
+#[tokio::test]
+async fn test_add_route_stream_with_invalid_route() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Create routes with one invalid prefix
+    let routes_to_add = vec![
+        (
+            "10.0.0.0/24".to_string(),
+            "192.168.1.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "invalid-prefix".to_string(),
+            "192.168.1.2".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+        (
+            "10.0.2.0/24".to_string(),
+            "192.168.1.3".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+        ),
+    ];
+
+    // Add routes using streaming API
+    let count = server.client.add_route_stream(routes_to_add).await.unwrap();
+
+    // Should have added 2 routes (invalid one skipped)
+    assert_eq!(count, 2);
+
+    // Verify only valid routes are in RIB
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 2);
+}
+
+async fn test_list_routes_impl(use_stream: bool) {
+    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+
+    // Server2 announces routes to Server1 (empty AS_PATH = local routes)
+    for i in 0..5 {
+        server2
+            .client
+            .add_route(
+                format!("10.{}.0.0/24", i),
+                server2.address.to_string(),
+                Origin::Igp,
+                vec![], // Empty AS_PATH - local route
+                None,
+                None,
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Server1 also announces local routes
+    for i in 10..15 {
+        server1
+            .client
+            .add_route(
+                format!("10.{}.0.0/24", i),
+                "192.168.1.1".to_string(),
+                Origin::Igp,
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Wait for routes to propagate
+    poll_until(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes.len() == 10
+        },
+        "Timeout waiting for 10 routes in server1",
+    )
+    .await;
+
+    // Test 1: GLOBAL - Should see all routes (5 from peer + 5 local)
+    let global_routes = if use_stream {
+        server1.client.get_routes_stream().await.unwrap()
+    } else {
+        server1.client.get_routes().await.unwrap()
+    };
+    assert_eq!(global_routes.len(), 10);
+
+    // Test 2: ADJ_IN - Should only see routes received from server2
+    let adj_in_routes = if use_stream {
+        server1
+            .client
+            .get_adj_rib_in_stream(&server2.address.to_string())
+            .await
+            .unwrap()
+    } else {
+        server1
+            .client
+            .get_adj_rib_in(&server2.address.to_string())
+            .await
+            .unwrap()
+    };
+
+    // Export policy prepends server2's ASN: [] -> [65002]
+    // eBGP: no LOCAL_PREF
+    let expected_adj_in: Vec<Route> = (0..5)
+        .map(|i| Route {
+            prefix: format!("10.{}.0.0/24", i),
+            paths: vec![build_path(
+                vec![as_sequence(vec![server2.asn as u32])],
+                &server2.address.to_string(),
+                server2.address.to_string(),
+                Origin::Igp,
+                None, // eBGP - no LOCAL_PREF
+                None,
+                false,
+                vec![],
+                vec![],
+            )],
+        })
+        .collect();
+
+    assert!(routes_match(&adj_in_routes, &expected_adj_in));
+
+    // Test 3: ADJ_OUT - Should see routes that server1 would send to server2
+    let adj_out_routes = if use_stream {
+        server1
+            .client
+            .get_adj_rib_out_stream(&server2.address.to_string())
+            .await
+            .unwrap()
+    } else {
+        server1
+            .client
+            .get_adj_rib_out(&server2.address.to_string())
+            .await
+            .unwrap()
+    };
+
+    // Export policy prepends server1's ASN: [] -> [65001]
+    // eBGP: no LOCAL_PREF, NEXT_HOP rewritten to router_id
+    let expected_adj_out: Vec<Route> = (10..15)
+        .map(|i| Route {
+            prefix: format!("10.{}.0.0/24", i),
+            paths: vec![build_path(
+                vec![as_sequence(vec![server1.asn as u32])],
+                &server1.config.router_id.to_string(),
+                "127.0.0.1".to_string(),
+                Origin::Igp,
+                None, // eBGP - no LOCAL_PREF
+                None,
+                false,
+                vec![],
+                vec![],
+            )],
+        })
+        .collect();
+
+    assert!(routes_match(&adj_out_routes, &expected_adj_out));
+}
+
+#[tokio::test]
+async fn test_list_routes() {
+    test_list_routes_impl(false).await;
+}
+
+#[tokio::test]
+async fn test_list_routes_stream() {
+    test_list_routes_impl(true).await;
+}
+
+#[tokio::test]
+async fn test_list_peers_stream() {
+    let (server1, server2) = setup_two_peered_servers(None).await;
+
+    let peers = server1.client.get_peers_stream().await.unwrap();
+    assert_eq!(peers.len(), 1);
+
+    // Verify peer matches expected
+    let expected_peer = server2.to_peer(BgpState::Established, true);
+    assert_eq!(peers[0], expected_peer);
+}
+
+#[tokio::test]
+async fn test_get_server_info() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Initially should have 0 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 0).await;
+
+    // Add some routes
+    for i in 0..5 {
+        server
+            .client
+            .add_route(
+                format!("10.{}.0.0/24", i),
+                "192.168.1.1".to_string(),
+                Origin::Igp,
+                vec![],
+                None,
+                None,
+                false,
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Should now have 5 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 5).await;
+
+    // Remove 2 routes
+    server
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+    server
+        .client
+        .remove_route("10.1.0.0/24".to_string())
+        .await
+        .unwrap();
+
+    // Should now have 3 routes
+    verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 3).await;
 }

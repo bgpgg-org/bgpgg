@@ -52,10 +52,116 @@ impl BgpClient {
         Ok(self
             .inner
             .clone()
-            .list_routes(ListRoutesRequest {})
+            .list_routes(ListRoutesRequest {
+                rib_type: None,
+                peer_address: None,
+            })
             .await?
             .into_inner()
             .routes)
+    }
+
+    /// Get all routes from the Loc-RIB using streaming
+    pub async fn get_routes_stream(&self) -> Result<Vec<Route>, tonic::Status> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: None,
+                peer_address: None,
+            })
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
+    }
+
+    /// Get routes from a specific peer's Adj-RIB-In
+    pub async fn get_adj_rib_in(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+
+        Ok(self
+            .inner
+            .clone()
+            .list_routes(ListRoutesRequest {
+                rib_type: Some(RibType::AdjIn as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner()
+            .routes)
+    }
+
+    /// Get routes from a specific peer's Adj-RIB-Out (computed on-demand)
+    pub async fn get_adj_rib_out(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+
+        Ok(self
+            .inner
+            .clone()
+            .list_routes(ListRoutesRequest {
+                rib_type: Some(RibType::AdjOut as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner()
+            .routes)
+    }
+
+    /// Get routes from Adj-RIB-In using streaming
+    pub async fn get_adj_rib_in_stream(
+        &self,
+        peer_address: &str,
+    ) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: Some(RibType::AdjIn as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
+    }
+
+    /// Get routes from Adj-RIB-Out using streaming
+    pub async fn get_adj_rib_out_stream(
+        &self,
+        peer_address: &str,
+    ) -> Result<Vec<Route>, tonic::Status> {
+        use super::proto::RibType;
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_routes_stream(ListRoutesRequest {
+                rib_type: Some(RibType::AdjOut as i32),
+                peer_address: Some(peer_address.to_string()),
+            })
+            .await?
+            .into_inner();
+
+        let mut routes = Vec::new();
+        while let Some(route) = stream.next().await {
+            routes.push(route?);
+        }
+        Ok(routes)
     }
 
     /// Get all configured peers
@@ -67,6 +173,24 @@ impl BgpClient {
             .await?
             .into_inner()
             .peers)
+    }
+
+    /// Get all configured peers using streaming
+    pub async fn get_peers_stream(&self) -> Result<Vec<Peer>, tonic::Status> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = self
+            .inner
+            .clone()
+            .list_peers_stream(ListPeersRequest {})
+            .await?
+            .into_inner();
+
+        let mut peers = Vec::new();
+        while let Some(peer) = stream.next().await {
+            peers.push(peer?);
+        }
+        Ok(peers)
     }
 
     /// Get a specific peer with statistics
@@ -169,6 +293,51 @@ impl BgpClient {
         }
     }
 
+    /// Add multiple routes using streaming API for better performance
+    #[allow(clippy::type_complexity)]
+    pub async fn add_route_stream(
+        &mut self,
+        routes: Vec<(
+            String,
+            String,
+            Origin,
+            Vec<AsPathSegment>,
+            Option<u32>,
+            Option<u32>,
+            bool,
+            Vec<u32>,
+        )>,
+    ) -> Result<u64, tonic::Status> {
+        let requests = routes.into_iter().map(
+            |(
+                prefix,
+                next_hop,
+                origin,
+                as_path,
+                local_pref,
+                med,
+                atomic_aggregate,
+                communities,
+            )| {
+                AddRouteRequest {
+                    prefix,
+                    next_hop,
+                    origin: origin.into(),
+                    as_path,
+                    local_pref,
+                    med,
+                    atomic_aggregate,
+                    communities,
+                }
+            },
+        );
+
+        let stream = tokio_stream::iter(requests);
+        let resp = self.inner.add_route_stream(stream).await?.into_inner();
+
+        Ok(resp.count)
+    }
+
     /// Remove a route from all established peers
     pub async fn remove_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
         let resp = self
@@ -184,8 +353,8 @@ impl BgpClient {
         }
     }
 
-    /// Get server info including the listen address and port
-    pub async fn get_server_info(&self) -> Result<(Ipv4Addr, u16), tonic::Status> {
+    /// Get server info including the listen address, port, and route count
+    pub async fn get_server_info(&self) -> Result<(Ipv4Addr, u16, u64), tonic::Status> {
         let resp = self
             .inner
             .clone()
@@ -197,7 +366,7 @@ impl BgpClient {
             .listen_addr
             .parse()
             .map_err(|_| tonic::Status::internal("invalid listen_addr"))?;
-        Ok((addr, resp.listen_port as u16))
+        Ok((addr, resp.listen_port as u16, resp.num_routes))
     }
 
     /// Add a BMP server destination
