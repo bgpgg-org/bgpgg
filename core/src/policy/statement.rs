@@ -1,7 +1,20 @@
 use crate::bgp::utils::IpNetwork;
 use crate::policy::action::{Accept, Action, Reject, SetLocalPref};
 use crate::policy::condition::{AsPathCondition, Condition, RouteType, RouteTypeCondition};
+use crate::policy::defined_sets::DefinedSets;
 use crate::rib::Path;
+use std::sync::Arc;
+
+/// Result of policy evaluation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyResult {
+    /// Accept route, stop processing
+    Accept,
+    /// Reject route, stop processing
+    Reject,
+    /// No match, try next policy
+    Continue,
+}
 
 /// A policy statement: if conditions match, apply actions
 pub struct Statement {
@@ -30,15 +43,19 @@ impl Statement {
     }
 
     /// Check if all conditions match
-    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
+    fn matches(&self, prefix: &IpNetwork, path: &Path, sets: &DefinedSets) -> bool {
         // Empty conditions means match everything
-        self.conditions.is_empty() || self.conditions.iter().all(|c| c.matches(prefix, path))
+        self.conditions.is_empty()
+            || self
+                .conditions
+                .iter()
+                .all(|c| c.matches(prefix, path, sets))
     }
 
     /// Apply all actions if conditions match
     /// Returns None if no match, Some(accept) if matched
-    fn apply(&self, prefix: &IpNetwork, path: &mut Path) -> Option<bool> {
-        if self.matches(prefix, path) {
+    fn apply(&self, prefix: &IpNetwork, path: &mut Path, sets: &DefinedSets) -> Option<bool> {
+        if self.matches(prefix, path, sets) {
             let mut accept = true;
             for action in &self.actions {
                 if !action.apply(path) {
@@ -60,14 +77,38 @@ impl Default for Statement {
 
 /// A policy consisting of multiple statements evaluated in order
 pub struct Policy {
+    name: Option<String>,
     statements: Vec<Statement>,
+    defined_sets: Arc<DefinedSets>,
 }
 
 impl Policy {
     pub fn new() -> Self {
         Self {
+            name: None,
             statements: Vec::new(),
+            defined_sets: Arc::new(DefinedSets::default()),
         }
+    }
+
+    /// Create a new policy with defined sets
+    pub fn new_with_sets(defined_sets: Arc<DefinedSets>) -> Self {
+        Self {
+            name: None,
+            statements: Vec::new(),
+            defined_sets,
+        }
+    }
+
+    /// Set the policy name (for debugging)
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Get the policy name
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Create a default inbound policy with AS loop prevention and default local pref
@@ -96,17 +137,27 @@ impl Policy {
     }
 
     /// Evaluate the policy against a route
+    /// Returns PolicyResult indicating whether to Accept, Reject, or Continue
+    pub fn evaluate(&self, prefix: &IpNetwork, path: &mut Path) -> PolicyResult {
+        // Try each statement in order
+        for statement in &self.statements {
+            if let Some(accept) = statement.apply(prefix, path, &self.defined_sets) {
+                return if accept {
+                    PolicyResult::Accept
+                } else {
+                    PolicyResult::Reject
+                };
+            }
+        }
+        // No statement matched - continue to next policy
+        PolicyResult::Continue
+    }
+
+    /// Evaluate the policy against a route (convenience wrapper)
     /// Returns true if the route is accepted, false if rejected
     /// If no statements match, rejects the route
     pub fn accept(&self, prefix: &IpNetwork, path: &mut Path) -> bool {
-        // Try each statement in order
-        for statement in &self.statements {
-            if let Some(accept) = statement.apply(prefix, path) {
-                return accept;
-            }
-        }
-        // No statement matched - reject by default
-        false
+        matches!(self.evaluate(prefix, path), PolicyResult::Accept)
     }
 }
 
@@ -150,11 +201,19 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
     }
 
+    fn empty_sets() -> DefinedSets {
+        DefinedSets::default()
+    }
+
     #[test]
     fn test_statement_no_conditions() {
         let statement = Statement::new().then(SetLocalPref::new(100));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
+        let sets = empty_sets();
+        assert_eq!(
+            statement.apply(&test_prefix(), &mut path, &sets),
+            Some(true)
+        );
         assert_eq!(path.local_pref, Some(100));
     }
 
@@ -169,12 +228,13 @@ mod tests {
             .when(PrefixCondition::new(prefix))
             .then(SetLocalPref::new(200));
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let sets = empty_sets();
 
-        assert_eq!(statement.apply(&prefix, &mut path), Some(true));
+        assert_eq!(statement.apply(&prefix, &mut path, &sets), Some(true));
         assert_eq!(path.local_pref, Some(200));
 
         path.local_pref = None;
-        assert_eq!(statement.apply(&other_prefix, &mut path), None);
+        assert_eq!(statement.apply(&other_prefix, &mut path, &sets), None);
         assert_eq!(path.local_pref, None);
     }
 
@@ -185,13 +245,14 @@ mod tests {
             .when(PrefixCondition::new(prefix))
             .when(NeighborCondition::new(test_ip(1)))
             .then(SetLocalPref::new(200));
+        let sets = empty_sets();
 
         let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
-        assert_eq!(statement.apply(&prefix, &mut path1), Some(true));
+        assert_eq!(statement.apply(&prefix, &mut path1, &sets), Some(true));
         assert_eq!(path1.local_pref, Some(200));
 
         let mut path2 = create_path(RouteSource::Ebgp(test_ip(2)));
-        assert_eq!(statement.apply(&prefix, &mut path2), None);
+        assert_eq!(statement.apply(&prefix, &mut path2, &sets), None);
         assert_eq!(path2.local_pref, None);
     }
 
@@ -201,8 +262,12 @@ mod tests {
             .then(SetLocalPref::new(200))
             .then(SetMed::remove());
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let sets = empty_sets();
         path.med = Some(100);
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
+        assert_eq!(
+            statement.apply(&test_prefix(), &mut path, &sets),
+            Some(true)
+        );
         assert_eq!(path.local_pref, Some(200));
         assert_eq!(path.med, None);
     }
@@ -211,7 +276,11 @@ mod tests {
     fn test_statement_reject() {
         let statement = Statement::new().then(Reject);
         let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(false));
+        let sets = empty_sets();
+        assert_eq!(
+            statement.apply(&test_prefix(), &mut path, &sets),
+            Some(false)
+        );
     }
 
     #[test]

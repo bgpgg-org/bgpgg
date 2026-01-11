@@ -131,6 +131,50 @@ pub fn is_valid_unicast_ipv4(ip: u32) -> bool {
     !(ip == 0 || ip == 0xFFFFFFFF || (ip & 0xF0000000) == 0xE0000000)
 }
 
+/// Parse CIDR notation string into IpNetwork
+impl std::str::FromStr for IpNetwork {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('/').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid CIDR format '{}' (expected address/length)",
+                s
+            ));
+        }
+
+        let addr = parts[0];
+        let prefix_len = parts[1]
+            .parse::<u8>()
+            .map_err(|_| format!("invalid prefix length '{}'", parts[1]))?;
+
+        // Try IPv4 first
+        if let Ok(ipv4_addr) = addr.parse::<Ipv4Addr>() {
+            if prefix_len > 32 {
+                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_len));
+            }
+            return Ok(IpNetwork::V4(Ipv4Net {
+                address: ipv4_addr,
+                prefix_length: prefix_len,
+            }));
+        }
+
+        // Try IPv6
+        if let Ok(ipv6_addr) = addr.parse::<Ipv6Addr>() {
+            if prefix_len > 128 {
+                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_len));
+            }
+            return Ok(IpNetwork::V6(Ipv6Net {
+                address: ipv6_addr,
+                prefix_length: prefix_len,
+            }));
+        }
+
+        Err(format!("invalid IP address '{}'", addr))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

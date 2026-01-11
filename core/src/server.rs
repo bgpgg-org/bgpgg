@@ -27,7 +27,7 @@ use crate::peer::outgoing::{
 };
 use crate::peer::BgpState;
 use crate::peer::{Peer, PeerOp, PeerStatistics};
-use crate::policy::Policy;
+use crate::policy::{DefinedSets, Policy, PolicyBuilder};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{Path, Route};
 use crate::types::PeerDownReason;
@@ -347,6 +347,8 @@ pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
     pub(crate) config: Config,
+    defined_sets: Arc<DefinedSets>,
+    policies: HashMap<String, Arc<Policy>>,
     local_bgp_id: u32,
     pub(crate) local_addr: Ipv4Addr,
     pub(crate) local_port: u16,
@@ -374,10 +376,28 @@ impl BgpServer {
         let log_level = config.parse_log_level();
         let logger = Arc::new(Logger::new(log_level));
 
+        // Compile defined sets
+        let defined_sets =
+            Arc::new(DefinedSets::new(&config.defined_sets).map_err(|e| {
+                ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e))
+            })?);
+
+        // Build named policies
+        let builder = PolicyBuilder::new(defined_sets.clone());
+        let mut policies = HashMap::new();
+        for policy_def in &config.policy_definitions {
+            let policy = builder
+                .build(policy_def)
+                .map_err(|e| ServerError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+            policies.insert(policy_def.name.clone(), Arc::new(policy));
+        }
+
         Ok(BgpServer {
             peers: HashMap::new(),
             loc_rib: LocRib::new(logger.clone()),
             config,
+            defined_sets,
+            policies,
             local_bgp_id,
             local_addr,
             local_port: sock_addr.port(),
@@ -388,6 +408,44 @@ impl BgpServer {
             bmp_tasks: HashMap::new(),
             logger,
         })
+    }
+
+    /// Resolve import policies for a peer from config
+    fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
+        if peer_config.import_policy.is_empty() {
+            // Default: use built-in default policy
+            vec![Arc::new(Policy::default_in(self.config.asn))]
+        } else {
+            // Look up each policy by name
+            peer_config
+                .import_policy
+                .iter()
+                .filter_map(|name| {
+                    self.policies.get(name).cloned().or_else(|| {
+                        error!(&self.logger, "import policy not found", "policy" => name);
+                        None
+                    })
+                })
+                .collect()
+        }
+    }
+
+    /// Resolve export policies for a peer from config
+    fn resolve_export_policies(&self, peer_config: &PeerConfig, peer_asn: u16) -> Vec<Arc<Policy>> {
+        if peer_config.export_policy.is_empty() {
+            vec![Arc::new(Policy::default_out(self.config.asn, peer_asn))]
+        } else {
+            peer_config
+                .export_policy
+                .iter()
+                .filter_map(|name| {
+                    self.policies.get(name).cloned().or_else(|| {
+                        error!(&self.logger, "export policy not found", "policy" => name);
+                        None
+                    })
+                })
+                .collect()
+        }
     }
 
     /// Check if a peer should be accepted.

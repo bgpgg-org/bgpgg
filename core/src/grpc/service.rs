@@ -223,6 +223,8 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
             .collision_detect_established_state
             .unwrap_or(defaults.collision_detect_established_state),
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
     }
 }
 
