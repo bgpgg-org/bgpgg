@@ -21,3 +21,6 @@ jobs:
 
     - name: Run tests
       run: make test
+
+    - name: Run load tests
+      run: make loadtest
