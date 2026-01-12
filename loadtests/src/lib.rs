@@ -5,14 +5,18 @@ pub mod sender;
 #[cfg(test)]
 mod load_test;
 
+// Re-export for convenience
+pub use route_generator::calculate_expected_best_paths;
+
 use bgpgg::bgp::msg::{BgpMessage, Message};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::rib::{Path, RouteSource};
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -122,12 +126,6 @@ pub fn create_update_message(
         }]
     };
 
-    // Add NO_ADVERTISE community to prevent bgpgg from redistributing routes
-    // This eliminates TCP backpressure from route redistribution in load tests
-    const NO_ADVERTISE: u32 = 0xFFFFFF02;
-    let mut all_communities = vec![NO_ADVERTISE];
-    all_communities.extend(communities);
-
     let update = UpdateMessage::new(
         origin,
         as_path_segments,
@@ -136,9 +134,117 @@ pub fn create_update_message(
         local_pref,
         med,
         false,
-        all_communities,
+        communities,
         vec![],
     );
 
     update.serialize()
+}
+
+/// Transform a path to match what would be exported to an eBGP peer
+/// (prepend local ASN, rewrite next_hop, remove local_pref and MED)
+pub fn transform_path_for_ebgp_export(
+    path: &Path,
+    local_asn: u16,
+    local_router_id: Ipv4Addr,
+) -> Path {
+    let mut exported = path.clone();
+
+    // Prepend local ASN to AS_PATH
+    if !exported.as_path.is_empty() {
+        let first_segment = &exported.as_path[0];
+        if first_segment.segment_type == AsPathSegmentType::AsSequence {
+            // Prepend to existing AS_SEQUENCE
+            let mut new_asn_list = vec![local_asn];
+            new_asn_list.extend_from_slice(&first_segment.asn_list);
+            exported.as_path[0] = AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: new_asn_list.len() as u8,
+                asn_list: new_asn_list,
+            };
+        } else {
+            // Create new AS_SEQUENCE with local ASN
+            let mut new_segments = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![local_asn],
+            }];
+            new_segments.extend_from_slice(&exported.as_path);
+            exported.as_path = new_segments;
+        }
+    } else {
+        // Empty AS_PATH, create new segment
+        exported.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![local_asn],
+        }];
+    }
+
+    // Rewrite next_hop to local router ID
+    exported.next_hop = local_router_id;
+
+    // Remove local_pref (not used in eBGP)
+    exported.local_pref = None;
+
+    // Remove MED (typically not propagated across AS boundaries)
+    exported.med = None;
+
+    exported
+}
+
+/// Convert proto::Path (from gRPC) to rib::Path for comparison
+pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<Path, String> {
+    // Convert origin
+    let origin = match proto_path.origin {
+        0 => Origin::IGP,
+        1 => Origin::EGP,
+        2 => Origin::INCOMPLETE,
+        _ => return Err(format!("Invalid origin: {}", proto_path.origin)),
+    };
+
+    // Convert AS_PATH
+    let as_path: Vec<AsPathSegment> = proto_path
+        .as_path
+        .iter()
+        .map(|seg| {
+            let segment_type = match seg.segment_type() {
+                bgpgg::grpc::proto::AsPathSegmentType::AsSet => AsPathSegmentType::AsSet,
+                bgpgg::grpc::proto::AsPathSegmentType::AsSequence => AsPathSegmentType::AsSequence,
+            };
+            AsPathSegment {
+                segment_type,
+                segment_len: seg.asns.len() as u8,
+                asn_list: seg.asns.iter().map(|asn| *asn as u16).collect(),
+            }
+        })
+        .collect();
+
+    // Parse next hop
+    let next_hop: Ipv4Addr = proto_path
+        .next_hop
+        .parse()
+        .map_err(|_| format!("Invalid next_hop: {}", proto_path.next_hop))?;
+
+    // Parse peer address for source
+    let peer_ip: IpAddr = proto_path
+        .peer_address
+        .parse()
+        .map_err(|_| format!("Invalid peer_address: {}", proto_path.peer_address))?;
+    let source = RouteSource::Ebgp(peer_ip);
+
+    // Convert communities
+    let communities: Vec<u32> = proto_path.communities.clone();
+
+    Ok(Path::from_attributes(
+        origin,
+        as_path,
+        next_hop,
+        source,
+        proto_path.local_pref,
+        proto_path.med,
+        proto_path.atomic_aggregate,
+        communities,
+        vec![], // unknown_attrs not compared
+    ))
 }

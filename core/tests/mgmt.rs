@@ -214,20 +214,15 @@ async fn test_announce_withdraw_route() {
     .await;
 
     // Announce route first
-    server1
-        .client
-        .add_route(
-            "10.0.0.0/24".to_string(),
-            "192.168.1.1".to_string(),
-            Origin::Igp,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-        )
-        .await
-        .unwrap();
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify route exists
     let routes = server1.client.get_routes().await.unwrap();
@@ -502,39 +497,31 @@ async fn test_list_routes_impl(use_stream: bool) {
     let (mut server1, mut server2) = setup_two_peered_servers(None).await;
 
     // Server2 announces routes to Server1 (empty AS_PATH = local routes)
+    let server2_addr = server2.address.to_string();
     for i in 0..5 {
-        server2
-            .client
-            .add_route(
-                format!("10.{}.0.0/24", i),
-                server2.address.to_string(),
-                Origin::Igp,
-                vec![], // Empty AS_PATH - local route
-                None,
-                None,
-                false,
-                vec![],
-            )
-            .await
-            .unwrap();
+        announce_route(
+            &mut server2,
+            RouteParams {
+                prefix: format!("10.{}.0.0/24", i),
+                next_hop: server2_addr.clone(),
+                as_path: vec![], // Empty AS_PATH - local route,
+                ..Default::default()
+            },
+        )
+        .await;
     }
 
     // Server1 also announces local routes
     for i in 10..15 {
-        server1
-            .client
-            .add_route(
-                format!("10.{}.0.0/24", i),
-                "192.168.1.1".to_string(),
-                Origin::Igp,
-                vec![],
-                None,
-                None,
-                false,
-                vec![],
-            )
-            .await
-            .unwrap();
+        announce_route(
+            &mut server1,
+            RouteParams {
+                prefix: format!("10.{}.0.0/24", i),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
     }
 
     // Wait for routes to propagate
@@ -666,20 +653,15 @@ async fn test_get_server_info() {
 
     // Add some routes
     for i in 0..5 {
-        server
-            .client
-            .add_route(
-                format!("10.{}.0.0/24", i),
-                "192.168.1.1".to_string(),
-                Origin::Igp,
-                vec![],
-                None,
-                None,
-                false,
-                vec![],
-            )
-            .await
-            .unwrap();
+        announce_route(
+            &mut server,
+            RouteParams {
+                prefix: format!("10.{}.0.0/24", i),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
     }
 
     // Should now have 5 routes

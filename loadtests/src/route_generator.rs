@@ -1,10 +1,11 @@
-use bgpgg::bgp::msg_update_types::Origin;
+use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::rib::{Path, RouteSource};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// Configuration for route generation
 #[derive(Debug, Clone)]
@@ -103,6 +104,34 @@ pub struct PeerRoute {
     pub communities: Vec<u32>,
 }
 
+impl PeerRoute {
+    /// Convert PeerRoute to Path for best path selection
+    pub fn to_path(&self, peer_ip: IpAddr, next_hop: Ipv4Addr) -> Path {
+        // Convert Vec<u16> to Vec<AsPathSegment>
+        let as_path_segments = if self.as_path.is_empty() {
+            vec![]
+        } else {
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: self.as_path.len() as u8,
+                asn_list: self.as_path.clone(),
+            }]
+        };
+
+        Path::from_attributes(
+            self.origin,
+            as_path_segments,
+            next_hop,
+            RouteSource::Ebgp(peer_ip),
+            Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
+            self.med,
+            false, // atomic_aggregate
+            self.communities.clone(),
+            vec![], // unknown_attrs
+        )
+    }
+}
+
 /// All routes for a specific peer
 #[derive(Debug, Clone)]
 pub struct PeerRouteSet {
@@ -127,6 +156,45 @@ pub fn generate_peer_routes(config: RouteGenConfig) -> Vec<PeerRouteSet> {
     generate_peer_attributes(peer_assignments, &config, &mut rng)
 }
 
+/// Calculate expected best paths from all peer route sets
+/// Returns a HashMap of prefix -> best Path
+pub fn calculate_expected_best_paths(peer_route_sets: &[PeerRouteSet]) -> HashMap<IpNetwork, Path> {
+    // Group all routes by prefix
+    let mut routes_by_prefix: HashMap<IpNetwork, Vec<(usize, &PeerRoute)>> = HashMap::new();
+
+    for peer_set in peer_route_sets {
+        for route in &peer_set.routes {
+            routes_by_prefix
+                .entry(route.prefix)
+                .or_default()
+                .push((peer_set.peer_index, route));
+        }
+    }
+
+    // For each prefix, find the best path using BGP decision process
+    let mut best_paths = HashMap::new();
+    for (prefix, peer_routes) in routes_by_prefix {
+        // Convert all routes to Path objects
+        let paths: Vec<Path> = peer_routes
+            .iter()
+            .map(|(peer_idx, route)| {
+                let peer_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1 + *peer_idx as u8));
+                // Use peer's router ID as next hop (same as sender in load test)
+                let next_hop = Ipv4Addr::new(2, 0, 0, 1 + *peer_idx as u8);
+                route.to_path(peer_ip, next_hop)
+            })
+            .collect();
+
+        // Sort by BGP best path selection (Path implements Ord)
+        // The maximum path is the best path
+        if let Some(best) = paths.into_iter().max() {
+            best_paths.insert(prefix, best);
+        }
+    }
+
+    best_paths
+}
+
 /// Generate unique prefixes with realistic length distribution
 fn generate_prefix_pool(config: &RouteGenConfig, rng: &mut StdRng) -> Vec<IpNetwork> {
     let dist = &config.prefix_len_dist;
@@ -141,26 +209,26 @@ fn generate_prefix_pool(config: &RouteGenConfig, rng: &mut StdRng) -> Vec<IpNetw
     let mut prefixes = Vec::with_capacity(total);
 
     // Generate /24 prefixes
-    generate_prefixes_for_length(&mut prefixes, count_24, 24, rng);
+    generate_prefixes_for_length(&mut prefixes, count_24, 24);
 
     // Generate /22-/23 prefixes
     let count_22 = count_22_23 / 2;
     let count_23 = count_22_23 - count_22;
-    generate_prefixes_for_length(&mut prefixes, count_22, 22, rng);
-    generate_prefixes_for_length(&mut prefixes, count_23, 23, rng);
+    generate_prefixes_for_length(&mut prefixes, count_22, 22);
+    generate_prefixes_for_length(&mut prefixes, count_23, 23);
 
     // Generate /20-/21 prefixes
     let count_20 = count_20_21 / 2;
     let count_21 = count_20_21 - count_20;
-    generate_prefixes_for_length(&mut prefixes, count_20, 20, rng);
-    generate_prefixes_for_length(&mut prefixes, count_21, 21, rng);
+    generate_prefixes_for_length(&mut prefixes, count_20, 20);
+    generate_prefixes_for_length(&mut prefixes, count_21, 21);
 
     // Generate /16-/19 prefixes
     let count_per_len = count_16_19 / 4;
-    generate_prefixes_for_length(&mut prefixes, count_per_len, 16, rng);
-    generate_prefixes_for_length(&mut prefixes, count_per_len, 17, rng);
-    generate_prefixes_for_length(&mut prefixes, count_per_len, 18, rng);
-    generate_prefixes_for_length(&mut prefixes, count_16_19 - count_per_len * 3, 19, rng);
+    generate_prefixes_for_length(&mut prefixes, count_per_len, 16);
+    generate_prefixes_for_length(&mut prefixes, count_per_len, 17);
+    generate_prefixes_for_length(&mut prefixes, count_per_len, 18);
+    generate_prefixes_for_length(&mut prefixes, count_16_19 - count_per_len * 3, 19);
 
     // Shuffle to mix prefix lengths
     prefixes.shuffle(rng);
@@ -169,29 +237,21 @@ fn generate_prefix_pool(config: &RouteGenConfig, rng: &mut StdRng) -> Vec<IpNetw
 }
 
 /// Generate prefixes for a specific prefix length
-fn generate_prefixes_for_length(
-    prefixes: &mut Vec<IpNetwork>,
-    count: usize,
-    prefix_len: u8,
-    rng: &mut StdRng,
-) {
+fn generate_prefixes_for_length(prefixes: &mut Vec<IpNetwork>, count: usize, prefix_len: u8) {
     // Start from 10.0.0.0 base address
     let base = u32::from(Ipv4Addr::new(10, 0, 0, 0));
     let increment = 1u32 << (32 - prefix_len);
 
     for i in 0..count {
-        // Sequential base + some randomization to avoid patterns
-        let offset = if i % 10 == 0 {
-            rng.gen_range(0..increment / 2)
-        } else {
-            0
-        };
-        let addr = base
-            .wrapping_add((i as u32).wrapping_mul(increment))
-            .wrapping_add(offset);
+        // Generate sequential, properly aligned prefixes
+        let addr = base.wrapping_add((i as u32).wrapping_mul(increment));
+
+        // Ensure address is properly aligned to prefix boundary
+        let mask = !((1u32 << (32 - prefix_len)) - 1);
+        let aligned_addr = addr & mask;
 
         prefixes.push(IpNetwork::V4(Ipv4Net {
-            address: Ipv4Addr::from(addr),
+            address: Ipv4Addr::from(aligned_addr),
             prefix_length: prefix_len,
         }));
     }

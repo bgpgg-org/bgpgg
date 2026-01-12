@@ -25,14 +25,18 @@ use tonic::{Request, Response, Status};
 
 use super::proto::{
     self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
-    AddPeerRequest, AddPeerResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
-    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
+    AddDefinedSetRequest, AddDefinedSetResponse, AddPeerRequest, AddPeerResponse, AddPolicyRequest,
+    AddPolicyResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
+    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DefinedSetInfo, DisablePeerRequest,
     DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
     GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
-    ListPeersRequest, ListPeersResponse, ListRoutesRequest, ListRoutesResponse, Path as ProtoPath,
-    Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, RemoveBmpServerRequest,
-    RemoveBmpServerResponse, RemovePeerRequest, RemovePeerResponse, RemoveRouteRequest,
-    RemoveRouteResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
+    ListDefinedSetsRequest, ListDefinedSetsResponse, ListPeersRequest, ListPeersResponse,
+    ListPoliciesRequest, ListPoliciesResponse, ListRoutesRequest, ListRoutesResponse,
+    Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics, PolicyInfo,
+    RemoveBmpServerRequest, RemoveBmpServerResponse, RemoveDefinedSetRequest,
+    RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
+    RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
+    SessionConfig as ProtoSessionConfig, SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
 };
 
 const LOCAL_ROUTE_SOURCE_STR: &str = "127.0.0.1";
@@ -381,6 +385,8 @@ impl BgpService for BgpGrpcService {
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
+                import_policies: peer.import_policies.clone(),
+                export_policies: peer.export_policies.clone(),
             })
             .collect();
 
@@ -411,6 +417,8 @@ impl BgpService for BgpGrpcService {
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
+                import_policies: peer.import_policies,
+                export_policies: peer.export_policies,
             })
         });
 
@@ -448,6 +456,8 @@ impl BgpService for BgpGrpcService {
                     state: to_proto_state(peer.state),
                     admin_state: to_proto_admin_state(peer.admin_state),
                     configured: peer.configured,
+                    import_policies: peer.import_policies.clone(),
+                    export_policies: peer.export_policies.clone(),
                 };
 
                 let proto_statistics = ProtoPeerStatistics {
@@ -786,5 +796,529 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         Ok(Response::new(ListBmpServersResponse { addresses }))
+    }
+
+    async fn add_defined_set(
+        &self,
+        request: Request<AddDefinedSetRequest>,
+    ) -> Result<Response<AddDefinedSetResponse>, Status> {
+        let inner = request.into_inner();
+        let set_config = inner
+            .set
+            .ok_or_else(|| Status::invalid_argument("set config required"))?;
+
+        // Convert proto to internal types
+        let set = proto_to_defined_set_config(&set_config)
+            .map_err(|e| Status::invalid_argument(format!("invalid set config: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddDefinedSet { set, response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddDefinedSetResponse {
+                success: true,
+                message: "defined set added".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddDefinedSetResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn remove_defined_set(
+        &self,
+        request: Request<RemoveDefinedSetRequest>,
+    ) -> Result<Response<RemoveDefinedSetResponse>, Status> {
+        use crate::policy::DefinedSetType;
+
+        let inner = request.into_inner();
+
+        let set_type = DefinedSetType::parse(&inner.set_type).map_err(Status::invalid_argument)?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RemoveDefinedSet {
+            set_type,
+            name: inner.name,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(RemoveDefinedSetResponse {
+                success: true,
+                message: "defined set removed".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(RemoveDefinedSetResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_defined_sets(
+        &self,
+        request: Request<ListDefinedSetsRequest>,
+    ) -> Result<Response<ListDefinedSetsResponse>, Status> {
+        use crate::policy::DefinedSetType;
+
+        let inner = request.into_inner();
+
+        let set_type = if let Some(st) = inner.set_type {
+            Some(DefinedSetType::parse(&st).map_err(Status::invalid_argument)?)
+        } else {
+            None
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let req = MgmtOp::ListDefinedSets {
+            set_type,
+            name: inner.name,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(results) => {
+                let sets = results
+                    .into_iter()
+                    .map(defined_set_config_to_proto)
+                    .collect();
+                Ok(Response::new(ListDefinedSetsResponse { sets }))
+            }
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn add_policy(
+        &self,
+        request: Request<AddPolicyRequest>,
+    ) -> Result<Response<AddPolicyResponse>, Status> {
+        let inner = request.into_inner();
+
+        // Convert proto statements to internal format
+        let statements = inner
+            .statements
+            .into_iter()
+            .map(proto_to_statement_config)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("invalid statement config: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddPolicy {
+            name: inner.name,
+            statements,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddPolicyResponse {
+                success: true,
+                message: "policy added".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddPolicyResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn remove_policy(
+        &self,
+        request: Request<RemovePolicyRequest>,
+    ) -> Result<Response<RemovePolicyResponse>, Status> {
+        let inner = request.into_inner();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RemovePolicy {
+            name: inner.name,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(RemovePolicyResponse {
+                success: true,
+                message: "policy removed".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(RemovePolicyResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_policies(
+        &self,
+        request: Request<ListPoliciesRequest>,
+    ) -> Result<Response<ListPoliciesResponse>, Status> {
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let req = MgmtOp::ListPolicies {
+            name: inner.name,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(results) => {
+                let policies = results.into_iter().map(policy_info_to_proto).collect();
+                Ok(Response::new(ListPoliciesResponse { policies }))
+            }
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn set_policy_assignment(
+        &self,
+        request: Request<SetPolicyAssignmentRequest>,
+    ) -> Result<Response<SetPolicyAssignmentResponse>, Status> {
+        let inner = request.into_inner();
+
+        // Parse peer address
+        let peer_addr = inner
+            .peer_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| Status::invalid_argument("invalid peer address"))?;
+
+        // Parse direction
+        let direction = match inner.direction.as_str() {
+            "import" => crate::server::PolicyDirection::Import,
+            "export" => crate::server::PolicyDirection::Export,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "direction must be 'import' or 'export'",
+                ))
+            }
+        };
+
+        // Parse default action
+        let default_action = inner
+            .default_action
+            .as_ref()
+            .map(|action| match action.as_str() {
+                "accept" => crate::policy::PolicyResult::Accept,
+                "reject" => crate::policy::PolicyResult::Reject,
+                _ => crate::policy::PolicyResult::Reject, // Default to reject
+            });
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::SetPolicyAssignment {
+            peer_addr,
+            direction,
+            policy_names: inner.policy_names,
+            default_action,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(SetPolicyAssignmentResponse {
+                success: true,
+                message: "policy assignment set".to_string(),
+            })),
+            Ok(Err(e)) => Ok(Response::new(SetPolicyAssignmentResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+}
+
+// ============================================================================
+// Proto conversion helpers (temporary stubs - will move to policy_proto.rs)
+// ============================================================================
+
+use super::proto::DefinedSetConfig as ProtoDefinedSetConfig;
+use crate::config::{
+    ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
+    LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
+    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
+};
+use crate::server::PolicyInfoResponse;
+
+fn proto_to_defined_set_config(
+    proto: &ProtoDefinedSetConfig,
+) -> Result<crate::config::DefinedSetConfig, String> {
+    let name = proto.name.clone();
+
+    let config = match proto.config.as_ref() {
+        Some(super::proto::defined_set_config::Config::PrefixSet(ps)) => {
+            let prefixes = ps
+                .prefixes
+                .iter()
+                .map(|p| PrefixMatchConfig {
+                    prefix: p.prefix.clone(),
+                    masklength_range: p.masklength_range.clone(),
+                })
+                .collect();
+            crate::config::DefinedSetConfig::PrefixSet(PrefixSetConfig { name, prefixes })
+        }
+        Some(super::proto::defined_set_config::Config::AsPathSet(aps)) => {
+            crate::config::DefinedSetConfig::AsPathSet(AsPathSetConfig {
+                name,
+                patterns: aps.patterns.clone(),
+            })
+        }
+        Some(super::proto::defined_set_config::Config::CommunitySet(cs)) => {
+            crate::config::DefinedSetConfig::CommunitySet(CommunitySetConfig {
+                name,
+                communities: cs.communities.clone(),
+            })
+        }
+        Some(super::proto::defined_set_config::Config::NeighborSet(ns)) => {
+            crate::config::DefinedSetConfig::NeighborSet(NeighborSetConfig {
+                name,
+                neighbors: ns.addresses.clone(),
+            })
+        }
+        None => return Err("missing set config data".to_string()),
+    };
+
+    Ok(config)
+}
+
+fn proto_to_statement_config(
+    proto: super::proto::StatementConfig,
+) -> Result<StatementConfig, String> {
+    let conditions = proto.conditions.map(|c| {
+        let parse_match_option = |opt: String| match opt.as_str() {
+            "all" => MatchOptionConfig::All,
+            "invert" => MatchOptionConfig::Invert,
+            _ => MatchOptionConfig::Any,
+        };
+
+        ConditionsConfig {
+            match_prefix_set: c.match_prefix_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_neighbor_set: c.match_neighbor_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_as_path_set: c.match_as_path_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_community_set: c.match_community_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            prefix: c.prefix,
+            neighbor: c.neighbor,
+            has_asn: None,
+            route_type: None,
+            community: None,
+        }
+    });
+
+    let actions = proto.actions.map(|a| ActionsConfig {
+        local_pref: a.local_pref.map(LocalPrefActionConfig::Set),
+        med: a.med.map(MedActionConfig::Set),
+        community: if !a.add_communities.is_empty() || !a.remove_communities.is_empty() {
+            Some(CommunityActionConfig {
+                operation: if !a.add_communities.is_empty() {
+                    "add".to_string()
+                } else {
+                    "remove".to_string()
+                },
+                communities: if !a.add_communities.is_empty() {
+                    a.add_communities
+                } else {
+                    a.remove_communities
+                },
+            })
+        } else {
+            None
+        },
+        accept: a.accept,
+        reject: a.reject,
+    });
+
+    Ok(StatementConfig {
+        name: None,
+        conditions: conditions.unwrap_or_default(),
+        actions: actions.unwrap_or_default(),
+    })
+}
+
+fn defined_set_config_to_proto(config: crate::config::DefinedSetConfig) -> DefinedSetInfo {
+    use super::proto::{
+        AsPathSetData, CommunitySetData, NeighborSetData, PrefixMatch, PrefixSetData,
+    };
+
+    let (set_type, name, set_data) = match config {
+        crate::config::DefinedSetConfig::PrefixSet(ps) => (
+            "prefix-set".to_string(),
+            ps.name,
+            Some(super::proto::defined_set_info::SetData::PrefixSet(
+                PrefixSetData {
+                    prefixes: ps
+                        .prefixes
+                        .into_iter()
+                        .map(|p| PrefixMatch {
+                            prefix: p.prefix,
+                            masklength_range: p.masklength_range,
+                        })
+                        .collect(),
+                },
+            )),
+        ),
+        crate::config::DefinedSetConfig::AsPathSet(aps) => (
+            "as-path-set".to_string(),
+            aps.name,
+            Some(super::proto::defined_set_info::SetData::AsPathSet(
+                AsPathSetData {
+                    patterns: aps.patterns,
+                },
+            )),
+        ),
+        crate::config::DefinedSetConfig::CommunitySet(cs) => (
+            "community-set".to_string(),
+            cs.name,
+            Some(super::proto::defined_set_info::SetData::CommunitySet(
+                CommunitySetData {
+                    communities: cs.communities,
+                },
+            )),
+        ),
+        crate::config::DefinedSetConfig::NeighborSet(ns) => (
+            "neighbor-set".to_string(),
+            ns.name,
+            Some(super::proto::defined_set_info::SetData::NeighborSet(
+                NeighborSetData {
+                    addresses: ns.neighbors,
+                },
+            )),
+        ),
+    };
+
+    DefinedSetInfo {
+        set_type,
+        name,
+        set_data,
+    }
+}
+
+fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
+    use super::proto::{
+        ActionsConfig as ProtoActionsConfig, ConditionsConfig as ProtoConditionsConfig,
+        MatchSetRef, StatementInfo,
+    };
+
+    let statements = info
+        .statements
+        .into_iter()
+        .map(|s| {
+            let conditions = Some(ProtoConditionsConfig {
+                match_prefix_set: s.conditions.match_prefix_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
+                }),
+                match_neighbor_set: s.conditions.match_neighbor_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
+                }),
+                match_as_path_set: s.conditions.match_as_path_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
+                }),
+                match_community_set: s.conditions.match_community_set.map(|m| MatchSetRef {
+                    set_name: m.set_name,
+                    match_option: match m.match_option {
+                        crate::config::MatchOptionConfig::Any => "any".to_string(),
+                        crate::config::MatchOptionConfig::All => "all".to_string(),
+                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                    },
+                }),
+                prefix: s.conditions.prefix.clone(),
+                neighbor: s.conditions.neighbor.clone(),
+            });
+
+            let (add_communities, remove_communities) = if let Some(comm) = s.actions.community {
+                if comm.operation == "add" {
+                    (comm.communities, vec![])
+                } else {
+                    (vec![], comm.communities)
+                }
+            } else {
+                (vec![], vec![])
+            };
+
+            let actions = Some(ProtoActionsConfig {
+                accept: s.actions.accept,
+                reject: s.actions.reject,
+                local_pref: s.actions.local_pref.map(|lp| match lp {
+                    crate::config::LocalPrefActionConfig::Set(v) => v,
+                    crate::config::LocalPrefActionConfig::Force { value, .. } => value,
+                }),
+                med: s.actions.med.and_then(|m| match m {
+                    crate::config::MedActionConfig::Set(v) => Some(v),
+                    crate::config::MedActionConfig::Remove { .. } => None,
+                }),
+                add_communities,
+                remove_communities,
+            });
+
+            StatementInfo {
+                conditions,
+                actions,
+            }
+        })
+        .collect();
+
+    PolicyInfo {
+        name: info.name,
+        statements,
     }
 }

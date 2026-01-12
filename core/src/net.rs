@@ -55,6 +55,15 @@ impl IpNetwork {
     }
 }
 
+impl std::fmt::Display for IpNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpNetwork::V4(net) => write!(f, "{}/{}", net.address, net.prefix_length),
+            IpNetwork::V6(net) => write!(f, "{}/{}", net.address, net.prefix_length),
+        }
+    }
+}
+
 /// IPv4 network prefix
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Ipv4Net {

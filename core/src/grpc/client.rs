@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddPeerRequest, AddRouteRequest,
-    AsPathSegment, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
-    ListBmpServersRequest, ListPeersRequest, ListRoutesRequest, Origin, Peer, PeerStatistics,
-    RemoveBmpServerRequest, RemovePeerRequest, RemoveRouteRequest, Route, SessionConfig,
+    bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddDefinedSetRequest,
+    AddPeerRequest, AddPolicyRequest, AddRouteRequest, AsPathSegment, DefinedSetConfig,
+    DefinedSetInfo, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
+    ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
+    ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
+    RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest, Route,
+    SessionConfig, SetPolicyAssignmentRequest, StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -415,5 +418,135 @@ impl BgpClient {
             .await?
             .into_inner()
             .addresses)
+    }
+
+    /// Add a policy definition
+    pub async fn add_policy(
+        &mut self,
+        name: String,
+        statements: Vec<StatementConfig>,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .add_policy(AddPolicyRequest { name, statements })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// List all policy definitions
+    pub async fn list_policies(&self) -> Result<Vec<PolicyInfo>, tonic::Status> {
+        Ok(self
+            .inner
+            .clone()
+            .list_policies(ListPoliciesRequest { name: None })
+            .await?
+            .into_inner()
+            .policies)
+    }
+
+    /// Add a defined set
+    pub async fn add_defined_set(
+        &mut self,
+        set: DefinedSetConfig,
+        replace: bool,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .add_defined_set(AddDefinedSetRequest {
+                set: Some(set),
+                replace,
+            })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// List all defined sets
+    pub async fn list_defined_sets(&self) -> Result<Vec<DefinedSetInfo>, tonic::Status> {
+        Ok(self
+            .inner
+            .clone()
+            .list_defined_sets(ListDefinedSetsRequest {
+                set_type: None,
+                name: None,
+            })
+            .await?
+            .into_inner()
+            .sets)
+    }
+
+    /// Remove a defined set
+    pub async fn remove_defined_set(
+        &mut self,
+        set_type: String,
+        name: String,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .remove_defined_set(RemoveDefinedSetRequest {
+                set_type,
+                name,
+                all: false,
+            })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Remove a policy
+    pub async fn remove_policy(&mut self, name: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .remove_policy(RemovePolicyRequest { name })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Set policy assignment for a peer
+    pub async fn set_policy_assignment(
+        &mut self,
+        peer_address: String,
+        direction: String,
+        policy_names: Vec<String>,
+        default_action: Option<String>,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .set_policy_assignment(SetPolicyAssignmentRequest {
+                peer_address,
+                direction,
+                policy_names,
+                default_action,
+            })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
     }
 }
