@@ -94,10 +94,7 @@ pub async fn send_routes(
             med: route.med,
             communities: route.communities.clone(),
         };
-        routes_by_attrs
-            .entry(attrs)
-            .or_insert_with(Vec::new)
-            .push(route.prefix);
+        routes_by_attrs.entry(attrs).or_default().push(route.prefix);
     }
 
     // Pre-serialize UPDATE messages, batching prefixes with the same attributes

@@ -166,7 +166,7 @@ pub fn calculate_expected_best_paths(peer_route_sets: &[PeerRouteSet]) -> HashMa
         for route in &peer_set.routes {
             routes_by_prefix
                 .entry(route.prefix)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push((peer_set.peer_index, route));
         }
     }
