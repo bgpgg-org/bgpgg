@@ -263,8 +263,9 @@ message ExtendedCommunity {
     LinkBandwidth link_bandwidth = 4;
     Color color = 5;
     Encapsulation encapsulation = 6;
-    Opaque opaque = 7;
-    Unknown unknown = 8;
+    RouterMac router_mac = 7;
+    Opaque opaque = 8;
+    Unknown unknown = 9;
   }
 
   message TwoOctetAsSpecific {
@@ -302,6 +303,11 @@ message ExtendedCommunity {
   message Encapsulation {
     bool is_transitive = 1;     // Type can be 0x03 (transitive) or 0x43 (non-transitive)
     uint32 tunnel_type = 2;     // 16-bit tunnel type (e.g., 8=VXLAN, 15=SR Policy, RFC 9012)
+  }
+
+  message RouterMac {
+    bool is_transitive = 1;     // Type 0x06 is always transitive for EVPN
+    bytes mac_address = 2;      // 6-byte MAC address (RFC 9012)
   }
 
   message Opaque {

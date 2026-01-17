@@ -20,6 +20,9 @@ pub const SUBTYPE_LINK_BANDWIDTH: u8 = 0x04;
 pub const SUBTYPE_COLOR: u8 = 0x0B;
 pub const SUBTYPE_ENCAPSULATION: u8 = 0x0C;
 
+// Subtype constants for EVPN extended communities
+pub const SUBTYPE_ROUTER_MAC: u8 = 0x03;
+
 // Bit 6 of type indicates transitive (0) or non-transitive (1)
 pub const TYPE_NON_TRANSITIVE_BIT: u8 = 0x40;
 
@@ -100,6 +103,19 @@ pub const fn from_encapsulation(tunnel_type: u16) -> u64 {
         | (tunnel_type as u64)
 }
 
+/// Create a Router's MAC extended community (RFC 9012, EVPN)
+/// Type 0x06: [Type][Subtype][MAC address (6 bytes)]
+pub const fn from_router_mac(mac: [u8; 6]) -> u64 {
+    ((TYPE_EVPN as u64) << byte_shift(0))
+        | ((SUBTYPE_ROUTER_MAC as u64) << byte_shift(1))
+        | ((mac[0] as u64) << byte_shift(2))
+        | ((mac[1] as u64) << byte_shift(3))
+        | ((mac[2] as u64) << byte_shift(4))
+        | ((mac[3] as u64) << byte_shift(5))
+        | ((mac[4] as u64) << byte_shift(6))
+        | ((mac[5] as u64) << byte_shift(7))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseExtCommunityError {
     InvalidFormat,
@@ -108,6 +124,7 @@ pub enum ParseExtCommunityError {
     InvalidIpv4,
     InvalidLocal,
     InvalidHex,
+    InvalidMac,
 }
 
 /// Parse an extended community from a string
@@ -120,6 +137,7 @@ pub enum ParseExtCommunityError {
 /// - "ro:4200000000:100" (Route Origin, four-octet AS)
 /// - "color:100" (Color community, RFC 9012)
 /// - "encapsulation:8" (Encapsulation community, RFC 9012)
+/// - "router-mac:aa:bb:cc:dd:ee:ff" (Router's MAC community, RFC 9012)
 /// - "0x0002FDE800000064" (raw hex, 16 hex digits)
 pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> {
     // Handle raw hex format
@@ -144,6 +162,16 @@ pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> 
             .parse()
             .map_err(|_| ParseExtCommunityError::InvalidLocal)?;
         return Ok(from_encapsulation(tunnel_type));
+    }
+
+    // Handle router-mac:aa:bb:cc:dd:ee:ff format (7 parts)
+    if parts.len() == 7 && parts[0] == "router-mac" {
+        let mut mac = [0u8; 6];
+        for (i, part) in parts[1..7].iter().enumerate() {
+            mac[i] =
+                u8::from_str_radix(part, 16).map_err(|_| ParseExtCommunityError::InvalidMac)?;
+        }
+        return Ok(from_router_mac(mac));
     }
 
     // Parse prefix:value:local format (3 parts)
@@ -219,6 +247,28 @@ pub fn format_extended_community(extcomm: u64) -> String {
             }
             _ => {
                 // Unknown opaque subtype, return raw hex
+                return format!("0x{:016x}", extcomm);
+            }
+        }
+    }
+
+    // Handle EVPN extended communities
+    if typ == TYPE_EVPN {
+        match subtype {
+            SUBTYPE_ROUTER_MAC => {
+                // [Type][Subtype][MAC address (6 bytes)]
+                return format!(
+                    "router-mac:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    value_bytes[0],
+                    value_bytes[1],
+                    value_bytes[2],
+                    value_bytes[3],
+                    value_bytes[4],
+                    value_bytes[5]
+                );
+            }
+            _ => {
+                // Unknown EVPN subtype, return raw hex
                 return format!("0x{:016x}", extcomm);
             }
         }
@@ -494,6 +544,32 @@ mod tests {
             "encapsulation:8",  // VXLAN
             "encapsulation:15", // SR Policy
             "encapsulation:65535",
+        ];
+
+        for original in test_cases {
+            let extcomm = parse_extended_community(original).unwrap();
+            let formatted = format_extended_community(extcomm);
+            assert_eq!(original, formatted);
+        }
+    }
+
+    #[test]
+    fn test_from_router_mac() {
+        let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let extcomm = from_router_mac(mac);
+        assert_eq!(ext_type(extcomm), TYPE_EVPN);
+        assert_eq!(ext_subtype(extcomm), SUBTYPE_ROUTER_MAC);
+        // MAC should be in value field
+        let value = ext_value(extcomm);
+        assert_eq!(value, mac);
+        assert!(is_transitive(extcomm));
+    }
+
+    #[test]
+    fn test_router_mac_roundtrip() {
+        let test_cases = vec![
+            "router-mac:00:00:00:00:00:00",
+            "router-mac:aa:bb:cc:dd:ee:ff",
         ];
 
         for original in test_cases {

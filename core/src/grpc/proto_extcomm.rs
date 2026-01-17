@@ -113,6 +113,23 @@ pub(super) fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u
             Ok(val)
         }
 
+        proto::extended_community::Community::RouterMac(ec) => {
+            if ec.mac_address.len() != 6 {
+                return Err(format!(
+                    "MAC address must be 6 bytes, got {}",
+                    ec.mac_address.len()
+                ));
+            }
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&ec.mac_address);
+            let mut val = from_router_mac(mac);
+            // Set non-transitive bit if needed (though EVPN is typically transitive)
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
         proto::extended_community::Community::Opaque(ec) => {
             if ec.value.len() != 6 {
                 return Err(format!(
@@ -247,6 +264,25 @@ pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
                 )
             } else {
                 // Generic opaque community
+                proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
+                    is_transitive,
+                    value: value_bytes.to_vec(),
+                })
+            }
+        }
+
+        TYPE_EVPN => {
+            // Check for Router's MAC extended community (subtype 0x03)
+            if subtype == SUBTYPE_ROUTER_MAC {
+                // [Type][Subtype][MAC address (6 bytes)]
+                proto::extended_community::Community::RouterMac(
+                    proto::extended_community::RouterMac {
+                        is_transitive,
+                        mac_address: value_bytes.to_vec(),
+                    },
+                )
+            } else {
+                // Unknown EVPN subtype, return as opaque
                 proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
                     is_transitive,
                     value: value_bytes.to_vec(),
@@ -509,6 +545,59 @@ mod tests {
             assert_eq!(e.tunnel_type, u16::MAX as u32);
         } else {
             panic!("Expected Encapsulation variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_router_mac_roundtrip() {
+        let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let original = from_router_mac(mac);
+
+        // u64 -> proto
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::RouterMac(rm)) = &proto_ec.community {
+            assert!(rm.is_transitive);
+            assert_eq!(rm.mac_address, vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        } else {
+            panic!("Expected RouterMac variant");
+        }
+
+        // proto -> u64
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_router_mac_all_zeros() {
+        let mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let original = from_router_mac(mac);
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::RouterMac(rm)) = &proto_ec.community {
+            assert!(rm.is_transitive);
+            assert_eq!(rm.mac_address, vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        } else {
+            panic!("Expected RouterMac variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_router_mac_all_ones() {
+        let mac = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        let original = from_router_mac(mac);
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::RouterMac(rm)) = &proto_ec.community {
+            assert!(rm.is_transitive);
+            assert_eq!(rm.mac_address, vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        } else {
+            panic!("Expected RouterMac variant");
         }
 
         let result = proto_extcomm_to_u64(&proto_ec).unwrap();
