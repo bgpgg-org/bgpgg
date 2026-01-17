@@ -14,6 +14,7 @@ pub const TYPE_EVPN: u8 = 0x06;
 // Subtype constants for Route Target / Route Origin
 pub const SUBTYPE_ROUTE_TARGET: u8 = 0x02;
 pub const SUBTYPE_ROUTE_ORIGIN: u8 = 0x03;
+pub const SUBTYPE_LINK_BANDWIDTH: u8 = 0x04;
 
 // Bit 6 of type indicates transitive (0) or non-transitive (1)
 pub const TYPE_NON_TRANSITIVE_BIT: u8 = 0x40;

@@ -254,14 +254,15 @@ message UnknownAttribute {
     bytes value = 3;
 }
 
-// Extended Community (RFC 4360)
+// Extended Community (RFC 4360, RFC 5668, draft-ietf-idr-link-bandwidth)
 message ExtendedCommunity {
   oneof community {
     TwoOctetAsSpecific two_octet_as = 1;
     IPv4AddressSpecific ipv4_address = 2;
     FourOctetAsSpecific four_octet_as = 3;
-    Opaque opaque = 4;
-    Unknown unknown = 5;
+    LinkBandwidth link_bandwidth = 4;
+    Opaque opaque = 5;
+    Unknown unknown = 6;
   }
 
   message TwoOctetAsSpecific {
@@ -283,6 +284,12 @@ message ExtendedCommunity {
     uint32 sub_type = 2;
     uint32 asn = 3;             // 32-bit ASN
     uint32 local_admin = 4;     // 16-bit local administrator (validate <= 65535)
+  }
+
+  message LinkBandwidth {
+    bool is_transitive = 1;     // Type can be 0x00 (transitive) or 0x40 (non-transitive)
+    uint32 asn = 2;             // 16-bit AS number (validate <= 65535)
+    float bandwidth = 3;        // Bandwidth in bytes/sec (IEEE 754 float32)
   }
 
   message Opaque {

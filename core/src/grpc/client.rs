@@ -38,18 +38,33 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
     let community = match base_type {
         TYPE_TWO_OCTET_AS => {
             let asn = u16::from_be_bytes([value_bytes[0], value_bytes[1]]);
-            let local_admin = u32::from_be_bytes([
+            let local_admin_bytes = u32::from_be_bytes([
                 value_bytes[2],
                 value_bytes[3],
                 value_bytes[4],
                 value_bytes[5],
             ]);
-            proto::extended_community::Community::TwoOctetAs(proto::extended_community::TwoOctetAsSpecific {
-                is_transitive,
-                sub_type: subtype as u32,
-                asn: asn as u32,
-                local_admin,
-            })
+
+            // Link Bandwidth has same base type but different subtype
+            if subtype == SUBTYPE_LINK_BANDWIDTH {
+                let bandwidth = f32::from_bits(local_admin_bytes);
+                proto::extended_community::Community::LinkBandwidth(
+                    proto::extended_community::LinkBandwidth {
+                        is_transitive,
+                        asn: asn as u32,
+                        bandwidth,
+                    },
+                )
+            } else {
+                proto::extended_community::Community::TwoOctetAs(
+                    proto::extended_community::TwoOctetAsSpecific {
+                        is_transitive,
+                        sub_type: subtype as u32,
+                        asn: asn as u32,
+                        local_admin: local_admin_bytes,
+                    },
+                )
+            }
         }
 
         TYPE_IPV4_ADDRESS => {
@@ -60,12 +75,14 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
                 value_bytes[3],
             );
             let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
-            proto::extended_community::Community::Ipv4Address(proto::extended_community::IPv4AddressSpecific {
-                is_transitive,
-                sub_type: subtype as u32,
-                address: ip.to_string(),
-                local_admin: local_admin as u32,
-            })
+            proto::extended_community::Community::Ipv4Address(
+                proto::extended_community::IPv4AddressSpecific {
+                    is_transitive,
+                    sub_type: subtype as u32,
+                    address: ip.to_string(),
+                    local_admin: local_admin as u32,
+                },
+            )
         }
 
         TYPE_FOUR_OCTET_AS => {
@@ -76,18 +93,22 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
                 value_bytes[3],
             ]);
             let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
-            proto::extended_community::Community::FourOctetAs(proto::extended_community::FourOctetAsSpecific {
-                is_transitive,
-                sub_type: subtype as u32,
-                asn,
-                local_admin: local_admin as u32,
-            })
+            proto::extended_community::Community::FourOctetAs(
+                proto::extended_community::FourOctetAsSpecific {
+                    is_transitive,
+                    sub_type: subtype as u32,
+                    asn,
+                    local_admin: local_admin as u32,
+                },
+            )
         }
 
-        TYPE_OPAQUE => proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
-            is_transitive,
-            value: value_bytes.to_vec(),
-        }),
+        TYPE_OPAQUE => {
+            proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
+                is_transitive,
+                value: value_bytes.to_vec(),
+            })
+        }
 
         _ => {
             // Unknown type - preserve all 7 bytes (subtype + value)
