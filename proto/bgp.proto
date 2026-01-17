@@ -254,15 +254,16 @@ message UnknownAttribute {
     bytes value = 3;
 }
 
-// Extended Community (RFC 4360, RFC 5668, draft-ietf-idr-link-bandwidth)
+// Extended Community (RFC 4360, RFC 5668, RFC 9012, draft-ietf-idr-link-bandwidth)
 message ExtendedCommunity {
   oneof community {
     TwoOctetAsSpecific two_octet_as = 1;
     IPv4AddressSpecific ipv4_address = 2;
     FourOctetAsSpecific four_octet_as = 3;
     LinkBandwidth link_bandwidth = 4;
-    Opaque opaque = 5;
-    Unknown unknown = 6;
+    Color color = 5;
+    Opaque opaque = 6;
+    Unknown unknown = 7;
   }
 
   message TwoOctetAsSpecific {
@@ -290,6 +291,11 @@ message ExtendedCommunity {
     bool is_transitive = 1;     // Type can be 0x00 (transitive) or 0x40 (non-transitive)
     uint32 asn = 2;             // 16-bit AS number (validate <= 65535)
     float bandwidth = 3;        // Bandwidth in bytes/sec (IEEE 754 float32)
+  }
+
+  message Color {
+    bool is_transitive = 1;     // Type can be 0x03 (transitive) or 0x43 (non-transitive)
+    uint32 color = 2;           // 32-bit color value (RFC 9012)
   }
 
   message Opaque {

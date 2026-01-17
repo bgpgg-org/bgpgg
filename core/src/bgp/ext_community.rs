@@ -16,6 +16,9 @@ pub const SUBTYPE_ROUTE_TARGET: u8 = 0x02;
 pub const SUBTYPE_ROUTE_ORIGIN: u8 = 0x03;
 pub const SUBTYPE_LINK_BANDWIDTH: u8 = 0x04;
 
+// Subtype constants for Opaque extended communities
+pub const SUBTYPE_COLOR: u8 = 0x0B;
+
 // Bit 6 of type indicates transitive (0) or non-transitive (1)
 pub const TYPE_NON_TRANSITIVE_BIT: u8 = 0x40;
 
@@ -80,6 +83,14 @@ pub const fn from_four_octet_as(subtype: u8, asn: u32, local: u16) -> u64 {
         | (local as u64)
 }
 
+/// Create a Color extended community (RFC 9012)
+/// Type 0x03: [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
+pub const fn from_color(color: u32) -> u64 {
+    ((TYPE_OPAQUE as u64) << byte_shift(0))
+        | ((SUBTYPE_COLOR as u64) << byte_shift(1))
+        | (color as u64)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseExtCommunityError {
     InvalidFormat,
@@ -98,6 +109,7 @@ pub enum ParseExtCommunityError {
 /// - "ro:65000:100" (Route Origin, two-octet AS)
 /// - "ro:192.168.1.1:100" (Route Origin, IPv4)
 /// - "ro:4200000000:100" (Route Origin, four-octet AS)
+/// - "color:100" (Color community, RFC 9012)
 /// - "0x0002FDE800000064" (raw hex, 16 hex digits)
 pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> {
     // Handle raw hex format
@@ -105,8 +117,18 @@ pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> 
         return u64::from_str_radix(hex_str, 16).map_err(|_| ParseExtCommunityError::InvalidHex);
     }
 
-    // Parse prefix:value:local format
+    // Parse colon-separated format
     let parts: Vec<&str> = s.split(':').collect();
+
+    // Handle color:VALUE format (2 parts)
+    if parts.len() == 2 && parts[0] == "color" {
+        let color: u32 = parts[1]
+            .parse()
+            .map_err(|_| ParseExtCommunityError::InvalidLocal)?;
+        return Ok(from_color(color));
+    }
+
+    // Parse prefix:value:local format (3 parts)
     if parts.len() != 3 {
         return Err(ParseExtCommunityError::InvalidFormat);
     }
@@ -159,7 +181,27 @@ pub fn format_extended_community(extcomm: u64) -> String {
     let subtype = ext_subtype(extcomm);
     let value_bytes = ext_value(extcomm);
 
-    // Determine prefix based on subtype
+    // Handle Opaque extended communities separately
+    if typ == TYPE_OPAQUE {
+        match subtype {
+            SUBTYPE_COLOR => {
+                // [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
+                let color = u32::from_be_bytes([
+                    value_bytes[2],
+                    value_bytes[3],
+                    value_bytes[4],
+                    value_bytes[5],
+                ]);
+                return format!("color:{}", color);
+            }
+            _ => {
+                // Unknown opaque subtype, return raw hex
+                return format!("0x{:016x}", extcomm);
+            }
+        }
+    }
+
+    // Determine prefix based on subtype for AS-specific types
     let prefix = match subtype {
         SUBTYPE_ROUTE_TARGET => "rt",
         SUBTYPE_ROUTE_ORIGIN => "ro",
@@ -379,6 +421,29 @@ mod tests {
             "ro:65000:200",
             "ro:10.0.0.1:50",
         ];
+
+        for original in test_cases {
+            let extcomm = parse_extended_community(original).unwrap();
+            let formatted = format_extended_community(extcomm);
+            assert_eq!(original, formatted);
+        }
+    }
+
+    #[test]
+    fn test_from_color() {
+        let extcomm = from_color(100);
+        assert_eq!(ext_type(extcomm), TYPE_OPAQUE);
+        assert_eq!(ext_subtype(extcomm), SUBTYPE_COLOR);
+        // Color should be in last 4 bytes
+        let value = ext_value(extcomm);
+        let color = u32::from_be_bytes([value[2], value[3], value[4], value[5]]);
+        assert_eq!(color, 100);
+        assert!(is_transitive(extcomm));
+    }
+
+    #[test]
+    fn test_color_roundtrip() {
+        let test_cases = vec!["color:0", "color:100", "color:999999", "color:4294967295"];
 
         for original in test_cases {
             let extcomm = parse_extended_community(original).unwrap();

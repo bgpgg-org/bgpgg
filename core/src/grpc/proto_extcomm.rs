@@ -89,6 +89,15 @@ pub(super) fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u
             Ok(val)
         }
 
+        proto::extended_community::Community::Color(ec) => {
+            let mut val = from_color(ec.color);
+            // Set non-transitive bit if needed
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
         proto::extended_community::Community::Opaque(ec) => {
             if ec.value.len() != 6 {
                 return Err(format!(
@@ -199,10 +208,26 @@ pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
         }
 
         TYPE_OPAQUE => {
-            proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
-                is_transitive,
-                value: value_bytes.to_vec(),
-            })
+            // Check for Color extended community (subtype 0x0B)
+            if subtype == SUBTYPE_COLOR {
+                // [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
+                let color = u32::from_be_bytes([
+                    value_bytes[2],
+                    value_bytes[3],
+                    value_bytes[4],
+                    value_bytes[5],
+                ]);
+                proto::extended_community::Community::Color(proto::extended_community::Color {
+                    is_transitive,
+                    color,
+                })
+            } else {
+                // Generic opaque community
+                proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
+                    is_transitive,
+                    value: value_bytes.to_vec(),
+                })
+            }
         }
 
         _ => {
@@ -362,6 +387,57 @@ mod tests {
 
         let result = proto_extcomm_to_u64(&proto_ec).unwrap();
         assert_eq!(val, result);
+    }
+
+    #[test]
+    fn test_color_roundtrip() {
+        let original = from_color(12345);
+
+        // u64 -> proto
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Color(c)) = &proto_ec.community {
+            assert!(c.is_transitive);
+            assert_eq!(c.color, 12345);
+        } else {
+            panic!("Expected Color variant");
+        }
+
+        // proto -> u64
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_color_non_transitive() {
+        let mut original = from_color(999);
+        original |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Color(c)) = &proto_ec.community {
+            assert!(!c.is_transitive);
+            assert_eq!(c.color, 999);
+        } else {
+            panic!("Expected Color variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_color_max_value() {
+        let original = from_color(u32::MAX);
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Color(c)) = &proto_ec.community {
+            assert!(c.is_transitive);
+            assert_eq!(c.color, u32::MAX);
+        } else {
+            panic!("Expected Color variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
     }
 
     #[test]
