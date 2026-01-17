@@ -688,3 +688,84 @@ async fn test_get_server_info() {
     // Should now have 3 routes
     verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 3).await;
 }
+
+#[tokio::test]
+async fn test_extended_community_roundtrip() {
+    use bgpgg::bgp::ext_community::*;
+    use bgpgg::grpc::proto::extended_community::Community;
+
+    let mut server = start_test_server(Config::new(
+        64512,
+        "127.0.0.1:0",
+        Ipv4Addr::new(127, 0, 0, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Create route with extended communities using helper functions
+    let ext_comms = vec![
+        from_two_octet_as(2, 65000, 100), // RT:65000:100
+        from_ipv4(2, u32::from(Ipv4Addr::new(192, 168, 1, 1)), 200), // RT:192.168.1.1:200
+        from_four_octet_as(3, 4200000000, 300), // RO:4200000000:300
+    ];
+
+    server
+        .client
+        .add_route(
+            "10.0.0.0/24".to_string(),
+            "192.0.2.1".to_string(),
+            Origin::Igp,
+            vec![],
+            Some(100),
+            None,
+            false,
+            vec![],
+            ext_comms.clone(),
+        )
+        .await
+        .unwrap();
+
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].paths.len(), 1);
+
+    let returned_ext_comms = &routes[0].paths[0].extended_communities;
+    assert_eq!(returned_ext_comms.len(), 3);
+
+    // Verify first ext comm (two-octet AS)
+    let first = &returned_ext_comms[0].community;
+    match first {
+        Some(Community::TwoOctetAs(ec)) => {
+            assert!(ec.is_transitive);
+            assert_eq!(ec.sub_type, 2);
+            assert_eq!(ec.asn, 65000);
+            assert_eq!(ec.local_admin, 100);
+        }
+        _ => panic!("Expected TwoOctetAs"),
+    }
+
+    // Verify second ext comm (IPv4)
+    let second = &returned_ext_comms[1].community;
+    match second {
+        Some(Community::Ipv4Address(ec)) => {
+            assert!(ec.is_transitive);
+            assert_eq!(ec.sub_type, 2);
+            assert_eq!(ec.address, "192.168.1.1");
+            assert_eq!(ec.local_admin, 200);
+        }
+        _ => panic!("Expected Ipv4Address"),
+    }
+
+    // Verify third ext comm (four-octet AS)
+    let third = &returned_ext_comms[2].community;
+    match third {
+        Some(Community::FourOctetAs(ec)) => {
+            assert!(ec.is_transitive);
+            assert_eq!(ec.sub_type, 3);
+            assert_eq!(ec.asn, 4200000000);
+            assert_eq!(ec.local_admin, 300);
+        }
+        _ => panic!("Expected FourOctetAs"),
+    }
+}

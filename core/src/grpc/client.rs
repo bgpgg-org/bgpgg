@@ -24,6 +24,87 @@ use super::proto::{
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
 
+/// Convert internal u64 representation to proto ExtendedCommunity
+fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
+    use super::proto;
+    use crate::bgp::ext_community::*;
+
+    let typ = ext_type(extcomm);
+    let subtype = ext_subtype(extcomm);
+    let value_bytes = ext_value(extcomm);
+    let is_transitive = (typ & TYPE_NON_TRANSITIVE_BIT) == 0;
+    let base_type = typ & !TYPE_NON_TRANSITIVE_BIT;
+
+    let community = match base_type {
+        TYPE_TWO_OCTET_AS => {
+            let asn = u16::from_be_bytes([value_bytes[0], value_bytes[1]]);
+            let local_admin = u32::from_be_bytes([
+                value_bytes[2],
+                value_bytes[3],
+                value_bytes[4],
+                value_bytes[5],
+            ]);
+            proto::extended_community::Community::TwoOctetAs(proto::extended_community::TwoOctetAsSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                asn: asn as u32,
+                local_admin,
+            })
+        }
+
+        TYPE_IPV4_ADDRESS => {
+            let ip = Ipv4Addr::new(
+                value_bytes[0],
+                value_bytes[1],
+                value_bytes[2],
+                value_bytes[3],
+            );
+            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+            proto::extended_community::Community::Ipv4Address(proto::extended_community::IPv4AddressSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                address: ip.to_string(),
+                local_admin: local_admin as u32,
+            })
+        }
+
+        TYPE_FOUR_OCTET_AS => {
+            let asn = u32::from_be_bytes([
+                value_bytes[0],
+                value_bytes[1],
+                value_bytes[2],
+                value_bytes[3],
+            ]);
+            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+            proto::extended_community::Community::FourOctetAs(proto::extended_community::FourOctetAsSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                asn,
+                local_admin: local_admin as u32,
+            })
+        }
+
+        TYPE_OPAQUE => proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
+            is_transitive,
+            value: value_bytes.to_vec(),
+        }),
+
+        _ => {
+            // Unknown type - preserve all 7 bytes (subtype + value)
+            let mut value = vec![subtype];
+            value.extend_from_slice(&value_bytes);
+            proto::extended_community::Community::Unknown(proto::extended_community::Unknown {
+                type_code: typ as u32,
+                value,
+            })
+        }
+    };
+
+    proto::ExtendedCommunity {
+        community: Some(community),
+    }
+}
+
 /// Simplified wrapper around the gRPC client that hides boilerplate
 pub struct BgpClient {
     inner: BgpServiceClient<Channel>,
@@ -275,6 +356,12 @@ impl BgpClient {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
     ) -> Result<String, tonic::Status> {
+        // Convert u64 extended communities to proto format
+        let extended_communities_proto = extended_communities
+            .into_iter()
+            .map(u64_to_proto_extcomm)
+            .collect();
+
         let resp = self
             .inner
             .add_route(AddRouteRequest {
@@ -286,7 +373,7 @@ impl BgpClient {
                 med,
                 atomic_aggregate,
                 communities,
-                extended_communities,
+                extended_communities: extended_communities_proto,
             })
             .await?
             .into_inner();
@@ -326,6 +413,12 @@ impl BgpClient {
                 communities,
                 extended_communities,
             )| {
+                // Convert u64 extended communities to proto format
+                let extended_communities_proto = extended_communities
+                    .into_iter()
+                    .map(u64_to_proto_extcomm)
+                    .collect();
+
                 AddRouteRequest {
                     prefix,
                     next_hop,
@@ -335,7 +428,7 @@ impl BgpClient {
                     med,
                     atomic_aggregate,
                     communities,
-                    extended_communities,
+                    extended_communities: extended_communities_proto,
                 }
             },
         );

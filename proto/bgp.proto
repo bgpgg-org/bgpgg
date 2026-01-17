@@ -168,7 +168,7 @@ message AddRouteRequest {
     optional uint32 med = 6;            // Optional MULTI_EXIT_DISC
     bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
     repeated uint32 communities = 8;    // BGP Communities (RFC 1997)
-    repeated uint64 extended_communities = 9; // Extended Communities (RFC 4360)
+    repeated ExtendedCommunity extended_communities = 9; // Extended Communities (RFC 4360)
 }
 
 message AddRouteResponse {
@@ -244,7 +244,7 @@ message Path {
     bool atomic_aggregate = 7;
     repeated UnknownAttribute unknown_attributes = 8;
     repeated uint32 communities = 9;
-    repeated uint64 extended_communities = 10;
+    repeated ExtendedCommunity extended_communities = 10;
 }
 
 // Unknown attribute
@@ -252,6 +252,48 @@ message UnknownAttribute {
     uint32 attr_type = 1;
     uint32 flags = 2;
     bytes value = 3;
+}
+
+// Extended Community (RFC 4360)
+message ExtendedCommunity {
+  oneof community {
+    TwoOctetAsSpecific two_octet_as = 1;
+    IPv4AddressSpecific ipv4_address = 2;
+    FourOctetAsSpecific four_octet_as = 3;
+    Opaque opaque = 4;
+    Unknown unknown = 5;
+  }
+
+  message TwoOctetAsSpecific {
+    bool is_transitive = 1;
+    uint32 sub_type = 2;        // 0x02=Route Target, 0x03=Route Origin
+    uint32 asn = 3;             // 16-bit ASN (validate <= 65535)
+    uint32 local_admin = 4;     // 32-bit local administrator
+  }
+
+  message IPv4AddressSpecific {
+    bool is_transitive = 1;
+    uint32 sub_type = 2;
+    string address = 3;         // IPv4 dotted notation (e.g., "192.168.1.1")
+    uint32 local_admin = 4;     // 16-bit local administrator (validate <= 65535)
+  }
+
+  message FourOctetAsSpecific {
+    bool is_transitive = 1;
+    uint32 sub_type = 2;
+    uint32 asn = 3;             // 32-bit ASN
+    uint32 local_admin = 4;     // 16-bit local administrator (validate <= 65535)
+  }
+
+  message Opaque {
+    bool is_transitive = 1;
+    bytes value = 2;            // 6 bytes of opaque data (validate length)
+  }
+
+  message Unknown {
+    uint32 type_code = 1;       // Full type octet from wire format
+    bytes value = 2;            // 7 bytes (subtype + 6-byte value, validate length)
+  }
 }
 
 // BMP server management

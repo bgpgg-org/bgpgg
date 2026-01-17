@@ -109,13 +109,186 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 })
                 .collect(),
             communities: path.communities.clone(),
-            extended_communities: path.extended_communities.clone(),
+            extended_communities: path
+                .extended_communities
+                .iter()
+                .map(|&ec| u64_to_proto_extcomm(ec))
+                .collect(),
         })
         .collect();
 
     ProtoRoute {
         prefix: prefix_str,
         paths: proto_paths,
+    }
+}
+
+/// Convert proto ExtendedCommunity to internal u64 representation
+fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u64, String> {
+    use crate::bgp::ext_community::*;
+
+    let community = proto
+        .community
+        .as_ref()
+        .ok_or("ExtendedCommunity missing oneof field")?;
+
+    match community {
+        proto::extended_community::Community::TwoOctetAs(ec) => {
+            if ec.asn > 65535 {
+                return Err(format!("ASN {} exceeds 16-bit max (65535)", ec.asn));
+            }
+            let mut val = from_two_octet_as(ec.sub_type as u8, ec.asn as u16, ec.local_admin);
+            // Set non-transitive bit if needed
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
+        proto::extended_community::Community::Ipv4Address(ec) => {
+            if ec.local_admin > 65535 {
+                return Err(format!(
+                    "Local admin {} exceeds 16-bit max (65535)",
+                    ec.local_admin
+                ));
+            }
+            let ip: Ipv4Addr = ec
+                .address
+                .parse()
+                .map_err(|_| format!("Invalid IPv4 address: {}", ec.address))?;
+            let mut val = from_ipv4(ec.sub_type as u8, u32::from(ip), ec.local_admin as u16);
+            // Set non-transitive bit if needed
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
+        proto::extended_community::Community::FourOctetAs(ec) => {
+            if ec.local_admin > 65535 {
+                return Err(format!(
+                    "Local admin {} exceeds 16-bit max (65535)",
+                    ec.local_admin
+                ));
+            }
+            let mut val = from_four_octet_as(ec.sub_type as u8, ec.asn, ec.local_admin as u16);
+            // Set non-transitive bit if needed
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
+        proto::extended_community::Community::Opaque(ec) => {
+            if ec.value.len() != 6 {
+                return Err(format!(
+                    "Opaque value must be 6 bytes, got {}",
+                    ec.value.len()
+                ));
+            }
+            let mut typ = TYPE_OPAQUE;
+            if !ec.is_transitive {
+                typ |= TYPE_NON_TRANSITIVE_BIT;
+            }
+            // Build u64: [type][0x00 subtype][6 bytes value]
+            let mut bytes = [0u8; 8];
+            bytes[0] = typ;
+            bytes[2..8].copy_from_slice(&ec.value);
+            Ok(u64::from_be_bytes(bytes))
+        }
+
+        proto::extended_community::Community::Unknown(ec) => {
+            if ec.value.len() != 7 {
+                return Err(format!(
+                    "Unknown value must be 7 bytes, got {}",
+                    ec.value.len()
+                ));
+            }
+            let mut bytes = [0u8; 8];
+            bytes[0] = ec.type_code as u8;
+            bytes[1..8].copy_from_slice(&ec.value);
+            Ok(u64::from_be_bytes(bytes))
+        }
+    }
+}
+
+/// Convert internal u64 representation to proto ExtendedCommunity
+fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
+    use crate::bgp::ext_community::*;
+
+    let typ = ext_type(extcomm);
+    let subtype = ext_subtype(extcomm);
+    let value_bytes = ext_value(extcomm);
+    let is_transitive = (typ & TYPE_NON_TRANSITIVE_BIT) == 0;
+    let base_type = typ & !TYPE_NON_TRANSITIVE_BIT;
+
+    let community = match base_type {
+        TYPE_TWO_OCTET_AS => {
+            let asn = u16::from_be_bytes([value_bytes[0], value_bytes[1]]);
+            let local_admin = u32::from_be_bytes([
+                value_bytes[2],
+                value_bytes[3],
+                value_bytes[4],
+                value_bytes[5],
+            ]);
+            proto::extended_community::Community::TwoOctetAs(proto::extended_community::TwoOctetAsSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                asn: asn as u32,
+                local_admin,
+            })
+        }
+
+        TYPE_IPV4_ADDRESS => {
+            let ip = Ipv4Addr::new(
+                value_bytes[0],
+                value_bytes[1],
+                value_bytes[2],
+                value_bytes[3],
+            );
+            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+            proto::extended_community::Community::Ipv4Address(proto::extended_community::IPv4AddressSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                address: ip.to_string(),
+                local_admin: local_admin as u32,
+            })
+        }
+
+        TYPE_FOUR_OCTET_AS => {
+            let asn = u32::from_be_bytes([
+                value_bytes[0],
+                value_bytes[1],
+                value_bytes[2],
+                value_bytes[3],
+            ]);
+            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+            proto::extended_community::Community::FourOctetAs(proto::extended_community::FourOctetAsSpecific {
+                is_transitive,
+                sub_type: subtype as u32,
+                asn,
+                local_admin: local_admin as u32,
+            })
+        }
+
+        TYPE_OPAQUE => proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
+            is_transitive,
+            value: value_bytes.to_vec(),
+        }),
+
+        _ => {
+            // Unknown type - preserve all 7 bytes (subtype + value)
+            let mut value = vec![subtype];
+            value.extend_from_slice(&value_bytes);
+            proto::extended_community::Community::Unknown(proto::extended_community::Unknown {
+                type_code: typ as u32,
+                value,
+            })
+        }
+    };
+
+    proto::ExtendedCommunity {
+        community: Some(community),
     }
 }
 
@@ -499,6 +672,14 @@ impl BgpService for BgpGrpcService {
             }
         };
 
+        // Convert proto extended communities to internal u64
+        let extended_communities: Vec<u64> = req
+            .extended_communities
+            .iter()
+            .map(proto_extcomm_to_u64)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("Invalid extended community: {}", e)))?;
+
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
@@ -510,7 +691,7 @@ impl BgpService for BgpGrpcService {
             med: req.med,
             atomic_aggregate: req.atomic_aggregate,
             communities: req.communities,
-            extended_communities: req.extended_communities,
+            extended_communities,
             response: tx,
         };
 
@@ -549,6 +730,17 @@ impl BgpService for BgpGrpcService {
                 Err(_) => continue, // Skip invalid routes
             };
 
+            // Convert proto extended communities to internal u64
+            let extended_communities: Vec<u64> = match req
+                .extended_communities
+                .iter()
+                .map(proto_extcomm_to_u64)
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(ec) => ec,
+                Err(_) => continue, // Skip routes with invalid extended communities
+            };
+
             // Send request to BGP server
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
@@ -560,7 +752,7 @@ impl BgpService for BgpGrpcService {
                 med: req.med,
                 atomic_aggregate: req.atomic_aggregate,
                 communities: req.communities,
-                extended_communities: req.extended_communities,
+                extended_communities,
                 response: tx,
             };
 
