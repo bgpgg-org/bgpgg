@@ -165,17 +165,14 @@ async fn test_export_policy_prefix_match() {
             .iter()
             .map(|prefix| Route {
                 prefix: prefix.to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65002])],
-                    &server2.address.to_string(),
-                    peer_addr.clone(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: server2.address.to_string(),
+                    peer_address: peer_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             })
             .collect();
 

@@ -14,6 +14,7 @@
 
 //! Route propagation logic for BGP UPDATE messages
 
+use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
@@ -166,6 +167,24 @@ pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u3
     } else {
         // Send MED when route is local or from iBGP
         path.med
+    }
+}
+
+/// Filter extended communities for export to peer
+/// RFC 4360: Non-transitive extended communities (bit 6 = 1) must be filtered when advertising to eBGP peers
+pub fn build_export_extended_communities(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<u64> {
+    let is_ebgp = local_asn != peer_asn;
+
+    if is_ebgp {
+        // Filter out non-transitive extended communities (RFC 4360 Section 6)
+        path.extended_communities
+            .iter()
+            .filter(|&&extcomm| is_transitive(extcomm))
+            .copied()
+            .collect()
+    } else {
+        // iBGP: propagate all extended communities
+        path.extended_communities.clone()
     }
 }
 
@@ -362,6 +381,10 @@ pub fn send_announcements_to_peer(
             "path_med" => format!("{:?}", batch.path.med),
             "export_med" => format!("{:?}", med));
 
+        // Filter extended communities for eBGP (remove non-transitive)
+        let extended_communities =
+            build_export_extended_communities(&batch.path, local_asn, peer_asn);
+
         let update_msg = UpdateMessage::new(
             batch.path.origin,
             as_path_segments,
@@ -371,7 +394,7 @@ pub fn send_announcements_to_peer(
             med,
             atomic_aggregate,
             batch.path.communities.clone(),
-            batch.path.extended_communities.clone(),
+            extended_communities,
             unknown_attrs,
         );
 
@@ -871,6 +894,37 @@ mod tests {
         assert!(
             !should_filter_by_community(&communities, 65000, 65000),
             "Regular communities should not filter"
+        );
+    }
+
+    #[test]
+    fn test_build_export_extended_communities() {
+        let transitive = 0x0002FDE800000064u64;
+        let non_transitive = 0x4002FDE800000064u64;
+
+        let path = Path {
+            origin: Origin::IGP,
+            as_path: vec![],
+            next_hop: Ipv4Addr::new(10, 0, 0, 1),
+            source: RouteSource::Local,
+            local_pref: None,
+            med: None,
+            atomic_aggregate: false,
+            communities: vec![],
+            extended_communities: vec![transitive, non_transitive],
+            unknown_attrs: vec![],
+        };
+
+        // eBGP: filters non-transitive
+        assert_eq!(
+            build_export_extended_communities(&path, 65000, 65001),
+            vec![transitive]
+        );
+
+        // iBGP: keeps all
+        assert_eq!(
+            build_export_extended_communities(&path, 65000, 65000),
+            vec![transitive, non_transitive]
         );
     }
 }

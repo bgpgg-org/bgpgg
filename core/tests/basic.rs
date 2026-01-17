@@ -44,17 +44,14 @@ async fn test_announce_withdraw() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(
-                vec![as_sequence(vec![65002])],
-                &server2.address.to_string(),
-                peer_addr.clone(),
-                Origin::Igp,
-                Some(100),
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
         }],
     )])
     .await;
@@ -101,34 +98,28 @@ async fn test_announce_withdraw_mesh() {
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65001])],
-                    &server1.address.to_string(),
-                    server1.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65001])],
-                    &server1.address.to_string(),
-                    server1.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
     ])
@@ -196,17 +187,14 @@ async fn test_announce_withdraw_four_node_mesh() {
     // eBGP: NEXT_HOP rewritten to sender's local address
     let expected_route = vec![Route {
         prefix: "10.1.0.0/24".to_string(),
-        paths: vec![build_path(
-            vec![as_sequence(vec![65001])],
-            &server1.address.to_string(),
-            server1.address.to_string(),
-            Origin::Igp,
-            Some(100),
-            None,
-            false,
-            vec![],
-            vec![],
-        )],
+        paths: vec![build_path(PathParams {
+            as_path: vec![as_sequence(vec![65001])],
+            next_hop: server1.address.to_string(),
+            peer_address: server1.address.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        })],
     }];
     let recv_1 = ExpectedStats {
         min_update_received: Some(1),
@@ -368,17 +356,14 @@ async fn test_ibgp_split_horizon() {
             &server2,
             vec![Route {
                 prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![],        // Empty AS_PATH for locally originated route in iBGP
-                    "192.168.1.1", // iBGP: NEXT_HOP preserved
-                    server1.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![], // Empty AS_PATH for locally originated route in iBGP
+                    next_hop: "192.168.1.1".to_string(), // iBGP: NEXT_HOP preserved
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
         (&server3, vec![]), // Server3 should have no routes due to split horizon
@@ -461,17 +446,14 @@ async fn test_as_loop_prevention() {
         &server2,
         vec![Route {
             prefix: "10.1.0.0/24".to_string(),
-            paths: vec![build_path(
-                vec![as_sequence(vec![65001])],
-                &server1_a.address.to_string(),
-                server1_a.address.to_string(),
-                Origin::Igp,
-                Some(100),
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: server1_a.address.to_string(),
+                peer_address: server1_a.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
         }],
     )])
     .await;

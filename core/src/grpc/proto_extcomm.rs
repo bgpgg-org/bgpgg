@@ -278,8 +278,7 @@ mod tests {
             | ((TYPE_NON_TRANSITIVE_BIT as u64) << 56);
 
         let proto_ec = u64_to_proto_extcomm(original);
-        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community
-        {
+        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community {
             assert!(!lb.is_transitive);
             assert_eq!(lb.asn, 65000);
             assert_eq!(lb.bandwidth, bandwidth_bps);
@@ -299,8 +298,7 @@ mod tests {
         let original = from_two_octet_as(SUBTYPE_LINK_BANDWIDTH, 200, bandwidth_bits);
 
         let proto_ec = u64_to_proto_extcomm(original);
-        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community
-        {
+        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community {
             assert!(lb.is_transitive);
             assert_eq!(lb.asn, 200);
             assert_eq!(lb.bandwidth, bandwidth_bps);
@@ -476,8 +474,7 @@ mod tests {
         let original = from_two_octet_as(SUBTYPE_LINK_BANDWIDTH, 100, bandwidth_bits);
 
         let proto_ec = u64_to_proto_extcomm(original);
-        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community
-        {
+        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community {
             assert_eq!(lb.bandwidth, 0.0);
         } else {
             panic!("Expected LinkBandwidth variant");
@@ -495,8 +492,7 @@ mod tests {
         let original = from_two_octet_as(SUBTYPE_LINK_BANDWIDTH, 65000, bandwidth_bits);
 
         let proto_ec = u64_to_proto_extcomm(original);
-        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community
-        {
+        if let Some(proto::extended_community::Community::LinkBandwidth(lb)) = &proto_ec.community {
             // Float comparison with some tolerance due to precision
             assert!((lb.bandwidth - bandwidth).abs() < 1.0);
         } else {

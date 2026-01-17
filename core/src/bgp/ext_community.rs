@@ -46,6 +46,13 @@ pub const fn ext_value(extcomm: u64) -> [u8; 6] {
     ]
 }
 
+/// Check if an extended community is transitive across AS boundaries (RFC 4360 Section 2)
+/// Returns true if the community should be propagated across eBGP sessions
+pub const fn is_transitive(extcomm: u64) -> bool {
+    let typ = ext_type(extcomm);
+    (typ & TYPE_NON_TRANSITIVE_BIT) == 0
+}
+
 /// Create an extended community from two-octet AS format
 /// Type 0x00: [Type][Subtype][AS (2 bytes)][Local (4 bytes)]
 pub const fn from_two_octet_as(subtype: u8, asn: u16, local: u32) -> u64 {
@@ -230,6 +237,17 @@ mod tests {
         let extcomm = 0x0002FDE800000064u64;
         let value = ext_value(extcomm);
         assert_eq!(value, [0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]);
+    }
+
+    #[test]
+    fn test_is_transitive() {
+        // Transitive (bit 6 = 0)
+        let transitive = 0x0002FDE800000064u64; // Type 0x00
+        assert!(is_transitive(transitive));
+
+        // Non-transitive (bit 6 = 1)
+        let non_transitive = 0x4002FDE800000064u64; // Type 0x40
+        assert!(!is_transitive(non_transitive));
     }
 
     #[test]

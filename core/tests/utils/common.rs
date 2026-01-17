@@ -111,30 +111,34 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
     }
 }
 
-/// Helper to build a Path with AS_PATH segments
-#[allow(clippy::too_many_arguments)]
-pub fn build_path(
-    as_path: Vec<AsPathSegment>,
-    next_hop: &str,
-    peer_address: String,
-    origin: Origin,
-    local_pref: Option<u32>,
-    med: Option<u32>,
-    atomic_aggregate: bool,
-    unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
-    communities: Vec<u32>,
-) -> Path {
+/// Parameters for building a Path in test assertions
+#[derive(Default, Clone)]
+pub struct PathParams {
+    pub as_path: Vec<AsPathSegment>,
+    pub next_hop: String,
+    pub peer_address: String,
+    pub origin: Option<Origin>,
+    pub local_pref: Option<u32>,
+    pub med: Option<u32>,
+    pub atomic_aggregate: bool,
+    pub unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
+    pub communities: Vec<u32>,
+    pub extended_communities: Vec<bgpgg::grpc::proto::ExtendedCommunity>,
+}
+
+/// Helper to build a Path from PathParams (new way - preferred for new tests)
+pub fn build_path(params: PathParams) -> Path {
     Path {
-        origin: origin.into(),
-        as_path,
-        next_hop: next_hop.to_string(),
-        peer_address,
-        local_pref,
-        med,
-        atomic_aggregate,
-        unknown_attributes,
-        communities,
-        extended_communities: vec![],
+        origin: params.origin.unwrap_or(Origin::Igp).into(),
+        as_path: params.as_path,
+        next_hop: params.next_hop,
+        peer_address: params.peer_address,
+        local_pref: params.local_pref,
+        med: params.med,
+        atomic_aggregate: params.atomic_aggregate,
+        unknown_attributes: params.unknown_attributes,
+        communities: params.communities,
+        extended_communities: params.extended_communities,
     }
 }
 
@@ -897,6 +901,7 @@ pub struct RouteParams {
     pub med: Option<u32>,
     pub atomic_aggregate: bool,
     pub communities: Vec<u32>,
+    pub extended_communities: Vec<u64>,
 }
 
 /// Announce a route with customizable attributes
@@ -931,7 +936,7 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
             params.med,
             params.atomic_aggregate,
             params.communities,
-            vec![],
+            params.extended_communities,
         )
         .await
         .unwrap();

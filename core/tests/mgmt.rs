@@ -568,17 +568,14 @@ async fn test_list_routes_impl(use_stream: bool) {
     let expected_adj_in: Vec<Route> = (0..5)
         .map(|i| Route {
             prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(
-                vec![as_sequence(vec![server2.asn as u32])],
-                &server2.address.to_string(),
-                server2.address.to_string(),
-                Origin::Igp,
-                None, // eBGP - no LOCAL_PREF
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![server2.asn as u32])],
+                next_hop: server2.address.to_string(),
+                peer_address: server2.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: None, // eBGP - no LOCAL_PREF
+                ..Default::default()
+            })],
         })
         .collect();
 
@@ -604,17 +601,14 @@ async fn test_list_routes_impl(use_stream: bool) {
     let expected_adj_out: Vec<Route> = (10..15)
         .map(|i| Route {
             prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(
-                vec![as_sequence(vec![server1.asn as u32])],
-                &server1.config.router_id.to_string(),
-                "127.0.0.1".to_string(),
-                Origin::Igp,
-                None, // eBGP - no LOCAL_PREF
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![server1.asn as u32])],
+                next_hop: server1.config.router_id.to_string(),
+                peer_address: "127.0.0.1".to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: None, // eBGP - no LOCAL_PREF
+                ..Default::default()
+            })],
         })
         .collect();
 

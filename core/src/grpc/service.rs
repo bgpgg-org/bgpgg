@@ -130,7 +130,6 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
     }
 }
 
-
 /// Parse an AddRouteRequest into internal types
 fn parse_add_route_request(
     req: &AddRouteRequest,
@@ -1095,4 +1094,3 @@ impl BgpService for BgpGrpcService {
         }
     }
 }
-
