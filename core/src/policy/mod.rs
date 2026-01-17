@@ -177,6 +177,7 @@ pub(crate) mod test_helpers {
             med: None,
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         }
     }

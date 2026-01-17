@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod community;
+pub mod ext_community;
 pub mod msg;
 pub mod msg_keepalive;
 pub mod msg_notification;
@@ -22,3 +23,44 @@ pub mod msg_update;
 mod msg_update_codec;
 pub mod msg_update_types;
 pub mod utils;
+
+#[cfg(test)]
+use msg_update_types::{AttrType, PathAttrFlag};
+
+#[cfg(test)]
+pub(crate) const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
+    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+    AttrType::Communities as u8,
+    0x08, // Length: 8 bytes (2 communities)
+    0x00,
+    0x01,
+    0x00,
+    0x64, // Community 1: 1:100
+    0xFF,
+    0xFF,
+    0xFF,
+    0x01, // Community 2: NO_EXPORT
+];
+
+#[cfg(test)]
+pub(crate) const PATH_ATTR_EXTENDED_COMMUNITIES_TWO: &[u8] = &[
+    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+    AttrType::ExtendedCommunities as u8,
+    0x10, // Length: 16 bytes (2 extended communities)
+    0x00,
+    0x02,
+    0xFD,
+    0xE8,
+    0x00,
+    0x00,
+    0x00,
+    0x64, // rt:65000:100
+    0x01,
+    0x02,
+    0xC0,
+    0xA8,
+    0x01,
+    0x01,
+    0x00,
+    0x64, // rt:192.168.1.1:100
+];

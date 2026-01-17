@@ -403,6 +403,7 @@ async fn test_add_route_stream() {
             None,
             false,
             vec![],
+            vec![],
         ),
         (
             "10.0.1.0/24".to_string(),
@@ -413,6 +414,7 @@ async fn test_add_route_stream() {
             None,
             false,
             vec![],
+            vec![],
         ),
         (
             "10.0.2.0/24".to_string(),
@@ -422,6 +424,7 @@ async fn test_add_route_stream() {
             None,
             None,
             false,
+            vec![],
             vec![],
         ),
     ];
@@ -459,6 +462,7 @@ async fn test_add_route_stream_with_invalid_route() {
             None,
             false,
             vec![],
+            vec![],
         ),
         (
             "invalid-prefix".to_string(),
@@ -469,6 +473,7 @@ async fn test_add_route_stream_with_invalid_route() {
             None,
             false,
             vec![],
+            vec![],
         ),
         (
             "10.0.2.0/24".to_string(),
@@ -478,6 +483,7 @@ async fn test_add_route_stream_with_invalid_route() {
             None,
             None,
             false,
+            vec![],
             vec![],
         ),
     ];

@@ -273,6 +273,7 @@ impl BgpClient {
         med: Option<u32>,
         atomic_aggregate: bool,
         communities: Vec<u32>,
+        extended_communities: Vec<u64>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
@@ -285,6 +286,7 @@ impl BgpClient {
                 med,
                 atomic_aggregate,
                 communities,
+                extended_communities,
             })
             .await?
             .into_inner();
@@ -309,6 +311,7 @@ impl BgpClient {
             Option<u32>,
             bool,
             Vec<u32>,
+            Vec<u64>,
         )>,
     ) -> Result<u64, tonic::Status> {
         let requests = routes.into_iter().map(
@@ -321,6 +324,7 @@ impl BgpClient {
                 med,
                 atomic_aggregate,
                 communities,
+                extended_communities,
             )| {
                 AddRouteRequest {
                     prefix,
@@ -331,6 +335,7 @@ impl BgpClient {
                     med,
                     atomic_aggregate,
                     communities,
+                    extended_communities,
                 }
             },
         );

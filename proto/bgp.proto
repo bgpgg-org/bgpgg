@@ -168,6 +168,7 @@ message AddRouteRequest {
     optional uint32 med = 6;            // Optional MULTI_EXIT_DISC
     bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
     repeated uint32 communities = 8;    // BGP Communities (RFC 1997)
+    repeated uint64 extended_communities = 9; // Extended Communities (RFC 4360)
 }
 
 message AddRouteResponse {
@@ -243,6 +244,7 @@ message Path {
     bool atomic_aggregate = 7;
     repeated UnknownAttribute unknown_attributes = 8;
     repeated uint32 communities = 9;
+    repeated uint64 extended_communities = 10;
 }
 
 // Unknown attribute

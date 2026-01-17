@@ -371,6 +371,7 @@ pub fn send_announcements_to_peer(
             med,
             atomic_aggregate,
             batch.path.communities.clone(),
+            batch.path.extended_communities.clone(),
             unknown_attrs,
         );
 
@@ -417,6 +418,7 @@ mod tests {
             med: None,
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         }
     }
@@ -712,6 +714,7 @@ mod tests {
             med: None,
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -734,6 +737,7 @@ mod tests {
             med: Some(50),
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         };
 
@@ -753,6 +757,7 @@ mod tests {
             med: Some(50),
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         };
 

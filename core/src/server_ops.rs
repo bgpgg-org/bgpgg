@@ -65,6 +65,7 @@ impl BgpServer {
                 med,
                 atomic_aggregate,
                 communities,
+                extended_communities,
                 response,
             } => {
                 self.handle_add_route(
@@ -76,6 +77,7 @@ impl BgpServer {
                     med,
                     atomic_aggregate,
                     communities,
+                    extended_communities,
                     response,
                 )
                 .await;
@@ -532,6 +534,7 @@ impl BgpServer {
         med: Option<u32>,
         atomic_aggregate: bool,
         communities: Vec<u32>,
+        extended_communities: Vec<u64>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
@@ -546,6 +549,7 @@ impl BgpServer {
             med,
             atomic_aggregate,
             communities,
+            extended_communities,
         );
 
         // Propagate to all peers using the common propagation logic
@@ -893,6 +897,7 @@ impl BgpServer {
                     batch.path.med,
                     batch.path.atomic_aggregate,
                     batch.path.communities.clone(),
+                    batch.path.extended_communities.clone(),
                     batch.path.unknown_attrs.clone(),
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
@@ -1395,6 +1400,7 @@ fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
                 batch.path.med,
                 batch.path.atomic_aggregate,
                 batch.path.communities.clone(),
+                batch.path.extended_communities.clone(),
                 batch.path.unknown_attrs.clone(),
             )
         })

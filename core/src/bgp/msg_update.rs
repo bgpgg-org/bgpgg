@@ -41,6 +41,7 @@ impl UpdateMessage {
         med: Option<u32>,
         atomic_aggregate: bool,
         communities: Vec<u32>,
+        extended_communities: Vec<u64>,
         unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         let mut path_attributes = vec![
@@ -85,6 +86,13 @@ impl UpdateMessage {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::Communities(communities),
+            });
+        }
+
+        if !extended_communities.is_empty() {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::ExtendedCommunities(extended_communities),
             });
         }
 
@@ -215,6 +223,16 @@ impl UpdateMessage {
         })
     }
 
+    pub fn extended_communities(&self) -> Option<Vec<u64>> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::ExtendedCommunities(ref ext_communities) = attr.value {
+                Some(ext_communities.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;
@@ -296,32 +314,28 @@ mod tests {
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_codec::{read_path_attribute, write_path_attribute};
     use crate::bgp::msg_update_types::AttrType;
+    use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
     use crate::net::Ipv4Net;
-    use std::str::FromStr;
 
-    const PATH_ATTR_ORIGIN_EGP: &[u8] = &[
-        PathAttrFlag::TRANSITIVE, // Attribute flags
-        AttrType::Origin as u8,   // Attribute type
-        0x01,                     // Attribute length
-        1,                        // Origin value: EGP
-    ];
+    const PATH_ATTR_ORIGIN_EGP: &[u8] =
+        &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 1];
+
     const PATH_ATTR_AS_PATH: &[u8] = &[
-        PathAttrFlag::TRANSITIVE, // Attribute flags
-        AttrType::AsPath as u8,   // Attribute type
-        0x06,                     // Attribute length
-        // AS Path attrbitue
+        PathAttrFlag::TRANSITIVE,
+        AttrType::AsPath as u8,
+        0x06,
         AsPathSegmentType::AsSet as u8,
-        0x02, // Number of ASes
+        0x02,
         0x00,
-        0x10, // ASN: 16
+        0x10,
         0x01,
-        0x12, // ASN: 274
+        0x12,
     ];
+
     const PATH_ATTR_NEXT_HOP_IPV4: &[u8] = &[
-        PathAttrFlag::TRANSITIVE, // Attribute flags
-        AttrType::NextHop as u8,  // Attribute type
-        0x04,                     // Attribute length
-        // IPv4
+        PathAttrFlag::TRANSITIVE,
+        AttrType::NextHop as u8,
+        0x04,
         0xc8,
         0xc9,
         0xca,
@@ -382,428 +396,6 @@ mod tests {
         body.extend_from_slice(nlri);
 
         body
-    }
-
-    #[test]
-    fn test_read_path_attribute_origin() {
-        let (attribute, offset) = read_path_attribute(PATH_ATTR_ORIGIN_EGP).unwrap();
-
-        assert_eq!(
-            attribute,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Origin(Origin::try_from(1).unwrap()),
-            }
-        );
-        assert_eq!(offset, 4);
-    }
-
-    #[test]
-    fn test_read_path_attribute_origin_invalid_value() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::Origin as u8,
-            0x01,
-            0x03, // Invalid value (must be 0, 1, or 2)
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute)
-                );
-                assert_eq!(data, input);
-            }
-            _ => panic!("Expected InvalidOriginAttribute error"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_as_path() {
-        let (as_path, offset) = read_path_attribute(PATH_ATTR_AS_PATH).unwrap();
-        let segments = vec![AsPathSegment {
-            segment_type: AsPathSegmentType::AsSet,
-            segment_len: 2,
-            asn_list: vec![16, 274],
-        }];
-
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AsPath(AsPath { segments }),
-            }
-        );
-        assert_eq!(offset, 9);
-    }
-
-    #[test]
-    fn test_read_path_attribute_as_path_truncated_header() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::AsPath as u8,
-            0x01, // Attribute length: only 1 byte
-            AsPathSegmentType::AsSet as u8,
-            // Missing segment_len byte
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
-                );
-                assert_eq!(data, Vec::<u8>::new());
-            }
-            _ => panic!("Expected MalformedASPath error"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_as_path_truncated_asn_data() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::AsPath as u8,
-            0x04, // Attribute length: 4 bytes
-            AsPathSegmentType::AsSequence as u8,
-            0x02, // segment_len: claims 2 ASNs (needs 4 bytes)
-            0x00,
-            0x10, // Only 1 ASN provided
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
-                );
-                assert_eq!(data, Vec::<u8>::new());
-            }
-            _ => panic!("Expected MalformedASPath error"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_as_path_empty() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::AsPath as u8,
-            0x00, // Attribute length: 0
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AsPath(AsPath { segments: vec![] }),
-            }
-        );
-        assert_eq!(offset, 3);
-    }
-
-    #[test]
-    fn test_read_path_attribute_as_path_multiple_segments() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,
-            AttrType::AsPath as u8,
-            0x0a, // Attribute length: 10 bytes
-            AsPathSegmentType::AsSequence as u8,
-            0x02, // 2 ASNs
-            0x00,
-            0x0a, // ASN 10
-            0x00,
-            0x14, // ASN 20
-            AsPathSegmentType::AsSet as u8,
-            0x01, // 1 ASN
-            0x00,
-            0x1e, // ASN 30
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AsPath(AsPath {
-                    segments: vec![
-                        AsPathSegment {
-                            segment_type: AsPathSegmentType::AsSequence,
-                            segment_len: 2,
-                            asn_list: vec![10, 20],
-                        },
-                        AsPathSegment {
-                            segment_type: AsPathSegmentType::AsSet,
-                            segment_len: 1,
-                            asn_list: vec![30],
-                        }
-                    ]
-                }),
-            }
-        );
-        assert_eq!(offset, 13);
-    }
-
-    #[test]
-    fn test_read_path_attribute_next_hop_ipv4() {
-        let (as_path, offset) = read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::NextHop(NextHopAddr::Ipv4(Ipv4Addr::new(200, 201, 202, 203))),
-            }
-        );
-        assert_eq!(offset, 7);
-    }
-
-    #[test]
-    fn test_read_path_attribute_next_hop_invalid_length() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::NextHop as u8,  // Attribute type
-            0x05,                     // Attribute length (invalid - should be 4)
-            0x0a,
-            0x0b,
-            0x0c,
-            0x0d,
-            0x0e,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_next_hop_invalid_address() {
-        let test_cases = vec![
-            ("0.0.0.0", [0x00, 0x00, 0x00, 0x00]),
-            ("255.255.255.255", [0xff, 0xff, 0xff, 0xff]),
-            ("224.0.0.1", [0xe0, 0x00, 0x00, 0x01]),
-            ("239.255.255.255", [0xef, 0xff, 0xff, 0xff]),
-        ];
-
-        for (name, ip_bytes) in test_cases {
-            let input: Vec<u8> = vec![
-                PathAttrFlag::TRANSITIVE,
-                AttrType::NextHop as u8,
-                0x04,
-                ip_bytes[0],
-                ip_bytes[1],
-                ip_bytes[2],
-                ip_bytes[3],
-            ];
-
-            match read_path_attribute(&input) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(data, input, "Failed for {}", name);
-                }
-                _ => panic!("Expected InvalidNextHopAttribute for {}", name),
-            }
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_multi_exit_disc() {
-        let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL,        // Attribute flags
-            AttrType::MultiExtiDisc as u8, // Attribute type
-            0x04,                          // Attribute length
-            // Attribute value
-            0x00,
-            0x01,
-            0x00,
-            0x01,
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
-                value: PathAttrValue::MultiExtiDisc(65537),
-            }
-        );
-        assert_eq!(offset, 7);
-    }
-
-    #[test]
-    fn test_read_path_attribute_optional_invalid_length() {
-        let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL,        // Attribute flags
-            AttrType::MultiExtiDisc as u8, // Attribute type (optional)
-            0x03,                          // Attribute length (invalid - should be 4)
-            0x00,
-            0x00,
-            0x01,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected OptionalAttributeError"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_local_pref() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,  // Attribute flags
-            AttrType::LocalPref as u8, // Attribute type
-            0x04,                      // Attribute length
-            // Attribute value
-            0x00,
-            0x00,
-            0x0f,
-            0x01,
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::LocalPref(3841),
-            }
-        );
-        assert_eq!(offset, 7);
-    }
-
-    #[test]
-    fn test_read_path_attribute_local_pref_invalid_length() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,  // Attribute flags
-            AttrType::LocalPref as u8, // Attribute type
-            0x03,                      // Attribute length (invalid - should be 4)
-            0x00,
-            0x00,
-            0x0f,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_atomic_aggregate() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,        // Attribute flags
-            AttrType::AtomicAggregate as u8, // Attribute type
-            0x00,
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AtomicAggregate,
-            }
-        );
-        assert_eq!(offset, 3);
-    }
-
-    #[test]
-    fn test_read_path_attribute_atomic_aggregate_invalid_length() {
-        let input: &[u8] = &[
-            PathAttrFlag::TRANSITIVE,        // Attribute flags
-            AttrType::AtomicAggregate as u8, // Attribute type
-            0x01,                            // Attribute length (invalid - should be 0)
-            0x00,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_aggregator_ipv4() {
-        let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::Aggregator as u8,                        // Attribute type
-            0x06,                                              // Attribute length
-            // Attribute value
-            0x00, // ASN
-            0x10,
-            0x0a, // IPv4
-            0x0b,
-            0x0c,
-            0x0d,
-        ];
-
-        let (as_path, offset) = read_path_attribute(input).unwrap();
-        assert_eq!(
-            as_path,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Aggregator(Aggregator {
-                    asn: 16,
-                    ip_addr: Ipv4Addr::from_str("10.11.12.13").unwrap(),
-                }),
-            }
-        );
-        assert_eq!(offset, 9);
-    }
-
-    #[test]
-    fn test_read_path_attribute_aggregator_invalid_length() {
-        let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Attribute flags
-            AttrType::Aggregator as u8,                        // Attribute type (optional)
-            0x03, // Attribute length (invalid - should be 6)
-            0x00, // ASN
-            0x10,
-            0x0a,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, data }) => {
-                // RFC 4271: recognized optional attribute errors use OptionalAttributeError
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected OptionalAttributeError"),
-        }
     }
 
     macro_rules! test_message_from_bytes {
@@ -1124,6 +716,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
         );
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -1135,6 +728,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
             vec![],
         );
@@ -1153,6 +747,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
         );
         assert_eq!(msg.med(), Some(50));
 
@@ -1164,6 +759,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
             vec![],
         );
@@ -1189,6 +785,7 @@ mod tests {
                 local_pref,
                 med,
                 atomic_aggregate,
+                vec![],
                 vec![],
                 vec![],
             );
@@ -1633,6 +1230,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -1644,6 +1242,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
             vec![],
         );
@@ -1666,151 +1265,6 @@ mod tests {
         }
     }
 
-    // Communities attribute tests
-    const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
-        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, // Flags
-        AttrType::Communities as u8,                       // Type code: 8
-        0x08,                                              // Length: 8 bytes (2 communities)
-        0x00,
-        0x01,
-        0x00,
-        0x64, // Community 1: 1:100 (AS 1, value 100)
-        0xFF,
-        0xFF,
-        0xFF,
-        0x01, // Community 2: NO_EXPORT
-    ];
-
-    const PATH_ATTR_COMMUNITIES_EMPTY: &[u8] = &[
-        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
-        AttrType::Communities as u8,
-        0x00, // Length: 0
-    ];
-
-    const PATH_ATTR_COMMUNITIES_WELL_KNOWN: &[u8] = &[
-        PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
-        AttrType::Communities as u8,
-        0x0c, // Length: 12 bytes (3 communities)
-        0xFF,
-        0xFF,
-        0xFF,
-        0x01, // NO_EXPORT
-        0xFF,
-        0xFF,
-        0xFF,
-        0x02, // NO_ADVERTISE
-        0xFF,
-        0xFF,
-        0xFF,
-        0x03, // NO_EXPORT_SUBCONFED
-    ];
-
-    #[test]
-    fn test_read_path_attribute_communities() {
-        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_TWO).unwrap();
-
-        assert_eq!(
-            attr,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Communities(vec![0x00010064, 0xFFFFFF01]),
-            }
-        );
-        assert_eq!(offset, 11); // 3-byte header + 8 bytes data
-    }
-
-    #[test]
-    fn test_read_path_attribute_communities_empty() {
-        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY).unwrap();
-
-        assert_eq!(
-            attr,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Communities(vec![]),
-            }
-        );
-        assert_eq!(offset, 3); // 3-byte header only
-    }
-
-    #[test]
-    fn test_read_path_attribute_communities_well_known() {
-        let (attr, _) = read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN).unwrap();
-
-        if let PathAttrValue::Communities(communities) = attr.value {
-            assert_eq!(communities.len(), 3);
-            assert_eq!(communities[0], 0xFFFFFF01); // NO_EXPORT
-            assert_eq!(communities[1], 0xFFFFFF02); // NO_ADVERTISE
-            assert_eq!(communities[2], 0xFFFFFF03); // NO_EXPORT_SUBCONFED
-        } else {
-            panic!("Expected Communities attribute");
-        }
-    }
-
-    #[test]
-    fn test_read_path_attribute_communities_invalid_length() {
-        // Length not multiple of 4
-        let input: &[u8] = &[
-            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
-            AttrType::Communities as u8,
-            0x03, // Invalid length: 3 bytes (not multiple of 4)
-            0x00,
-            0x01,
-            0x00,
-        ];
-
-        match read_path_attribute(input) {
-            Err(ParserError::BgpError { error, .. }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-            }
-            _ => panic!("Expected OptionalAttributeError for invalid communities length"),
-        }
-    }
-
-    #[test]
-    fn test_write_path_attribute_communities() {
-        let attr = PathAttribute {
-            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-            value: PathAttrValue::Communities(vec![0x00010064, 0xFFFFFF01]),
-        };
-
-        let bytes = write_path_attribute(&attr);
-        assert_eq!(bytes, PATH_ATTR_COMMUNITIES_TWO);
-    }
-
-    #[test]
-    fn test_write_path_attribute_communities_empty() {
-        let attr = PathAttribute {
-            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-            value: PathAttrValue::Communities(vec![]),
-        };
-
-        let bytes = write_path_attribute(&attr);
-        assert_eq!(bytes, PATH_ATTR_COMMUNITIES_EMPTY);
-    }
-
-    #[test]
-    fn test_communities_roundtrip() {
-        // Test parsing and serializing communities
-        let original_communities = vec![0x00010064, 0xFFFFFF01, 0xFFFFFF02];
-        let attr = PathAttribute {
-            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-            value: PathAttrValue::Communities(original_communities.clone()),
-        };
-
-        let bytes = write_path_attribute(&attr);
-        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
-
-        if let PathAttrValue::Communities(communities) = parsed_attr.value {
-            assert_eq!(communities, original_communities);
-        } else {
-            panic!("Expected Communities attribute after roundtrip");
-        }
-    }
-
     #[test]
     fn test_update_message_with_communities() {
         let body = build_update_body(
@@ -1827,6 +1281,18 @@ mod tests {
 
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert_eq!(msg.communities(), Some(vec![0x00010064, 0xFFFFFF01]));
+
+        // Verify Communities attribute has OPTIONAL | TRANSITIVE flags
+        let comm_attr = msg
+            .path_attributes
+            .iter()
+            .find(|attr| matches!(attr.value, PathAttrValue::Communities(_)))
+            .expect("Communities attribute should exist");
+
+        assert_eq!(
+            comm_attr.flags,
+            PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE)
+        );
     }
 
     #[test]
@@ -1843,5 +1309,38 @@ mod tests {
         let msg = UpdateMessage::from_bytes(body).unwrap();
 
         assert_eq!(msg.communities(), None);
+    }
+
+    #[test]
+    fn test_update_message_with_extended_communities() {
+        let body = build_update_body(
+            &[
+                PATH_ATTR_ORIGIN_IGP,
+                PATH_ATTR_AS_PATH_EMPTY,
+                PATH_ATTR_NEXT_HOP,
+                PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
+            ],
+            NLRI_SINGLE,
+        );
+
+        let msg = UpdateMessage::from_bytes(body).unwrap();
+
+        assert_eq!(msg.origin(), Some(Origin::IGP));
+        assert_eq!(
+            msg.extended_communities(),
+            Some(vec![0x0002FDE800000064u64, 0x0102C0A801010064u64])
+        );
+
+        // Verify ExtendedCommunities attribute has OPTIONAL | TRANSITIVE flags
+        let ext_comm_attr = msg
+            .path_attributes
+            .iter()
+            .find(|attr| matches!(attr.value, PathAttrValue::ExtendedCommunities(_)))
+            .expect("ExtendedCommunities attribute should exist");
+
+        assert_eq!(
+            ext_comm_attr.flags,
+            PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE)
+        );
     }
 }

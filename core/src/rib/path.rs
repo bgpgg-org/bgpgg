@@ -30,6 +30,7 @@ pub struct Path {
     pub med: Option<u32>,
     pub atomic_aggregate: bool,
     pub communities: Vec<u32>,
+    pub extended_communities: Vec<u64>,
     pub unknown_attrs: Vec<PathAttribute>,
 }
 
@@ -45,6 +46,7 @@ impl Path {
         med: Option<u32>,
         atomic_aggregate: bool,
         communities: Vec<u32>,
+        extended_communities: Vec<u64>,
         unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         Path {
@@ -56,6 +58,7 @@ impl Path {
             med,
             atomic_aggregate,
             communities,
+            extended_communities,
             unknown_attrs,
         }
     }
@@ -74,6 +77,7 @@ impl Path {
             med: update_msg.med(),
             atomic_aggregate: update_msg.atomic_aggregate(),
             communities: update_msg.communities().unwrap_or_default(),
+            extended_communities: update_msg.extended_communities().unwrap_or_default(),
             unknown_attrs: update_msg.unknown_attrs(),
         })
     }
@@ -208,6 +212,7 @@ mod tests {
             med: None,
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         }
     }
@@ -350,6 +355,7 @@ mod tests {
             Some(100),
             Some(50),
             true,
+            vec![],
             vec![],
             vec![],
         );

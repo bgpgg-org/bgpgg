@@ -109,6 +109,7 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 })
                 .collect(),
             communities: path.communities.clone(),
+            extended_communities: path.extended_communities.clone(),
         })
         .collect();
 
@@ -509,6 +510,7 @@ impl BgpService for BgpGrpcService {
             med: req.med,
             atomic_aggregate: req.atomic_aggregate,
             communities: req.communities,
+            extended_communities: req.extended_communities,
             response: tx,
         };
 
@@ -558,6 +560,7 @@ impl BgpService for BgpGrpcService {
                 med: req.med,
                 atomic_aggregate: req.atomic_aggregate,
                 communities: req.communities,
+                extended_communities: req.extended_communities,
                 response: tx,
             };
 

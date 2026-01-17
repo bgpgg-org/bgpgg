@@ -89,6 +89,7 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
                         med,
                         atomic_aggregate,
                         communities_vec,
+                        vec![],
                     )
                     .await?;
 

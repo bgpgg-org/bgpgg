@@ -20,6 +20,16 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 pub use super::community::{asn, from_asn_value, value};
 pub use super::community::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 
+// Re-export extended community functions and constants
+pub use super::ext_community::{
+    ext_subtype, ext_type, ext_value, format_extended_community, from_four_octet_as, from_ipv4,
+    from_two_octet_as, parse_extended_community,
+};
+pub use super::ext_community::{
+    SUBTYPE_ROUTE_ORIGIN, SUBTYPE_ROUTE_TARGET, TYPE_EVPN, TYPE_FOUR_OCTET_AS, TYPE_IPV4_ADDRESS,
+    TYPE_OPAQUE, TYPE_TWO_OCTET_AS,
+};
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct PathAttrFlag(pub u8);
 
@@ -51,6 +61,7 @@ pub mod attr_type_code {
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
     pub const COMMUNITIES: u8 = 8;
+    pub const EXTENDED_COMMUNITIES: u8 = 16;
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
@@ -63,6 +74,7 @@ pub enum PathAttrValue {
     AtomicAggregate,
     Aggregator(Aggregator),
     Communities(Vec<u32>),
+    ExtendedCommunities(Vec<u64>),
     Unknown {
         type_code: u8,
         flags: u8,
@@ -95,6 +107,7 @@ impl PathAttribute {
             PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
             PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
             PathAttrValue::Communities(_) => attr_type_code::COMMUNITIES,
+            PathAttrValue::ExtendedCommunities(_) => attr_type_code::EXTENDED_COMMUNITIES,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
     }
@@ -110,6 +123,7 @@ pub(crate) enum AttrType {
     AtomicAggregate = 6,
     Aggregator = 7,
     Communities = 8,
+    ExtendedCommunities = 16,
 }
 
 impl TryFrom<u8> for AttrType {
@@ -125,6 +139,7 @@ impl TryFrom<u8> for AttrType {
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
             8 => Ok(AttrType::Communities),
+            16 => Ok(AttrType::ExtendedCommunities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
                 data: Vec::new(),
@@ -144,6 +159,7 @@ impl AttrType {
             AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
             AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::Communities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
 
@@ -161,7 +177,10 @@ impl AttrType {
     pub(super) fn is_optional(&self) -> bool {
         matches!(
             self,
-            AttrType::MultiExtiDisc | AttrType::Aggregator | AttrType::Communities
+            AttrType::MultiExtiDisc
+                | AttrType::Aggregator
+                | AttrType::Communities
+                | AttrType::ExtendedCommunities
         )
     }
 }
