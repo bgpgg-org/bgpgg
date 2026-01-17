@@ -116,6 +116,17 @@ pub const fn from_router_mac(mac: [u8; 6]) -> u64 {
         | ((mac[5] as u64) << byte_shift(7))
 }
 
+/// Create a Link Bandwidth extended community (RFC 4360, Cisco/Juniper)
+/// Type 0x40 (non-transitive): [Type][Subtype][AS (2 bytes)][Bandwidth (4 bytes)]
+/// Bandwidth is in bytes per second as IEEE 754 float32
+pub fn from_link_bandwidth(asn: u16, bandwidth_bps: f32) -> u64 {
+    let bandwidth_bits = bandwidth_bps.to_bits();
+    (((TYPE_NON_TRANSITIVE_BIT | TYPE_TWO_OCTET_AS) as u64) << byte_shift(0))
+        | ((SUBTYPE_LINK_BANDWIDTH as u64) << byte_shift(1))
+        | ((asn as u64) << byte_shift(3))
+        | (bandwidth_bits as u64)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseExtCommunityError {
     InvalidFormat,
@@ -135,6 +146,7 @@ pub enum ParseExtCommunityError {
 /// - "ro:65000:100" (Route Origin, two-octet AS)
 /// - "ro:192.168.1.1:100" (Route Origin, IPv4)
 /// - "ro:4200000000:100" (Route Origin, four-octet AS)
+/// - "lb:65000:1000000" (Link Bandwidth, ASN:bytes-per-second)
 /// - "color:100" (Color community, RFC 9012)
 /// - "encapsulation:8" (Encapsulation community, RFC 9012)
 /// - "router-mac:aa:bb:cc:dd:ee:ff" (Router's MAC community, RFC 9012)
@@ -172,6 +184,17 @@ pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> 
                 u8::from_str_radix(part, 16).map_err(|_| ParseExtCommunityError::InvalidMac)?;
         }
         return Ok(from_router_mac(mac));
+    }
+
+    // Handle link-bandwidth:ASN:BPS format (3 parts)
+    if parts.len() == 3 && parts[0] == "lb" {
+        let asn: u16 = parts[1]
+            .parse()
+            .map_err(|_| ParseExtCommunityError::InvalidAsn)?;
+        let bandwidth: f32 = parts[2]
+            .parse()
+            .map_err(|_| ParseExtCommunityError::InvalidLocal)?;
+        return Ok(from_link_bandwidth(asn, bandwidth));
     }
 
     // Parse prefix:value:local format (3 parts)
@@ -269,6 +292,28 @@ pub fn format_extended_community(extcomm: u64) -> String {
             }
             _ => {
                 // Unknown EVPN subtype, return raw hex
+                return format!("0x{:016x}", extcomm);
+            }
+        }
+    }
+
+    // Handle non-transitive two-octet AS communities
+    if typ == (TYPE_NON_TRANSITIVE_BIT | TYPE_TWO_OCTET_AS) {
+        match subtype {
+            SUBTYPE_LINK_BANDWIDTH => {
+                // [Type][Subtype][AS (2 bytes)][Bandwidth (4 bytes)]
+                let asn = u16::from_be_bytes([value_bytes[0], value_bytes[1]]);
+                let bandwidth_bits = u32::from_be_bytes([
+                    value_bytes[2],
+                    value_bytes[3],
+                    value_bytes[4],
+                    value_bytes[5],
+                ]);
+                let bandwidth = f32::from_bits(bandwidth_bits);
+                return format!("lb:{}:{}", asn, bandwidth);
+            }
+            _ => {
+                // Unknown non-transitive subtype, return raw hex
                 return format!("0x{:016x}", extcomm);
             }
         }
@@ -571,6 +616,48 @@ mod tests {
             "router-mac:00:00:00:00:00:00",
             "router-mac:aa:bb:cc:dd:ee:ff",
         ];
+
+        for original in test_cases {
+            let extcomm = parse_extended_community(original).unwrap();
+            let formatted = format_extended_community(extcomm);
+            assert_eq!(original, formatted);
+        }
+    }
+
+    #[test]
+    fn test_from_link_bandwidth() {
+        let bandwidth_bps = 1000000.0f32;
+        let extcomm = from_link_bandwidth(65000, bandwidth_bps);
+        assert_eq!(
+            ext_type(extcomm),
+            TYPE_NON_TRANSITIVE_BIT | TYPE_TWO_OCTET_AS
+        );
+        assert_eq!(ext_subtype(extcomm), SUBTYPE_LINK_BANDWIDTH);
+        // Check ASN and bandwidth
+        let value = ext_value(extcomm);
+        let asn = u16::from_be_bytes([value[0], value[1]]);
+        let bandwidth_bits = u32::from_be_bytes([value[2], value[3], value[4], value[5]]);
+        let bandwidth = f32::from_bits(bandwidth_bits);
+        assert_eq!(asn, 65000);
+        assert_eq!(bandwidth, bandwidth_bps);
+        assert!(!is_transitive(extcomm)); // Link bandwidth is non-transitive
+    }
+
+    #[test]
+    fn test_parse_link_bandwidth() {
+        let extcomm = parse_extended_community("lb:65000:1000000").unwrap();
+        assert_eq!(extcomm, from_link_bandwidth(65000, 1000000.0));
+    }
+
+    #[test]
+    fn test_format_link_bandwidth() {
+        let extcomm = from_link_bandwidth(65000, 1000000.0);
+        assert_eq!(format_extended_community(extcomm), "lb:65000:1000000");
+    }
+
+    #[test]
+    fn test_link_bandwidth_roundtrip() {
+        let test_cases = vec!["lb:0:0", "lb:65000:1000000", "lb:65535:1500000000"];
 
         for original in test_cases {
             let extcomm = parse_extended_community(original).unwrap();
