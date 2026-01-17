@@ -47,6 +47,7 @@ pub(crate) mod test_helpers {
             med: Some(0),
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         })
     }
@@ -65,6 +66,7 @@ pub(crate) mod test_helpers {
             med: Some(0),
             atomic_aggregate: false,
             communities: vec![],
+            extended_communities: vec![],
             unknown_attrs: vec![],
         };
         f(&mut path);

@@ -48,17 +48,14 @@ async fn test_remove_peer() {
         &server1,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(
-                vec![as_sequence(vec![65002])],
-                &server2.address.to_string(),
-                peer_addr.clone(),
-                Origin::Igp,
-                Some(100),
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
         }],
     )])
     .await;
@@ -103,17 +100,14 @@ async fn test_remove_peer_withdraw_routes() {
         &server1,
         vec![Route {
             prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(
-                vec![as_sequence(vec![65002])],
-                &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                peer_addr.clone(),
-                Origin::Igp,
-                Some(100),
-                None,
-                false,
-                vec![],
-                vec![],
-            )],
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
         }],
     )])
     .await;
@@ -156,51 +150,42 @@ async fn test_remove_peer_four_node_mesh() {
             &server1,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65004])],
-                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65004])],
+                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    peer_address: server4.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
         (
             &server2,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65004])],
-                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65004])],
+                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    peer_address: server4.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
         (
             &server3,
             vec![Route {
                 prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(
-                    vec![as_sequence(vec![65004])],
-                    &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    server4.address.to_string(),
-                    Origin::Igp,
-                    Some(100),
-                    None,
-                    false,
-                    vec![],
-                    vec![],
-                )],
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65004])],
+                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                    peer_address: server4.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
             }],
         ),
     ])
@@ -224,51 +209,42 @@ async fn test_remove_peer_four_node_mesh() {
                 &server1,
                 vec![Route {
                     prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(
-                        vec![as_sequence(vec![65002, 65004])],
-                        &server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                        server2.address.to_string(),
-                        Origin::Igp,
-                        Some(100),
-                        None,
-                        false,
-                        vec![],
-                        vec![],
-                    )], // Via server2 (127.0.0.2 < 127.0.0.3)
+                    paths: vec![build_path(PathParams {
+                        as_path: vec![as_sequence(vec![65002, 65004])],
+                        next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        peer_address: server2.address.to_string(),
+                        origin: Some(Origin::Igp),
+                        local_pref: Some(100),
+                        ..Default::default()
+                    })], // Via server2 (127.0.0.2 < 127.0.0.3)
                 }],
             ),
             (
                 &server2,
                 vec![Route {
                     prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(
-                        vec![as_sequence(vec![65004])],
-                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.to_string(),
-                        Origin::Igp,
-                        Some(100),
-                        None,
-                        false,
-                        vec![],
-                        vec![],
-                    )],
+                    paths: vec![build_path(PathParams {
+                        as_path: vec![as_sequence(vec![65004])],
+                        next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        peer_address: server4.address.to_string(),
+                        origin: Some(Origin::Igp),
+                        local_pref: Some(100),
+                        ..Default::default()
+                    })],
                 }],
             ),
             (
                 &server3,
                 vec![Route {
                     prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(
-                        vec![as_sequence(vec![65004])],
-                        &server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                        server4.address.to_string(),
-                        Origin::Igp,
-                        Some(100),
-                        None,
-                        false,
-                        vec![],
-                        vec![],
-                    )],
+                    paths: vec![build_path(PathParams {
+                        as_path: vec![as_sequence(vec![65004])],
+                        next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
+                        peer_address: server4.address.to_string(),
+                        origin: Some(Origin::Igp),
+                        local_pref: Some(100),
+                        ..Default::default()
+                    })],
                 }],
             ),
         ],

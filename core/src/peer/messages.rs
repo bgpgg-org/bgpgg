@@ -338,6 +338,7 @@ mod tests {
                 false,
                 vec![],
                 vec![],
+                vec![],
             );
 
             let result = peer.handle_message(BgpMessage::Update(update)).await;
@@ -381,6 +382,7 @@ mod tests {
             None,
             None,
             false,
+            vec![],
             vec![],
             vec![],
         );

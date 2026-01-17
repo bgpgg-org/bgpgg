@@ -150,6 +150,7 @@ pub enum MgmtOp {
         med: Option<u32>,
         atomic_aggregate: bool,
         communities: Vec<u32>,
+        extended_communities: Vec<u64>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
