@@ -262,8 +262,9 @@ message ExtendedCommunity {
     FourOctetAsSpecific four_octet_as = 3;
     LinkBandwidth link_bandwidth = 4;
     Color color = 5;
-    Opaque opaque = 6;
-    Unknown unknown = 7;
+    Encapsulation encapsulation = 6;
+    Opaque opaque = 7;
+    Unknown unknown = 8;
   }
 
   message TwoOctetAsSpecific {
@@ -296,6 +297,11 @@ message ExtendedCommunity {
   message Color {
     bool is_transitive = 1;     // Type can be 0x03 (transitive) or 0x43 (non-transitive)
     uint32 color = 2;           // 32-bit color value (RFC 9012)
+  }
+
+  message Encapsulation {
+    bool is_transitive = 1;     // Type can be 0x03 (transitive) or 0x43 (non-transitive)
+    uint32 tunnel_type = 2;     // 16-bit tunnel type (e.g., 8=VXLAN, 15=SR Policy, RFC 9012)
   }
 
   message Opaque {

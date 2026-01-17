@@ -98,6 +98,21 @@ pub(super) fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u
             Ok(val)
         }
 
+        proto::extended_community::Community::Encapsulation(ec) => {
+            if ec.tunnel_type > 65535 {
+                return Err(format!(
+                    "Tunnel type {} exceeds 16-bit max (65535)",
+                    ec.tunnel_type
+                ));
+            }
+            let mut val = from_encapsulation(ec.tunnel_type as u16);
+            // Set non-transitive bit if needed
+            if !ec.is_transitive {
+                val |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+            }
+            Ok(val)
+        }
+
         proto::extended_community::Community::Opaque(ec) => {
             if ec.value.len() != 6 {
                 return Err(format!(
@@ -221,6 +236,15 @@ pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
                     is_transitive,
                     color,
                 })
+            } else if subtype == SUBTYPE_ENCAPSULATION {
+                // [Type][Subtype][Reserved (2 bytes)][Tunnel Type (2 bytes)]
+                let tunnel_type = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+                proto::extended_community::Community::Encapsulation(
+                    proto::extended_community::Encapsulation {
+                        is_transitive,
+                        tunnel_type: tunnel_type as u32,
+                    },
+                )
             } else {
                 // Generic opaque community
                 proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
@@ -434,6 +458,57 @@ mod tests {
             assert_eq!(c.color, u32::MAX);
         } else {
             panic!("Expected Color variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_encapsulation_roundtrip() {
+        let original = from_encapsulation(8); // VXLAN
+
+        // u64 -> proto
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Encapsulation(e)) = &proto_ec.community {
+            assert!(e.is_transitive);
+            assert_eq!(e.tunnel_type, 8);
+        } else {
+            panic!("Expected Encapsulation variant");
+        }
+
+        // proto -> u64
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_encapsulation_non_transitive() {
+        let mut original = from_encapsulation(15); // SR Policy
+        original |= (TYPE_NON_TRANSITIVE_BIT as u64) << 56;
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Encapsulation(e)) = &proto_ec.community {
+            assert!(!e.is_transitive);
+            assert_eq!(e.tunnel_type, 15);
+        } else {
+            panic!("Expected Encapsulation variant");
+        }
+
+        let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_encapsulation_max_value() {
+        let original = from_encapsulation(u16::MAX);
+
+        let proto_ec = u64_to_proto_extcomm(original);
+        if let Some(proto::extended_community::Community::Encapsulation(e)) = &proto_ec.community {
+            assert!(e.is_transitive);
+            assert_eq!(e.tunnel_type, u16::MAX as u32);
+        } else {
+            panic!("Expected Encapsulation variant");
         }
 
         let result = proto_extcomm_to_u64(&proto_ec).unwrap();

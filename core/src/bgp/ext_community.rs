@@ -18,6 +18,7 @@ pub const SUBTYPE_LINK_BANDWIDTH: u8 = 0x04;
 
 // Subtype constants for Opaque extended communities
 pub const SUBTYPE_COLOR: u8 = 0x0B;
+pub const SUBTYPE_ENCAPSULATION: u8 = 0x0C;
 
 // Bit 6 of type indicates transitive (0) or non-transitive (1)
 pub const TYPE_NON_TRANSITIVE_BIT: u8 = 0x40;
@@ -91,6 +92,14 @@ pub const fn from_color(color: u32) -> u64 {
         | (color as u64)
 }
 
+/// Create an Encapsulation extended community (RFC 9012)
+/// Type 0x03: [Type][Subtype][Reserved (2 bytes)][Tunnel Type (2 bytes)]
+pub const fn from_encapsulation(tunnel_type: u16) -> u64 {
+    ((TYPE_OPAQUE as u64) << byte_shift(0))
+        | ((SUBTYPE_ENCAPSULATION as u64) << byte_shift(1))
+        | (tunnel_type as u64)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseExtCommunityError {
     InvalidFormat,
@@ -110,6 +119,7 @@ pub enum ParseExtCommunityError {
 /// - "ro:192.168.1.1:100" (Route Origin, IPv4)
 /// - "ro:4200000000:100" (Route Origin, four-octet AS)
 /// - "color:100" (Color community, RFC 9012)
+/// - "encapsulation:8" (Encapsulation community, RFC 9012)
 /// - "0x0002FDE800000064" (raw hex, 16 hex digits)
 pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> {
     // Handle raw hex format
@@ -126,6 +136,14 @@ pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> 
             .parse()
             .map_err(|_| ParseExtCommunityError::InvalidLocal)?;
         return Ok(from_color(color));
+    }
+
+    // Handle encapsulation:TYPE format (2 parts)
+    if parts.len() == 2 && parts[0] == "encapsulation" {
+        let tunnel_type: u16 = parts[1]
+            .parse()
+            .map_err(|_| ParseExtCommunityError::InvalidLocal)?;
+        return Ok(from_encapsulation(tunnel_type));
     }
 
     // Parse prefix:value:local format (3 parts)
@@ -193,6 +211,11 @@ pub fn format_extended_community(extcomm: u64) -> String {
                     value_bytes[5],
                 ]);
                 return format!("color:{}", color);
+            }
+            SUBTYPE_ENCAPSULATION => {
+                // [Type][Subtype][Reserved (2 bytes)][Tunnel Type (2 bytes)]
+                let tunnel_type = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
+                return format!("encapsulation:{}", tunnel_type);
             }
             _ => {
                 // Unknown opaque subtype, return raw hex
@@ -444,6 +467,34 @@ mod tests {
     #[test]
     fn test_color_roundtrip() {
         let test_cases = vec!["color:0", "color:100", "color:999999", "color:4294967295"];
+
+        for original in test_cases {
+            let extcomm = parse_extended_community(original).unwrap();
+            let formatted = format_extended_community(extcomm);
+            assert_eq!(original, formatted);
+        }
+    }
+
+    #[test]
+    fn test_from_encapsulation() {
+        let extcomm = from_encapsulation(8); // VXLAN
+        assert_eq!(ext_type(extcomm), TYPE_OPAQUE);
+        assert_eq!(ext_subtype(extcomm), SUBTYPE_ENCAPSULATION);
+        // Tunnel type should be in last 2 bytes
+        let value = ext_value(extcomm);
+        let tunnel_type = u16::from_be_bytes([value[4], value[5]]);
+        assert_eq!(tunnel_type, 8);
+        assert!(is_transitive(extcomm));
+    }
+
+    #[test]
+    fn test_encapsulation_roundtrip() {
+        let test_cases = vec![
+            "encapsulation:0",
+            "encapsulation:8",  // VXLAN
+            "encapsulation:15", // SR Policy
+            "encapsulation:65535",
+        ];
 
         for original in test_cases {
             let extcomm = parse_extended_community(original).unwrap();
