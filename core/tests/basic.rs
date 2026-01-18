@@ -520,7 +520,17 @@ async fn test_as_loop_prevention() {
 async fn test_ipv6_route_exchange() {
     let (server1, mut server2) = setup_two_peered_servers(None).await;
 
-    // Server2 announces an IPv6 route to Server1 via gRPC
+    // Server2 announces both IPv4 and IPv6 routes to Server1 via gRPC
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
     announce_route(
         &mut server2,
         RouteParams {
@@ -535,25 +545,45 @@ async fn test_ipv6_route_exchange() {
     let peers = server1.client.get_peers().await.unwrap();
     let peer_addr = &peers[0].address;
 
-    // Poll for IPv6 route to appear in Server1's RIB
-    // Cross-family (IPv6 route over IPv4 session): next hop preserved as IPv6
+    // Poll for both IPv4 and IPv6 routes to appear in Server1's RIB
+    // eBGP: IPv4 next hop rewritten to sender's address
+    // Cross-family (IPv6 route over IPv4 session): IPv6 next hop preserved
     poll_route_propagation(&[(
         &server1,
-        vec![Route {
-            prefix: "2001:db8::/32".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: "2001:db8::1".to_string(),  // IPv6 next hop preserved
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        vec![
+            Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: server2.address.to_string(),
+                    peer_address: peer_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            },
+            Route {
+                prefix: "2001:db8::/32".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: "2001:db8::1".to_string(), // IPv6 next hop preserved
+                    peer_address: peer_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            },
+        ],
     )])
     .await;
 
-    // Server2 withdraws the IPv6 route
+    // Server2 withdraws both routes
+    server2
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .expect("Failed to withdraw IPv4 route");
+
     server2
         .client
         .remove_route("2001:db8::/32".to_string())

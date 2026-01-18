@@ -768,6 +768,7 @@ impl BgpServer {
             peer_asn,
             IpAddr::V4(self.config.router_id),
             export_policies,
+            &self.logger,
         );
 
         // Group by prefix for Route struct

@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue};
+use crate::bgp::msg_update::{
+    AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
+};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
@@ -136,7 +138,9 @@ fn parse_add_route_request(
     // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
     let parts: Vec<&str> = req.prefix.split('/').collect();
     if parts.len() != 2 {
-        return Err("Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string());
+        return Err(
+            "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string(),
+        );
     }
 
     let address: IpAddr = parts[0]
@@ -630,7 +634,9 @@ impl BgpService for BgpGrpcService {
         if parts.len() != 2 {
             return Ok(Response::new(RemoveRouteResponse {
                 success: false,
-                message: "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string(),
+                message:
+                    "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)"
+                        .to_string(),
             }));
         }
 

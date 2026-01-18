@@ -238,6 +238,69 @@ pub(crate) fn batch_announcements_by_path(
     batches.into_values().collect()
 }
 
+fn address_families_match(next_hop: &NextHopAddr, ip_addr: IpAddr) -> bool {
+    matches!(
+        (next_hop, ip_addr),
+        (NextHopAddr::Ipv4(_), IpAddr::V4(_)) | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+    )
+}
+
+fn build_ebgp_next_hop(
+    path: &Path,
+    local_next_hop: IpAddr,
+    prefix: &IpNetwork,
+    logger: &Logger,
+) -> Option<NextHopAddr> {
+    if address_families_match(&path.next_hop, local_next_hop) {
+        // Same address family - rewrite to local interface
+        Some(local_next_hop.into())
+    } else if !path.next_hop.is_unspecified() {
+        // Cross-family with explicit next hop - preserve it
+        Some(path.next_hop)
+    } else {
+        // Cross-family without explicit next hop - can't advertise
+        crate::warn!(
+            logger,
+            format!(
+                "Filtering cross-family route {} without explicit next hop",
+                prefix
+            )
+        );
+        None
+    }
+}
+
+fn build_ibgp_next_hop(
+    path: &Path,
+    local_next_hop: IpAddr,
+    prefix: &IpNetwork,
+    logger: &Logger,
+) -> Option<NextHopAddr> {
+    if !path.source.is_local() {
+        // Learned route - preserve next hop
+        return Some(path.next_hop);
+    }
+
+    // Locally originated route
+    if !path.next_hop.is_unspecified() {
+        // Explicit next hop - preserve it
+        Some(path.next_hop)
+    } else if address_families_match(&path.next_hop, local_next_hop) {
+        // Same address family - use local interface
+        Some(local_next_hop.into())
+    } else {
+        // Cross-family without explicit next hop - can't advertise
+        crate::warn!(
+            logger,
+            format!(
+                "Filtering cross-family route {} without explicit next hop",
+                prefix
+            )
+        );
+        None
+    }
+}
+
 /// Build the NEXT_HOP for export to a peer
 /// RFC 4271 Section 5.1.3: Rewrite NEXT_HOP to local interface address
 /// RFC 2545/4760: Cross-family (e.g., IPv6 route over IPv4 session) must preserve explicit next hop
@@ -246,51 +309,13 @@ fn build_export_next_hop(
     local_next_hop: IpAddr,
     local_asn: u16,
     peer_asn: u16,
+    prefix: &IpNetwork,
+    logger: &Logger,
 ) -> Option<NextHopAddr> {
-    let is_ebgp = local_asn != peer_asn;
-
-    // Check if next hop and local peering address have matching address families
-    let af_match = matches!(
-        (&path.next_hop, local_next_hop),
-        (NextHopAddr::Ipv4(_), IpAddr::V4(_)) | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
-    );
-
-    if is_ebgp {
-        // eBGP: Rewrite to local interface if address families match
-        if af_match {
-            Some(match local_next_hop {
-                IpAddr::V4(addr) => NextHopAddr::Ipv4(addr),
-                IpAddr::V6(addr) => NextHopAddr::Ipv6(addr),
-            })
-        } else {
-            // Cross-family: Must preserve explicit next hop (can't rewrite IPv6 to IPv4 or vice versa)
-            if path.next_hop.is_unspecified() {
-                // Can't advertise cross-family route without explicit next hop - filter it
-                None
-            } else {
-                Some(path.next_hop)
-            }
-        }
+    if local_asn != peer_asn {
+        build_ebgp_next_hop(path, local_next_hop, prefix, logger)
     } else {
-        // iBGP
-        if path.source.is_local() && !path.next_hop.is_unspecified() {
-            // iBGP locally-originated with explicit next hop - preserve it
-            Some(path.next_hop)
-        } else if path.source.is_local() {
-            // iBGP locally-originated with unspecified next hop
-            if af_match || path.next_hop.is_unspecified() {
-                Some(match local_next_hop {
-                    IpAddr::V4(addr) => NextHopAddr::Ipv4(addr),
-                    IpAddr::V6(addr) => NextHopAddr::Ipv6(addr),
-                })
-            } else {
-                // Cross-family with unspecified next hop - can't advertise
-                None
-            }
-        } else {
-            // iBGP learned route - preserve next hop
-            Some(path.next_hop)
-        }
+        build_ibgp_next_hop(path, local_next_hop, prefix, logger)
     }
 }
 
@@ -302,6 +327,7 @@ pub fn compute_routes_for_peer(
     peer_asn: u16,
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
+    logger: &Arc<Logger>,
 ) -> Vec<(IpNetwork, Path)> {
     // Apply well-known community filtering BEFORE export policy
     // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
@@ -341,7 +367,14 @@ pub fn compute_routes_for_peer(
             path_mut.as_path = build_export_as_path(&path_mut, local_asn, peer_asn);
 
             // Build next hop - may return None for cross-family routes without explicit next hop
-            path_mut.next_hop = build_export_next_hop(&path_mut, local_next_hop, local_asn, peer_asn)?;
+            path_mut.next_hop = build_export_next_hop(
+                &path_mut,
+                local_next_hop,
+                local_asn,
+                peer_asn,
+                prefix,
+                logger,
+            )?;
 
             path_mut.local_pref = build_export_local_pref(&path_mut, local_asn, peer_asn);
             path_mut.med = build_export_med(&path_mut, local_asn, peer_asn);
@@ -375,6 +408,7 @@ pub fn send_announcements_to_peer(
         peer_asn,
         local_next_hop,
         export_policies,
+        logger,
     );
 
     if filtered.is_empty() {
@@ -713,6 +747,8 @@ mod tests {
         let local_asn = 65000;
         let peer_asn_ebgp = 65001;
         let peer_asn_ibgp = 65000;
+        let logger = Arc::new(Logger::new(crate::log::LogLevel::Warn));
+        let prefix = "10.0.0.0/24".parse().unwrap();
 
         let local_path = make_path(
             RouteSource::Local,
@@ -737,37 +773,79 @@ mod tests {
 
         // iBGP: Local route with unspecified next hop -> set to local address
         assert_eq!(
-            build_export_next_hop(&local_path, IpAddr::V4(router_id), local_asn, peer_asn_ibgp),
+            build_export_next_hop(
+                &local_path,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // iBGP: Local route with explicit next hop -> preserve
         assert_eq!(
-            build_export_next_hop(&local_explicit, IpAddr::V4(router_id), local_asn, peer_asn_ibgp),
+            build_export_next_hop(
+                &local_explicit,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
         );
 
         // iBGP: Learned route -> preserve next hop
         assert_eq!(
-            build_export_next_hop(&ibgp_learned, IpAddr::V4(router_id), local_asn, peer_asn_ibgp),
+            build_export_next_hop(
+                &ibgp_learned,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)))
         );
 
         // eBGP: Local route with unspecified next hop -> set to local address
         assert_eq!(
-            build_export_next_hop(&local_path, IpAddr::V4(router_id), local_asn, peer_asn_ebgp),
+            build_export_next_hop(
+                &local_path,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // eBGP: Local route with explicit next hop (same AF) -> rewrite to local address
         assert_eq!(
-            build_export_next_hop(&local_explicit, IpAddr::V4(router_id), local_asn, peer_asn_ebgp),
+            build_export_next_hop(
+                &local_explicit,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // eBGP: Learned route -> rewrite to local address
         assert_eq!(
-            build_export_next_hop(&ebgp_learned, IpAddr::V4(router_id), local_asn, peer_asn_ebgp),
+            build_export_next_hop(
+                &ebgp_learned,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
             Some(NextHopAddr::Ipv4(router_id))
         );
     }

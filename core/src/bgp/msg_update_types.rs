@@ -291,6 +291,15 @@ impl NextHopAddr {
     }
 }
 
+impl From<std::net::IpAddr> for NextHopAddr {
+    fn from(addr: std::net::IpAddr) -> Self {
+        match addr {
+            std::net::IpAddr::V4(v4) => NextHopAddr::Ipv4(v4),
+            std::net::IpAddr::V6(v6) => NextHopAddr::Ipv6(v6),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct AsPath {
     pub(super) segments: Vec<AsPathSegment>,
