@@ -499,6 +499,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: 180,
+                peer_capabilities: vec![],
             }),
             FsmEvent::BgpUpdateReceived,
             FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(

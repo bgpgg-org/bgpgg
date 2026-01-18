@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use crate::bgp::msg_update::{
-    AsPathSegment, AsPathSegmentType, Origin, PathAttribute, UpdateMessage,
+    AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttribute, UpdateMessage,
 };
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
-use std::net::Ipv4Addr;
 
 /// Represents a BGP path with all its attributes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub origin: Origin,
     pub as_path: Vec<AsPathSegment>,
-    pub next_hop: Ipv4Addr,
+    pub next_hop: NextHopAddr,
     pub source: RouteSource,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
@@ -40,7 +39,7 @@ impl Path {
     pub fn from_attributes(
         origin: Origin,
         as_path: Vec<AsPathSegment>,
-        next_hop: Ipv4Addr,
+        next_hop: NextHopAddr,
         source: RouteSource,
         local_pref: Option<u32>,
         med: Option<u32>,
@@ -192,7 +191,7 @@ impl Ord for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
@@ -206,7 +205,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65001],
             }],
-            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             source: RouteSource::Ebgp(test_ip(1)),
             local_pref: Some(100),
             med: None,
@@ -350,7 +349,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65001],
             }],
-            Ipv4Addr::new(10, 0, 0, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             vec![],
             Some(100),
             Some(50),
@@ -363,7 +362,7 @@ mod tests {
         assert!(path.is_some());
         let path = path.unwrap();
         assert_eq!(path.origin, Origin::IGP);
-        assert_eq!(path.next_hop, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(path.next_hop, NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(path.local_pref, Some(100));
         assert_eq!(path.med, Some(50));
         assert!(path.atomic_aggregate);

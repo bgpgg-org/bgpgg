@@ -418,7 +418,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     // the BGP speaker SHOULD set it to S1's local address (1.1.1.1)
     // when sending to iBGP peer S2.
     //
-    // Note: Per GoBGP implementation, NEXT_HOP is only auto-set when it's unspecified.
+    // Note: NEXT_HOP is only auto-set when it's unspecified.
     // If explicitly set to a non-zero value, it's preserved.
     let [server1, server2] = &mut chain_servers([
         start_test_server(Config::new(

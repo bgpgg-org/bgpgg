@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, Origin};
+use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
 use crate::log::Logger;
-use crate::net::IpNetwork;
+use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::{Path, Route, RouteSource};
 use crate::{debug, info};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::hash::Hash;
+use std::net::IpAddr;
+
+#[cfg(test)]
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 /// Loc-RIB: Local routing table
@@ -27,71 +30,138 @@ use std::sync::Arc;
 /// Contains the best paths selected after applying import policies
 /// and the BGP best path selection algorithm.
 pub struct LocRib {
-    // Map from prefix to best route(s)
-    routes: HashMap<IpNetwork, Route>,
+    // Per-AFI/SAFI tables
+    ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
+    ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
     logger: Arc<Logger>,
+}
+
+// Helper functions to avoid code duplication
+
+fn add_route<K: Eq + Hash>(
+    table: &mut HashMap<K, Route>,
+    key: K,
+    prefix: IpNetwork,
+    path: Arc<Path>,
+) {
+    if let Some(route) = table.get_mut(&key) {
+        if let Some(existing) = route.paths.iter_mut().find(|p| p.source == path.source) {
+            *existing = path;
+        } else {
+            route.paths.push(path);
+        }
+        route.paths.sort_by(|a, b| b.cmp(a));
+    } else {
+        table.insert(
+            key,
+            Route {
+                prefix,
+                paths: vec![path],
+            },
+        );
+    }
+}
+
+fn remove_peer_paths<K: Eq + Hash>(
+    table: &mut HashMap<K, Route>,
+    key: &K,
+    peer_ip: IpAddr,
+) -> bool {
+    if let Some(route) = table.get_mut(key) {
+        let had_path = route.paths.iter().any(|p| {
+            matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
+        });
+        route.paths.retain(|p| {
+            !matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
+        });
+        if route.paths.is_empty() {
+            table.remove(key);
+        }
+        had_path
+    } else {
+        false
+    }
+}
+
+fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> bool {
+    if let Some(route) = table.get_mut(key) {
+        let original_len = route.paths.len();
+        route.paths.retain(|p| p.source != RouteSource::Local);
+        let removed = route.paths.len() != original_len;
+        if route.paths.is_empty() {
+            table.remove(key);
+        }
+        removed
+    } else {
+        false
+    }
+}
+
+fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
+    matches!(&path.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
+}
+
+fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) {
+    for route in table.values_mut() {
+        route.paths.retain(|p| !is_path_from_peer(p, peer_ip));
+    }
+    table.retain(|_, route| !route.paths.is_empty());
 }
 
 impl LocRib {
     fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
-        match self.routes.entry(prefix) {
-            Entry::Occupied(mut entry) => {
-                let route = entry.get_mut();
-                // Check if we already have a path from this source, if so replace it
-                if let Some(existing_path) =
-                    route.paths.iter_mut().find(|p| p.source == path.source)
-                {
-                    *existing_path = path;
-                } else {
-                    route.paths.push(path);
-                }
-                // Keep paths sorted (best first)
-                route.paths.sort_by(|a, b| b.cmp(a));
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(Route {
-                    prefix,
-                    paths: vec![path],
-                });
+        match prefix {
+            IpNetwork::V4(v4_prefix) => add_route(&mut self.ipv4_unicast, v4_prefix, prefix, path),
+            IpNetwork::V6(v6_prefix) => add_route(&mut self.ipv6_unicast, v6_prefix, prefix, path),
+        }
+    }
+
+    fn get_prefixes_from_peer(&self, peer_ip: IpAddr) -> Vec<IpNetwork> {
+        let mut prefixes = Vec::new();
+
+        for (prefix, route) in &self.ipv4_unicast {
+            if route.paths.iter().any(|p| is_path_from_peer(p, peer_ip)) {
+                prefixes.push(IpNetwork::V4(*prefix));
             }
         }
+
+        for (prefix, route) in &self.ipv6_unicast {
+            if route.paths.iter().any(|p| is_path_from_peer(p, peer_ip)) {
+                prefixes.push(IpNetwork::V6(*prefix));
+            }
+        }
+
+        prefixes
+    }
+
+    fn clear_peer_paths(&mut self, peer_ip: IpAddr) {
+        remove_all_peer_paths(&mut self.ipv4_unicast, peer_ip);
+        remove_all_peer_paths(&mut self.ipv6_unicast, peer_ip);
     }
 
     /// Remove paths from a specific peer for a given prefix.
     /// Returns true if a path was actually removed.
     fn remove_peer_path(&mut self, prefix: IpNetwork, peer_ip: IpAddr) -> bool {
-        if let Some(route) = self.routes.get_mut(&prefix) {
-            let had_path = route.paths.iter().any(|p| {
-                matches!(
-                    &p.source,
-                    RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip
-                )
-            });
-            route.paths.retain(|p| {
-                !matches!(
-                    &p.source,
-                    RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip
-                )
-            });
-
-            // Remove route if no paths left
-            if route.paths.is_empty() {
-                self.routes.remove(&prefix);
+        match prefix {
+            IpNetwork::V4(v4_prefix) => {
+                remove_peer_paths(&mut self.ipv4_unicast, &v4_prefix, peer_ip)
             }
-
-            had_path
-        } else {
-            false
+            IpNetwork::V6(v6_prefix) => {
+                remove_peer_paths(&mut self.ipv6_unicast, &v6_prefix, peer_ip)
+            }
         }
     }
 
     pub fn get_all_routes(&self) -> Vec<Route> {
-        self.routes.values().cloned().collect()
+        let mut routes = Vec::new();
+        routes.extend(self.ipv4_unicast.values().cloned());
+        routes.extend(self.ipv6_unicast.values().cloned());
+        routes
     }
 
     /// Get iterator over routes for streaming
     pub fn iter_routes(&self) -> impl Iterator<Item = &Route> {
-        self.routes.values()
+        self.ipv4_unicast.values().chain(self.ipv6_unicast.values())
     }
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
@@ -149,7 +219,8 @@ impl LocRib {
 impl LocRib {
     pub fn new(logger: Arc<Logger>) -> Self {
         LocRib {
-            routes: HashMap::new(),
+            ipv4_unicast: HashMap::new(),
+            ipv6_unicast: HashMap::new(),
             logger,
         }
     }
@@ -159,7 +230,7 @@ impl LocRib {
     pub fn add_local_route(
         &mut self,
         prefix: IpNetwork,
-        next_hop: Ipv4Addr,
+        next_hop: NextHopAddr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
@@ -185,11 +256,6 @@ impl LocRib {
             unknown_attrs: vec![],
         });
 
-        eprintln!(
-            "[PREFIX] adding local route to Loc-RIB, prefix={:?}, next_hop={:?}",
-            format!("{:?}", prefix),
-            next_hop.to_string()
-        );
         self.add_route(prefix, path);
     }
 
@@ -198,69 +264,59 @@ impl LocRib {
     pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
         info!(&self.logger, "removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
 
-        if let Some(route) = self.routes.get_mut(&prefix) {
-            let original_len = route.paths.len();
-            route.paths.retain(|p| p.source != RouteSource::Local);
-            let removed = route.paths.len() != original_len;
-
-            // Remove this specific route if no paths left
-            if route.paths.is_empty() {
-                self.routes.remove(&prefix);
-            }
-
-            removed
-        } else {
-            false
+        match prefix {
+            IpNetwork::V4(v4_prefix) => remove_local_paths(&mut self.ipv4_unicast, &v4_prefix),
+            IpNetwork::V6(v6_prefix) => remove_local_paths(&mut self.ipv6_unicast, &v6_prefix),
         }
     }
 
     /// Remove all routes from a peer. Returns prefixes where best path changed.
     pub fn remove_routes_from_peer(&mut self, peer_ip: IpAddr) -> Vec<IpNetwork> {
-        // Snapshot old best for all prefixes that have paths from this peer
-        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = self
-            .routes
+        let prefixes = self.get_prefixes_from_peer(peer_ip);
+
+        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = prefixes
             .iter()
-            .filter(|(_, route)| {
-                route.paths.iter().any(|p| {
-                    matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
-                })
-            })
-            .map(|(prefix, _)| (*prefix, self.get_best_path(prefix).map(Arc::clone)))
+            .map(|p| (*p, self.get_best_path(p).map(Arc::clone)))
             .collect();
 
-        // Remove paths from this peer
-        for route in self.routes.values_mut() {
-            route.paths.retain(|p| {
-                !matches!(
-                    &p.source,
-                    RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip
-                )
-            });
-        }
-        self.routes.retain(|_, route| !route.paths.is_empty());
+        self.clear_peer_paths(peer_ip);
 
-        // Return only prefixes where best changed
         old_best
             .into_iter()
-            .filter(|(prefix, old)| old != &self.get_best_path(prefix).map(Arc::clone))
-            .map(|(prefix, _)| prefix)
+            .filter_map(|(prefix, old)| {
+                if old.as_ref() != self.get_best_path(&prefix) {
+                    Some(prefix)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
     pub fn routes_len(&self) -> usize {
-        self.routes.len()
+        self.ipv4_unicast.len() + self.ipv6_unicast.len()
     }
 
     /// Get the best path for a specific prefix, if any
     pub fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Arc<Path>> {
-        self.routes
-            .get(prefix)
-            .and_then(|route| route.paths.first())
+        match prefix {
+            IpNetwork::V4(v4_prefix) => self
+                .ipv4_unicast
+                .get(v4_prefix)
+                .and_then(|route| route.paths.first()),
+            IpNetwork::V6(v6_prefix) => self
+                .ipv6_unicast
+                .get(v6_prefix)
+                .and_then(|route| route.paths.first()),
+        }
     }
 
     /// Check if a prefix exists in Loc-RIB
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
-        self.routes.contains_key(prefix)
+        match prefix {
+            IpNetwork::V4(v4_prefix) => self.ipv4_unicast.contains_key(v4_prefix),
+            IpNetwork::V6(v6_prefix) => self.ipv6_unicast.contains_key(v6_prefix),
+        }
     }
 }
 
@@ -438,7 +494,7 @@ mod tests {
 
         loc_rib.add_local_route(
             prefix,
-            next_hop,
+            NextHopAddr::Ipv4(next_hop),
             Origin::IGP,
             vec![],
             None,
@@ -466,7 +522,7 @@ mod tests {
 
         loc_rib.add_local_route(
             prefix,
-            next_hop,
+            NextHopAddr::Ipv4(next_hop),
             Origin::IGP,
             vec![],
             Some(200), // Custom LOCAL_PREF
@@ -478,5 +534,88 @@ mod tests {
 
         let path = loc_rib.get_best_path(&prefix).unwrap();
         assert_eq!(path.local_pref, Some(200));
+    }
+
+    #[test]
+    fn test_mixed_ipv4_ipv6_routes() {
+        use crate::net::Ipv6Net;
+        use std::net::Ipv6Addr;
+
+        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let peer_ip = test_peer_ip();
+
+        let prefix_v4 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let prefix_v6 = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        });
+
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+
+        assert_eq!(loc_rib.routes_len(), 2);
+        assert!(loc_rib.has_prefix(&prefix_v4));
+        assert!(loc_rib.has_prefix(&prefix_v6));
+
+        let routes = loc_rib.get_all_routes();
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn test_iter_routes_mixed_families() {
+        use crate::net::Ipv6Net;
+        use std::net::Ipv6Addr;
+
+        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let peer_ip = test_peer_ip();
+
+        let prefix_v4 = create_test_prefix(); // IPv4
+        let prefix_v6 = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        });
+
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+
+        let count = loc_rib.iter_routes().count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_remove_routes_from_peer_mixed() {
+        use crate::net::Ipv6Net;
+        use std::net::Ipv6Addr;
+
+        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let peer1 = test_peer_ip();
+        let peer2 = test_peer_ip2();
+
+        let prefix_v4 = create_test_prefix();
+        let prefix_v6 = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        });
+
+        loc_rib.add_route(prefix_v4, create_test_path(peer1));
+        loc_rib.add_route(prefix_v6, create_test_path(peer2));
+
+        let changed = loc_rib.remove_routes_from_peer(peer1);
+
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0], prefix_v4);
+        assert!(!loc_rib.has_prefix(&prefix_v4));
+        assert!(loc_rib.has_prefix(&prefix_v6));
+    }
+
+    #[test]
+    fn test_empty_tables() {
+        let loc_rib = LocRib::new(Arc::new(Logger::default()));
+        assert_eq!(loc_rib.routes_len(), 0);
+        assert_eq!(loc_rib.get_all_routes().len(), 0);
+        assert_eq!(loc_rib.iter_routes().count(), 0);
     }
 }

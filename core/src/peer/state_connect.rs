@@ -118,6 +118,7 @@ impl Peer {
                             peer_hold_time: open.hold_time,
                             local_asn: self.fsm.local_asn(),
                             local_hold_time: self.fsm.local_hold_time(),
+                            peer_capabilities: vec![],
                             peer_bgp_id: open.bgp_identifier,
                         });
                         if let Err(e) = self.process_event(&event).await {
@@ -303,7 +304,7 @@ impl Peer {
             }
 
             // Received OPEN while in Connect with DelayOpen - send OPEN + KEEPALIVE (RFC 4271 Event 20)
-            (BgpState::OpenConfirm, &FsmEvent::BgpOpenWithDelayOpenTimer(params)) => {
+            (BgpState::OpenConfirm, FsmEvent::BgpOpenWithDelayOpenTimer(params)) => {
                 self.fsm.timers.stop_connect_retry();
                 self.fsm.timers.stop_delay_open_timer();
                 self.send_open().await?;
@@ -312,6 +313,7 @@ impl Peer {
                     params.peer_hold_time,
                     params.local_asn,
                     params.local_hold_time,
+                    params.peer_capabilities.clone(),
                 )
                 .await?;
             }
@@ -517,6 +519,7 @@ mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
+            peer_capabilities: vec![],
         }))
         .await
         .unwrap();
@@ -597,6 +600,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: 180,
+                peer_capabilities: vec![],
             }),
             FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(
                 BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),

@@ -15,7 +15,7 @@
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
+use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
@@ -72,7 +72,7 @@ pub enum ConnectionType {
 }
 
 /// Administrative state of a peer, controls auto-reconnect behavior.
-/// Follows GoBGP's approach: only reconnect when Up.
+/// Only reconnect when Up.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AdminState {
     /// Normal operation, auto-reconnect enabled
@@ -143,7 +143,7 @@ pub enum MgmtOp {
     },
     AddRoute {
         prefix: IpNetwork,
-        next_hop: Ipv4Addr,
+        next_hop: NextHopAddr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
@@ -822,6 +822,14 @@ impl BgpServer {
             // Get peer ASN, default to local ASN if not yet known
             let peer_asn = entry.asn.unwrap_or(local_asn);
 
+            // Get local address used for this peering session (RFC 4271 5.1.3)
+            // Falls back to router ID if connection info not available
+            let local_next_hop = entry
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(IpAddr::V4(self.local_addr));
+
             let export_policies = entry.policy_out();
             if !export_policies.is_empty() {
                 send_withdrawals_to_peer(*peer_addr, peer_tx, &to_withdraw, &self.logger);
@@ -831,7 +839,7 @@ impl BgpServer {
                     &to_announce,
                     local_asn,
                     peer_asn,
-                    self.local_addr,
+                    local_next_hop,
                     export_policies,
                     &self.logger,
                 );

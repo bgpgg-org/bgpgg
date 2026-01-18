@@ -12,10 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::net::{IpNetwork, Ipv4Net};
+use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+const MAX_IPV4_PREFIX_LEN: u8 = 32;
+const MAX_IPV6_PREFIX_LEN: u8 = 128;
+
+/// Validate prefix length and calculate byte length for NLRI
+fn validate_and_calculate_byte_len(
+    prefix_length: u8,
+    max_prefix_len: u8,
+    remaining_bytes: usize,
+) -> Result<usize, ParserError> {
+    use super::msg_notification::{BgpError, UpdateMessageError};
+
+    // Check prefix length before calculating byte_len
+    if prefix_length > max_prefix_len {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
+            data: Vec::new(),
+        });
+    }
+
+    let byte_len: usize = (prefix_length as usize).div_ceil(8);
+
+    if byte_len > remaining_bytes {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
+            data: Vec::new(),
+        });
+    }
+
+    Ok(byte_len)
+}
 
 #[derive(Debug, PartialEq)]
 pub enum ParserError {
@@ -38,8 +69,6 @@ impl Display for ParserError {
 impl Error for ParserError {}
 
 pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
-    use super::msg_notification::{BgpError, UpdateMessageError};
-
     let mut cursor = 0;
     let mut nlri_list: Vec<IpNetwork> = Vec::new();
 
@@ -47,22 +76,11 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
         let prefix_length = bytes[cursor];
         cursor += 1;
 
-        // Check prefix length before calculating byte_len to avoid buffer overflow
-        if prefix_length > 32 {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
-                data: Vec::new(),
-            });
-        }
-
-        let byte_len: usize = (prefix_length as usize).div_ceil(8);
-
-        if cursor + byte_len > bytes.len() {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
-                data: Vec::new(),
-            });
-        }
+        let byte_len = validate_and_calculate_byte_len(
+            prefix_length,
+            MAX_IPV4_PREFIX_LEN,
+            bytes.len() - cursor,
+        )?;
 
         let mut ip_buffer = [0; 4];
         ip_buffer[..byte_len].copy_from_slice(&bytes[cursor..(byte_len + cursor)]);
@@ -83,6 +101,35 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
         }
 
         nlri_list.push(IpNetwork::V4(net));
+        cursor += byte_len;
+    }
+
+    Ok(nlri_list)
+}
+
+pub fn parse_nlri_v6_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
+    let mut cursor = 0;
+    let mut nlri_list: Vec<IpNetwork> = Vec::new();
+
+    while cursor < bytes.len() {
+        let prefix_length = bytes[cursor];
+        cursor += 1;
+
+        let byte_len = validate_and_calculate_byte_len(
+            prefix_length,
+            MAX_IPV6_PREFIX_LEN,
+            bytes.len() - cursor,
+        )?;
+
+        let mut ip_buffer = [0; 16];
+        ip_buffer[..byte_len].copy_from_slice(&bytes[cursor..(byte_len + cursor)]);
+
+        let net = Ipv6Net {
+            address: Ipv6Addr::from(ip_buffer),
+            prefix_length,
+        };
+
+        nlri_list.push(IpNetwork::V6(net));
         cursor += byte_len;
     }
 
@@ -243,6 +290,100 @@ mod tests {
 
         for (ip, expected, name) in test_cases {
             assert_eq!(is_valid_unicast_ipv4(ip), expected, "Failed for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_parse_nlri_v6_list_single() {
+        // 2001:db8::/32
+        let data: Vec<u8> = vec![0x20, 0x20, 0x01, 0x0d, 0xb8];
+
+        let result = parse_nlri_v6_list(&data).unwrap();
+        let expected = vec![IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        })];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_parse_nlri_v6_list_multiple() {
+        // Test various prefix lengths: /32, /48, /64, /128
+        let data: Vec<u8> = vec![
+            0x20, 0x20, 0x01, 0x0d, 0xb8, // 2001:db8::/32
+            0x30, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, // 2001:db8:1::/48
+            0x40, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01, // 2001:db8:0:1::/64
+            0x80, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, // 2001:db8::1/128
+        ];
+
+        let result = parse_nlri_v6_list(&data).unwrap();
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result[0],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                prefix_length: 32,
+            })
+        );
+        assert_eq!(
+            result[1],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0x0001, 0, 0, 0, 0, 0),
+                prefix_length: 48,
+            })
+        );
+        assert_eq!(
+            result[2],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 0),
+                prefix_length: 64,
+            })
+        );
+        assert_eq!(
+            result[3],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1),
+                prefix_length: 128,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_nlri_v6_list_empty() {
+        let data: Vec<u8> = vec![];
+        let result = parse_nlri_v6_list(&data).unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_nlri_v6_list_invalid_prefix_length() {
+        let data: Vec<u8> = vec![129, 0x20, 0x01]; // /129 is invalid for IPv6
+
+        match parse_nlri_v6_list(&data) {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField)
+                );
+            }
+            _ => panic!("Expected InvalidNetworkField"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nlri_v6_list_truncated() {
+        // Claims /32 (needs 4 bytes) but only provides 2
+        let data: Vec<u8> = vec![32, 0x20, 0x01];
+
+        match parse_nlri_v6_list(&data) {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField)
+                );
+            }
+            _ => panic!("Expected InvalidNetworkField"),
         }
     }
 }

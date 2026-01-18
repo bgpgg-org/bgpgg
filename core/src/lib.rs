@@ -27,7 +27,7 @@ pub mod types;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
@@ -41,7 +41,7 @@ pub(crate) mod test_helpers {
                 segment_len: 2,
                 asn_list: vec![100, 200],
             }],
-            next_hop: Ipv4Addr::new(192, 0, 2, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
             source: RouteSource::Ebgp(peer_ip),
             local_pref: Some(100),
             med: Some(0),
@@ -60,7 +60,7 @@ pub(crate) mod test_helpers {
                 segment_len: 2,
                 asn_list: vec![100, 200],
             }],
-            next_hop: Ipv4Addr::new(192, 0, 2, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
             source: RouteSource::Ebgp(peer_ip),
             local_pref: Some(100),
             med: Some(0),

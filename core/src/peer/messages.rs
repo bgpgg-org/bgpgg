@@ -17,17 +17,90 @@ use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepAliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
+use crate::bgp::msg_open_types::{
+    BgpCapabiltyCode, Capability, OptionalParam, OptionalParamTypes, ParamVal,
+};
 use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::IpNetwork;
 use crate::rib::Path;
 use crate::server::ServerOp;
 use crate::{debug, info, warn};
+use std::collections::HashSet;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use super::{Peer, SessionType};
+
+/// Default local capabilities to advertise
+fn default_local_capabilities() -> Vec<AfiSafi> {
+    vec![
+        AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+        AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+    ]
+}
+
+/// Convert AfiSafi to capability bytes
+/// Format: [AFI_HIGH, AFI_LOW, RESERVED, SAFI]
+fn afi_safi_to_capability_bytes(afi_safi: &AfiSafi) -> Vec<u8> {
+    let afi_bytes = (afi_safi.afi as u16).to_be_bytes();
+    vec![afi_bytes[0], afi_bytes[1], 0x00, afi_safi.safi as u8]
+}
+
+/// Extract multiprotocol capabilities from OPEN message
+fn extract_capabilities(open_msg: &OpenMessage) -> Vec<AfiSafi> {
+    let mut capabilities = Vec::new();
+
+    for param in &open_msg.optional_params {
+        if let ParamVal::Capability(cap) = &param.param_value {
+            if cap.code == BgpCapabiltyCode::Multiprotocol {
+                if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
+                    capabilities.push(afi_safi);
+                }
+            }
+        }
+    }
+
+    capabilities
+}
+
+/// Create an OPEN message with multiprotocol capabilities
+fn create_open_message(asn: u16, hold_time: u16, router_id: Ipv4Addr) -> OpenMessage {
+    // Create multiprotocol capabilities
+    let local_capabilities = default_local_capabilities();
+    let mut optional_params = Vec::new();
+
+    for afi_safi in local_capabilities {
+        let cap_bytes = afi_safi_to_capability_bytes(&afi_safi);
+        let capability = Capability {
+            code: BgpCapabiltyCode::Multiprotocol,
+            len: cap_bytes.len() as u8,
+            val: cap_bytes,
+        };
+        optional_params.push(OptionalParam {
+            param_type: OptionalParamTypes::Capabilities,
+            param_len: 2 + capability.len, // code(1) + len(1) + val
+            param_value: ParamVal::Capability(capability),
+        });
+    }
+
+    // Calculate total optional params length
+    let optional_params_len = optional_params
+        .iter()
+        .map(|p| 2 + p.param_len as usize) // type(1) + len(1) + value
+        .sum::<usize>() as u8;
+
+    OpenMessage {
+        version: 4,
+        asn,
+        hold_time,
+        bgp_identifier: u32::from(router_id),
+        optional_params_len,
+        optional_params,
+    }
+}
 
 impl Peer {
     /// Send OPEN message to peer.
@@ -36,10 +109,10 @@ impl Peer {
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no TCP connection"))?;
-        let open_msg = OpenMessage::new(
+        let open_msg = create_open_message(
             self.fsm.local_asn(),
             self.fsm.local_hold_time(),
-            self.fsm.local_bgp_id(),
+            Ipv4Addr::from(self.fsm.local_bgp_id()),
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -55,6 +128,7 @@ impl Peer {
         peer_hold_time: u16,
         local_asn: u16,
         local_hold_time: u16,
+        peer_capabilities: Vec<AfiSafi>,
     ) -> Result<(), io::Error> {
         // Set peer ASN and determine session type
         self.asn = Some(peer_asn);
@@ -63,6 +137,16 @@ impl Peer {
         } else {
             SessionType::Ebgp
         });
+
+        // Negotiate multiprotocol capabilities (intersection of local and peer)
+        let local_capabilities = default_local_capabilities();
+        let local_set: HashSet<_> = local_capabilities.into_iter().collect();
+        let peer_set: HashSet<_> = peer_capabilities.into_iter().collect();
+        self.negotiated_capabilities = local_set.intersection(&peer_set).copied().collect();
+
+        info!(&self.logger, "negotiated capabilities",
+              "capabilities" => format!("{:?}", self.negotiated_capabilities),
+              "peer_ip" => self.addr.to_string());
 
         // Negotiate hold time: use minimum (RFC 4271).
         let hold_time = local_hold_time.min(peer_hold_time);
@@ -218,12 +302,17 @@ impl Peer {
                     bgp_id: open_msg.bgp_identifier,
                     conn_type: self.conn_type,
                 });
+
+                // Extract multiprotocol capabilities from OPEN message
+                let peer_capabilities = extract_capabilities(open_msg);
+
                 self.process_event(&FsmEvent::BgpOpenReceived(BgpOpenParams {
                     peer_asn: open_msg.asn,
                     peer_hold_time: open_msg.hold_time,
                     peer_bgp_id: open_msg.bgp_identifier,
                     local_asn: self.fsm.local_asn(),
                     local_hold_time: self.fsm.local_hold_time(),
+                    peer_capabilities,
                 }))
                 .await?;
             }
@@ -291,9 +380,87 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg::Message;
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+    use crate::bgp::msg_update::{
+        AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
+    };
     use crate::peer::fsm::BgpState;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_afi_safi_to_capability_bytes() {
+        let cases = vec![
+            (
+                AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+                vec![0x00, 0x01, 0x00, 0x01],
+            ),
+            (
+                AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+                vec![0x00, 0x02, 0x00, 0x01],
+            ),
+            (
+                AfiSafi::new(Afi::Ipv4, Safi::Multicast),
+                vec![0x00, 0x01, 0x00, 0x02],
+            ),
+        ];
+
+        for (afi_safi, expected_bytes) in cases {
+            let bytes = afi_safi_to_capability_bytes(&afi_safi);
+            assert_eq!(bytes, expected_bytes, "{:?}", afi_safi);
+        }
+    }
+
+    #[test]
+    fn test_extract_capabilities() {
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1));
+        let capabilities = extract_capabilities(&open_msg);
+
+        assert_eq!(capabilities.len(), 2);
+        assert!(capabilities.contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
+        assert!(capabilities.contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)));
+    }
+
+    #[tokio::test]
+    async fn test_capability_negotiation_intersection() {
+        use std::collections::HashSet;
+
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv4_multicast = AfiSafi::new(Afi::Ipv4, Safi::Multicast);
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+
+        // (local_caps, peer_caps, expected_negotiated)
+        let cases = vec![
+            (vec![ipv4_unicast], vec![ipv4_unicast], vec![ipv4_unicast]),
+            (
+                vec![ipv4_unicast],
+                vec![ipv4_unicast, ipv4_multicast],
+                vec![ipv4_unicast],
+            ),
+            (vec![ipv4_unicast], vec![ipv6_unicast], vec![]),
+            (
+                vec![ipv4_unicast, ipv6_unicast],
+                vec![ipv4_unicast, ipv6_unicast],
+                vec![ipv4_unicast, ipv6_unicast],
+            ),
+            (
+                vec![ipv4_unicast, ipv6_unicast],
+                vec![ipv4_unicast],
+                vec![ipv4_unicast],
+            ),
+        ];
+
+        for (local_caps, peer_caps, expected) in cases {
+            let local_set: HashSet<_> = local_caps.iter().copied().collect();
+            let peer_set: HashSet<_> = peer_caps.iter().copied().collect();
+            let negotiated: HashSet<_> = local_set.intersection(&peer_set).copied().collect();
+            let expected_set: HashSet<_> = expected.iter().copied().collect();
+
+            assert_eq!(
+                negotiated, expected_set,
+                "local={:?} peer={:?}",
+                local_caps, peer_caps
+            );
+        }
+    }
 
     #[test]
     fn test_admin_shutdown_notification() {
@@ -331,7 +498,7 @@ mod tests {
                     segment_len: 1,
                     asn_list: vec![65001],
                 }],
-                Ipv4Addr::new(10, 0, 0, 1),
+                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                 vec![],
                 None,
                 None,
@@ -377,7 +544,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65001],
             }],
-            Ipv4Addr::new(10, 0, 0, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             vec![],
             None,
             None,

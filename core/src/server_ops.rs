@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::msg_notification::CeaseSubcode;
-use crate::bgp::msg_update::{AsPathSegment, Origin, UpdateMessage};
+use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::config::PeerConfig;
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
@@ -31,7 +31,7 @@ use crate::types::PeerDownReason;
 use crate::{error, info};
 use regex::Regex;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -527,7 +527,7 @@ impl BgpServer {
     async fn handle_add_route(
         &mut self,
         prefix: IpNetwork,
-        next_hop: Ipv4Addr,
+        next_hop: NextHopAddr,
         origin: Origin,
         as_path: Vec<AsPathSegment>,
         local_pref: Option<u32>,
@@ -537,7 +537,7 @@ impl BgpServer {
         extended_communities: Vec<u64>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => next_hop.to_string());
+        info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => format!("{:?}", next_hop));
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
         self.loc_rib.add_local_route(
@@ -761,11 +761,12 @@ impl BgpServer {
         }
 
         // Use EXACT same filtering + transformation logic
+        // Note: For adj-rib-out query, we use router_id as next hop (hypothetical)
         let filtered = compute_routes_for_peer(
             &to_announce,
             self.config.asn,
             peer_asn,
-            self.config.router_id,
+            IpAddr::V4(self.config.router_id),
             export_policies,
         );
 

@@ -515,3 +515,59 @@ async fn test_as_loop_prevention() {
         .await
     );
 }
+
+#[tokio::test]
+async fn test_ipv6_route_exchange() {
+    let (server1, mut server2) = setup_two_peered_servers(None).await;
+
+    // Server2 announces an IPv6 route to Server1 via gRPC
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "2001:db8::/32".to_string(),
+            next_hop: "2001:db8::1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Get the actual peer address
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // Poll for IPv6 route to appear in Server1's RIB
+    // Cross-family (IPv6 route over IPv4 session): next hop preserved as IPv6
+    poll_route_propagation(&[(
+        &server1,
+        vec![Route {
+            prefix: "2001:db8::/32".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: "2001:db8::1".to_string(),  // IPv6 next hop preserved
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+
+    // Server2 withdraws the IPv6 route
+    server2
+        .client
+        .remove_route("2001:db8::/32".to_string())
+        .await
+        .expect("Failed to withdraw IPv6 route");
+
+    // Poll for withdrawal and verify peers are still established
+    poll_route_withdrawal(&[&server1]).await;
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
+    assert!(
+        verify_peers(
+            &server2,
+            vec![server1.to_peer(BgpState::Established, false)],
+        )
+        .await
+    );
+}

@@ -31,13 +31,14 @@ pub enum BgpState {
 }
 
 /// Parameters from received BGP OPEN message
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgpOpenParams {
     pub peer_asn: u16,
     pub peer_hold_time: u16,
     pub peer_bgp_id: u32,
     pub local_asn: u16,
     pub local_hold_time: u16,
+    pub peer_capabilities: Vec<crate::bgp::multiprotocol::AfiSafi>,
 }
 
 /// BGP FSM events as defined in RFC 4271 Section 8.1
@@ -602,6 +603,7 @@ mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
+            peer_capabilities: vec![],
         }));
         assert_eq!(fsm.state(), BgpState::OpenConfirm);
 
@@ -715,6 +717,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 BgpState::OpenConfirm,
             ),
@@ -765,6 +768,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 BgpState::OpenConfirm,
             ),
@@ -919,6 +923,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
             ),
             // Established + BgpHeaderErr -> Idle (Event 21)
@@ -1037,6 +1042,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 19,
             ),
@@ -1047,6 +1053,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 20,
             ),

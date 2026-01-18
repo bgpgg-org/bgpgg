@@ -304,6 +304,7 @@ pub(super) mod tests {
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
+    use std::collections::HashSet;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::time::Duration;
@@ -358,6 +359,8 @@ pub(super) mod tests {
             sent_open: None,
             received_open: None,
             logger: Arc::new(Logger::default()),
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
         }
     }
 
@@ -524,6 +527,7 @@ pub(super) mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
+            peer_capabilities: vec![],
         }))
         .await
         .unwrap();

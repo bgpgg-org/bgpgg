@@ -162,7 +162,7 @@ impl PolicyContext {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use crate::bgp::msg_update::Origin;
+    use crate::bgp::msg_update::{NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, RouteSource};
     use std::net::Ipv4Addr;
@@ -171,7 +171,7 @@ pub(crate) mod test_helpers {
         Path {
             origin: Origin::IGP,
             as_path: vec![],
-            next_hop: Ipv4Addr::new(10, 0, 0, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             source,
             local_pref: None,
             med: None,

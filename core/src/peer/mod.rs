@@ -24,6 +24,7 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -227,6 +228,10 @@ pub struct Peer {
     sent_open: Option<OpenMessage>,
     /// OPEN message received from peer (for BMP PeerUp)
     received_open: Option<OpenMessage>,
+    /// Negotiated multiprotocol capabilities (intersection of local and peer)
+    negotiated_capabilities: HashSet<crate::bgp::multiprotocol::AfiSafi>,
+    /// AFI/SAFI pairs disabled due to errors (RFC 4760 Section 7)
+    disabled_afi_safi: HashSet<crate::bgp::multiprotocol::AfiSafi>,
 }
 
 impl Peer {
@@ -282,6 +287,8 @@ impl Peer {
             established_at: None,
             sent_open: None,
             received_open: None,
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
             logger,
         }
     }
@@ -424,6 +431,8 @@ pub mod test_helpers {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
             logger: Arc::new(Logger::default()),
         }
     }

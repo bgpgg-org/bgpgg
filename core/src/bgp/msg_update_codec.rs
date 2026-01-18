@@ -15,13 +15,16 @@
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
-    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, NextHopAddr,
-    Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, MpReachNlri,
+    MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
-use super::utils::{is_valid_unicast_ipv4, read_u32, ParserError};
+use super::multiprotocol::{Afi, Safi};
+use super::utils::{
+    is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
+};
 use crate::net::IpNetwork;
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub(super) fn validate_attribute_flags(
     flags: u8,
@@ -77,6 +80,8 @@ pub(super) fn validate_attribute_length(
         AttrType::Aggregator => attr_len == 6,
         AttrType::AsPath => true, // Variable length
         AttrType::Communities => attr_len.is_multiple_of(4), // Must be multiple of 4
+        AttrType::MpReachNlri => true, // Variable length
+        AttrType::MpUnreachNlri => true, // Variable length
         AttrType::ExtendedCommunities => attr_len.is_multiple_of(8), // Must be multiple of 8
     };
 
@@ -124,6 +129,7 @@ pub(super) fn validate_well_known_mandatory_attributes(
 ) -> Result<(), ParserError> {
     // RFC 4271 Section 5: well-known mandatory attributes MUST be included
     // in every UPDATE message that contains NLRI
+    // RFC 2858: MP_REACH_NLRI can replace NEXT_HOP for multiprotocol
     if !has_nlri {
         return Ok(());
     }
@@ -137,6 +143,9 @@ pub(super) fn validate_well_known_mandatory_attributes(
     let has_next_hop = path_attributes
         .iter()
         .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
+    let has_mp_reach = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::MpReachNlri(_)));
 
     if !has_origin {
         return Err(ParserError::BgpError {
@@ -152,10 +161,58 @@ pub(super) fn validate_well_known_mandatory_attributes(
         });
     }
 
-    if !has_next_hop {
+    // NEXT_HOP is required UNLESS MP_REACH_NLRI is present
+    if !has_next_hop && !has_mp_reach {
         return Err(ParserError::BgpError {
             error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
             data: vec![attr_type_code::NEXT_HOP],
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_nlri_afi(afi: &Afi, routes: &[IpNetwork]) -> bool {
+    for route in routes {
+        match (afi, route) {
+            (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn optional_attribute_error(attr_bytes: &[u8]) -> ParserError {
+    ParserError::BgpError {
+        error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+        data: attr_bytes.to_vec(),
+    }
+}
+
+fn validate_mp_reach_buffer(
+    afi: &Afi,
+    next_hop_len: usize,
+    bytes: &[u8],
+    header_size: usize,
+    reserved_size: usize,
+) -> Result<(), ParserError> {
+    // Validate next hop length based on AFI: IPv4=4 bytes, IPv6=16 or 32 bytes (global or global+link-local)
+    // Per RFC 2545: IPv6 MP_REACH_NLRI must have IPv6 next hop (16 or 32 bytes)
+    match (afi, next_hop_len) {
+        (Afi::Ipv4, 4) | (Afi::Ipv6, 16) | (Afi::Ipv6, 32) => {}
+        _ => {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+                data: Vec::new(),
+            });
+        }
+    }
+
+    let min_total_size = header_size + next_hop_len + reserved_size;
+    if bytes.len() < min_total_size {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            data: Vec::new(),
         });
     }
 
@@ -233,7 +290,9 @@ pub(super) fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
 
 pub(super) fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
     // Length already validated by validate_attribute_length
-    NextHopAddr::Ipv4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
+    let mut octets = [0u8; 4];
+    octets.copy_from_slice(&bytes[0..4]);
+    NextHopAddr::Ipv4(Ipv4Addr::from(octets))
 }
 
 pub(super) fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
@@ -280,6 +339,134 @@ pub(super) fn read_attr_extended_communities(bytes: &[u8]) -> Result<Vec<u64>, P
     }
 
     Ok(ext_communities)
+}
+
+pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, ParserError> {
+    // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
+    const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
+    const RESERVED_SIZE: usize = 1;
+    const MIN_SIZE: usize = HEADER_SIZE + RESERVED_SIZE; // Minimum without next hop address
+
+    if bytes.len() < MIN_SIZE {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            data: Vec::new(),
+        });
+    }
+
+    let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
+    let safi = Safi::try_from(bytes[2])?;
+    let next_hop_len = bytes[3] as usize;
+
+    validate_mp_reach_buffer(&afi, next_hop_len, bytes, HEADER_SIZE, RESERVED_SIZE)?;
+
+    // Extract next hop
+    let next_hop = match afi {
+        Afi::Ipv4 => {
+            let mut octets = [0u8; 4];
+            octets.copy_from_slice(&bytes[HEADER_SIZE..HEADER_SIZE + 4]);
+            let addr = Ipv4Addr::from(octets);
+            if !is_valid_unicast_ipv4(u32::from(addr)) {
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(
+                        UpdateMessageError::InvalidNextHopAttribute,
+                    ),
+                    data: Vec::new(),
+                });
+            }
+            NextHopAddr::Ipv4(addr)
+        }
+        Afi::Ipv6 => {
+            // Use first 16 bytes (global nexthop), ignore link-local if present
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&bytes[HEADER_SIZE..HEADER_SIZE + 16]);
+            NextHopAddr::Ipv6(Ipv6Addr::from(octets))
+        }
+    };
+
+    let cursor = HEADER_SIZE + next_hop_len;
+
+    // Parse NLRI (skip 1 reserved byte)
+    let nlri = match afi {
+        Afi::Ipv4 => parse_nlri_list(&bytes[cursor + RESERVED_SIZE..])?,
+        Afi::Ipv6 => parse_nlri_v6_list(&bytes[cursor + RESERVED_SIZE..])?,
+    };
+
+    Ok(MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        nlri,
+    })
+}
+
+pub(super) fn read_attr_mp_unreach_nlri(bytes: &[u8]) -> Result<MpUnreachNlri, ParserError> {
+    if bytes.len() < 3 {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            data: Vec::new(),
+        });
+    }
+
+    let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
+    let safi = Safi::try_from(bytes[2])?;
+
+    let withdrawn_routes = match afi {
+        Afi::Ipv4 => parse_nlri_list(&bytes[3..])?,
+        Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..])?,
+    };
+
+    Ok(MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn_routes,
+    })
+}
+
+pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
+    let mut bytes = Vec::new();
+
+    // AFI (2 bytes)
+    bytes.extend_from_slice(&(mp_reach.afi as u16).to_be_bytes());
+
+    // SAFI (1 byte)
+    bytes.push(mp_reach.safi as u8);
+
+    // Next hop length and address
+    match &mp_reach.next_hop {
+        NextHopAddr::Ipv4(addr) => {
+            bytes.push(4); // Length
+            bytes.extend_from_slice(&addr.octets());
+        }
+        NextHopAddr::Ipv6(addr) => {
+            bytes.push(16); // Length (global only)
+            bytes.extend_from_slice(&addr.octets());
+        }
+    }
+
+    // Reserved (1 byte)
+    bytes.push(0);
+
+    // NLRI
+    let nlri_bytes = write_nlri_list(&mp_reach.nlri);
+    bytes.extend_from_slice(&nlri_bytes);
+
+    bytes
+}
+
+pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> {
+    let mut bytes = Vec::new();
+
+    // AFI (2 bytes)
+    bytes.extend_from_slice(&(mp_unreach.afi as u16).to_be_bytes());
+
+    // SAFI (1 byte)
+    bytes.push(mp_unreach.safi as u8);
+
+    // Withdrawn routes
+    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
+
+    bytes
 }
 
 pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
@@ -372,6 +559,22 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
                     let communities = read_attr_communities(attr_data)?;
                     PathAttrValue::Communities(communities)
                 }
+                AttrType::MpReachNlri => {
+                    let mp_reach = read_attr_mp_reach_nlri(attr_data)?;
+                    // Validate routes match declared AFI
+                    if !validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) {
+                        return Err(optional_attribute_error(attr_bytes));
+                    }
+                    PathAttrValue::MpReachNlri(mp_reach)
+                }
+                AttrType::MpUnreachNlri => {
+                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data)?;
+                    // Validate routes match declared AFI
+                    if !validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) {
+                        return Err(optional_attribute_error(attr_bytes));
+                    }
+                    PathAttrValue::MpUnreachNlri(mp_unreach)
+                }
                 AttrType::ExtendedCommunities => {
                     let ext_communities = read_attr_extended_communities(attr_data)?;
                     PathAttrValue::ExtendedCommunities(ext_communities)
@@ -432,6 +635,21 @@ pub(super) fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, P
         }
 
         path_attributes.push(attribute);
+    }
+
+    // Validate that we don't have both NEXT_HOP and MP_REACH_NLRI
+    let has_next_hop = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
+    let has_mp_reach = path_attributes
+        .iter()
+        .any(|attr| matches!(attr.value, PathAttrValue::MpReachNlri(_)));
+
+    if has_next_hop && has_mp_reach {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+            data: Vec::new(),
+        });
     }
 
     Ok(path_attributes)
@@ -497,6 +715,8 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             }
             comm_bytes
         }
+        PathAttrValue::MpReachNlri(mp_reach) => write_attr_mp_reach_nlri(mp_reach),
+        PathAttrValue::MpUnreachNlri(mp_unreach) => write_attr_mp_unreach_nlri(mp_unreach),
         PathAttrValue::ExtendedCommunities(ext_communities) => {
             let mut ext_comm_bytes = Vec::new();
             for &ext_comm in ext_communities {
@@ -524,6 +744,8 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
         PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
         PathAttrValue::Communities(_) => AttrType::Communities as u8,
+        PathAttrValue::MpReachNlri(_) => AttrType::MpReachNlri as u8,
+        PathAttrValue::MpUnreachNlri(_) => AttrType::MpUnreachNlri as u8,
         PathAttrValue::ExtendedCommunities(_) => AttrType::ExtendedCommunities as u8,
         PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
@@ -555,6 +777,16 @@ pub(super) fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Sample MP_REACH_NLRI for IPv4 (192.168.1.1, NLRI=10.0.0.0/8)
+    const MP_REACH_IPV4_SAMPLE: &[u8] = &[
+        0x00, 0x01, // AFI = IPv4 (1)
+        0x01, // SAFI = 1 (unicast)
+        0x04, // Next hop length = 4
+        0xc0, 0xa8, 0x01, 0x01, // Next hop 192.168.1.1
+        0x00, // Reserved
+        0x08, 0x0a, // NLRI: 10.0.0.0/8
+    ];
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
 
@@ -1186,5 +1418,173 @@ mod tests {
             }
         );
         assert_eq!(offset, 19);
+    }
+
+    #[test]
+    fn test_validate_nlri_afi_mismatch() {
+        use crate::net::{Ipv4Net, Ipv6Net};
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // IPv4 AFI with IPv6 routes should fail
+        let ipv6_routes = vec![IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            prefix_length: 64,
+        })];
+        assert!(!validate_nlri_afi(&Afi::Ipv4, &ipv6_routes));
+
+        // IPv6 AFI with IPv4 routes should fail
+        let ipv4_routes = vec![IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(192, 168, 1, 0),
+            prefix_length: 24,
+        })];
+        assert!(!validate_nlri_afi(&Afi::Ipv6, &ipv4_routes));
+
+        // IPv4 AFI with IPv4 routes should succeed
+        assert!(validate_nlri_afi(&Afi::Ipv4, &ipv4_routes));
+
+        // IPv6 AFI with IPv6 routes should succeed
+        assert!(validate_nlri_afi(&Afi::Ipv6, &ipv6_routes));
+    }
+
+    #[test]
+    fn test_read_attr_mp_reach_nlri_ipv4() {
+        use crate::net::Ipv4Net;
+        use std::net::Ipv4Addr;
+
+        let result = read_attr_mp_reach_nlri(MP_REACH_IPV4_SAMPLE).unwrap();
+
+        assert_eq!(result.afi, Afi::Ipv4);
+        assert_eq!(result.safi, Safi::Unicast);
+        assert_eq!(
+            result.next_hop,
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1))
+        );
+        assert_eq!(result.nlri.len(), 1);
+        assert_eq!(
+            result.nlri[0],
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn test_read_attr_mp_reach_nlri_ipv6() {
+        use crate::net::Ipv6Net;
+        use std::net::Ipv6Addr;
+
+        // MP_REACH_NLRI: AFI=IPv6, SAFI=1, next_hop=2001:db8::1, NLRI=2001:db8::/32
+        let input: &[u8] = &[
+            0x00, 0x02, // AFI = IPv6 (2)
+            0x01, // SAFI = 1 (unicast)
+            0x10, // Next hop length = 16
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, // Next hop 2001:db8::1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // Reserved
+            0x20, 0x20, 0x01, 0x0d, 0xb8, // NLRI: 2001:db8::/32
+        ];
+
+        let result = read_attr_mp_reach_nlri(input).unwrap();
+
+        assert_eq!(result.afi, Afi::Ipv6);
+        assert_eq!(result.safi, Safi::Unicast);
+        assert_eq!(
+            result.next_hop,
+            NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1))
+        );
+        assert_eq!(result.nlri.len(), 1);
+        assert_eq!(
+            result.nlri[0],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                prefix_length: 32,
+            })
+        );
+    }
+
+    #[test]
+    fn test_read_attr_mp_unreach_nlri_ipv4() {
+        use crate::net::Ipv4Net;
+        use std::net::Ipv4Addr;
+
+        // MP_UNREACH_NLRI: AFI=IPv4, SAFI=1, withdrawn=10.0.0.0/8
+        let input: &[u8] = &[
+            0x00, 0x01, // AFI = IPv4 (1)
+            0x01, // SAFI = 1 (unicast)
+            0x08, 0x0a, // Withdrawn: 10.0.0.0/8
+        ];
+
+        let result = read_attr_mp_unreach_nlri(input).unwrap();
+
+        assert_eq!(result.afi, Afi::Ipv4);
+        assert_eq!(result.safi, Safi::Unicast);
+        assert_eq!(result.withdrawn_routes.len(), 1);
+        assert_eq!(
+            result.withdrawn_routes[0],
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn test_read_attr_mp_unreach_nlri_ipv6() {
+        use crate::net::Ipv6Net;
+        use std::net::Ipv6Addr;
+
+        // MP_UNREACH_NLRI: AFI=IPv6, SAFI=1, withdrawn=2001:db8::/32
+        let input: &[u8] = &[
+            0x00, 0x02, // AFI = IPv6 (2)
+            0x01, // SAFI = 1 (unicast)
+            0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
+        ];
+
+        let result = read_attr_mp_unreach_nlri(input).unwrap();
+
+        assert_eq!(result.afi, Afi::Ipv6);
+        assert_eq!(result.safi, Safi::Unicast);
+        assert_eq!(result.withdrawn_routes.len(), 1);
+        assert_eq!(
+            result.withdrawn_routes[0],
+            IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                prefix_length: 32,
+            })
+        );
+    }
+
+    #[test]
+    fn test_reject_both_next_hop_and_mp_reach() {
+        // Create attributes with both NEXT_HOP and MP_REACH_NLRI
+        let mut attrs_bytes = Vec::new();
+
+        // NEXT_HOP attribute (flags=0x40, type=3, length=4, value=192.168.1.1)
+        attrs_bytes.extend_from_slice(&[
+            0x40, // flags: TRANSITIVE
+            0x03, // type: NEXT_HOP
+            0x04, // length: 4
+            192, 168, 1, 1, // next_hop: 192.168.1.1
+        ]);
+
+        // MP_REACH_NLRI attribute using sample data
+        attrs_bytes.extend_from_slice(&[
+            0x80,                             // flags: OPTIONAL
+            0x0e,                             // type: MP_REACH_NLRI
+            MP_REACH_IPV4_SAMPLE.len() as u8, // length
+        ]);
+        attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
+
+        // Should fail with MalformedAttributeList
+        let result = read_path_attributes(&attrs_bytes);
+        assert!(result.is_err());
+        if let Err(ParserError::BgpError { error, .. }) = result {
+            assert_eq!(
+                error,
+                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+            );
+        } else {
+            panic!("Expected MalformedAttributeList error");
+        }
     }
 }
