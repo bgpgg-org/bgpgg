@@ -14,7 +14,7 @@
 
 //! This module implements the BGP FSM.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
@@ -31,13 +31,14 @@ pub enum BgpState {
 }
 
 /// Parameters from received BGP OPEN message
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgpOpenParams {
     pub peer_asn: u16,
     pub peer_hold_time: u16,
     pub peer_bgp_id: u32,
     pub local_asn: u16,
     pub local_hold_time: u16,
+    pub peer_capabilities: Vec<crate::bgp::multiprotocol::AfiSafi>,
 }
 
 /// BGP FSM events as defined in RFC 4271 Section 8.1
@@ -289,7 +290,7 @@ pub struct Fsm {
     local_asn: u16,
     local_hold_time: u16,
     local_bgp_id: u32,
-    local_addr: Ipv4Addr,
+    local_addr: IpAddr,
 
     /// Passive mode: if true, wait for incoming connections (Active state)
     /// if false, initiate connections (Connect state)
@@ -302,7 +303,7 @@ impl Fsm {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
         delay_open_time: Option<Duration>,
         passive_mode: bool,
     ) -> Self {
@@ -325,7 +326,7 @@ impl Fsm {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
         passive_mode: bool,
     ) -> Self {
         Fsm {
@@ -361,7 +362,7 @@ impl Fsm {
     }
 
     /// Get local address
-    pub fn local_addr(&self) -> Ipv4Addr {
+    pub fn local_addr(&self) -> IpAddr {
         self.local_addr
     }
 
@@ -547,8 +548,9 @@ impl Fsm {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
+    use crate::net::ipv4;
 
-    const TEST_LOCAL_ADDR: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+    const TEST_LOCAL_ADDR: IpAddr = ipv4(127, 0, 0, 1);
 
     #[test]
     fn test_initial_state() {
@@ -602,6 +604,7 @@ mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
+            peer_capabilities: vec![],
         }));
         assert_eq!(fsm.state(), BgpState::OpenConfirm);
 
@@ -715,6 +718,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 BgpState::OpenConfirm,
             ),
@@ -765,6 +769,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 BgpState::OpenConfirm,
             ),
@@ -919,6 +924,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
             ),
             // Established + BgpHeaderErr -> Idle (Event 21)
@@ -1037,6 +1043,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 19,
             ),
@@ -1047,6 +1054,7 @@ mod tests {
                     peer_bgp_id: 0x02020202,
                     local_asn: 65000,
                     local_hold_time: 180,
+                    peer_capabilities: vec![],
                 }),
                 20,
             ),

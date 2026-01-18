@@ -145,14 +145,6 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
     }
 }
 
-/// Extract IPv4 from IpAddr, returns error for IPv6.
-pub fn ipv4_from_ipaddr(addr: IpAddr) -> Result<Ipv4Addr, &'static str> {
-    match addr {
-        IpAddr::V4(ip) => Ok(ip),
-        IpAddr::V6(_) => Err("IPv6 not supported"),
-    }
-}
-
 /// Create and bind a TCP socket for outgoing BGP connections
 ///
 /// This helper creates an appropriate socket (IPv4 or IPv6) based on the remote address,
@@ -207,6 +199,12 @@ pub fn parse_sockaddr(addr: &str, default_port: u16) -> Result<SocketAddr, Strin
         .map_err(|e| format!("invalid address: {}", e))
 }
 
+/// Helper to create IPv4 IpAddr for tests
+#[cfg(test)]
+pub(crate) const fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,11 +215,11 @@ mod tests {
     fn test_ipv4_from_sockaddr() {
         let cases = [
             (
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 179),
+                SocketAddr::new(ipv4(192, 168, 1, 1), 179),
                 Some(Ipv4Addr::new(192, 168, 1, 1)),
             ),
             (
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                SocketAddr::new(ipv4(127, 0, 0, 1), 0),
                 Some(Ipv4Addr::LOCALHOST),
             ),
             (SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 179), None),
@@ -245,7 +243,7 @@ mod tests {
                 ),
                 Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             ),
-            (SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 179), None),
+            (SocketAddr::new(ipv4(127, 0, 0, 1), 179), None),
         ];
         for (addr, expected) in cases {
             assert_eq!(ipv6_from_sockaddr(addr), expected);
@@ -253,30 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv4_from_ipaddr() {
-        let cases = [
-            (
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
-                Ok(Ipv4Addr::new(192, 168, 1, 1)),
-            ),
-            (IpAddr::V4(Ipv4Addr::LOCALHOST), Ok(Ipv4Addr::LOCALHOST)),
-            (IpAddr::V6(Ipv6Addr::LOCALHOST), Err("IPv6 not supported")),
-        ];
-        for (addr, expected) in cases {
-            assert_eq!(ipv4_from_ipaddr(addr), expected);
-        }
-    }
-
-    #[test]
     fn test_bind_addr_from_ip() {
         let cases = [
-            (
-                Ipv4Addr::LOCALHOST,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            ),
+            (Ipv4Addr::LOCALHOST, SocketAddr::new(ipv4(127, 0, 0, 1), 0)),
             (
                 Ipv4Addr::new(10, 0, 0, 1),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 0),
+                SocketAddr::new(ipv4(10, 0, 0, 1), 0),
             ),
         ];
         for (ip, expected) in cases {
@@ -290,28 +270,22 @@ mod tests {
             (
                 "127.0.0.1:179",
                 179,
-                Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 179)),
+                Ok(SocketAddr::new(ipv4(127, 0, 0, 1), 179)),
             ),
             (
                 "127.0.0.1",
                 179,
-                Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 179)),
+                Ok(SocketAddr::new(ipv4(127, 0, 0, 1), 179)),
             ),
             (
                 "10.0.0.1:8080",
                 179,
-                Ok(SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    8080,
-                )),
+                Ok(SocketAddr::new(ipv4(10, 0, 0, 1), 8080)),
             ),
             (
                 "10.0.0.1",
                 8080,
-                Ok(SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    8080,
-                )),
+                Ok(SocketAddr::new(ipv4(10, 0, 0, 1), 8080)),
             ),
         ];
         for (addr, default_port, expected) in cases {
@@ -330,16 +304,10 @@ mod tests {
         let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server_stream, _) = listener.accept().await.unwrap();
 
-        assert_eq!(
-            peer_ip(&server_stream),
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        );
+        assert_eq!(peer_ip(&server_stream), Some(ipv4(127, 0, 0, 1)));
 
         let client_stream = client.await.unwrap();
-        assert_eq!(
-            peer_ip(&client_stream),
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        );
+        assert_eq!(peer_ip(&client_stream), Some(ipv4(127, 0, 0, 1)));
     }
 
     #[tokio::test]
@@ -350,16 +318,10 @@ mod tests {
         let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server_stream, _) = listener.accept().await.unwrap();
 
-        assert_eq!(
-            local_ip(&server_stream),
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        );
+        assert_eq!(local_ip(&server_stream), Some(ipv4(127, 0, 0, 1)));
 
         let client_stream = client.await.unwrap();
-        assert_eq!(
-            local_ip(&client_stream),
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        );
+        assert_eq!(local_ip(&client_stream), Some(ipv4(127, 0, 0, 1)));
     }
 
     #[test]

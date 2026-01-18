@@ -17,7 +17,7 @@
 use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
-use crate::bgp::msg_update_types::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
+use crate::bgp::msg_update_types::{NextHopAddr, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::log::Logger;
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
@@ -28,7 +28,10 @@ use crate::{debug, error, info, warn};
 #[cfg(test)]
 use crate::policy::Policy;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
+
+#[cfg(test)]
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -208,7 +211,7 @@ pub fn send_withdrawals_to_peer(
 }
 
 /// Batching key: attributes that must match for announcements to be batched together
-type BatchingKey = (Origin, Vec<AsPathSegment>, Ipv4Addr, bool, Vec<u32>);
+type BatchingKey = (Origin, Vec<AsPathSegment>, NextHopAddr, bool, Vec<u32>);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
@@ -235,31 +238,84 @@ pub(crate) fn batch_announcements_by_path(
     batches.into_values().collect()
 }
 
+fn address_families_match(next_hop: &NextHopAddr, ip_addr: IpAddr) -> bool {
+    matches!(
+        (next_hop, ip_addr),
+        (NextHopAddr::Ipv4(_), IpAddr::V4(_)) | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+    )
+}
+
+fn build_ebgp_next_hop(
+    path: &Path,
+    local_next_hop: IpAddr,
+    prefix: &IpNetwork,
+    logger: &Logger,
+) -> Option<NextHopAddr> {
+    if address_families_match(&path.next_hop, local_next_hop) {
+        // Same address family - rewrite to local interface
+        Some(local_next_hop.into())
+    } else if !path.next_hop.is_unspecified() {
+        // Cross-family with explicit next hop - preserve it
+        Some(path.next_hop)
+    } else {
+        // Cross-family without explicit next hop - can't advertise
+        crate::warn!(
+            logger,
+            format!(
+                "Filtering cross-family route {} without explicit next hop",
+                prefix
+            )
+        );
+        None
+    }
+}
+
+fn build_ibgp_next_hop(
+    path: &Path,
+    local_next_hop: IpAddr,
+    prefix: &IpNetwork,
+    logger: &Logger,
+) -> Option<NextHopAddr> {
+    if !path.source.is_local() {
+        // Learned route - preserve next hop
+        return Some(path.next_hop);
+    }
+
+    // Locally originated route
+    if !path.next_hop.is_unspecified() {
+        // Explicit next hop - preserve it
+        Some(path.next_hop)
+    } else if address_families_match(&path.next_hop, local_next_hop) {
+        // Same address family - use local interface
+        Some(local_next_hop.into())
+    } else {
+        // Cross-family without explicit next hop - can't advertise
+        crate::warn!(
+            logger,
+            format!(
+                "Filtering cross-family route {} without explicit next hop",
+                prefix
+            )
+        );
+        None
+    }
+}
+
 /// Build the NEXT_HOP for export to a peer
-/// RFC 4271 Section 5.1.3:
-/// - eBGP: "By default, the BGP speaker SHOULD use the IP address of the interface
-///   that the speaker uses to establish the BGP connection to peer X in the NEXT_HOP attribute."
-///   -> Always rewrite NEXT_HOP to self
-/// - iBGP: Preserve NEXT_HOP from received routes; set to router ID for locally-originated
-///   routes with unspecified NEXT_HOP
+/// RFC 4271 Section 5.1.3: Rewrite NEXT_HOP to local interface address
+/// RFC 2545/4760: Cross-family (e.g., IPv6 route over IPv4 session) must preserve explicit next hop
 fn build_export_next_hop(
     path: &Path,
-    local_router_id: Ipv4Addr,
+    local_next_hop: IpAddr,
     local_asn: u16,
     peer_asn: u16,
-) -> Ipv4Addr {
-    let is_ebgp = peer_asn != local_asn;
-
-    if is_ebgp {
-        // eBGP: always rewrite NEXT_HOP to self
-        local_router_id
+    prefix: &IpNetwork,
+    logger: &Logger,
+) -> Option<NextHopAddr> {
+    if local_asn != peer_asn {
+        build_ebgp_next_hop(path, local_next_hop, prefix, logger)
     } else {
-        // iBGP: only rewrite locally-originated routes with unspecified NEXT_HOP
-        if path.source.is_local() && path.next_hop.is_unspecified() {
-            local_router_id
-        } else {
-            path.next_hop
-        }
+        build_ibgp_next_hop(path, local_next_hop, prefix, logger)
     }
 }
 
@@ -269,8 +325,9 @@ pub fn compute_routes_for_peer(
     to_announce: &[(IpNetwork, Arc<Path>)],
     local_asn: u16,
     peer_asn: u16,
-    local_router_id: Ipv4Addr,
+    local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
+    logger: &Arc<Logger>,
 ) -> Vec<(IpNetwork, Path)> {
     // Apply well-known community filtering BEFORE export policy
     // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
@@ -308,8 +365,17 @@ pub fn compute_routes_for_peer(
 
             // Apply export attribute transformations
             path_mut.as_path = build_export_as_path(&path_mut, local_asn, peer_asn);
-            path_mut.next_hop =
-                build_export_next_hop(&path_mut, local_router_id, local_asn, peer_asn);
+
+            // Build next hop - may return None for cross-family routes without explicit next hop
+            path_mut.next_hop = build_export_next_hop(
+                &path_mut,
+                local_next_hop,
+                local_asn,
+                peer_asn,
+                prefix,
+                logger,
+            )?;
+
             path_mut.local_pref = build_export_local_pref(&path_mut, local_asn, peer_asn);
             path_mut.med = build_export_med(&path_mut, local_asn, peer_asn);
 
@@ -327,7 +393,7 @@ pub fn send_announcements_to_peer(
     to_announce: &[(IpNetwork, Arc<Path>)],
     local_asn: u16,
     peer_asn: u16,
-    local_router_id: Ipv4Addr,
+    local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
     logger: &Arc<Logger>,
 ) {
@@ -340,8 +406,9 @@ pub fn send_announcements_to_peer(
         to_announce,
         local_asn,
         peer_asn,
-        local_router_id,
+        local_next_hop,
         export_policies,
+        logger,
     );
 
     if filtered.is_empty() {
@@ -431,7 +498,7 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
     }
 
-    fn make_path(source: RouteSource, as_path: Vec<AsPathSegment>, next_hop: Ipv4Addr) -> Path {
+    fn make_path(source: RouteSource, as_path: Vec<AsPathSegment>, next_hop: NextHopAddr) -> Path {
         Path {
             origin: Origin::IGP,
             as_path,
@@ -480,7 +547,11 @@ mod tests {
     #[test]
     fn test_build_export_as_path() {
         // Local routes are stored with empty AS_PATH
-        let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
+        let local_path = make_path(
+            RouteSource::Local,
+            vec![],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+        );
 
         let ebgp_path = make_path(
             RouteSource::Ebgp(test_ip(1)),
@@ -489,7 +560,7 @@ mod tests {
                 segment_len: 2,
                 asn_list: vec![65001, 65002],
             }],
-            Ipv4Addr::new(192, 168, 1, 2),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 2)),
         );
 
         let ibgp_path = make_path(
@@ -499,7 +570,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65003],
             }],
-            Ipv4Addr::new(192, 168, 1, 3),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 3)),
         );
 
         // Local route to eBGP peer: AS_PATH = [local_asn]
@@ -534,7 +605,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65000],
             }],
-            Ipv4Addr::new(192, 168, 1, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
         ));
 
         let path_b = Arc::new(make_path(
@@ -544,7 +615,7 @@ mod tests {
                 segment_len: 1,
                 asn_list: vec![65000],
             }],
-            Ipv4Addr::new(192, 168, 1, 2),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 2)),
         ));
 
         let p1 = IpNetwork::V4(Ipv4Net {
@@ -598,7 +669,7 @@ mod tests {
                     asn_list: vec![65003, 65004, 65005],
                 },
             ],
-            Ipv4Addr::new(192, 168, 1, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
         );
 
         // Export to eBGP peer should prepend local ASN and preserve AS_SET
@@ -627,7 +698,7 @@ mod tests {
                     asn_list: vec![65003],
                 },
             ],
-            Ipv4Addr::new(192, 168, 1, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
         );
 
         // Export to eBGP should create new AS_SEQUENCE segment for local ASN
@@ -658,7 +729,7 @@ mod tests {
                     asn_list: vec![65003, 65004, 65005],
                 },
             ],
-            Ipv4Addr::new(192, 168, 1, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
         );
 
         // Export to iBGP peer should preserve AS_PATH unchanged
@@ -676,53 +747,106 @@ mod tests {
         let local_asn = 65000;
         let peer_asn_ebgp = 65001;
         let peer_asn_ibgp = 65000;
+        let logger = Arc::new(Logger::new(crate::log::LogLevel::Warn));
+        let prefix = "10.0.0.0/24".parse().unwrap();
 
-        // iBGP: Local route with 0.0.0.0 -> rewrite to router ID
-        let local_path = make_path(RouteSource::Local, vec![], Ipv4Addr::UNSPECIFIED);
+        let local_path = make_path(
+            RouteSource::Local,
+            vec![],
+            NextHopAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
+        );
+        let local_explicit = make_path(
+            RouteSource::Local,
+            vec![],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+        );
+        let ibgp_learned = make_path(
+            RouteSource::Ibgp(test_ip(1)),
+            vec![],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)),
+        );
+        let ebgp_learned = make_path(
+            RouteSource::Ebgp(test_ip(1)),
+            vec![],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
+        );
+
+        // iBGP: Local route with unspecified next hop -> set to local address
         assert_eq!(
-            build_export_next_hop(&local_path, router_id, local_asn, peer_asn_ibgp),
-            router_id
+            build_export_next_hop(
+                &local_path,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(router_id))
         );
 
         // iBGP: Local route with explicit next hop -> preserve
-        let local_explicit = make_path(RouteSource::Local, vec![], Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(
-            build_export_next_hop(&local_explicit, router_id, local_asn, peer_asn_ibgp),
-            Ipv4Addr::new(192, 168, 1, 1)
+            build_export_next_hop(
+                &local_explicit,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
         );
 
-        // iBGP: Learned route -> preserve NEXT_HOP
-        let ibgp_path = make_path(
-            RouteSource::Ibgp(test_ip(1)),
-            vec![],
-            Ipv4Addr::new(192, 168, 2, 1),
-        );
+        // iBGP: Learned route -> preserve next hop
         assert_eq!(
-            build_export_next_hop(&ibgp_path, router_id, local_asn, peer_asn_ibgp),
-            Ipv4Addr::new(192, 168, 2, 1)
+            build_export_next_hop(
+                &ibgp_learned,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ibgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)))
         );
 
-        // eBGP: Learned route -> rewrite to self
-        let ebgp_path = make_path(
-            RouteSource::Ebgp(test_ip(1)),
-            vec![],
-            Ipv4Addr::new(192, 168, 3, 1),
-        );
+        // eBGP: Local route with unspecified next hop -> set to local address
         assert_eq!(
-            build_export_next_hop(&ebgp_path, router_id, local_asn, peer_asn_ebgp),
-            router_id
-        );
-
-        // eBGP: Local route with 0.0.0.0 -> rewrite to router ID
-        assert_eq!(
-            build_export_next_hop(&local_path, router_id, local_asn, peer_asn_ebgp),
-            router_id
+            build_export_next_hop(
+                &local_path,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(router_id))
         );
 
-        // eBGP: Local route with explicit next hop -> rewrite to router ID
+        // eBGP: Local route with explicit next hop (same AF) -> rewrite to local address
         assert_eq!(
-            build_export_next_hop(&local_explicit, router_id, local_asn, peer_asn_ebgp),
-            router_id
+            build_export_next_hop(
+                &local_explicit,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(router_id))
+        );
+
+        // eBGP: Learned route -> rewrite to local address
+        assert_eq!(
+            build_export_next_hop(
+                &ebgp_learned,
+                IpAddr::V4(router_id),
+                local_asn,
+                peer_asn_ebgp,
+                &prefix,
+                &logger
+            ),
+            Some(NextHopAddr::Ipv4(router_id))
         );
     }
 
@@ -731,7 +855,7 @@ mod tests {
         let path = Path {
             origin: Origin::IGP,
             as_path: vec![],
-            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             source: RouteSource::Local,
             local_pref: Some(200),
             med: None,
@@ -754,7 +878,7 @@ mod tests {
         let ebgp_path = Path {
             origin: Origin::IGP,
             as_path: vec![],
-            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             source: RouteSource::Ebgp(test_ip(1)),
             local_pref: Some(100),
             med: Some(50),
@@ -774,7 +898,7 @@ mod tests {
         let local_path = Path {
             origin: Origin::IGP,
             as_path: vec![],
-            next_hop: Ipv4Addr::new(192, 168, 1, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             source: RouteSource::Local,
             local_pref: Some(100),
             med: Some(50),
@@ -814,7 +938,7 @@ mod tests {
         let path = make_path(
             RouteSource::Ebgp(test_ip(2)),
             as_path,
-            Ipv4Addr::new(192, 168, 1, 1),
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
         );
 
         // Just one prefix, but huge AS_PATH should make UPDATE > 4096 bytes
@@ -833,7 +957,7 @@ mod tests {
             &routes,
             65000,
             65001,
-            Ipv4Addr::new(1, 1, 1, 1),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             &policies,
             &logger,
         );
@@ -905,7 +1029,7 @@ mod tests {
         let path = Path {
             origin: Origin::IGP,
             as_path: vec![],
-            next_hop: Ipv4Addr::new(10, 0, 0, 1),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             source: RouteSource::Local,
             local_pref: None,
             med: None,

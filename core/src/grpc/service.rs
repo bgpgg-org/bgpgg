@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, PathAttrValue};
+use crate::bgp::msg_update::{
+    AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
+};
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
-use crate::net::{IpNetwork, Ipv4Net};
+use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -59,9 +61,8 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
         IpNetwork::V4(v4) => {
             format!("{}/{}", v4.address, v4.prefix_length)
         }
-        IpNetwork::V6(_) => {
-            // IPv6 not yet supported
-            "".to_string()
+        IpNetwork::V6(v6) => {
+            format!("{}/{}", v6.address, v6.prefix_length)
         }
     };
 
@@ -133,30 +134,42 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
 /// Parse an AddRouteRequest into internal types
 fn parse_add_route_request(
     req: &AddRouteRequest,
-) -> Result<(IpNetwork, Ipv4Addr, Origin, Vec<AsPathSegment>), String> {
-    // Parse prefix (CIDR format like "10.0.0.0/24")
+) -> Result<(IpNetwork, NextHopAddr, Origin, Vec<AsPathSegment>), String> {
+    // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
     let parts: Vec<&str> = req.prefix.split('/').collect();
     if parts.len() != 2 {
-        return Err("Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24)".to_string());
+        return Err(
+            "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string(),
+        );
     }
 
-    let address: Ipv4Addr = parts[0]
+    let address: IpAddr = parts[0]
         .parse()
         .map_err(|_| "Invalid IP address in prefix".to_string())?;
     let prefix_length: u8 = parts[1]
         .parse()
         .map_err(|_| "Invalid prefix length".to_string())?;
 
-    let prefix = IpNetwork::V4(Ipv4Net {
-        address,
-        prefix_length,
-    });
+    let prefix = match address {
+        IpAddr::V4(ipv4) => IpNetwork::V4(Ipv4Net {
+            address: ipv4,
+            prefix_length,
+        }),
+        IpAddr::V6(ipv6) => IpNetwork::V6(Ipv6Net {
+            address: ipv6,
+            prefix_length,
+        }),
+    };
 
     // Parse next_hop
-    let next_hop: Ipv4Addr = req
+    let next_hop_addr: IpAddr = req
         .next_hop
         .parse()
         .map_err(|_| "Invalid next_hop IP address".to_string())?;
+    let next_hop = match next_hop_addr {
+        IpAddr::V4(ipv4) => NextHopAddr::Ipv4(ipv4),
+        IpAddr::V6(ipv6) => NextHopAddr::Ipv6(ipv6),
+    };
 
     // Convert proto Origin to Rust Origin
     let origin = match req.origin {
@@ -616,26 +629,34 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<RemoveRouteResponse>, Status> {
         let req = request.into_inner();
 
-        // Parse prefix (CIDR format like "10.0.0.0/24")
+        // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
         let parts: Vec<&str> = req.prefix.split('/').collect();
         if parts.len() != 2 {
             return Ok(Response::new(RemoveRouteResponse {
                 success: false,
-                message: "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24)".to_string(),
+                message:
+                    "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)"
+                        .to_string(),
             }));
         }
 
-        let address: Ipv4Addr = parts[0]
+        let address: IpAddr = parts[0]
             .parse()
             .map_err(|_| Status::invalid_argument("Invalid IP address in prefix"))?;
         let prefix_length: u8 = parts[1]
             .parse()
             .map_err(|_| Status::invalid_argument("Invalid prefix length"))?;
 
-        let prefix = IpNetwork::V4(Ipv4Net {
-            address,
-            prefix_length,
-        });
+        let prefix = match address {
+            IpAddr::V4(ipv4) => IpNetwork::V4(Ipv4Net {
+                address: ipv4,
+                prefix_length,
+            }),
+            IpAddr::V6(ipv6) => IpNetwork::V6(Ipv6Net {
+                address: ipv6,
+                prefix_length,
+            }),
+        };
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();

@@ -129,8 +129,8 @@ impl Peer {
                 return Err(PeerError::UpdateError);
             }
 
-            (BgpState::OpenConfirm, &FsmEvent::BgpOpenReceived(params))
-            | (BgpState::OpenConfirm, &FsmEvent::BgpOpenWithDelayOpenTimer(params)) => {
+            (BgpState::OpenConfirm, &FsmEvent::BgpOpenReceived(ref params))
+            | (BgpState::OpenConfirm, &FsmEvent::BgpOpenWithDelayOpenTimer(ref params)) => {
                 self.fsm.timers.stop_delay_open_timer();
                 self.fsm.timers.stop_connect_retry();
                 self.enter_open_confirm(
@@ -138,6 +138,7 @@ impl Peer {
                     params.peer_hold_time,
                     params.local_asn,
                     params.local_hold_time,
+                    params.peer_capabilities.clone(),
                 )
                 .await?;
             }
@@ -193,6 +194,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: local_hold,
+                peer_capabilities: vec![],
             }))
             .await
             .unwrap();

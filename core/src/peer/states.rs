@@ -304,7 +304,8 @@ pub(super) mod tests {
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -333,7 +334,7 @@ pub(super) mod tests {
         let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         // Create peer directly for testing
-        let local_ip = Ipv4Addr::new(127, 0, 0, 1);
+        let local_ip = crate::net::ipv4(127, 0, 0, 1);
         Peer {
             addr: addr.ip(),
             port: addr.port(),
@@ -346,7 +347,7 @@ pub(super) mod tests {
             config: PeerConfig::default(),
             peer_rx,
             server_tx,
-            local_addr: SocketAddr::new(local_ip.into(), 0),
+            local_addr: SocketAddr::new(local_ip, 0),
             connect_retry_secs: 120,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
@@ -358,6 +359,8 @@ pub(super) mod tests {
             sent_open: None,
             received_open: None,
             logger: Arc::new(Logger::default()),
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
         }
     }
 
@@ -524,6 +527,7 @@ pub(super) mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
+            peer_capabilities: vec![],
         }))
         .await
         .unwrap();

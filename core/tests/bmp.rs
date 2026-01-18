@@ -150,7 +150,7 @@ async fn test_add_bmp_server_with_existing_peers() {
         let nlri = rm.bgp_update().nlri_list();
 
         // Must be one of the two routes
-        assert!(nlri == &route_1[..] || nlri == &route_2[..]);
+        assert!(nlri[..] == route_1[..] || nlri[..] == route_2[..]);
 
         assert_bmp_route_monitoring_msg(
             rm,
@@ -158,7 +158,7 @@ async fn test_add_bmp_server_with_existing_peers() {
             peer.asn as u32,
             u32::from(peer.client.router_id),
             0, // peer_flags (L=0 for pre-policy)
-            nlri,
+            &nlri,
             &[], // no withdrawals
         );
     }

@@ -11,7 +11,7 @@ pub use route_generator::calculate_expected_best_paths;
 use bgpgg::bgp::msg::{BgpMessage, Message};
 use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
-use bgpgg::bgp::msg_update::UpdateMessage;
+use bgpgg::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rib::{Path, RouteSource};
@@ -129,7 +129,7 @@ pub fn create_update_message(
     let update = UpdateMessage::new(
         origin,
         as_path_segments,
-        next_hop,
+        NextHopAddr::Ipv4(next_hop),
         routes,
         local_pref,
         med,
@@ -183,7 +183,7 @@ pub fn transform_path_for_ebgp_export(
     }
 
     // Rewrite next_hop to local router ID
-    exported.next_hop = local_router_id;
+    exported.next_hop = NextHopAddr::Ipv4(local_router_id);
 
     // Remove local_pref (not used in eBGP)
     exported.local_pref = None;
@@ -240,7 +240,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
     Ok(Path::from_attributes(
         origin,
         as_path,
-        next_hop,
+        NextHopAddr::Ipv4(next_hop),
         source,
         proto_path.local_pref,
         proto_path.med,

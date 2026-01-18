@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::net::IpNetwork;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,32 +23,50 @@ use std::sync::Arc;
 /// Stores routes received from a specific BGP peer before any import policy
 /// or best path selection has been applied.
 pub struct AdjRibIn {
-    // Map from prefix to routes learned from this specific peer
-    routes: HashMap<IpNetwork, Route>,
+    // Per-AFI/SAFI tables
+    ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
+    ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
 }
 
 impl AdjRibIn {
     pub fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
-        self.routes.insert(
-            prefix,
-            Route {
-                prefix,
-                paths: vec![path],
-            },
-        );
+        match prefix {
+            IpNetwork::V4(net) => {
+                self.ipv4_unicast.insert(
+                    net,
+                    Route {
+                        prefix,
+                        paths: vec![path],
+                    },
+                );
+            }
+            IpNetwork::V6(net) => {
+                self.ipv6_unicast.insert(
+                    net,
+                    Route {
+                        prefix,
+                        paths: vec![path],
+                    },
+                );
+            }
+        }
     }
 
     pub fn get_all_routes(&self) -> Vec<Route> {
-        self.routes.values().cloned().collect()
+        let mut routes = Vec::new();
+        routes.extend(self.ipv4_unicast.values().cloned());
+        routes.extend(self.ipv6_unicast.values().cloned());
+        routes
     }
 
     pub fn prefix_count(&self) -> usize {
-        self.routes.len()
+        self.ipv4_unicast.len() + self.ipv6_unicast.len()
     }
 
     #[cfg(test)]
     pub fn clear(&mut self) {
-        self.routes.clear();
+        self.ipv4_unicast.clear();
+        self.ipv6_unicast.clear();
     }
 }
 
@@ -60,12 +79,38 @@ impl Default for AdjRibIn {
 impl AdjRibIn {
     pub fn new() -> Self {
         AdjRibIn {
-            routes: HashMap::new(),
+            ipv4_unicast: HashMap::new(),
+            ipv6_unicast: HashMap::new(),
         }
     }
 
     pub fn remove_route(&mut self, prefix: IpNetwork) {
-        self.routes.remove(&prefix);
+        match prefix {
+            IpNetwork::V4(net) => {
+                self.ipv4_unicast.remove(&net);
+            }
+            IpNetwork::V6(net) => {
+                self.ipv6_unicast.remove(&net);
+            }
+        }
+    }
+
+    /// Clear all routes for a specific AFI/SAFI
+    /// Returns the number of routes deleted
+    pub fn clear_afi_safi(&mut self, afi_safi: AfiSafi) -> usize {
+        match (afi_safi.afi, afi_safi.safi) {
+            (Afi::Ipv4, Safi::Unicast) => {
+                let count = self.ipv4_unicast.len();
+                self.ipv4_unicast.clear();
+                count
+            }
+            (Afi::Ipv6, Safi::Unicast) => {
+                let count = self.ipv6_unicast.len();
+                self.ipv6_unicast.clear();
+                count
+            }
+            _ => 0,
+        }
     }
 }
 
@@ -201,6 +246,40 @@ mod tests {
 
         rib_in.remove_route(prefix);
         assert_eq!(rib_in.get_all_routes().len(), 0);
+    }
+
+    #[test]
+    fn test_clear_afi_safi() {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        let peer_ip = test_peer_ip();
+        let mut rib_in = AdjRibIn::new();
+
+        // Add IPv4 and IPv6 routes
+        let ipv4_prefix = create_test_prefix();
+        let ipv6_prefix = IpNetwork::V6(crate::net::Ipv6Net {
+            address: std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            prefix_length: 64,
+        });
+
+        rib_in.add_route(ipv4_prefix, create_test_path(peer_ip));
+        rib_in.add_route(ipv6_prefix, create_test_path(peer_ip));
+
+        assert_eq!(rib_in.prefix_count(), 2);
+
+        // Clear IPv4/Unicast
+        let count = rib_in.clear_afi_safi(AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        assert_eq!(count, 1);
+        assert_eq!(rib_in.prefix_count(), 1);
+
+        // Clear IPv6/Unicast
+        let count = rib_in.clear_afi_safi(AfiSafi::new(Afi::Ipv6, Safi::Unicast));
+        assert_eq!(count, 1);
+        assert_eq!(rib_in.prefix_count(), 0);
+
+        // Clearing again returns 0
+        let count = rib_in.clear_afi_safi(AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        assert_eq!(count, 0);
     }
 
     #[test]

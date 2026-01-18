@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::msg_notification::{BgpError, UpdateMessageError};
+use super::multiprotocol::{Afi, Safi};
 use super::utils::ParserError;
+use crate::net::IpNetwork;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 // Re-export community functions and constants
@@ -61,7 +63,24 @@ pub mod attr_type_code {
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
     pub const COMMUNITIES: u8 = 8;
+    pub const MP_REACH_NLRI: u8 = 14;
+    pub const MP_UNREACH_NLRI: u8 = 15;
     pub const EXTENDED_COMMUNITIES: u8 = 16;
+}
+
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+pub struct MpReachNlri {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub next_hop: NextHopAddr,
+    pub nlri: Vec<IpNetwork>,
+}
+
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+pub struct MpUnreachNlri {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub withdrawn_routes: Vec<IpNetwork>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
@@ -74,6 +93,8 @@ pub enum PathAttrValue {
     AtomicAggregate,
     Aggregator(Aggregator),
     Communities(Vec<u32>),
+    MpReachNlri(MpReachNlri),
+    MpUnreachNlri(MpUnreachNlri),
     ExtendedCommunities(Vec<u64>),
     Unknown {
         type_code: u8,
@@ -107,6 +128,8 @@ impl PathAttribute {
             PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
             PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
             PathAttrValue::Communities(_) => attr_type_code::COMMUNITIES,
+            PathAttrValue::MpReachNlri(_) => attr_type_code::MP_REACH_NLRI,
+            PathAttrValue::MpUnreachNlri(_) => attr_type_code::MP_UNREACH_NLRI,
             PathAttrValue::ExtendedCommunities(_) => attr_type_code::EXTENDED_COMMUNITIES,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
@@ -123,6 +146,8 @@ pub(crate) enum AttrType {
     AtomicAggregate = 6,
     Aggregator = 7,
     Communities = 8,
+    MpReachNlri = 14,
+    MpUnreachNlri = 15,
     ExtendedCommunities = 16,
 }
 
@@ -139,6 +164,8 @@ impl TryFrom<u8> for AttrType {
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
             8 => Ok(AttrType::Communities),
+            14 => Ok(AttrType::MpReachNlri),
+            15 => Ok(AttrType::MpUnreachNlri),
             16 => Ok(AttrType::ExtendedCommunities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
@@ -159,6 +186,8 @@ impl AttrType {
             AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
             AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::Communities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::MpReachNlri => PathAttrFlag::OPTIONAL,
+            AttrType::MpUnreachNlri => PathAttrFlag::OPTIONAL,
             AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
@@ -180,6 +209,8 @@ impl AttrType {
             AttrType::MultiExtiDisc
                 | AttrType::Aggregator
                 | AttrType::Communities
+                | AttrType::MpReachNlri
+                | AttrType::MpUnreachNlri
                 | AttrType::ExtendedCommunities
         )
     }
@@ -236,12 +267,37 @@ impl TryFrom<u8> for AsPathSegmentType {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 pub enum NextHopAddr {
     Ipv4(Ipv4Addr),
-    // TODO: support IPv6
-    #[allow(dead_code)]
     Ipv6(Ipv6Addr),
+}
+
+impl std::fmt::Display for NextHopAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NextHopAddr::Ipv4(addr) => write!(f, "{}", addr),
+            NextHopAddr::Ipv6(addr) => write!(f, "{}", addr),
+        }
+    }
+}
+
+impl NextHopAddr {
+    pub fn is_unspecified(&self) -> bool {
+        match self {
+            NextHopAddr::Ipv4(addr) => addr.is_unspecified(),
+            NextHopAddr::Ipv6(addr) => addr.is_unspecified(),
+        }
+    }
+}
+
+impl From<std::net::IpAddr> for NextHopAddr {
+    fn from(addr: std::net::IpAddr) -> Self {
+        match addr {
+            std::net::IpAddr::V4(v4) => NextHopAddr::Ipv4(v4),
+            std::net::IpAddr::V6(v6) => NextHopAddr::Ipv6(v6),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

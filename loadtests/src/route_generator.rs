@@ -1,4 +1,4 @@
-use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rib::{Path, RouteSource};
 use rand::rngs::StdRng;
@@ -121,7 +121,7 @@ impl PeerRoute {
         Path::from_attributes(
             self.origin,
             as_path_segments,
-            next_hop,
+            NextHopAddr::Ipv4(next_hop),
             RouteSource::Ebgp(peer_ip),
             Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
             self.med,

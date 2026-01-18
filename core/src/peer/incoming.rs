@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
-use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::msg_update::{NextHopAddr, UpdateMessage};
+use crate::bgp::msg_update_types::PathAttrValue;
+use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
 use crate::{info, warn};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use super::{Peer, SessionType};
@@ -25,12 +28,67 @@ use super::{Peer, SessionType};
 type UpdateResult = (Vec<IpNetwork>, Vec<(IpNetwork, Arc<Path>)>);
 
 impl Peer {
+    /// Validate AFI/SAFI is negotiated and not disabled.
+    /// Returns true if validation passes, false if UPDATE should be ignored.
+    fn validate_afi_safi(&mut self, afi_safi: AfiSafi) -> bool {
+        // Check if AFI/SAFI is disabled
+        if self.disabled_afi_safi.contains(&afi_safi) {
+            warn!(&self.logger, "ignoring UPDATE for disabled AFI/SAFI",
+                  "afi_safi" => format!("{}", afi_safi), "peer" => &self.addr);
+            return false;
+        }
+
+        // Check if AFI/SAFI was negotiated
+        if !self.negotiated_capabilities.contains(&afi_safi) {
+            warn!(&self.logger, "received UPDATE for non-negotiated AFI/SAFI, disabling",
+                  "afi_safi" => format!("{}", afi_safi), "peer" => &self.addr);
+
+            // RFC 4760 Section 7: Delete all routes for this AFI/SAFI
+            let deleted_count = self.rib_in.clear_afi_safi(afi_safi);
+            warn!(&self.logger, "deleted all routes for AFI/SAFI due to error",
+                  "afi_safi" => format!("{}", afi_safi),
+                  "deleted_count" => deleted_count,
+                  "peer" => &self.addr);
+
+            // Mark AFI/SAFI as disabled for this session
+            self.disabled_afi_safi.insert(afi_safi);
+
+            return false;
+        }
+
+        true
+    }
+
+    /// Validate multiprotocol capabilities in UPDATE message.
+    /// Returns true if all AFI/SAFIs are valid, false if UPDATE should be ignored.
+    fn validate_multiprotocol_capabilities(&mut self, update_msg: &UpdateMessage) -> bool {
+        for attr in update_msg.path_attributes() {
+            let afi_safi = match &attr.value {
+                PathAttrValue::MpReachNlri(mp_reach) => AfiSafi::new(mp_reach.afi, mp_reach.safi),
+                PathAttrValue::MpUnreachNlri(mp_unreach) => {
+                    AfiSafi::new(mp_unreach.afi, mp_unreach.safi)
+                }
+                _ => continue,
+            };
+
+            if !self.validate_afi_safi(afi_safi) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Handle a BGP UPDATE message
     /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
     pub(super) fn handle_update(
         &mut self,
         update_msg: UpdateMessage,
     ) -> Result<UpdateResult, BgpError> {
+        // RFC 4760 Section 7: Validate multiprotocol NLRI against negotiated capabilities
+        if !self.validate_multiprotocol_capabilities(&update_msg) {
+            return Ok((vec![], vec![]));
+        }
+
         // RFC 4271 Section 6.3: For eBGP, check that leftmost AS in AS_PATH equals peer AS.
         // If mismatch, MUST set error subcode to MalformedASPath.
         if self.session_type == Some(SessionType::Ebgp) {
@@ -57,8 +115,8 @@ impl Peer {
         let mut withdrawn = Vec::new();
         for prefix in update_msg.withdrawn_routes() {
             info!(&self.logger, "withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string());
-            self.rib_in.remove_route(*prefix);
-            withdrawn.push(*prefix);
+            self.rib_in.remove_route(prefix);
+            withdrawn.push(prefix);
         }
         withdrawn
     }
@@ -111,7 +169,12 @@ impl Peer {
         };
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
-        if path.next_hop == self.fsm.local_addr() {
+        let is_local_nexthop = match (&path.next_hop, self.fsm.local_addr()) {
+            (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
+            (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
+            _ => false,
+        };
+        if is_local_nexthop {
             warn!(&self.logger, "rejecting UPDATE: NEXT_HOP is local address",
                   "next_hop" => path.next_hop.to_string(), "peer" => &self.addr);
             return Ok(announced);
@@ -122,8 +185,8 @@ impl Peer {
 
         for prefix in update_msg.nlri_list() {
             info!(&self.logger, "adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path_arc.med));
-            self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
-            announced.push((*prefix, Arc::clone(&path_arc)));
+            self.rib_in.add_route(prefix, Arc::clone(&path_arc));
+            announced.push((prefix, Arc::clone(&path_arc)));
         }
 
         Ok(announced)
@@ -138,6 +201,37 @@ mod tests {
     use crate::net::Ipv4Net;
     use crate::peer::BgpState;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn test_validate_afi_safi() {
+        use crate::bgp::multiprotocol::{Afi, Safi};
+        use crate::peer::test_helpers::create_test_peer_with_state;
+
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+        let ipv4_multicast = AfiSafi::new(Afi::Ipv4, Safi::Multicast);
+
+        // (negotiated, disabled, afi_safi, expected_valid, expect_disabled_after)
+        let cases = vec![
+            (vec![ipv6_unicast], vec![], ipv6_unicast, true, false),
+            (vec![ipv6_unicast], vec![], ipv4_multicast, false, true),
+            (vec![], vec![ipv4_multicast], ipv4_multicast, false, true),
+        ];
+
+        for (negotiated, disabled, test_afi_safi, expected_valid, expect_disabled_after) in cases {
+            let mut peer = create_test_peer_with_state(BgpState::Established).await;
+            peer.negotiated_capabilities = negotiated.into_iter().collect();
+            peer.disabled_afi_safi = disabled.into_iter().collect();
+
+            let result = peer.validate_afi_safi(test_afi_safi);
+            assert_eq!(result, expected_valid, "{:?}", test_afi_safi);
+            assert_eq!(
+                peer.disabled_afi_safi.contains(&test_afi_safi),
+                expect_disabled_after,
+                "{:?}",
+                test_afi_safi
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_handle_update_first_as_validation() {
@@ -162,7 +256,7 @@ mod tests {
                     segment_len: 1,
                     asn_list: vec![first_as],
                 }],
-                Ipv4Addr::new(10, 0, 0, 1),
+                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                 vec![],
                 None,
                 None,
@@ -276,7 +370,7 @@ mod tests {
                         segment_len: 1,
                         asn_list: vec![65001],
                     }],
-                    Ipv4Addr::new(10, 0, 0, 1),
+                    NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                     initial_nlri,
                     None,
                     None,
@@ -304,7 +398,7 @@ mod tests {
                     segment_len: 1,
                     asn_list: vec![65001],
                 }],
-                Ipv4Addr::new(10, 0, 0, 1),
+                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                 nlri,
                 None,
                 None,

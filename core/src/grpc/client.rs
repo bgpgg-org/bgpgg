@@ -476,7 +476,7 @@ impl BgpClient {
     }
 
     /// Get server info including the listen address, port, and route count
-    pub async fn get_server_info(&self) -> Result<(Ipv4Addr, u16, u64), tonic::Status> {
+    pub async fn get_server_info(&self) -> Result<(std::net::IpAddr, u16, u64), tonic::Status> {
         let resp = self
             .inner
             .clone()
@@ -484,7 +484,7 @@ impl BgpClient {
             .await?
             .into_inner();
 
-        let addr: Ipv4Addr = resp
+        let addr: std::net::IpAddr = resp
             .listen_addr
             .parse()
             .map_err(|_| tonic::Status::internal("invalid listen_addr"))?;

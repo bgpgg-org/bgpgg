@@ -24,9 +24,10 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Error;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -227,6 +228,10 @@ pub struct Peer {
     sent_open: Option<OpenMessage>,
     /// OPEN message received from peer (for BMP PeerUp)
     received_open: Option<OpenMessage>,
+    /// Negotiated multiprotocol capabilities (intersection of local and peer)
+    negotiated_capabilities: HashSet<crate::bgp::multiprotocol::AfiSafi>,
+    /// AFI/SAFI pairs disabled due to errors (RFC 4760 Section 7)
+    disabled_afi_safi: HashSet<crate::bgp::multiprotocol::AfiSafi>,
 }
 
 impl Peer {
@@ -246,10 +251,7 @@ impl Peer {
         connect_retry_secs: u64,
         logger: Arc<Logger>,
     ) -> Self {
-        let local_ip = match local_addr.ip() {
-            IpAddr::V4(ip) => ip,
-            _ => Ipv4Addr::UNSPECIFIED,
-        };
+        let local_ip = local_addr.ip();
         Peer {
             addr,
             port,
@@ -282,6 +284,8 @@ impl Peer {
             established_at: None,
             sent_open: None,
             received_open: None,
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
             logger,
         }
     }
@@ -375,6 +379,7 @@ impl Peer {
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
+    use crate::net::ipv4;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
@@ -400,7 +405,7 @@ pub mod test_helpers {
         let (_peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         // Create peer directly for testing
-        let local_ip = Ipv4Addr::new(127, 0, 0, 1);
+        let local_ip = ipv4(127, 0, 0, 1);
         Peer {
             addr: addr.ip(),
             port: addr.port(),
@@ -413,7 +418,7 @@ pub mod test_helpers {
             config: PeerConfig::default(),
             peer_rx,
             server_tx,
-            local_addr: SocketAddr::new(local_ip.into(), 0),
+            local_addr: SocketAddr::new(local_ip, 0),
             connect_retry_secs: 120,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,
@@ -424,6 +429,8 @@ pub mod test_helpers {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
+            negotiated_capabilities: HashSet::new(),
+            disabled_afi_safi: HashSet::new(),
             logger: Arc::new(Logger::default()),
         }
     }

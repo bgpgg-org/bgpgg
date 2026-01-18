@@ -22,6 +22,7 @@ pub mod msg_open_types;
 pub mod msg_update;
 mod msg_update_codec;
 pub mod msg_update_types;
+pub mod multiprotocol;
 pub mod utils;
 
 #[cfg(test)]
