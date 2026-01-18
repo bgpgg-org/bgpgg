@@ -138,6 +138,10 @@ pub enum MgmtOp {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    SoftResetPeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     AddRoute {
         prefix: IpNetwork,
         next_hop: NextHopAddr,

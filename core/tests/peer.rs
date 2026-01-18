@@ -973,3 +973,80 @@ async fn test_ipv6_peering() {
     poll_peer_stats(&server1, "::1", expected).await;
     poll_peer_stats(&server2, "::1", expected).await;
 }
+
+#[tokio::test]
+async fn test_route_refresh() {
+    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+
+    // Server1 announces a route to server2
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Wait for route to propagate
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+
+    // Get initial stats
+    let (_, s1_initial_stats) = server1
+        .client
+        .get_peer(server2.address.to_string())
+        .await
+        .unwrap();
+    let s1_initial_update_sent = s1_initial_stats.unwrap().update_sent;
+
+    let (_, s2_initial_stats) = server2
+        .client
+        .get_peer(server1.address.to_string())
+        .await
+        .unwrap();
+    let s2_initial_update_received = s2_initial_stats.unwrap().update_received;
+
+    // Server2 sends ROUTE_REFRESH to server1 (soft reset IN)
+    server2
+        .client
+        .soft_reset_peer(server1.address.to_string())
+        .await
+        .unwrap();
+
+    // Verify server1 re-sent the route to server2
+    poll_peer_stats(
+        &server1,
+        &server2.address.to_string(),
+        ExpectedStats {
+            min_update_sent: Some(s1_initial_update_sent + 1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Verify server2 received the re-advertised route from server1
+    poll_peer_stats(
+        &server2,
+        &server1.address.to_string(),
+        ExpectedStats {
+            min_update_received: Some(s2_initial_update_received + 1),
+            ..Default::default()
+        },
+    )
+    .await;
+}

@@ -19,6 +19,7 @@ use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::mem;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 
 impl Peer {
     /// Handle Established state transitions.
@@ -183,6 +184,21 @@ impl Peer {
                         PeerOp::GetAdjRibIn(response) => {
                             let routes = self.rib_in.get_all_routes();
                             let _ = response.send(routes);
+                        }
+                        PeerOp::SendRouteRefresh => {
+                            use crate::bgp::msg::Message;
+                            use crate::bgp::msg_route_refresh::RouteRefreshMessage;
+                            use crate::bgp::multiprotocol::{Afi, Safi};
+
+                            let refresh_msg = RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast);
+                            if let Some(conn) = &mut self.conn {
+                                if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
+                                    error!(&self.logger, "failed to send ROUTE_REFRESH", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                } else {
+                                    self.statistics.route_refresh_sent += 1;
+                                    info!(&self.logger, "sent ROUTE_REFRESH", "peer_ip" => peer_ip.to_string());
+                                }
+                            }
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());

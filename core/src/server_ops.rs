@@ -60,6 +60,9 @@ impl BgpServer {
             MgmtOp::EnablePeer { addr, response } => {
                 self.handle_enable_peer(addr, response);
             }
+            MgmtOp::SoftResetPeer { addr, response } => {
+                self.handle_soft_reset_peer(addr, response);
+            }
             MgmtOp::AddRoute {
                 prefix,
                 next_hop,
@@ -525,6 +528,31 @@ impl BgpServer {
             } else {
                 let _ = peer_tx.send(PeerOp::ManualStart);
             }
+        }
+
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_soft_reset_peer(
+        &mut self,
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        let Some(entry) = self.peers.get(&peer_ip) else {
+            let _ = response.send(Err(format!("peer {} not found", addr)));
+            return;
+        };
+
+        if let Some(peer_tx) = &entry.peer_tx {
+            let _ = peer_tx.send(PeerOp::SendRouteRefresh);
         }
 
         let _ = response.send(Ok(()));

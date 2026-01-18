@@ -75,6 +75,10 @@ impl Peer {
                             // RFC violation: UPDATEs not allowed in OpenSent/OpenConfirm
                             // Drop silently
                         }
+                        PeerOp::SendRouteRefresh => {
+                            // ROUTE_REFRESH only allowed in Established state
+                            // Drop silently
+                        }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
                         }
