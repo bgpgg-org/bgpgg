@@ -20,6 +20,7 @@ use crate::config::MaxPrefixAction;
 use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
 use crate::{info, warn};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use super::{Peer, SessionType};
@@ -168,7 +169,12 @@ impl Peer {
         };
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
-        if path.next_hop == NextHopAddr::Ipv4(self.fsm.local_addr()) {
+        let is_local_nexthop = match (&path.next_hop, self.fsm.local_addr()) {
+            (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
+            (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
+            _ => false,
+        };
+        if is_local_nexthop {
             warn!(&self.logger, "rejecting UPDATE: NEXT_HOP is local address",
                   "next_hop" => path.next_hop.to_string(), "peer" => &self.addr);
             return Ok(announced);

@@ -918,3 +918,58 @@ async fn test_mrai_rate_limiting() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn test_ipv6_peering() {
+    let hold_timer_secs = 3;
+
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "[::1]:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
+
+    let server2 = start_test_server(Config::new(
+        65002,
+        "[::1]:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        hold_timer_secs as u64,
+        true,
+    ))
+    .await;
+
+    // Peer over IPv6
+    server1
+        .client
+        .add_peer(format!("[::1]:{}", server2.bgp_port), None)
+        .await
+        .unwrap();
+
+    // Wait for peering to establish
+    poll_until(
+        || async {
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
+                && verify_peers(
+                    &server2,
+                    vec![server1.to_peer(BgpState::Established, false)],
+                )
+                .await
+        },
+        "Timeout waiting for IPv6 transport peering to establish",
+    )
+    .await;
+
+    // Verify keepalive exchange works
+    let expected = ExpectedStats {
+        open_sent: Some(1),
+        open_received: Some(1),
+        min_keepalive_sent: Some(2),
+        min_keepalive_received: Some(2),
+        ..Default::default()
+    };
+    poll_peer_stats(&server1, "::1", expected).await;
+    poll_peer_stats(&server2, "::1", expected).await;
+}

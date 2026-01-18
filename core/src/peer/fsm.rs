@@ -14,7 +14,7 @@
 
 //! This module implements the BGP FSM.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
@@ -290,7 +290,7 @@ pub struct Fsm {
     local_asn: u16,
     local_hold_time: u16,
     local_bgp_id: u32,
-    local_addr: Ipv4Addr,
+    local_addr: IpAddr,
 
     /// Passive mode: if true, wait for incoming connections (Active state)
     /// if false, initiate connections (Connect state)
@@ -303,7 +303,7 @@ impl Fsm {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
         delay_open_time: Option<Duration>,
         passive_mode: bool,
     ) -> Self {
@@ -326,7 +326,7 @@ impl Fsm {
         local_asn: u16,
         local_hold_time: u16,
         local_bgp_id: u32,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
         passive_mode: bool,
     ) -> Self {
         Fsm {
@@ -362,7 +362,7 @@ impl Fsm {
     }
 
     /// Get local address
-    pub fn local_addr(&self) -> Ipv4Addr {
+    pub fn local_addr(&self) -> IpAddr {
         self.local_addr
     }
 
@@ -548,8 +548,9 @@ impl Fsm {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
+    use crate::net::ipv4;
 
-    const TEST_LOCAL_ADDR: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+    const TEST_LOCAL_ADDR: IpAddr = ipv4(127, 0, 0, 1);
 
     #[test]
     fn test_initial_state() {

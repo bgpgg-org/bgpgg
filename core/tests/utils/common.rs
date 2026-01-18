@@ -178,13 +178,25 @@ pub async fn start_test_server(config: Config) -> TestServer {
 
     let router_id = config.router_id;
     let asn = config.asn;
-    let bind_ip: std::net::IpAddr = config
-        .listen_addr
-        .split(':')
-        .next()
-        .unwrap_or("127.0.0.1")
-        .parse()
-        .expect("valid IP address");
+
+    // Parse IP from listen_addr (handles both "IP:port" and "[IPv6]:port")
+    let bind_ip: std::net::IpAddr = if config.listen_addr.starts_with('[') {
+        let end = config
+            .listen_addr
+            .find(']')
+            .expect("IPv6 address missing ]");
+        config.listen_addr[1..end]
+            .parse()
+            .expect("valid IPv6 address")
+    } else {
+        config
+            .listen_addr
+            .split(':')
+            .next()
+            .unwrap_or("127.0.0.1")
+            .parse()
+            .expect("valid IPv4 address")
+    };
 
     // Bind gRPC listener to get port (no race - we keep the listener)
     let grpc_listener = TcpListener::bind("[::1]:0").await.unwrap();
@@ -967,9 +979,14 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
         let next_port = servers[i + 1].bgp_port;
         let next_address = servers[i + 1].address;
 
+        let peer_addr = match next_address {
+            std::net::IpAddr::V4(addr) => format!("{}:{}", addr, next_port),
+            std::net::IpAddr::V6(addr) => format!("[{}]:{}", addr, next_port),
+        };
+
         servers[i]
             .client
-            .add_peer(format!("{}:{}", next_address, next_port), None)
+            .add_peer(peer_addr, None)
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
     }

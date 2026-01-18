@@ -601,3 +601,74 @@ async fn test_ipv6_route_exchange() {
         .await
     );
 }
+
+#[tokio::test]
+async fn test_ipv6_nexthop_rewrite() {
+    let server1 = start_test_server(Config::new(
+        65001,
+        "[::ffff:127.0.0.1]:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    let server2 = start_test_server(Config::new(
+        65002,
+        "[::ffff:127.0.0.2]:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        true,
+    ))
+    .await;
+
+    let [server1, mut server2] = chain_servers([server1, server2]).await;
+
+    // Server2 announces IPv6 route with explicit next-hop
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "2001:db8::/32".to_string(),
+            next_hop: "2001:db8::1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    // eBGP over IPv6: next-hop rewritten to sender's IPv6 address
+    poll_route_propagation(&[(
+        &server1,
+        vec![Route {
+            prefix: "2001:db8::/32".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: "::ffff:127.0.0.2".to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+
+    // Withdraw the route
+    server2
+        .client
+        .remove_route("2001:db8::/32".to_string())
+        .await
+        .expect("Failed to withdraw IPv6 route");
+
+    poll_route_withdrawal(&[&server1]).await;
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
+    assert!(
+        verify_peers(
+            &server2,
+            vec![server1.to_peer(BgpState::Established, false)],
+        )
+        .await
+    );
+}

@@ -21,7 +21,7 @@ use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
 use crate::log::Logger;
 use crate::net::IpNetwork;
-use crate::net::{bind_addr_from_ip, ipv4_from_ipaddr, peer_ip};
+use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::outgoing::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
@@ -34,7 +34,7 @@ use crate::types::PeerDownReason;
 use crate::{error, info};
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -44,7 +44,6 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug)]
 pub enum ServerError {
     InvalidListenAddr(String),
-    UnsupportedIPv6,
     BindError(io::Error),
     IoError(io::Error),
 }
@@ -53,9 +52,6 @@ impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerError::InvalidListenAddr(addr) => write!(f, "Invalid listen address: {}", addr),
-            ServerError::UnsupportedIPv6 => {
-                write!(f, "IPv6 listen addresses are not yet supported")
-            }
             ServerError::BindError(e) => write!(f, "Failed to bind listener: {}", e),
             ServerError::IoError(e) => write!(f, "I/O error: {}", e),
         }
@@ -178,7 +174,7 @@ pub enum MgmtOp {
         tx: mpsc::UnboundedSender<GetPeersResponse>,
     },
     GetServerInfo {
-        response: oneshot::Sender<(Ipv4Addr, u16, u64)>,
+        response: oneshot::Sender<(IpAddr, u16, u64)>,
     },
     AddBmpServer {
         addr: SocketAddr,
@@ -405,7 +401,7 @@ pub struct BgpServer {
     pub(crate) config: Config,
     pub(crate) policy_ctx: PolicyContext,
     local_bgp_id: u32,
-    pub(crate) local_addr: Ipv4Addr,
+    pub(crate) local_addr: IpAddr,
     pub(crate) local_port: u16,
     pub mgmt_tx: mpsc::Sender<MgmtOp>,
     mgmt_rx: mpsc::Receiver<MgmtOp>,
@@ -422,8 +418,7 @@ impl BgpServer {
             .listen_addr
             .parse()
             .map_err(|_| ServerError::InvalidListenAddr(config.listen_addr.clone()))?;
-        let local_addr =
-            ipv4_from_ipaddr(sock_addr.ip()).map_err(|_| ServerError::UnsupportedIPv6)?;
+        let local_addr = sock_addr.ip();
 
         let (mgmt_tx, mgmt_rx) = mpsc::channel(100);
         let (op_tx, op_rx) = mpsc::unbounded_channel();
@@ -728,7 +723,7 @@ impl BgpServer {
 
         let local_addr = stream
             .local_addr()
-            .unwrap_or_else(|_| SocketAddr::new(self.local_addr.into(), 0));
+            .unwrap_or_else(|_| SocketAddr::new(self.local_addr, 0));
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
@@ -828,7 +823,7 @@ impl BgpServer {
                 .conn_info
                 .as_ref()
                 .map(|conn_info| conn_info.local_address)
-                .unwrap_or(IpAddr::V4(self.local_addr));
+                .unwrap_or(self.local_addr);
 
             let export_policies = entry.policy_out();
             if !export_policies.is_empty() {
@@ -853,6 +848,7 @@ impl BgpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
         PeerInfo::new(true, PeerConfig::default(), None)
