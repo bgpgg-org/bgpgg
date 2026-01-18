@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpOpenParams, FsmEvent};
 use crate::bgp::msg::{BgpMessage, Message};
-use crate::bgp::msg_keepalive::KeepAliveMessage;
+use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{
@@ -182,7 +182,7 @@ impl Peer {
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no TCP connection"))?;
-        let keepalive_msg = KeepAliveMessage {};
+        let keepalive_msg = KeepaliveMessage {};
         conn.tx.write_all(&keepalive_msg.serialize()).await?;
         self.statistics.keepalive_sent += 1;
         debug!(&self.logger, "sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
@@ -245,7 +245,7 @@ impl Peer {
                 }
                 Ok(())
             }
-            BgpMessage::KeepAlive(_) => {
+            BgpMessage::Keepalive(_) => {
                 let _ = self.handle_message(message).await;
                 // RFC 4271: Reset HoldTimer if negotiated HoldTime is non-zero
                 if self.fsm.timers.hold_time.as_secs() > 0 {
@@ -254,6 +254,10 @@ impl Peer {
                 Ok(())
             }
             BgpMessage::Open(_) => {
+                let _ = self.handle_message(message).await;
+                Ok(())
+            }
+            BgpMessage::RouteRefresh(_) => {
                 let _ = self.handle_message(message).await;
                 Ok(())
             }
@@ -271,13 +275,17 @@ impl Peer {
                 self.statistics.update_received += 1;
                 info!(&self.logger, "received UPDATE", "peer_ip" => self.addr.to_string());
             }
-            BgpMessage::KeepAlive(_) => {
+            BgpMessage::Keepalive(_) => {
                 self.statistics.keepalive_received += 1;
                 debug!(&self.logger, "received KEEPALIVE", "peer_ip" => self.addr.to_string());
             }
             BgpMessage::Notification(notif_msg) => {
                 self.statistics.notification_received += 1;
                 warn!(&self.logger, "received NOTIFICATION", "peer_ip" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
+            }
+            BgpMessage::RouteRefresh(msg) => {
+                self.statistics.route_refresh_received += 1;
+                info!(&self.logger, "received ROUTE_REFRESH", "peer_ip" => self.addr.to_string(), "afi" => format!("{:?}", msg.afi), "safi" => format!("{:?}", msg.safi));
             }
         }
     }
@@ -319,11 +327,15 @@ impl Peer {
             BgpMessage::Update(_) => {
                 self.process_event(&FsmEvent::BgpUpdateReceived).await?;
             }
-            BgpMessage::KeepAlive(_) => {
+            BgpMessage::Keepalive(_) => {
                 self.process_event(&FsmEvent::BgpKeepaliveReceived).await?;
             }
             BgpMessage::Notification(notif) => {
                 self.handle_notification_received(notif).await;
+                return Ok(None);
+            }
+            BgpMessage::RouteRefresh(msg) => {
+                self.handle_route_refresh(msg.afi, msg.safi).await;
                 return Ok(None);
             }
         }
@@ -357,6 +369,26 @@ impl Peer {
         } else {
             Ok(None)
         }
+    }
+
+    /// Handle received ROUTE_REFRESH message
+    async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi) {
+        // Validate against negotiated capabilities
+        let requested = AfiSafi::new(afi, safi);
+        if !self.negotiated_capabilities.contains(&requested) {
+            warn!(&self.logger, "ROUTE_REFRESH for non-negotiated AFI/SAFI",
+                  "peer_ip" => self.addr.to_string(),
+                  "afi" => format!("{:?}", afi),
+                  "safi" => format!("{:?}", safi));
+            return;
+        }
+
+        // Send to server to trigger route re-advertisement
+        let _ = self.server_tx.send(ServerOp::RouteRefresh {
+            peer_ip: self.addr,
+            afi,
+            safi,
+        });
     }
 
     /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)

@@ -318,14 +318,35 @@ impl LocRib {
             IpNetwork::V6(v6_prefix) => self.ipv6_unicast.contains_key(v6_prefix),
         }
     }
+
+    /// Get all routes from IPv4 Unicast table as iterator (zero-copy)
+    pub fn iter_ipv4_unicast_routes(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
+        self.ipv4_unicast.values().filter_map(|route| {
+            route
+                .paths
+                .first()
+                .map(|path| (route.prefix, Arc::clone(path)))
+        })
+    }
+
+    /// Get all routes from IPv6 Unicast table as iterator (zero-copy)
+    pub fn iter_ipv6_unicast_routes(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
+        self.ipv6_unicast.values().filter_map(|route| {
+            route
+                .paths
+                .first()
+                .map(|path| (route.prefix, Arc::clone(path)))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
-    use crate::net::Ipv4Net;
+    use crate::net::{Ipv4Net, Ipv6Net};
     use crate::test_helpers::*;
+    use std::net::Ipv6Addr;
 
     fn test_peer_ip() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
@@ -538,9 +559,6 @@ mod tests {
 
     #[test]
     fn test_mixed_ipv4_ipv6_routes() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
         let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
         let peer_ip = test_peer_ip();
 
@@ -566,9 +584,6 @@ mod tests {
 
     #[test]
     fn test_iter_routes_mixed_families() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
         let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
         let peer_ip = test_peer_ip();
 
@@ -586,10 +601,30 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_routes_from_peer_mixed() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
+    fn test_iter_by_afi() {
+        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let peer_ip = test_peer_ip();
 
+        let prefix_v4 = create_test_prefix();
+        let prefix_v6 = IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        });
+
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+
+        let ipv4_routes: Vec<_> = loc_rib.iter_ipv4_unicast_routes().collect();
+        assert_eq!(ipv4_routes.len(), 1);
+        assert_eq!(ipv4_routes[0].0, prefix_v4);
+
+        let ipv6_routes: Vec<_> = loc_rib.iter_ipv6_unicast_routes().collect();
+        assert_eq!(ipv6_routes.len(), 1);
+        assert_eq!(ipv6_routes[0].0, prefix_v6);
+    }
+
+    #[test]
+    fn test_remove_routes_from_peer_mixed() {
         let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();

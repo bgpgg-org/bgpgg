@@ -9,7 +9,7 @@ mod load_test;
 pub use route_generator::calculate_expected_best_paths;
 
 use bgpgg::bgp::msg::{BgpMessage, Message};
-use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
+use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
@@ -60,7 +60,7 @@ pub async fn bgp_handshake(
     }
 
     // Send KEEPALIVE
-    let keepalive = KeepAliveMessage {};
+    let keepalive = KeepaliveMessage {};
     stream.write_all(&keepalive.serialize()).await?;
 
     // Read peer's KEEPALIVE
@@ -74,7 +74,7 @@ pub async fn bgp_handshake(
         })?;
 
     match msg {
-        BgpMessage::KeepAlive(_) => Ok(()),
+        BgpMessage::Keepalive(_) => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Expected KEEPALIVE message",

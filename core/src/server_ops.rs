@@ -14,21 +14,25 @@
 
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
+use crate::bgp::multiprotocol::{Afi, Safi};
+use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
-    batch_announcements_by_path, compute_routes_for_peer, should_propagate_to_peer,
+    batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
+    should_propagate_to_peer,
 };
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::sets::{AsPathSet, CommunitySet, NeighborSet, PrefixMatch, PrefixSet};
-use crate::policy::DefinedSetType;
+use crate::policy::{DefinedSetType, PolicyResult};
 use crate::rib::{Path, Route, RouteSource};
+use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
     GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
 };
 use crate::types::PeerDownReason;
-use crate::{error, info};
+use crate::{error, info, warn};
 use regex::Regex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -240,9 +244,9 @@ impl BgpServer {
                             // Evaluate policies in order until Accept/Reject
                             for policy in import_policies {
                                 match policy.evaluate(prefix, path) {
-                                    crate::policy::PolicyResult::Accept => return true,
-                                    crate::policy::PolicyResult::Reject => return false,
-                                    crate::policy::PolicyResult::Continue => continue,
+                                    PolicyResult::Accept => return true,
+                                    PolicyResult::Reject => return false,
+                                    PolicyResult::Continue => continue,
                                 }
                             }
                             false // All policies returned Continue -> default reject
@@ -338,6 +342,9 @@ impl BgpServer {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.admin_state = state;
                 }
+            }
+            ServerOp::RouteRefresh { peer_ip, afi, safi } => {
+                self.handle_route_refresh(peer_ip, afi, safi).await;
             }
             ServerOp::GetBmpStatistics { response } => {
                 self.handle_get_bmp_statistics(response).await;
@@ -961,7 +968,7 @@ impl BgpServer {
 
         // Add the set - convert config to runtime type
         match set {
-            crate::config::DefinedSetConfig::PrefixSet(config) => {
+            DefinedSetConfig::PrefixSet(config) => {
                 let mut prefix_matches = Vec::new();
                 for pm_config in &config.prefixes {
                     match PrefixMatch::new(pm_config) {
@@ -980,7 +987,7 @@ impl BgpServer {
                     },
                 );
             }
-            crate::config::DefinedSetConfig::AsPathSet(config) => {
+            DefinedSetConfig::AsPathSet(config) => {
                 let mut regexes = Vec::new();
                 for pattern in &config.patterns {
                     match Regex::new(pattern) {
@@ -1000,7 +1007,7 @@ impl BgpServer {
                     },
                 );
             }
-            crate::config::DefinedSetConfig::CommunitySet(config) => {
+            DefinedSetConfig::CommunitySet(config) => {
                 let mut community_values = Vec::new();
                 for comm_str in &config.communities {
                     match parse_community_str(comm_str) {
@@ -1019,7 +1026,7 @@ impl BgpServer {
                     },
                 );
             }
-            crate::config::DefinedSetConfig::NeighborSet(config) => {
+            DefinedSetConfig::NeighborSet(config) => {
                 let mut neighbor_addrs = Vec::new();
                 for addr_str in &config.neighbors {
                     match IpAddr::from_str(addr_str) {
@@ -1337,10 +1344,10 @@ impl BgpServer {
 
         // Update peer's policy list
         match direction {
-            crate::server::PolicyDirection::Import => {
+            PolicyDirection::Import => {
                 peer.import_policies = resolved_policies;
             }
-            crate::server::PolicyDirection::Export => {
+            PolicyDirection::Export => {
                 peer.export_policies = resolved_policies;
             }
         }
@@ -1459,4 +1466,122 @@ async fn send_initial_bmp_state_to_task(
         }
     }
     let _ = response.send(Ok(()));
+}
+
+impl BgpServer {
+    async fn handle_route_refresh(&mut self, peer_ip: std::net::IpAddr, afi: Afi, safi: Safi) {
+        info!(&self.logger, "processing ROUTE_REFRESH",
+              "peer_ip" => peer_ip.to_string(),
+              "afi" => format!("{:?}", afi),
+              "safi" => format!("{:?}", safi));
+
+        // Get peer info
+        let Some(peer_info) = self.peers.get(&peer_ip) else {
+            warn!(&self.logger, "ROUTE_REFRESH from unknown peer", "peer_ip" => peer_ip.to_string());
+            return;
+        };
+
+        // Only process if peer is Established
+        if peer_info.state != BgpState::Established {
+            warn!(&self.logger, "ROUTE_REFRESH from non-Established peer",
+                  "peer_ip" => peer_ip.to_string(),
+                  "state" => format!("{:?}", peer_info.state));
+            return;
+        }
+
+        let Some(peer_asn) = peer_info.asn else {
+            warn!(&self.logger, "ROUTE_REFRESH before ASN known", "peer_ip" => peer_ip.to_string());
+            return;
+        };
+
+        let export_policies = &peer_info.export_policies;
+        if export_policies.is_empty() {
+            warn!(&self.logger, "export policies not initialized", "peer_ip" => peer_ip.to_string());
+            return;
+        }
+
+        // Only Unicast SAFI is supported currently
+        if safi != Safi::Unicast {
+            warn!(&self.logger, "unsupported SAFI requested",
+                  "safi" => format!("{:?}", safi));
+            return;
+        }
+
+        const CHUNK_SIZE: usize = 10_000;
+
+        info!(&self.logger, "processing ROUTE_REFRESH with chunking",
+              "peer_ip" => peer_ip.to_string(),
+              "afi" => format!("{:?}", afi),
+              "safi" => format!("{:?}", safi),
+              "chunk_size" => CHUNK_SIZE);
+
+        if let Some(peer_tx) = &peer_info.peer_tx {
+            // Get iterator (no allocation)
+            let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+            let mut total_sent = 0;
+
+            // Process in chunks
+            match afi {
+                Afi::Ipv4 => {
+                    for route in self.loc_rib.iter_ipv4_unicast_routes() {
+                        chunk.push(route);
+
+                        if chunk.len() >= CHUNK_SIZE {
+                            send_announcements_to_peer(
+                                peer_ip,
+                                peer_tx,
+                                &chunk,
+                                self.config.asn,
+                                peer_asn,
+                                std::net::IpAddr::V4(self.config.router_id),
+                                export_policies,
+                                &self.logger,
+                            );
+                            total_sent += chunk.len();
+                            chunk.clear();
+                        }
+                    }
+                }
+                Afi::Ipv6 => {
+                    for route in self.loc_rib.iter_ipv6_unicast_routes() {
+                        chunk.push(route);
+
+                        if chunk.len() >= CHUNK_SIZE {
+                            send_announcements_to_peer(
+                                peer_ip,
+                                peer_tx,
+                                &chunk,
+                                self.config.asn,
+                                peer_asn,
+                                std::net::IpAddr::V4(self.config.router_id),
+                                export_policies,
+                                &self.logger,
+                            );
+                            total_sent += chunk.len();
+                            chunk.clear();
+                        }
+                    }
+                }
+            }
+
+            // Send remaining routes
+            if !chunk.is_empty() {
+                send_announcements_to_peer(
+                    peer_ip,
+                    peer_tx,
+                    &chunk,
+                    self.config.asn,
+                    peer_asn,
+                    std::net::IpAddr::V4(self.config.router_id),
+                    export_policies,
+                    &self.logger,
+                );
+                total_sent += chunk.len();
+            }
+
+            info!(&self.logger, "completed ROUTE_REFRESH",
+                  "peer_ip" => peer_ip.to_string(),
+                  "total_routes" => total_sent);
+        }
+    }
 }

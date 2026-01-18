@@ -15,11 +15,11 @@
 use super::msg::{Message, MessageType};
 
 #[derive(Debug, Clone)]
-pub struct KeepAliveMessage {}
+pub struct KeepaliveMessage {}
 
-impl Message for KeepAliveMessage {
+impl Message for KeepaliveMessage {
     fn kind(&self) -> MessageType {
-        MessageType::KEEPALIVE
+        MessageType::Keepalive
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn test_keepalive_serialize() {
-        let keepalive_msg = KeepAliveMessage {};
+        let keepalive_msg = KeepaliveMessage {};
 
         // Serialize to complete BGP message with header
         let message = keepalive_msg.serialize();

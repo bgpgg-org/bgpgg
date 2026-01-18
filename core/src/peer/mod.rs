@@ -137,6 +137,8 @@ pub struct PeerStatistics {
     pub keepalive_received: u64,
     pub update_received: u64,
     pub notification_received: u64,
+    pub route_refresh_received: u64,
+    pub route_refresh_sent: u64,
     pub adj_rib_in_count: u64,
 }
 

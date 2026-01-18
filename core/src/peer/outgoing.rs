@@ -22,6 +22,7 @@ use crate::log::Logger;
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
+use crate::policy::PolicyResult;
 use crate::rib::{Path, RouteSource};
 use crate::{debug, error, info, warn};
 
@@ -259,7 +260,7 @@ fn build_ebgp_next_hop(
         Some(path.next_hop)
     } else {
         // Cross-family without explicit next hop - can't advertise
-        crate::warn!(
+        warn!(
             logger,
             format!(
                 "Filtering cross-family route {} without explicit next hop",
@@ -290,7 +291,7 @@ fn build_ibgp_next_hop(
         Some(local_next_hop.into())
     } else {
         // Cross-family without explicit next hop - can't advertise
-        crate::warn!(
+        warn!(
             logger,
             format!(
                 "Filtering cross-family route {} without explicit next hop",
@@ -345,15 +346,15 @@ pub fn compute_routes_for_peer(
                 let mut result = false;
                 for policy in export_policies {
                     match policy.evaluate(prefix, &mut path_mut) {
-                        crate::policy::PolicyResult::Accept => {
+                        PolicyResult::Accept => {
                             result = true;
                             break;
                         }
-                        crate::policy::PolicyResult::Reject => {
+                        PolicyResult::Reject => {
                             result = false;
                             break;
                         }
-                        crate::policy::PolicyResult::Continue => continue,
+                        PolicyResult::Continue => continue,
                     }
                 }
                 result

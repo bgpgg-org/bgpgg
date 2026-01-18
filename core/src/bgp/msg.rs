@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::msg_keepalive::KeepAliveMessage;
+use super::msg_keepalive::KeepaliveMessage;
 use super::msg_notification::{BgpError, MessageHeaderError, NotificationMessage};
 use super::msg_open::OpenMessage;
+use super::msg_route_refresh::RouteRefreshMessage;
 use super::msg_update::UpdateMessage;
 use super::utils::ParserError;
 use tokio::io::AsyncReadExt;
@@ -28,10 +29,11 @@ pub const BGP_MARKER: [u8; 16] = [0xff; 16];
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum MessageType {
-    OPEN = 1,
-    UPDATE = 2,
-    NOTIFICATION = 3,
-    KEEPALIVE = 4,
+    Open = 1,
+    Update = 2,
+    Notification = 3,
+    Keepalive = 4,
+    RouteRefresh = 5,
 }
 
 impl MessageType {
@@ -78,10 +80,11 @@ impl TryFrom<u8> for MessageType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(MessageType::OPEN),
-            2 => Ok(MessageType::UPDATE),
-            3 => Ok(MessageType::NOTIFICATION),
-            4 => Ok(MessageType::KEEPALIVE),
+            1 => Ok(MessageType::Open),
+            2 => Ok(MessageType::Update),
+            3 => Ok(MessageType::Notification),
+            4 => Ok(MessageType::Keepalive),
+            5 => Ok(MessageType::RouteRefresh),
             _ => Err(ParserError::BgpError {
                 error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageType),
                 data: vec![value],
@@ -94,8 +97,9 @@ impl TryFrom<u8> for MessageType {
 pub enum BgpMessage {
     Open(OpenMessage),
     Update(UpdateMessage),
-    KeepAlive(KeepAliveMessage),
+    Keepalive(KeepaliveMessage),
     Notification(NotificationMessage),
+    RouteRefresh(RouteRefreshMessage),
 }
 
 impl BgpMessage {
@@ -104,8 +108,9 @@ impl BgpMessage {
         match self {
             Self::Open(m) => m.serialize(),
             Self::Update(m) => m.serialize(),
-            Self::KeepAlive(m) => m.serialize(),
+            Self::Keepalive(m) => m.serialize(),
             Self::Notification(m) => m.serialize(),
+            Self::RouteRefresh(m) => m.serialize(),
         }
     }
 
@@ -113,18 +118,22 @@ impl BgpMessage {
         let message_type = MessageType::try_from(message_type_val)?;
 
         match message_type {
-            MessageType::OPEN => {
+            MessageType::Open => {
                 let message = OpenMessage::from_bytes(bytes)?;
                 Ok(BgpMessage::Open(message))
             }
-            MessageType::UPDATE => {
+            MessageType::Update => {
                 let message = UpdateMessage::from_bytes(bytes)?;
                 Ok(BgpMessage::Update(message))
             }
-            MessageType::KEEPALIVE => Ok(BgpMessage::KeepAlive(KeepAliveMessage {})),
-            MessageType::NOTIFICATION => {
+            MessageType::Keepalive => Ok(BgpMessage::Keepalive(KeepaliveMessage {})),
+            MessageType::Notification => {
                 let message = NotificationMessage::from_bytes(bytes);
                 Ok(BgpMessage::Notification(message))
+            }
+            MessageType::RouteRefresh => {
+                let message = RouteRefreshMessage::from_bytes(bytes)?;
+                Ok(BgpMessage::RouteRefresh(message))
             }
         }
     }
@@ -188,7 +197,7 @@ fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserEr
     }
 
     // Validate message-type-specific length
-    if message_type == MessageType::KEEPALIVE.as_u8()
+    if message_type == MessageType::Keepalive.as_u8()
         && message_length != BGP_HEADER_SIZE_BYTES as u16
     {
         return Err(ParserError::BgpError {
@@ -198,7 +207,15 @@ fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserEr
     }
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
-    if message_type == MessageType::NOTIFICATION.as_u8() && message_length < 21 {
+    if message_type == MessageType::Notification.as_u8() && message_length < 21 {
+        return Err(ParserError::BgpError {
+            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            data: message_length.to_be_bytes().to_vec(),
+        });
+    }
+
+    // ROUTEREFRESH: exactly 23 bytes (19 header + 4 body)
+    if message_type == MessageType::RouteRefresh.as_u8() && message_length != 23 {
         return Err(ParserError::BgpError {
             error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             data: message_length.to_be_bytes().to_vec(),

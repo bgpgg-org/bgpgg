@@ -356,7 +356,7 @@ pub struct UpdateMessage {
 
 impl Message for UpdateMessage {
     fn kind(&self) -> MessageType {
-        MessageType::UPDATE
+        MessageType::Update
     }
 
     fn to_bytes(&self) -> Vec<u8> {

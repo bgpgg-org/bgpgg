@@ -331,7 +331,7 @@ impl NotificationMessage {
 
 impl Message for NotificationMessage {
     fn kind(&self) -> MessageType {
-        MessageType::NOTIFICATION
+        MessageType::Notification
     }
 
     fn to_bytes(&self) -> Vec<u8> {

@@ -249,7 +249,9 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_notification::{CeaseSubcode, UpdateMessageError};
+    use crate::bgp::msg_notification::{
+        CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
+    };
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
 
@@ -441,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_established_keepalive_received() {
-        // RFC 4271 8.2.2: KeepAliveMsg -> reset HoldTimer if non-zero, stay Established
+        // RFC 4271 8.2.2: KeepaliveMsg -> reset HoldTimer if non-zero, stay Established
         let test_cases = vec![
             (180, true), // (hold_time, should_reset_hold_timer)
             (0, false),  // hold_time=0 should not reset hold timer
@@ -743,15 +745,11 @@ mod tests {
                 peer_capabilities: vec![],
             }),
             FsmEvent::BgpHeaderErr(NotificationMessage::new(
-                BgpError::MessageHeaderError(
-                    crate::bgp::msg_notification::MessageHeaderError::BadMessageLength,
-                ),
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
                 vec![],
             )),
             FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
-                BgpError::OpenMessageError(
-                    crate::bgp::msg_notification::OpenMessageError::UnsupportedVersionNumber,
-                ),
+                BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
                 vec![],
             )),
         ];

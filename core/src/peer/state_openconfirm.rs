@@ -101,7 +101,9 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+    use crate::bgp::msg_notification::{
+        BgpError, CeaseSubcode, NotificationMessage, UpdateMessageError,
+    };
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
 
@@ -503,9 +505,7 @@ mod tests {
             }),
             FsmEvent::BgpUpdateReceived,
             FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(
-                BgpError::UpdateMessageError(
-                    crate::bgp::msg_notification::UpdateMessageError::MalformedAttributeList,
-                ),
+                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
                 vec![],
             )),
         ];
