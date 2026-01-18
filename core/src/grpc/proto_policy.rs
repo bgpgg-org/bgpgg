@@ -25,14 +25,14 @@ use super::proto::{
 };
 use crate::config::{
     ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
-    LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
+    DefinedSetConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
     NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
 };
 use crate::server::PolicyInfoResponse;
 
 pub(super) fn proto_to_defined_set_config(
     proto: &ProtoDefinedSetConfig,
-) -> Result<crate::config::DefinedSetConfig, String> {
+) -> Result<DefinedSetConfig, String> {
     let name = proto.name.clone();
 
     let config = match proto.config.as_ref() {
@@ -45,22 +45,22 @@ pub(super) fn proto_to_defined_set_config(
                     masklength_range: p.masklength_range.clone(),
                 })
                 .collect();
-            crate::config::DefinedSetConfig::PrefixSet(PrefixSetConfig { name, prefixes })
+            DefinedSetConfig::PrefixSet(PrefixSetConfig { name, prefixes })
         }
         Some(super::proto::defined_set_config::Config::AsPathSet(aps)) => {
-            crate::config::DefinedSetConfig::AsPathSet(AsPathSetConfig {
+            DefinedSetConfig::AsPathSet(AsPathSetConfig {
                 name,
                 patterns: aps.patterns.clone(),
             })
         }
         Some(super::proto::defined_set_config::Config::CommunitySet(cs)) => {
-            crate::config::DefinedSetConfig::CommunitySet(CommunitySetConfig {
+            DefinedSetConfig::CommunitySet(CommunitySetConfig {
                 name,
                 communities: cs.communities.clone(),
             })
         }
         Some(super::proto::defined_set_config::Config::NeighborSet(ns)) => {
-            crate::config::DefinedSetConfig::NeighborSet(NeighborSetConfig {
+            DefinedSetConfig::NeighborSet(NeighborSetConfig {
                 name,
                 neighbors: ns.addresses.clone(),
             })
@@ -136,11 +136,9 @@ pub(super) fn proto_to_statement_config(
     })
 }
 
-pub(super) fn defined_set_config_to_proto(
-    config: crate::config::DefinedSetConfig,
-) -> DefinedSetInfo {
+pub(super) fn defined_set_config_to_proto(config: DefinedSetConfig) -> DefinedSetInfo {
     let (set_type, name, set_data) = match config {
-        crate::config::DefinedSetConfig::PrefixSet(ps) => (
+        DefinedSetConfig::PrefixSet(ps) => (
             "prefix-set".to_string(),
             ps.name,
             Some(super::proto::defined_set_info::SetData::PrefixSet(
@@ -156,7 +154,7 @@ pub(super) fn defined_set_config_to_proto(
                 },
             )),
         ),
-        crate::config::DefinedSetConfig::AsPathSet(aps) => (
+        DefinedSetConfig::AsPathSet(aps) => (
             "as-path-set".to_string(),
             aps.name,
             Some(super::proto::defined_set_info::SetData::AsPathSet(
@@ -165,7 +163,7 @@ pub(super) fn defined_set_config_to_proto(
                 },
             )),
         ),
-        crate::config::DefinedSetConfig::CommunitySet(cs) => (
+        DefinedSetConfig::CommunitySet(cs) => (
             "community-set".to_string(),
             cs.name,
             Some(super::proto::defined_set_info::SetData::CommunitySet(
@@ -174,7 +172,7 @@ pub(super) fn defined_set_config_to_proto(
                 },
             )),
         ),
-        crate::config::DefinedSetConfig::NeighborSet(ns) => (
+        DefinedSetConfig::NeighborSet(ns) => (
             "neighbor-set".to_string(),
             ns.name,
             Some(super::proto::defined_set_info::SetData::NeighborSet(
@@ -201,33 +199,33 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 match_prefix_set: s.conditions.match_prefix_set.map(|m| MatchSetRef {
                     set_name: m.set_name,
                     match_option: match m.match_option {
-                        crate::config::MatchOptionConfig::Any => "any".to_string(),
-                        crate::config::MatchOptionConfig::All => "all".to_string(),
-                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                        MatchOptionConfig::Any => "any".to_string(),
+                        MatchOptionConfig::All => "all".to_string(),
+                        MatchOptionConfig::Invert => "invert".to_string(),
                     },
                 }),
                 match_neighbor_set: s.conditions.match_neighbor_set.map(|m| MatchSetRef {
                     set_name: m.set_name,
                     match_option: match m.match_option {
-                        crate::config::MatchOptionConfig::Any => "any".to_string(),
-                        crate::config::MatchOptionConfig::All => "all".to_string(),
-                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                        MatchOptionConfig::Any => "any".to_string(),
+                        MatchOptionConfig::All => "all".to_string(),
+                        MatchOptionConfig::Invert => "invert".to_string(),
                     },
                 }),
                 match_as_path_set: s.conditions.match_as_path_set.map(|m| MatchSetRef {
                     set_name: m.set_name,
                     match_option: match m.match_option {
-                        crate::config::MatchOptionConfig::Any => "any".to_string(),
-                        crate::config::MatchOptionConfig::All => "all".to_string(),
-                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                        MatchOptionConfig::Any => "any".to_string(),
+                        MatchOptionConfig::All => "all".to_string(),
+                        MatchOptionConfig::Invert => "invert".to_string(),
                     },
                 }),
                 match_community_set: s.conditions.match_community_set.map(|m| MatchSetRef {
                     set_name: m.set_name,
                     match_option: match m.match_option {
-                        crate::config::MatchOptionConfig::Any => "any".to_string(),
-                        crate::config::MatchOptionConfig::All => "all".to_string(),
-                        crate::config::MatchOptionConfig::Invert => "invert".to_string(),
+                        MatchOptionConfig::Any => "any".to_string(),
+                        MatchOptionConfig::All => "all".to_string(),
+                        MatchOptionConfig::Invert => "invert".to_string(),
                     },
                 }),
                 prefix: s.conditions.prefix.clone(),
@@ -248,12 +246,12 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 accept: s.actions.accept,
                 reject: s.actions.reject,
                 local_pref: s.actions.local_pref.map(|lp| match lp {
-                    crate::config::LocalPrefActionConfig::Set(v) => v,
-                    crate::config::LocalPrefActionConfig::Force { value, .. } => value,
+                    LocalPrefActionConfig::Set(v) => v,
+                    LocalPrefActionConfig::Force { value, .. } => value,
                 }),
                 med: s.actions.med.and_then(|m| match m {
-                    crate::config::MedActionConfig::Set(v) => Some(v),
-                    crate::config::MedActionConfig::Remove { .. } => None,
+                    MedActionConfig::Set(v) => Some(v),
+                    MedActionConfig::Remove { .. } => None,
                 }),
                 add_communities,
                 remove_communities,

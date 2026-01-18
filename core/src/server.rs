@@ -16,6 +16,7 @@ use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
+use crate::bgp::multiprotocol::{Afi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
@@ -134,6 +135,10 @@ pub enum MgmtOp {
         response: oneshot::Sender<Result<(), String>>,
     },
     EnablePeer {
+        addr: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    SoftResetPeer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
@@ -272,6 +277,12 @@ pub enum ServerOp {
     SetAdminState {
         peer_ip: IpAddr,
         state: AdminState,
+    },
+    /// Route Refresh request from peer
+    RouteRefresh {
+        peer_ip: IpAddr,
+        afi: Afi,
+        safi: Safi,
     },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {

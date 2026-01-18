@@ -19,6 +19,7 @@ pub mod msg_keepalive;
 pub mod msg_notification;
 pub mod msg_open;
 pub mod msg_open_types;
+pub mod msg_route_refresh;
 pub mod msg_update;
 mod msg_update_codec;
 pub mod msg_update_types;

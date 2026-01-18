@@ -61,7 +61,7 @@ pub async fn run_receiver(
                     }
                 }
             }
-            Ok(BgpMessage::KeepAlive(_)) => {
+            Ok(BgpMessage::Keepalive(_)) => {
                 // Ignore KEEPALIVEs
                 continue;
             }

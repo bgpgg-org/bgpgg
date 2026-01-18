@@ -15,7 +15,7 @@
 //! Common test utilities for BGP server testing
 
 use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
-use bgpgg::bgp::msg_keepalive::KeepAliveMessage;
+use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::config::Config;
@@ -1242,7 +1242,7 @@ impl FakePeer {
 
     /// Exchange KEEPALIVE messages to complete handshake (reaches Established state).
     pub async fn handshake_keepalive(&mut self) {
-        let keepalive = KeepAliveMessage {};
+        let keepalive = KeepaliveMessage {};
         self.stream
             .as_mut()
             .unwrap()
@@ -1254,7 +1254,7 @@ impl FakePeer {
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
-            BgpMessage::KeepAlive(_) => {}
+            BgpMessage::Keepalive(_) => {}
             _ => panic!("Expected KEEPALIVE message during handshake"),
         }
     }
@@ -1283,7 +1283,7 @@ impl FakePeer {
 
     /// Send a KEEPALIVE message
     pub async fn send_keepalive(&mut self) {
-        let keepalive = KeepAliveMessage {};
+        let keepalive = KeepaliveMessage {};
         self.stream
             .as_mut()
             .unwrap()
@@ -1316,7 +1316,7 @@ impl FakePeer {
         let msg = read_bgp_message(self.stream.as_mut().unwrap())
             .await
             .unwrap();
-        assert!(matches!(msg, BgpMessage::KeepAlive(_)));
+        assert!(matches!(msg, BgpMessage::Keepalive(_)));
     }
 
     /// Read a NOTIFICATION message (skips any KEEPALIVEs)
@@ -1328,7 +1328,7 @@ impl FakePeer {
 
             match msg {
                 BgpMessage::Notification(notif) => return notif,
-                BgpMessage::KeepAlive(_) => continue, // Skip KEEPALIVEs sent by peer
+                BgpMessage::Keepalive(_) => continue, // Skip KEEPALIVEs sent by peer
                 _ => panic!("Expected NOTIFICATION, got unexpected message type"),
             }
         }
@@ -1398,7 +1398,7 @@ pub fn build_raw_update(
     // NLRI
     body.extend_from_slice(nlri);
 
-    build_raw_message(BGP_MARKER, None, MessageType::UPDATE.as_u8(), &body)
+    build_raw_message(BGP_MARKER, None, MessageType::Update.as_u8(), &body)
 }
 
 // Build raw attribute bytes
@@ -1441,7 +1441,7 @@ pub fn build_raw_open(
 ) -> Vec<u8> {
     let version = version_override.unwrap_or(4);
     let marker = marker_override.unwrap_or(BGP_MARKER);
-    let msg_type = msg_type_override.unwrap_or(MessageType::OPEN.as_u8());
+    let msg_type = msg_type_override.unwrap_or(MessageType::Open.as_u8());
 
     let mut body = Vec::new();
     body.push(version);
@@ -1459,7 +1459,7 @@ pub fn build_raw_keepalive(length_override: Option<u16>) -> Vec<u8> {
     build_raw_message(
         BGP_MARKER,
         length_override,
-        MessageType::KEEPALIVE.as_u8(),
+        MessageType::Keepalive.as_u8(),
         &body,
     )
 }
@@ -1479,7 +1479,7 @@ pub fn build_raw_notification(
     build_raw_message(
         BGP_MARKER,
         length_override,
-        MessageType::NOTIFICATION.as_u8(),
+        MessageType::Notification.as_u8(),
         &body,
     )
 }

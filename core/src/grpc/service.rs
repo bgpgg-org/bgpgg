@@ -39,6 +39,7 @@ use super::proto::{
     RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
     RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
     SessionConfig as ProtoSessionConfig, SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
+    SoftResetPeerRequest, SoftResetPeerResponse,
 };
 
 // Proto conversion functions from sibling modules
@@ -379,6 +380,25 @@ impl BgpService for BgpGrpcService {
 
         match rx.await {
             Ok(Ok(())) => Ok(Response::new(EnablePeerResponse {})),
+            Ok(Err(e)) => Err(Status::not_found(e)),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn soft_reset_peer(
+        &self,
+        request: Request<SoftResetPeerRequest>,
+    ) -> Result<Response<SoftResetPeerResponse>, Status> {
+        let addr = request.into_inner().address;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.mgmt_request_tx
+            .send(MgmtOp::SoftResetPeer { addr, response: tx })
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(SoftResetPeerResponse {})),
             Ok(Err(e)) => Err(Status::not_found(e)),
             Err(_) => Err(Status::internal("request processing failed")),
         }

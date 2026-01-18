@@ -251,7 +251,7 @@ impl Peer {
                 self.fsm.timers.stop_connect_retry();
             }
 
-            // RFC 4271 8.2.2: Events 26-27 (KeepAlive, Update) in Connect -> FSM Error
+            // RFC 4271 8.2.2: Events 26-27 (Keepalive, Update) in Connect -> FSM Error
             (BgpState::Idle, FsmEvent::BgpKeepaliveReceived)
             | (BgpState::Idle, FsmEvent::BgpUpdateReceived) => {
                 let _ = self

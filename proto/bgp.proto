@@ -10,6 +10,7 @@ service BgpService {
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
     rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
+    rpc SoftResetPeer(SoftResetPeerRequest) returns (SoftResetPeerResponse);
     rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
     rpc ListPeersStream(ListPeersRequest) returns (stream Peer);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
@@ -100,6 +101,13 @@ message EnablePeerRequest {
 }
 
 message EnablePeerResponse {}
+
+// Soft reset peer request/response (sends ROUTE_REFRESH)
+message SoftResetPeerRequest {
+    string address = 1;
+}
+
+message SoftResetPeerResponse {}
 
 // List peers request/response
 message ListPeersRequest {}

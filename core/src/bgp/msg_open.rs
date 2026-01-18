@@ -187,7 +187,7 @@ impl OpenMessage {
 
 impl Message for OpenMessage {
     fn kind(&self) -> MessageType {
-        MessageType::OPEN
+        MessageType::Open
     }
 
     fn to_bytes(&self) -> Vec<u8> {

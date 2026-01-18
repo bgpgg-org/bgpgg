@@ -96,6 +96,7 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 /// Operations that can be sent to a peer task
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
+    SendRouteRefresh,
     GetStatistics(oneshot::Sender<PeerStatistics>),
     GetAdjRibIn(oneshot::Sender<Vec<Route>>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
@@ -137,6 +138,8 @@ pub struct PeerStatistics {
     pub keepalive_received: u64,
     pub update_received: u64,
     pub notification_received: u64,
+    pub route_refresh_received: u64,
+    pub route_refresh_sent: u64,
     pub adj_rib_in_count: u64,
 }
 

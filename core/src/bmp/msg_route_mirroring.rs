@@ -147,10 +147,10 @@ mod tests {
 
     #[test]
     fn test_route_mirroring_normal() {
-        use crate::bgp::msg_keepalive::KeepAliveMessage;
+        use crate::bgp::msg_keepalive::KeepaliveMessage;
         use crate::bmp::utils::PeerDistinguisher;
 
-        let keepalive = BgpMessage::KeepAlive(KeepAliveMessage {});
+        let keepalive = BgpMessage::Keepalive(KeepaliveMessage {});
         let msg = RouteMirroringMessage::new(
             PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -167,11 +167,11 @@ mod tests {
 
     #[test]
     fn test_route_mirroring_errored_message() {
-        use crate::bgp::msg_keepalive::KeepAliveMessage;
+        use crate::bgp::msg_keepalive::KeepaliveMessage;
         use crate::bmp::utils::PeerDistinguisher;
 
         // A parsed message that had semantic errors (treated-as-withdraw)
-        let keepalive = BgpMessage::KeepAlive(KeepAliveMessage {});
+        let keepalive = BgpMessage::Keepalive(KeepaliveMessage {});
         let msg = RouteMirroringMessage::new(
             PeerDistinguisher::Global,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),

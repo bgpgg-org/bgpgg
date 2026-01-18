@@ -82,7 +82,7 @@ pub enum FsmEvent {
     NotifMsgVerErr(NotificationMessage),
     /// Event 25: NotifMsg
     NotifMsg(NotificationMessage),
-    /// Event 26: KeepAliveMsg
+    /// Event 26: KeepaliveMsg
     BgpKeepaliveReceived,
     /// Event 27: UpdateMsg
     BgpUpdateReceived,
@@ -513,7 +513,7 @@ impl Fsm {
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => BgpState::Established,
             // RFC 4271 8.2.2: TcpConnectionFails -> Idle
             (BgpState::Established, FsmEvent::TcpConnectionFails) => BgpState::Idle,
-            // RFC 4271 8.2.2: Event 26 (KeepAliveMsg) -> reset HoldTimer, stay Established
+            // RFC 4271 8.2.2: Event 26 (KeepaliveMsg) -> reset HoldTimer, stay Established
             (BgpState::Established, FsmEvent::BgpKeepaliveReceived) => BgpState::Established,
             // RFC 4271 8.2.2: Event 27 (UpdateMsg) -> process UPDATE, reset HoldTimer, stay Established
             (BgpState::Established, FsmEvent::BgpUpdateReceived) => BgpState::Established,

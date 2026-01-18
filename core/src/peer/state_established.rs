@@ -19,6 +19,7 @@ use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::mem;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 
 impl Peer {
     /// Handle Established state transitions.
@@ -184,6 +185,21 @@ impl Peer {
                             let routes = self.rib_in.get_all_routes();
                             let _ = response.send(routes);
                         }
+                        PeerOp::SendRouteRefresh => {
+                            use crate::bgp::msg::Message;
+                            use crate::bgp::msg_route_refresh::RouteRefreshMessage;
+                            use crate::bgp::multiprotocol::{Afi, Safi};
+
+                            let refresh_msg = RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast);
+                            if let Some(conn) = &mut self.conn {
+                                if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
+                                    error!(&self.logger, "failed to send ROUTE_REFRESH", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                } else {
+                                    self.statistics.route_refresh_sent += 1;
+                                    info!(&self.logger, "sent ROUTE_REFRESH", "peer_ip" => peer_ip.to_string());
+                                }
+                            }
+                        }
                         PeerOp::Shutdown(subcode) => {
                             info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
@@ -249,7 +265,9 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_notification::{CeaseSubcode, UpdateMessageError};
+    use crate::bgp::msg_notification::{
+        CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
+    };
     use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
 
@@ -441,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_established_keepalive_received() {
-        // RFC 4271 8.2.2: KeepAliveMsg -> reset HoldTimer if non-zero, stay Established
+        // RFC 4271 8.2.2: KeepaliveMsg -> reset HoldTimer if non-zero, stay Established
         let test_cases = vec![
             (180, true), // (hold_time, should_reset_hold_timer)
             (0, false),  // hold_time=0 should not reset hold timer
@@ -743,15 +761,11 @@ mod tests {
                 peer_capabilities: vec![],
             }),
             FsmEvent::BgpHeaderErr(NotificationMessage::new(
-                BgpError::MessageHeaderError(
-                    crate::bgp::msg_notification::MessageHeaderError::BadMessageLength,
-                ),
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
                 vec![],
             )),
             FsmEvent::BgpOpenMsgErr(NotificationMessage::new(
-                BgpError::OpenMessageError(
-                    crate::bgp::msg_notification::OpenMessageError::UnsupportedVersionNumber,
-                ),
+                BgpError::OpenMessageError(OpenMessageError::UnsupportedVersionNumber),
                 vec![],
             )),
         ];

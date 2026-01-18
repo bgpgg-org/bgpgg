@@ -19,7 +19,7 @@ use super::proto::{
     ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
     ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
     RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest, Route,
-    SessionConfig, SetPolicyAssignmentRequest, StatementConfig,
+    SessionConfig, SetPolicyAssignmentRequest, SoftResetPeerRequest, StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -359,6 +359,14 @@ impl BgpClient {
     pub async fn enable_peer(&mut self, address: String) -> Result<(), tonic::Status> {
         self.inner
             .enable_peer(EnablePeerRequest { address })
+            .await?;
+        Ok(())
+    }
+
+    /// Soft reset a BGP peer (sends ROUTE_REFRESH message)
+    pub async fn soft_reset_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+        self.inner
+            .soft_reset_peer(SoftResetPeerRequest { address })
             .await?;
         Ok(())
     }
