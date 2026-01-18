@@ -96,9 +96,13 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 /// Operations that can be sent to a peer task
 pub enum PeerOp {
     SendUpdate(UpdateMessage),
-    SendRouteRefresh,
+    SendRouteRefresh {
+        afi: crate::bgp::multiprotocol::Afi,
+        safi: crate::bgp::multiprotocol::Safi,
+    },
     GetStatistics(oneshot::Sender<PeerStatistics>),
     GetAdjRibIn(oneshot::Sender<Vec<Route>>),
+    GetNegotiatedCapabilities(oneshot::Sender<HashSet<crate::bgp::multiprotocol::AfiSafi>>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
     /// RFC 4271 Event 1: ManualStart - admin starts the peer connection

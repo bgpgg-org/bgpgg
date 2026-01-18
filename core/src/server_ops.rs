@@ -14,7 +14,7 @@
 
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
-use crate::bgp::multiprotocol::{Afi, Safi};
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::net::IpNetwork;
@@ -29,7 +29,7 @@ use crate::rib::{Path, Route, RouteSource};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
-    GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ServerOp,
+    GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ResetType, ServerOp,
 };
 use crate::types::PeerDownReason;
 use crate::{error, info, warn};
@@ -60,8 +60,15 @@ impl BgpServer {
             MgmtOp::EnablePeer { addr, response } => {
                 self.handle_enable_peer(addr, response);
             }
-            MgmtOp::SoftResetPeer { addr, response } => {
-                self.handle_soft_reset_peer(addr, response);
+            MgmtOp::ResetPeer {
+                addr,
+                reset_type,
+                afi,
+                safi,
+                response,
+            } => {
+                self.handle_reset_peer(addr, reset_type, afi, safi, response)
+                    .await;
             }
             MgmtOp::AddRoute {
                 prefix,
@@ -533,11 +540,16 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn handle_soft_reset_peer(
+    async fn handle_reset_peer(
         &mut self,
         addr: String,
+        reset_type: ResetType,
+        afi: Option<Afi>,
+        safi: Option<Safi>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        use crate::bgp::multiprotocol::AfiSafi;
+
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -551,11 +563,199 @@ impl BgpServer {
             return;
         };
 
-        if let Some(peer_tx) = &entry.peer_tx {
-            let _ = peer_tx.send(PeerOp::SendRouteRefresh);
+        // Only allow soft reset on Established peers
+        if entry.state != BgpState::Established {
+            let _ = response.send(Err(format!(
+                "peer {} not in Established state (current: {:?})",
+                addr, entry.state
+            )));
+            return;
         }
 
+        // Determine which AFI/SAFIs to reset based on parameters
+        let afi_safis: Vec<AfiSafi> = match (afi, safi) {
+            // Both specified: use exact AFI/SAFI
+            (Some(afi), Some(safi)) => vec![AfiSafi::new(afi, safi)],
+
+            // Any parameter unset: query negotiated capabilities and filter
+            _ => {
+                let negotiated = match self.get_negotiated_capabilities(entry).await {
+                    Ok(caps) => caps,
+                    Err(e) => {
+                        let _ = response.send(Err(e));
+                        return;
+                    }
+                };
+
+                // Filter based on what's specified
+                negotiated
+                    .into_iter()
+                    .filter(|cap| {
+                        afi.is_none_or(|a| cap.afi == a) && safi.is_none_or(|s| cap.safi == s)
+                    })
+                    .collect()
+            }
+        };
+
+        match reset_type {
+            ResetType::SoftIn => {
+                self.handle_reset_soft_in(peer_ip, &afi_safis, Some(response));
+            }
+            ResetType::SoftOut => {
+                self.handle_reset_soft_out(peer_ip, &afi_safis, response);
+            }
+            ResetType::Soft => {
+                self.handle_reset_soft_in(peer_ip, &afi_safis, None);
+                self.handle_reset_soft_out(peer_ip, &afi_safis, response);
+            }
+        }
+    }
+
+    /// Helper to query negotiated capabilities from peer
+    async fn get_negotiated_capabilities(
+        &self,
+        peer_info: &PeerInfo,
+    ) -> Result<Vec<AfiSafi>, String> {
+        let peer_tx = peer_info
+            .peer_tx
+            .as_ref()
+            .ok_or_else(|| "peer task not available".to_string())?;
+
+        let (tx, rx) = oneshot::channel();
+        peer_tx
+            .send(PeerOp::GetNegotiatedCapabilities(tx))
+            .map_err(|_| "failed to query peer capabilities".to_string())?;
+
+        let caps = rx
+            .await
+            .map_err(|_| "failed to get peer capabilities".to_string())?;
+
+        if caps.is_empty() {
+            Err("no negotiated capabilities".to_string())
+        } else {
+            Ok(caps.into_iter().collect())
+        }
+    }
+
+    fn handle_reset_soft_in(
+        &mut self,
+        peer_ip: IpAddr,
+        afi_safis: &[AfiSafi],
+        response: Option<oneshot::Sender<Result<(), String>>>,
+    ) {
+        if let Some(peer_tx) = self.peers.get(&peer_ip).and_then(|p| p.peer_tx.as_ref()) {
+            for afi_safi in afi_safis {
+                let _ = peer_tx.send(PeerOp::SendRouteRefresh {
+                    afi: afi_safi.afi,
+                    safi: afi_safi.safi,
+                });
+            }
+        }
+        if let Some(resp) = response {
+            let _ = resp.send(Ok(()));
+        }
+    }
+
+    fn handle_reset_soft_out(
+        &mut self,
+        peer_ip: IpAddr,
+        afi_safis: &[AfiSafi],
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        for afi_safi in afi_safis {
+            self.resend_routes_to_peer(peer_ip, afi_safi.afi, afi_safi.safi);
+        }
         let _ = response.send(Ok(()));
+    }
+
+    fn resend_routes_to_peer(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let Some(peer_info) = self.peers.get(&peer_ip) else {
+            warn!(&self.logger, "SOFT_OUT for unknown peer", "peer_ip" => peer_ip.to_string());
+            return;
+        };
+
+        if peer_info.state != BgpState::Established {
+            return;
+        }
+
+        let Some(peer_asn) = peer_info.asn else {
+            return;
+        };
+        let export_policies = &peer_info.export_policies;
+        if export_policies.is_empty() {
+            return;
+        }
+        if safi != Safi::Unicast {
+            warn!(&self.logger, "unsupported SAFI", "safi" => format!("{:?}", safi));
+            return;
+        }
+
+        const CHUNK_SIZE: usize = 10_000;
+
+        if let Some(peer_tx) = &peer_info.peer_tx {
+            let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+            let mut total_sent = 0;
+
+            match afi {
+                Afi::Ipv4 => {
+                    for route in self.loc_rib.iter_ipv4_unicast_routes() {
+                        chunk.push(route);
+                        if chunk.len() >= CHUNK_SIZE {
+                            send_announcements_to_peer(
+                                peer_ip,
+                                peer_tx,
+                                &chunk,
+                                self.config.asn,
+                                peer_asn,
+                                IpAddr::V4(self.config.router_id),
+                                export_policies,
+                                &self.logger,
+                            );
+                            total_sent += chunk.len();
+                            chunk.clear();
+                        }
+                    }
+                }
+                Afi::Ipv6 => {
+                    for route in self.loc_rib.iter_ipv6_unicast_routes() {
+                        chunk.push(route);
+                        if chunk.len() >= CHUNK_SIZE {
+                            send_announcements_to_peer(
+                                peer_ip,
+                                peer_tx,
+                                &chunk,
+                                self.config.asn,
+                                peer_asn,
+                                IpAddr::V4(self.config.router_id),
+                                export_policies,
+                                &self.logger,
+                            );
+                            total_sent += chunk.len();
+                            chunk.clear();
+                        }
+                    }
+                }
+            }
+
+            if !chunk.is_empty() {
+                send_announcements_to_peer(
+                    peer_ip,
+                    peer_tx,
+                    &chunk,
+                    self.config.asn,
+                    peer_asn,
+                    IpAddr::V4(self.config.router_id),
+                    export_policies,
+                    &self.logger,
+                );
+                total_sent += chunk.len();
+            }
+
+            info!(&self.logger, "completed SOFT_OUT reset",
+                  "peer_ip" => peer_ip.to_string(),
+                  "afi" => format!("{:?}", afi),
+                  "total_routes" => total_sent);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

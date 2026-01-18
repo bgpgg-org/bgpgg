@@ -18,7 +18,9 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    AdminState, Afi, BgpState, Origin, Peer, ResetType, Route, Safi, SessionConfig,
+};
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 
@@ -974,79 +976,148 @@ async fn test_ipv6_peering() {
     poll_peer_stats(&server2, "::1", expected).await;
 }
 
+// Table-driven test for soft reset combinations
 #[tokio::test]
-async fn test_route_refresh() {
-    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+async fn test_reset_peer_soft() {
+    struct TestCase {
+        name: &'static str,
+        reset_type: ResetType,
+        afi: Option<Afi>,
+        safi: Option<Safi>,
+        // For SoftIn: server calling reset_peer, peer to verify updates on
+        // For SoftOut: server calling reset_peer (also peer to verify updates on)
+        reset_caller_is_server2: bool,
+    }
 
-    // Server1 announces a route to server2
-    announce_route(
-        &mut server1,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.1.1".to_string(),
-            ..Default::default()
+    let test_cases = vec![
+        TestCase {
+            name: "soft_in_ipv4_unicast_explicit",
+            reset_type: ResetType::SoftIn,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: true,
         },
-    )
-    .await;
+        TestCase {
+            name: "soft_in_all_negotiated",
+            reset_type: ResetType::SoftIn,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: true,
+        },
+        TestCase {
+            name: "soft_out_ipv4_unicast_explicit",
+            reset_type: ResetType::SoftOut,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_out_all_negotiated",
+            reset_type: ResetType::SoftOut,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_both_ipv4_unicast",
+            reset_type: ResetType::Soft,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_both_all_negotiated",
+            reset_type: ResetType::Soft,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: false,
+        },
+    ];
 
-    // Wait for route to propagate
-    poll_route_propagation(&[(
-        &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+    for tc in test_cases {
+        println!("Running test case: {}", tc.name);
+        let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+
+        // Server1 announces a route to server2
+        announce_route(
+            &mut server1,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            })],
-        }],
-    )])
-    .await;
+            },
+        )
+        .await;
 
-    // Get initial stats
-    let (_, s1_initial_stats) = server1
-        .client
-        .get_peer(server2.address.to_string())
-        .await
-        .unwrap();
-    let s1_initial_update_sent = s1_initial_stats.unwrap().update_sent;
+        // Wait for route to propagate
+        poll_route_propagation(&[(
+            &server2,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            }],
+        )])
+        .await;
 
-    let (_, s2_initial_stats) = server2
-        .client
-        .get_peer(server1.address.to_string())
-        .await
-        .unwrap();
-    let s2_initial_update_received = s2_initial_stats.unwrap().update_received;
+        // Get initial stats
+        let (_, s1_initial_stats) = server1
+            .client
+            .get_peer(server2.address.to_string())
+            .await
+            .unwrap();
+        let s1_initial_update_sent = s1_initial_stats.unwrap().update_sent;
 
-    // Server2 sends ROUTE_REFRESH to server1 (soft reset IN)
-    server2
-        .client
-        .soft_reset_peer(server1.address.to_string())
-        .await
-        .unwrap();
+        let (_, s2_initial_stats) = server2
+            .client
+            .get_peer(server1.address.to_string())
+            .await
+            .unwrap();
+        let s2_initial_update_received = s2_initial_stats.unwrap().update_received;
 
-    // Verify server1 re-sent the route to server2
-    poll_peer_stats(
-        &server1,
-        &server2.address.to_string(),
-        ExpectedStats {
-            min_update_sent: Some(s1_initial_update_sent + 1),
-            ..Default::default()
-        },
-    )
-    .await;
+        // Execute reset based on test case
+        if tc.reset_caller_is_server2 {
+            // SoftIn: Server2 requests routes from server1
+            server2
+                .client
+                .reset_peer(server1.address.to_string(), tc.reset_type, tc.afi, tc.safi)
+                .await
+                .unwrap();
+        } else {
+            // SoftOut or Soft: Server1 resends routes to server2
+            server1
+                .client
+                .reset_peer(server2.address.to_string(), tc.reset_type, tc.afi, tc.safi)
+                .await
+                .unwrap();
+        }
 
-    // Verify server2 received the re-advertised route from server1
-    poll_peer_stats(
-        &server2,
-        &server1.address.to_string(),
-        ExpectedStats {
-            min_update_received: Some(s2_initial_update_received + 1),
-            ..Default::default()
-        },
-    )
-    .await;
+        // Verify server1 re-sent the route to server2
+        poll_peer_stats(
+            &server1,
+            &server2.address.to_string(),
+            ExpectedStats {
+                min_update_sent: Some(s1_initial_update_sent + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Verify server2 received the re-sent/re-advertised route from server1
+        poll_peer_stats(
+            &server2,
+            &server1.address.to_string(),
+            ExpectedStats {
+                min_update_received: Some(s2_initial_update_received + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
 }

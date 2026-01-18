@@ -81,6 +81,14 @@ pub enum AdminState {
     PrefixLimitReached,
 }
 
+/// Reset type for peer reset operations
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResetType {
+    SoftIn,  // Send ROUTE_REFRESH to peer
+    SoftOut, // Resend our routes
+    Soft,    // Both
+}
+
 #[derive(Debug, Clone)]
 pub struct GetPeersResponse {
     pub address: String,
@@ -138,8 +146,11 @@ pub enum MgmtOp {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     },
-    SoftResetPeer {
+    ResetPeer {
         addr: String,
+        reset_type: ResetType,
+        afi: Option<Afi>,
+        safi: Option<Safi>,
         response: oneshot::Sender<Result<(), String>>,
     },
     AddRoute {

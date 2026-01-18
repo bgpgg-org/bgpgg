@@ -21,7 +21,7 @@ use crate::peer::BgpState;
 use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};
 use std::net::IpAddr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
@@ -37,9 +37,9 @@ use super::proto::{
     Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics,
     RemoveBmpServerRequest, RemoveBmpServerResponse, RemoveDefinedSetRequest,
     RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
-    RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, Route as ProtoRoute,
-    SessionConfig as ProtoSessionConfig, SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
-    SoftResetPeerRequest, SoftResetPeerResponse,
+    RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, ResetPeerRequest,
+    ResetPeerResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
+    SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
 };
 
 // Proto conversion functions from sibling modules
@@ -385,20 +385,47 @@ impl BgpService for BgpGrpcService {
         }
     }
 
-    async fn soft_reset_peer(
+    async fn reset_peer(
         &self,
-        request: Request<SoftResetPeerRequest>,
-    ) -> Result<Response<SoftResetPeerResponse>, Status> {
-        let addr = request.into_inner().address;
+        request: Request<ResetPeerRequest>,
+    ) -> Result<Response<ResetPeerResponse>, Status> {
+        use crate::bgp::multiprotocol::{Afi, Safi};
+        use crate::server::ResetType;
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = request.into_inner();
+
+        let reset_type = match proto::ResetType::try_from(req.reset_type) {
+            Ok(proto::ResetType::SoftIn) => ResetType::SoftIn,
+            Ok(proto::ResetType::SoftOut) => ResetType::SoftOut,
+            Ok(proto::ResetType::Soft) => ResetType::Soft,
+            Err(_) => return Err(Status::invalid_argument("invalid reset type")),
+        };
+
+        let afi = req.afi.and_then(|a| match proto::Afi::try_from(a) {
+            Ok(proto::Afi::Ipv4) => Some(Afi::Ipv4),
+            Ok(proto::Afi::Ipv6) => Some(Afi::Ipv6),
+            Err(_) => None,
+        });
+
+        let safi = req.safi.and_then(|s| match proto::Safi::try_from(s) {
+            Ok(proto::Safi::Unicast) => Some(Safi::Unicast),
+            Err(_) => None,
+        });
+
+        let (tx, rx) = oneshot::channel();
         self.mgmt_request_tx
-            .send(MgmtOp::SoftResetPeer { addr, response: tx })
+            .send(MgmtOp::ResetPeer {
+                addr: req.address,
+                reset_type,
+                afi,
+                safi,
+                response: tx,
+            })
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
         match rx.await {
-            Ok(Ok(())) => Ok(Response::new(SoftResetPeerResponse {})),
+            Ok(Ok(())) => Ok(Response::new(ResetPeerResponse {})),
             Ok(Err(e)) => Err(Status::not_found(e)),
             Err(_) => Err(Status::internal("request processing failed")),
         }

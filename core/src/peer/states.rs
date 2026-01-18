@@ -75,9 +75,13 @@ impl Peer {
                             // RFC violation: UPDATEs not allowed in OpenSent/OpenConfirm
                             // Drop silently
                         }
-                        PeerOp::SendRouteRefresh => {
+                        PeerOp::SendRouteRefresh { .. } => {
                             // ROUTE_REFRESH only allowed in Established state
                             // Drop silently
+                        }
+                        PeerOp::GetNegotiatedCapabilities(response) => {
+                            // Return empty set if not in Established state
+                            let _ = response.send(std::collections::HashSet::new());
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
