@@ -104,8 +104,9 @@ mod tests {
     use crate::bgp::msg_notification::{
         BgpError, CeaseSubcode, NotificationMessage, UpdateMessageError,
     };
-    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
+    use crate::peer::BgpOpenParams;
+    use crate::peer::PeerCapabilities;
 
     #[tokio::test]
     async fn test_openconfirm_ignores_start_events() {
@@ -501,7 +502,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: 180,
-                peer_capabilities: vec![],
+                peer_capabilities: PeerCapabilities::default(),
             }),
             FsmEvent::BgpUpdateReceived,
             FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(

@@ -583,29 +583,37 @@ impl BgpServer {
             return;
         }
 
+        // Query negotiated capabilities
+        let negotiated = match self.get_negotiated_capabilities(entry).await {
+            Ok(caps) => caps,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
+
         // Determine which AFI/SAFIs to reset based on parameters
         let afi_safis: Vec<AfiSafi> = match (afi, safi) {
-            // Both specified: use exact AFI/SAFI
-            (Some(afi), Some(safi)) => vec![AfiSafi::new(afi, safi)],
-
-            // Any parameter unset: query negotiated capabilities and filter
-            _ => {
-                let negotiated = match self.get_negotiated_capabilities(entry).await {
-                    Ok(caps) => caps,
-                    Err(e) => {
-                        let _ = response.send(Err(e));
-                        return;
-                    }
-                };
-
-                // Filter based on what's specified
-                negotiated
-                    .into_iter()
-                    .filter(|cap| {
-                        afi.is_none_or(|a| cap.afi == a) && safi.is_none_or(|s| cap.safi == s)
-                    })
-                    .collect()
+            // Both specified: validate it's negotiated
+            (Some(afi), Some(safi)) => {
+                let requested = AfiSafi::new(afi, safi);
+                if !negotiated.contains(&requested) {
+                    let _ = response.send(Err(format!(
+                        "AFI/SAFI {:?}/{:?} not negotiated with peer {}",
+                        afi, safi, addr
+                    )));
+                    return;
+                }
+                vec![requested]
             }
+
+            // Any parameter unset: filter negotiated capabilities
+            _ => negotiated
+                .into_iter()
+                .filter(|cap| {
+                    afi.is_none_or(|a| cap.afi == a) && safi.is_none_or(|s| cap.safi == s)
+                })
+                .collect(),
         };
 
         match reset_type {
@@ -672,10 +680,10 @@ impl BgpServer {
             .await
             .map_err(|_| "failed to get peer capabilities".to_string())?;
 
-        if caps.is_empty() {
+        if caps.multiprotocol.is_empty() {
             Err("no negotiated capabilities".to_string())
         } else {
-            Ok(caps.into_iter().collect())
+            Ok(caps.multiprotocol.into_iter().collect())
         }
     }
 

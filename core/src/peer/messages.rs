@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::fsm::{BgpOpenParams, FsmEvent};
+use super::fsm::FsmEvent;
+use super::{BgpOpenParams, PeerCapabilities};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::{
-    BgpCapabiltyCode, Capability, OptionalParam, OptionalParamTypes, ParamVal,
-};
+use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, ParamVal};
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::IpNetwork;
@@ -42,23 +41,22 @@ fn default_local_capabilities() -> Vec<AfiSafi> {
     ]
 }
 
-/// Convert AfiSafi to capability bytes
-/// Format: [AFI_HIGH, AFI_LOW, RESERVED, SAFI]
-fn afi_safi_to_capability_bytes(afi_safi: &AfiSafi) -> Vec<u8> {
-    let afi_bytes = (afi_safi.afi as u16).to_be_bytes();
-    vec![afi_bytes[0], afi_bytes[1], 0x00, afi_safi.safi as u8]
-}
-
-/// Extract multiprotocol capabilities from OPEN message
-fn extract_capabilities(open_msg: &OpenMessage) -> Vec<AfiSafi> {
-    let mut capabilities = Vec::new();
+/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760)
+fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
+    let mut capabilities = PeerCapabilities::default();
 
     for param in &open_msg.optional_params {
         if let ParamVal::Capability(cap) = &param.param_value {
-            if cap.code == BgpCapabiltyCode::Multiprotocol {
-                if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
-                    capabilities.push(afi_safi);
+            match cap.code {
+                BgpCapabiltyCode::Multiprotocol => {
+                    if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
+                        capabilities.multiprotocol.insert(afi_safi);
+                    }
                 }
+                BgpCapabiltyCode::RouteRefresh => {
+                    capabilities.route_refresh = true;
+                }
+                _ => {}
             }
         }
     }
@@ -73,18 +71,15 @@ fn create_open_message(asn: u16, hold_time: u16, router_id: Ipv4Addr) -> OpenMes
     let mut optional_params = Vec::new();
 
     for afi_safi in local_capabilities {
-        let cap_bytes = afi_safi_to_capability_bytes(&afi_safi);
-        let capability = Capability {
-            code: BgpCapabiltyCode::Multiprotocol,
-            len: cap_bytes.len() as u8,
-            val: cap_bytes,
-        };
-        optional_params.push(OptionalParam {
-            param_type: OptionalParamTypes::Capabilities,
-            param_len: 2 + capability.len, // code(1) + len(1) + val
-            param_value: ParamVal::Capability(capability),
-        });
+        optional_params.push(OptionalParam::new_capability(
+            Capability::new_multiprotocol(&afi_safi),
+        ));
     }
+
+    // Add Route Refresh capability (RFC 2918)
+    optional_params.push(OptionalParam::new_capability(
+        Capability::new_route_refresh(),
+    ));
 
     // Calculate total optional params length
     let optional_params_len = optional_params
@@ -128,7 +123,7 @@ impl Peer {
         peer_hold_time: u16,
         local_asn: u16,
         local_hold_time: u16,
-        peer_capabilities: Vec<AfiSafi>,
+        peer_capabilities: PeerCapabilities,
     ) -> Result<(), io::Error> {
         // Set peer ASN and determine session type
         self.asn = Some(peer_asn);
@@ -141,11 +136,23 @@ impl Peer {
         // Negotiate multiprotocol capabilities (intersection of local and peer)
         let local_capabilities = default_local_capabilities();
         let local_set: HashSet<_> = local_capabilities.into_iter().collect();
-        let peer_set: HashSet<_> = peer_capabilities.into_iter().collect();
-        self.negotiated_capabilities = local_set.intersection(&peer_set).copied().collect();
+        let negotiated_multiprotocol = local_set
+            .intersection(&peer_capabilities.multiprotocol)
+            .copied()
+            .collect();
+
+        // Negotiate Route Refresh capability (RFC 2918)
+        // We always advertise it, so it's negotiated if the peer also advertises it
+        let negotiated_route_refresh = peer_capabilities.route_refresh;
+
+        self.negotiated_capabilities = PeerCapabilities {
+            multiprotocol: negotiated_multiprotocol,
+            route_refresh: negotiated_route_refresh,
+        };
 
         info!(&self.logger, "negotiated capabilities",
-              "capabilities" => format!("{:?}", self.negotiated_capabilities),
+              "multiprotocol" => format!("{:?}", self.negotiated_capabilities.multiprotocol),
+              "route_refresh" => self.negotiated_capabilities.route_refresh,
               "peer_ip" => self.addr.to_string());
 
         // Negotiate hold time: use minimum (RFC 4271).
@@ -311,7 +318,7 @@ impl Peer {
                     conn_type: self.conn_type,
                 });
 
-                // Extract multiprotocol capabilities from OPEN message
+                // Extract capabilities from OPEN message
                 let peer_capabilities = extract_capabilities(open_msg);
 
                 self.process_event(&FsmEvent::BgpOpenReceived(BgpOpenParams {
@@ -373,9 +380,20 @@ impl Peer {
 
     /// Handle received ROUTE_REFRESH message
     async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi) {
-        // Validate against negotiated capabilities
+        // RFC 2918: ROUTE_REFRESH capability must be negotiated
+        if !self.negotiated_capabilities.route_refresh {
+            warn!(&self.logger, "ROUTE_REFRESH received but capability not negotiated",
+                  "peer_ip" => self.addr.to_string());
+            return;
+        }
+
+        // Validate against negotiated multiprotocol capabilities
         let requested = AfiSafi::new(afi, safi);
-        if !self.negotiated_capabilities.contains(&requested) {
+        if !self
+            .negotiated_capabilities
+            .multiprotocol
+            .contains(&requested)
+        {
             warn!(&self.logger, "ROUTE_REFRESH for non-negotiated AFI/SAFI",
                   "peer_ip" => self.addr.to_string(),
                   "afi" => format!("{:?}", afi),
@@ -419,36 +437,21 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
-    fn test_afi_safi_to_capability_bytes() {
-        let cases = vec![
-            (
-                AfiSafi::new(Afi::Ipv4, Safi::Unicast),
-                vec![0x00, 0x01, 0x00, 0x01],
-            ),
-            (
-                AfiSafi::new(Afi::Ipv6, Safi::Unicast),
-                vec![0x00, 0x02, 0x00, 0x01],
-            ),
-            (
-                AfiSafi::new(Afi::Ipv4, Safi::Multicast),
-                vec![0x00, 0x01, 0x00, 0x02],
-            ),
-        ];
-
-        for (afi_safi, expected_bytes) in cases {
-            let bytes = afi_safi_to_capability_bytes(&afi_safi);
-            assert_eq!(bytes, expected_bytes, "{:?}", afi_safi);
-        }
-    }
-
-    #[test]
     fn test_extract_capabilities() {
         let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1));
         let capabilities = extract_capabilities(&open_msg);
 
-        assert_eq!(capabilities.len(), 2);
-        assert!(capabilities.contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
-        assert!(capabilities.contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)));
+        // Check multiprotocol capabilities
+        assert_eq!(capabilities.multiprotocol.len(), 2);
+        assert!(capabilities
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
+        assert!(capabilities
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)));
+
+        // Check route refresh capability
+        assert!(capabilities.route_refresh);
     }
 
     #[tokio::test]

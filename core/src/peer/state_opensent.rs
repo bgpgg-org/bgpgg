@@ -153,8 +153,8 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{MessageHeaderError, OpenMessageError};
-    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
+    use crate::peer::{BgpOpenParams, PeerCapabilities};
 
     #[tokio::test]
     async fn test_opensent_tcp_connection_fails() {
@@ -194,7 +194,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: local_hold,
-                peer_capabilities: vec![],
+                peer_capabilities: PeerCapabilities::default(),
             }))
             .await
             .unwrap();

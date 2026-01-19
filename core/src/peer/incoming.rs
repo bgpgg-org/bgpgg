@@ -39,7 +39,7 @@ impl Peer {
         }
 
         // Check if AFI/SAFI was negotiated
-        if !self.negotiated_capabilities.contains(&afi_safi) {
+        if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
             warn!(&self.logger, "received UPDATE for non-negotiated AFI/SAFI, disabling",
                   "afi_safi" => format!("{}", afi_safi), "peer" => &self.addr);
 
@@ -200,6 +200,7 @@ mod tests {
     use crate::config::MaxPrefixSetting;
     use crate::net::Ipv4Net;
     use crate::peer::BgpState;
+    use crate::peer::PeerCapabilities;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[tokio::test]
@@ -219,7 +220,10 @@ mod tests {
 
         for (negotiated, disabled, test_afi_safi, expected_valid, expect_disabled_after) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.negotiated_capabilities = negotiated.into_iter().collect();
+            peer.negotiated_capabilities = PeerCapabilities {
+                multiprotocol: negotiated.into_iter().collect(),
+                route_refresh: false,
+            };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 
             let result = peer.validate_afi_safi(test_afi_safi);

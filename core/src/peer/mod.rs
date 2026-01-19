@@ -16,6 +16,7 @@ use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::multiprotocol::AfiSafi;
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
 use crate::debug;
@@ -34,6 +35,33 @@ use std::time::{Duration, Instant};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// BGP capabilities negotiated between peers
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerCapabilities {
+    /// Multiprotocol extensions (RFC 4760)
+    pub multiprotocol: HashSet<AfiSafi>,
+    /// Route Refresh capability (RFC 2918)
+    pub route_refresh: bool,
+}
+
+impl PeerCapabilities {
+    /// Check if a specific AFI/SAFI is negotiated
+    pub fn supports_afi_safi(&self, afi_safi: &AfiSafi) -> bool {
+        self.multiprotocol.contains(afi_safi)
+    }
+}
+
+/// Parameters from received BGP OPEN message
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BgpOpenParams {
+    pub peer_asn: u16,
+    pub peer_hold_time: u16,
+    pub peer_bgp_id: u32,
+    pub local_asn: u16,
+    pub local_hold_time: u16,
+    pub peer_capabilities: PeerCapabilities,
+}
 
 mod fsm;
 mod incoming;
@@ -102,7 +130,7 @@ pub enum PeerOp {
     },
     GetStatistics(oneshot::Sender<PeerStatistics>),
     GetAdjRibIn(oneshot::Sender<Vec<Route>>),
-    GetNegotiatedCapabilities(oneshot::Sender<HashSet<crate::bgp::multiprotocol::AfiSafi>>),
+    GetNegotiatedCapabilities(oneshot::Sender<PeerCapabilities>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
     /// Hard reset - sends CEASE/ADMINISTRATIVE_RESET, closes connection, but keeps task alive
@@ -238,8 +266,8 @@ pub struct Peer {
     sent_open: Option<OpenMessage>,
     /// OPEN message received from peer (for BMP PeerUp)
     received_open: Option<OpenMessage>,
-    /// Negotiated multiprotocol capabilities (intersection of local and peer)
-    negotiated_capabilities: HashSet<crate::bgp::multiprotocol::AfiSafi>,
+    /// Negotiated capabilities with peer
+    negotiated_capabilities: PeerCapabilities,
     /// AFI/SAFI pairs disabled due to errors (RFC 4760 Section 7)
     disabled_afi_safi: HashSet<crate::bgp::multiprotocol::AfiSafi>,
 }
@@ -294,7 +322,7 @@ impl Peer {
             established_at: None,
             sent_open: None,
             received_open: None,
-            negotiated_capabilities: HashSet::new(),
+            negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
             logger,
         }
@@ -439,7 +467,7 @@ pub mod test_helpers {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
-            negotiated_capabilities: HashSet::new(),
+            negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
             logger: Arc::new(Logger::default()),
         }

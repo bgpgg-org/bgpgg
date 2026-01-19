@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::fsm::{BgpState, FsmEvent};
+use super::PeerCapabilities;
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
@@ -82,8 +83,8 @@ impl Peer {
                             // Drop silently
                         }
                         PeerOp::GetNegotiatedCapabilities(response) => {
-                            // Return empty set if not in Established state
-                            let _ = response.send(std::collections::HashSet::new());
+                            // Return empty capabilities if not in Established state
+                            let _ = response.send(PeerCapabilities::default());
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
@@ -335,7 +336,7 @@ pub(super) mod tests {
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::log::Logger;
-    use crate::peer::fsm::BgpOpenParams;
+    use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use std::collections::HashSet;
@@ -393,7 +394,7 @@ pub(super) mod tests {
             sent_open: None,
             received_open: None,
             logger: Arc::new(Logger::default()),
-            negotiated_capabilities: HashSet::new(),
+            negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
         }
     }
@@ -561,7 +562,7 @@ pub(super) mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-            peer_capabilities: vec![],
+            peer_capabilities: PeerCapabilities::default(),
         }))
         .await
         .unwrap();

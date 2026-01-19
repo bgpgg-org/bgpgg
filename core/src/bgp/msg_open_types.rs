@@ -89,6 +89,15 @@ pub(crate) struct Capability {
     pub(crate) val: Vec<u8>,
 }
 
+/// Convert AfiSafi to capability bytes
+/// Format: [AFI_HIGH, AFI_LOW, RESERVED, SAFI]
+pub(crate) fn afi_safi_to_capability_bytes(
+    afi_safi: &crate::bgp::multiprotocol::AfiSafi,
+) -> Vec<u8> {
+    let afi_bytes = (afi_safi.afi as u16).to_be_bytes();
+    vec![afi_bytes[0], afi_bytes[1], 0x00, afi_safi.safi as u8]
+}
+
 impl Capability {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -96,6 +105,26 @@ impl Capability {
         bytes.push(self.len);
         bytes.extend_from_slice(&self.val);
         bytes
+    }
+
+    /// Create a Route Refresh capability (RFC 2918)
+    pub(crate) fn new_route_refresh() -> Self {
+        Capability {
+            code: BgpCapabiltyCode::RouteRefresh,
+            len: 0,
+            val: vec![],
+        }
+    }
+
+    /// Create a Multiprotocol capability (RFC 4760)
+    pub(crate) fn new_multiprotocol(afi_safi: &crate::bgp::multiprotocol::AfiSafi) -> Self {
+        let val = afi_safi_to_capability_bytes(afi_safi);
+
+        Capability {
+            code: BgpCapabiltyCode::Multiprotocol,
+            len: val.len() as u8,
+            val,
+        }
     }
 }
 
@@ -113,5 +142,43 @@ impl OptionalParam {
         bytes.push(self.param_len);
         bytes.extend_from_slice(&self.param_value.to_bytes());
         bytes
+    }
+
+    /// Create an OptionalParam from a Capability
+    pub(crate) fn new_capability(capability: Capability) -> Self {
+        OptionalParam {
+            param_type: OptionalParamTypes::Capabilities,
+            param_len: 2 + capability.len, // code(1) + len(1) + val
+            param_value: ParamVal::Capability(capability),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+    #[test]
+    fn test_afi_safi_to_capability_bytes() {
+        let cases = vec![
+            (
+                AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+                vec![0x00, 0x01, 0x00, 0x01],
+            ),
+            (
+                AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+                vec![0x00, 0x02, 0x00, 0x01],
+            ),
+            (
+                AfiSafi::new(Afi::Ipv4, Safi::Multicast),
+                vec![0x00, 0x01, 0x00, 0x02],
+            ),
+        ];
+
+        for (afi_safi, expected_bytes) in cases {
+            let bytes = afi_safi_to_capability_bytes(&afi_safi);
+            assert_eq!(bytes, expected_bytes, "{:?}", afi_safi);
+        }
     }
 }
