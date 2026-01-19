@@ -672,3 +672,44 @@ async fn test_ipv6_nexthop_rewrite() {
         .await
     );
 }
+#[tokio::test]
+async fn test_route_advertised_when_peer_becomes_established() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // FakePeer connects and completes OPEN handshake (reaches OpenConfirm)
+    let mut fake_peer = FakePeer::connect(None, &server).await;
+    fake_peer
+        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
+        .await;
+
+    // Announce route while peer is still in OpenConfirm (not Established)
+    announce_route(
+        &mut server,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Complete handshake to reach Established (send KEEPALIVE)
+    fake_peer.handshake_keepalive().await;
+
+    // Read UPDATE message - route should be automatically sent when peer became Established
+    let update = fake_peer.read_update().await;
+    let nlri = update.nlri_list();
+    assert_eq!(nlri.len(), 1, "Expected one route announcement");
+    assert_eq!(
+        nlri[0].to_string(),
+        "10.0.0.0/24",
+        "Expected 10.0.0.0/24 to be announced"
+    );
+}

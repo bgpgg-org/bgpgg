@@ -18,6 +18,7 @@ use super::common::TestServer;
 use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
+use bgpgg::bmp::msg::BmpMessage;
 use bgpgg::bmp::msg::{MessageType as BmpMessageType, BMP_VERSION};
 use bgpgg::bmp::msg_initiation::InitiationMessage;
 use bgpgg::bmp::msg_peer_down::PeerDownMessage;
@@ -33,6 +34,54 @@ use bgpgg::types::PeerDownReason;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
+
+/// Expected PeerUp message (without timestamps and OPEN message details)
+#[derive(Debug, Clone)]
+pub struct ExpectedPeerUp {
+    pub local_addr: IpAddr,
+    pub peer_addr: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub peer_port: u16,
+}
+
+/// Expected Statistics message (without timestamps)
+#[derive(Debug, Clone)]
+pub struct ExpectedStatistics {
+    pub peer_addr: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub stats: Vec<(u16, u64)>,
+}
+
+/// Expected PeerDown message (without timestamps)
+#[derive(Debug, Clone)]
+pub struct ExpectedPeerDown {
+    pub peer_addr: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub reason: PeerDownReason,
+}
+
+/// Expected RouteMonitoring message (without timestamps)
+#[derive(Debug, Clone)]
+pub struct ExpectedRouteMonitoring {
+    pub peer_addr: IpAddr,
+    pub peer_as: u32,
+    pub peer_bgp_id: u32,
+    pub peer_flags: u8,
+    pub nlri: Vec<IpNetwork>,
+    pub withdrawn: Vec<IpNetwork>,
+}
+
+/// Expected BMP message for order-independent validation
+#[derive(Debug, Clone)]
+pub enum ExpectedBmpMessage {
+    PeerUp(ExpectedPeerUp),
+    PeerDown(ExpectedPeerDown),
+    Statistics(ExpectedStatistics),
+    RouteMonitoring(ExpectedRouteMonitoring),
+}
 
 /// Decode IP address from 16-byte BMP format (detects IPv4-mapped)
 pub fn decode_bmp_ip_address(bytes: &[u8; 16]) -> IpAddr {
@@ -302,48 +351,19 @@ impl FakeBmpServer {
         TerminationMessage { information }
     }
 
-    pub async fn assert_route_monitoring(
-        &mut self,
-        peer_addr: std::net::IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        peer_flags: u8,
-        expected_nlri: &[bgpgg::net::IpNetwork],
-        expected_withdrawn: &[bgpgg::net::IpNetwork],
-    ) {
+    pub async fn assert_route_monitoring(&mut self, expected: &ExpectedRouteMonitoring) {
         let msg = self.read_route_monitoring().await;
-        assert_bmp_route_monitoring_msg(
-            &msg,
-            peer_addr,
-            peer_as,
-            peer_bgp_id,
-            peer_flags,
-            expected_nlri,
-            expected_withdrawn,
-        );
+        assert_bmp_route_monitoring_msg(&msg, expected);
     }
 
-    pub async fn assert_peer_up(
-        &mut self,
-        local_addr: std::net::IpAddr,
-        peer_addr: std::net::IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        peer_port: u16,
-    ) {
+    pub async fn assert_peer_up(&mut self, expected: &ExpectedPeerUp) {
         let msg = self.read_peer_up().await;
-        assert_bmp_peer_up_msg(&msg, local_addr, peer_addr, peer_as, peer_bgp_id, peer_port);
+        assert_bmp_peer_up_msg(&msg, expected);
     }
 
-    pub async fn assert_peer_down(
-        &mut self,
-        peer_addr: std::net::IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        reason: &bgpgg::types::PeerDownReason,
-    ) {
+    pub async fn assert_peer_down(&mut self, expected: &ExpectedPeerDown) {
         let msg = self.read_peer_down().await;
-        assert_bmp_peer_down_msg(&msg, peer_addr, peer_as, peer_bgp_id, reason);
+        assert_bmp_peer_down_msg(&msg, expected);
     }
 
     pub async fn assert_termination(&mut self, expected_reason: TerminationReason) {
@@ -400,15 +420,154 @@ impl FakeBmpServer {
         }
     }
 
-    pub async fn assert_statistics(
-        &mut self,
-        peer_addr: std::net::IpAddr,
-        peer_as: u32,
-        peer_bgp_id: u32,
-        expected_stats: &[(u16, u64)],
-    ) {
+    pub async fn assert_statistics(&mut self, expected: &ExpectedStatistics) {
         let msg = self.read_statistics().await;
-        assert_bmp_statistics_msg(&msg, peer_addr, peer_as, peer_bgp_id, expected_stats);
+        assert_bmp_statistics_msg(&msg, expected);
+    }
+
+    /// Read and validate messages in any order
+    pub async fn assert_messages_no_order(&mut self, expected: &[ExpectedBmpMessage]) {
+        let mut remaining = expected.to_vec();
+
+        for _ in 0..expected.len() {
+            let (msg_type, body) = self.read_message().await;
+
+            let msg = if msg_type == BmpMessageType::PeerUpNotification.as_u8() {
+                BmpMessage::PeerUp(self.parse_peer_up_from_body(&body))
+            } else if msg_type == BmpMessageType::PeerDownNotification.as_u8() {
+                BmpMessage::PeerDown(self.parse_peer_down_from_body(&body))
+            } else if msg_type == BmpMessageType::StatisticsReport.as_u8() {
+                BmpMessage::StatisticsReport(self.parse_statistics_from_body(&body))
+            } else if msg_type == BmpMessageType::RouteMonitoring.as_u8() {
+                BmpMessage::RouteMonitoring(self.parse_route_monitoring_from_body(&body))
+            } else {
+                panic!("Unsupported message type: {}", msg_type);
+            };
+
+            let pos = remaining.iter().position(|exp_msg| match (&msg, exp_msg) {
+                (BmpMessage::PeerUp(a), ExpectedBmpMessage::PeerUp(e)) => {
+                    validate_bmp_peer_up_msg(a, e)
+                }
+                (BmpMessage::PeerDown(a), ExpectedBmpMessage::PeerDown(e)) => {
+                    validate_bmp_peer_down_msg(a, e)
+                }
+                (BmpMessage::StatisticsReport(a), ExpectedBmpMessage::Statistics(e)) => {
+                    validate_bmp_statistics_msg(a, e)
+                }
+                (BmpMessage::RouteMonitoring(a), ExpectedBmpMessage::RouteMonitoring(e)) => {
+                    validate_bmp_route_monitoring_msg(a, e)
+                }
+                _ => false,
+            });
+
+            assert!(pos.is_some(), "Unexpected message");
+            remaining.swap_remove(pos.unwrap());
+        }
+
+        assert!(
+            remaining.is_empty(),
+            "Missing expected messages: {:?}",
+            remaining
+        );
+    }
+
+    fn parse_peer_up_from_body(&self, body: &[u8]) -> PeerUpMessage {
+        let peer_header = parse_peer_header(body);
+        let mut offset = PEER_HEADER_SIZE;
+        let local_address_bytes: [u8; 16] = body[offset..offset + 16].try_into().unwrap();
+        let local_address = decode_bmp_ip_address(&local_address_bytes);
+        offset += 16;
+        let local_port = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        let remote_port = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        let (sent_open, sent_msg_len) = parse_bgp_open_from_bmp(body, offset);
+        offset += sent_msg_len;
+        let (received_open, _) = parse_bgp_open_from_bmp(body, offset);
+
+        PeerUpMessage {
+            peer_header,
+            local_address,
+            local_port,
+            remote_port,
+            sent_open_message: sent_open,
+            received_open_message: received_open,
+            information: Vec::new(),
+        }
+    }
+
+    fn parse_statistics_from_body(&self, body: &[u8]) -> StatisticsReportMessage {
+        let peer_header = parse_peer_header(body);
+        let offset = PEER_HEADER_SIZE;
+        let stats_count = u32::from_be_bytes(body[offset..offset + 4].try_into().unwrap()) as usize;
+        let mut offset = offset + 4;
+        let mut statistics = Vec::new();
+        for _ in 0..stats_count {
+            let stat_type = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+            offset += 2;
+            let stat_len =
+                u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap()) as usize;
+            offset += 2;
+            let stat_value = body[offset..offset + stat_len].to_vec();
+            offset += stat_len;
+            statistics.push(StatisticsTlv {
+                stat_type,
+                stat_value,
+            });
+        }
+        StatisticsReportMessage {
+            peer_header,
+            statistics,
+        }
+    }
+
+    fn parse_peer_down_from_body(&self, body: &[u8]) -> PeerDownMessage {
+        let peer_header = parse_peer_header(body);
+        let reason_code = body[PEER_HEADER_SIZE];
+        let offset = PEER_HEADER_SIZE + 1;
+
+        let reason = match reason_code {
+            1 => {
+                let notif_bytes = body[offset..].to_vec();
+                let notif =
+                    bgpgg::bgp::msg_notification::NotificationMessage::from_bytes(notif_bytes);
+                PeerDownReason::LocalNotification(notif)
+            }
+            2 => {
+                let event_code = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+                let fsm_event = match event_code {
+                    10 => bgpgg::peer::FsmEvent::HoldTimerExpires,
+                    _ => bgpgg::peer::FsmEvent::ManualStop,
+                };
+                PeerDownReason::LocalNoNotification(fsm_event)
+            }
+            3 => {
+                let notif_bytes = body[offset..].to_vec();
+                let notif =
+                    bgpgg::bgp::msg_notification::NotificationMessage::from_bytes(notif_bytes);
+                PeerDownReason::RemoteNotification(notif)
+            }
+            4 => PeerDownReason::RemoteNoNotification,
+            5 => PeerDownReason::PeerDeConfigured,
+            _ => panic!("Unknown peer down reason code: {}", reason_code),
+        };
+
+        PeerDownMessage {
+            peer_header,
+            reason,
+        }
+    }
+
+    fn parse_route_monitoring_from_body(&self, body: &[u8]) -> RouteMonitoringMessage {
+        let peer_header = parse_peer_header(body);
+        let bgp_msg_offset = PEER_HEADER_SIZE;
+        let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
+        let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec()).unwrap();
+
+        RouteMonitoringMessage {
+            peer_header,
+            bgp_update,
+        }
     }
 }
 
@@ -452,117 +611,90 @@ pub fn assert_bmp_initiation_msg(
     );
 }
 
-/// Assert that a PeerDownMessage matches expected values (ignoring timestamp)
-fn assert_bmp_peer_down_msg(
-    actual: &PeerDownMessage,
-    expected_peer_address: IpAddr,
-    expected_peer_as: u32,
-    expected_peer_bgp_id: u32,
-    expected_reason: &PeerDownReason,
-) {
-    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
-    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
-    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
-
-    // Check reason matches
-    match (&actual.reason, expected_reason) {
-        (
-            PeerDownReason::LocalNotification(actual_notif),
-            PeerDownReason::LocalNotification(expected_notif),
-        ) => {
-            assert_eq!(
-                actual_notif.error(),
-                expected_notif.error(),
-                "LocalNotification error mismatch"
-            );
-            assert_eq!(
-                actual_notif.data(),
-                expected_notif.data(),
-                "LocalNotification data mismatch"
-            );
-        }
-        (
-            PeerDownReason::LocalNoNotification(actual_event),
-            PeerDownReason::LocalNoNotification(expected_event),
-        ) => {
-            assert_eq!(
-                actual_event.to_event_code(),
-                expected_event.to_event_code(),
-                "LocalNoNotification FSM event mismatch"
-            );
-        }
-        (
-            PeerDownReason::RemoteNotification(actual_notif),
-            PeerDownReason::RemoteNotification(expected_notif),
-        ) => {
-            assert_eq!(
-                actual_notif.error(),
-                expected_notif.error(),
-                "RemoteNotification error mismatch"
-            );
-            assert_eq!(
-                actual_notif.data(),
-                expected_notif.data(),
-                "RemoteNotification data mismatch"
-            );
-        }
-        (PeerDownReason::RemoteNoNotification, PeerDownReason::RemoteNoNotification) => {}
-        (PeerDownReason::PeerDeConfigured, PeerDownReason::PeerDeConfigured) => {}
-        _ => panic!(
-            "PeerDown reason variant mismatch: expected {:?}, got {:?}",
-            expected_reason, actual.reason
-        ),
+fn validate_bmp_peer_down_msg(actual: &PeerDownMessage, expected: &ExpectedPeerDown) -> bool {
+    if actual.peer_header.peer_address != expected.peer_addr
+        || actual.peer_header.peer_as != expected.peer_as
+        || actual.peer_header.peer_bgp_id != expected.peer_bgp_id
+    {
+        return false;
     }
+
+    peer_down_reasons_match(&actual.reason, &expected.reason)
+}
+
+fn peer_down_reasons_match(actual: &PeerDownReason, expected: &PeerDownReason) -> bool {
+    match (actual, expected) {
+        (PeerDownReason::LocalNotification(a), PeerDownReason::LocalNotification(e)) => {
+            a.error() == e.error() && a.data() == e.data()
+        }
+        (PeerDownReason::LocalNoNotification(a), PeerDownReason::LocalNoNotification(e)) => {
+            a.to_event_code() == e.to_event_code()
+        }
+        (PeerDownReason::RemoteNotification(a), PeerDownReason::RemoteNotification(e)) => {
+            a.error() == e.error() && a.data() == e.data()
+        }
+        (PeerDownReason::RemoteNoNotification, PeerDownReason::RemoteNoNotification) => true,
+        (PeerDownReason::PeerDeConfigured, PeerDownReason::PeerDeConfigured) => true,
+        _ => false,
+    }
+}
+
+/// Assert that a PeerDownMessage matches expected values (ignoring timestamp)
+fn assert_bmp_peer_down_msg(actual: &PeerDownMessage, expected: &ExpectedPeerDown) {
+    assert!(validate_bmp_peer_down_msg(actual, expected));
+}
+
+fn validate_bmp_peer_up_msg(actual: &PeerUpMessage, expected: &ExpectedPeerUp) -> bool {
+    actual.local_address == expected.local_addr
+        && actual.peer_header.peer_address == expected.peer_addr
+        && actual.peer_header.peer_as == expected.peer_as
+        && actual.peer_header.peer_bgp_id == expected.peer_bgp_id
+        && actual.remote_port == expected.peer_port
 }
 
 /// Assert that a PeerUpMessage matches expected values (ignoring timestamp and local_port)
 ///
 /// Note: local_port is not checked because it's an ephemeral port when the connection
 /// is initiated (not the listening port).
-pub fn assert_bmp_peer_up_msg(
-    actual: &PeerUpMessage,
-    expected_local_address: IpAddr,
-    expected_peer_address: IpAddr,
-    expected_peer_as: u32,
-    expected_peer_bgp_id: u32,
-    expected_remote_port: u16,
-) {
-    assert_eq!(actual.local_address, expected_local_address);
-    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
-    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
-    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
-    assert_eq!(actual.remote_port, expected_remote_port);
+pub fn assert_bmp_peer_up_msg(actual: &PeerUpMessage, expected: &ExpectedPeerUp) {
+    assert!(validate_bmp_peer_up_msg(actual, expected));
+}
+
+fn validate_bmp_route_monitoring_msg(
+    actual: &RouteMonitoringMessage,
+    expected: &ExpectedRouteMonitoring,
+) -> bool {
+    if actual.peer_header().peer_address != expected.peer_addr
+        || actual.peer_header().peer_as != expected.peer_as
+        || actual.peer_header().peer_bgp_id != expected.peer_bgp_id
+        || actual.peer_header().peer_flags != expected.peer_flags
+    {
+        return false;
+    }
+
+    let mut actual_nlri = actual.bgp_update().nlri_list().to_vec();
+    let mut expected_nlri = expected.nlri.clone();
+    actual_nlri.sort_by_key(|n| format!("{:?}", n));
+    expected_nlri.sort_by_key(|n| format!("{:?}", n));
+
+    if actual_nlri != expected_nlri {
+        return false;
+    }
+
+    let mut actual_withdrawn = actual.bgp_update().withdrawn_routes().to_vec();
+    let mut expected_withdrawn_vec = expected.withdrawn.clone();
+    actual_withdrawn.sort_by_key(|n| format!("{:?}", n));
+    expected_withdrawn_vec.sort_by_key(|n| format!("{:?}", n));
+
+    actual_withdrawn == expected_withdrawn_vec
 }
 
 /// Assert that a RouteMonitoringMessage matches expected values (ignoring timestamp)
 pub fn assert_bmp_route_monitoring_msg(
     actual: &RouteMonitoringMessage,
-    expected_peer_address: IpAddr,
-    expected_peer_as: u32,
-    expected_peer_bgp_id: u32,
-    expected_peer_flags: u8,
-    expected_announced: &[IpNetwork],
-    expected_withdrawn: &[IpNetwork],
+    expected: &ExpectedRouteMonitoring,
 ) {
-    assert_eq!(actual.peer_header().peer_address, expected_peer_address);
-    assert_eq!(actual.peer_header().peer_as, expected_peer_as);
-    assert_eq!(actual.peer_header().peer_bgp_id, expected_peer_bgp_id);
-    assert_eq!(actual.peer_header().peer_flags, expected_peer_flags);
-
-    let mut actual_nlri = actual.bgp_update().nlri_list().to_vec();
-    let mut expected_nlri = expected_announced.to_vec();
-    actual_nlri.sort_by_key(|n| format!("{:?}", n));
-    expected_nlri.sort_by_key(|n| format!("{:?}", n));
-    assert_eq!(actual_nlri, expected_nlri, "NLRI mismatch");
-
-    let mut actual_withdrawn = actual.bgp_update().withdrawn_routes().to_vec();
-    let mut expected_withdrawn_vec = expected_withdrawn.to_vec();
-    actual_withdrawn.sort_by_key(|n| format!("{:?}", n));
-    expected_withdrawn_vec.sort_by_key(|n| format!("{:?}", n));
-    assert_eq!(
-        actual_withdrawn, expected_withdrawn_vec,
-        "Withdrawn routes mismatch"
-    );
+    assert!(validate_bmp_route_monitoring_msg(actual, expected));
 }
 
 /// Assert that a Termination message has the expected reason code
@@ -582,44 +714,40 @@ pub fn assert_bmp_termination_msg(msg: &TerminationMessage, expected_reason: Ter
     );
 }
 
-/// Assert that a Statistics Report message matches expected values
-pub fn assert_bmp_statistics_msg(
+fn validate_bmp_statistics_msg(
     actual: &StatisticsReportMessage,
-    expected_peer_address: IpAddr,
-    expected_peer_as: u32,
-    expected_peer_bgp_id: u32,
-    expected_stats: &[(u16, u64)],
-) {
-    assert_eq!(actual.peer_header.peer_address, expected_peer_address);
-    assert_eq!(actual.peer_header.peer_as, expected_peer_as);
-    assert_eq!(actual.peer_header.peer_bgp_id, expected_peer_bgp_id);
-
-    // Check statistics match
-    assert_eq!(
-        actual.statistics.len(),
-        expected_stats.len(),
-        "Statistics count mismatch"
-    );
+    expected: &ExpectedStatistics,
+) -> bool {
+    if actual.peer_header.peer_address != expected.peer_addr
+        || actual.peer_header.peer_as != expected.peer_as
+        || actual.peer_header.peer_bgp_id != expected.peer_bgp_id
+        || actual.statistics.len() != expected.stats.len()
+    {
+        return false;
+    }
 
     for (stat_tlv, (expected_type, expected_value)) in
-        actual.statistics.iter().zip(expected_stats.iter())
+        actual.statistics.iter().zip(expected.stats.iter())
     {
-        assert_eq!(stat_tlv.stat_type, *expected_type, "Stat type mismatch");
+        if stat_tlv.stat_type != *expected_type {
+            return false;
+        }
 
-        // Decode value based on length (4 bytes = u32, 8 bytes = u64)
         let actual_value = match stat_tlv.stat_value.len() {
             4 => u32::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()) as u64,
             8 => u64::from_be_bytes(stat_tlv.stat_value[..].try_into().unwrap()),
-            _ => panic!(
-                "Unexpected stat value length: {}",
-                stat_tlv.stat_value.len()
-            ),
+            _ => return false,
         };
 
-        assert_eq!(
-            actual_value, *expected_value,
-            "Stat value mismatch for type {}",
-            expected_type
-        );
+        if actual_value != *expected_value {
+            return false;
+        }
     }
+
+    true
+}
+
+/// Assert that a Statistics Report message matches expected values
+pub fn assert_bmp_statistics_msg(actual: &StatisticsReportMessage, expected: &ExpectedStatistics) {
+    assert!(validate_bmp_statistics_msg(actual, expected));
 }

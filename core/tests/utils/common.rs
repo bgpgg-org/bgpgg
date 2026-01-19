@@ -18,6 +18,7 @@ use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MA
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
+use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
@@ -28,7 +29,7 @@ use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 /// Test server handle that includes runtime for killing the server
 pub struct TestServer {
@@ -696,6 +697,8 @@ pub struct ExpectedStats {
     pub min_update_received: Option<u64>,
     pub min_keepalive_sent: Option<u64>,
     pub min_keepalive_received: Option<u64>,
+    pub min_notification_sent: Option<u64>,
+    pub min_notification_received: Option<u64>,
 }
 
 impl ExpectedStats {
@@ -720,6 +723,12 @@ impl ExpectedStats {
             && self
                 .min_keepalive_received
                 .is_none_or(|e| s.keepalive_received >= e)
+            && self
+                .min_notification_sent
+                .is_none_or(|e| s.notification_sent >= e)
+            && self
+                .min_notification_received
+                .is_none_or(|e| s.notification_received >= e)
     }
 }
 
@@ -1319,18 +1328,49 @@ impl FakePeer {
         assert!(matches!(msg, BgpMessage::Keepalive(_)));
     }
 
-    /// Read a NOTIFICATION message (skips any KEEPALIVEs)
+    /// Read a NOTIFICATION message (skips any KEEPALIVEs) with 5s timeout
     pub async fn read_notification(&mut self) -> NotificationMessage {
-        loop {
-            let msg = read_bgp_message(self.stream.as_mut().unwrap())
-                .await
-                .expect("Failed to read message");
+        let result = timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = read_bgp_message(self.stream.as_mut().unwrap())
+                    .await
+                    .expect("Failed to read message");
 
-            match msg {
-                BgpMessage::Notification(notif) => return notif,
-                BgpMessage::Keepalive(_) => continue, // Skip KEEPALIVEs sent by peer
-                _ => panic!("Expected NOTIFICATION, got unexpected message type"),
+                match msg {
+                    BgpMessage::Notification(notif) => return notif,
+                    BgpMessage::Keepalive(_) => continue, // Skip KEEPALIVEs sent by peer
+                    _ => panic!("Expected NOTIFICATION, got unexpected message type"),
+                }
             }
+        })
+        .await;
+
+        match result {
+            Ok(notif) => notif,
+            Err(_) => panic!("Timeout waiting for NOTIFICATION message"),
+        }
+    }
+
+    /// Read an UPDATE message (skips any KEEPALIVEs) with 5s timeout
+    pub async fn read_update(&mut self) -> UpdateMessage {
+        let result = timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = read_bgp_message(self.stream.as_mut().unwrap())
+                    .await
+                    .expect("Failed to read UPDATE");
+
+                match msg {
+                    BgpMessage::Update(update) => return update,
+                    BgpMessage::Keepalive(_) => continue, // Skip KEEPALIVEs sent by peer
+                    _ => panic!("Expected UPDATE, got {:?}", msg),
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(update) => update,
+            Err(_) => panic!("Timeout waiting for UPDATE message"),
         }
     }
 

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::fsm::{BgpOpenParams, BgpState, FsmEvent};
+use super::fsm::{BgpState, FsmEvent};
+use super::{BgpOpenParams, PeerCapabilities};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
@@ -118,7 +119,7 @@ impl Peer {
                             peer_hold_time: open.hold_time,
                             local_asn: self.fsm.local_asn(),
                             local_hold_time: self.fsm.local_hold_time(),
-                            peer_capabilities: vec![],
+                            peer_capabilities: PeerCapabilities::default(),
                             peer_bgp_id: open.bgp_identifier,
                         });
                         if let Err(e) = self.process_event(&event).await {
@@ -330,8 +331,8 @@ mod tests {
     use crate::bgp::msg_notification::{
         CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
     };
-    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
+    use crate::peer::BgpOpenParams;
 
     #[tokio::test]
     async fn test_bgp_message_errors_in_connect_active() {
@@ -519,7 +520,7 @@ mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-            peer_capabilities: vec![],
+            peer_capabilities: PeerCapabilities::default(),
         }))
         .await
         .unwrap();
@@ -600,7 +601,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: 180,
-                peer_capabilities: vec![],
+                peer_capabilities: PeerCapabilities::default(),
             }),
             FsmEvent::BgpUpdateMsgErr(NotificationMessage::new(
                 BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),

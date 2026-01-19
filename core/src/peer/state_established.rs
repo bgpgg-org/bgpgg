@@ -14,9 +14,12 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::bgp::msg::Message;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_route_refresh::RouteRefreshMessage;
+use crate::bgp::multiprotocol::AfiSafi;
 use crate::types::PeerDownReason;
-use crate::{debug, error, info};
+use crate::{debug, error, info, warn};
 use std::mem;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -185,20 +188,67 @@ impl Peer {
                             let routes = self.rib_in.get_all_routes();
                             let _ = response.send(routes);
                         }
-                        PeerOp::SendRouteRefresh => {
-                            use crate::bgp::msg::Message;
-                            use crate::bgp::msg_route_refresh::RouteRefreshMessage;
-                            use crate::bgp::multiprotocol::{Afi, Safi};
+                        PeerOp::SendRouteRefresh { afi, safi } => {
+                            // RFC 2918: Only send if capability was negotiated
+                            if !self.negotiated_capabilities.route_refresh {
+                                warn!(&self.logger, "cannot send ROUTE_REFRESH: capability not negotiated",
+                                      "peer_ip" => peer_ip.to_string());
+                                continue;
+                            }
 
-                            let refresh_msg = RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast);
+                            // Validate that the specific AFI/SAFI was negotiated
+                            let afi_safi = AfiSafi::new(afi, safi);
+                            if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
+                                warn!(&self.logger, "cannot send ROUTE_REFRESH: AFI/SAFI not negotiated",
+                                      "peer_ip" => peer_ip.to_string(),
+                                      "afi" => format!("{:?}", afi),
+                                      "safi" => format!("{:?}", safi));
+                                continue;
+                            }
+
+                            let refresh_msg = RouteRefreshMessage::new(afi, safi);
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
-                                    error!(&self.logger, "failed to send ROUTE_REFRESH", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                    error!(&self.logger, "failed to send ROUTE_REFRESH",
+                                           "peer_ip" => peer_ip.to_string(),
+                                           "afi" => format!("{:?}", afi),
+                                           "safi" => format!("{:?}", safi),
+                                           "error" => e.to_string());
                                 } else {
                                     self.statistics.route_refresh_sent += 1;
-                                    info!(&self.logger, "sent ROUTE_REFRESH", "peer_ip" => peer_ip.to_string());
+                                    info!(&self.logger, "sent ROUTE_REFRESH",
+                                          "peer_ip" => peer_ip.to_string(),
+                                          "afi" => format!("{:?}", afi),
+                                          "safi" => format!("{:?}", safi));
                                 }
                             }
+                        }
+                        PeerOp::GetNegotiatedCapabilities(response) => {
+                            let _ = response.send(self.negotiated_capabilities.clone());
+                        }
+                        PeerOp::HardReset => {
+                            info!(&self.logger, "hard reset requested", "peer_ip" => peer_ip.to_string());
+
+                            // Send CEASE/ADMINISTRATIVE_RESET notification
+                            let notif = NotificationMessage::new(
+                                BgpError::Cease(CeaseSubcode::AdministrativeReset),
+                                Vec::new()
+                            );
+
+                            if let Some(conn) = &mut self.conn {
+                                if let Err(e) = conn.tx.write_all(&notif.serialize()).await {
+                                    error!(&self.logger, "failed to send hard reset notification",
+                                          "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                } else {
+                                    self.statistics.notification_sent += 1;
+                                }
+                            }
+
+                            // Close connection and transition to Idle (FSM handles this)
+                            self.try_process_event(&FsmEvent::NotifMsgVerErr(notif)).await;
+
+                            // Do NOT return true - keep task alive for reconnection
+                            return false;
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
@@ -268,8 +318,9 @@ mod tests {
     use crate::bgp::msg_notification::{
         CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
     };
-    use crate::peer::fsm::BgpOpenParams;
     use crate::peer::states::tests::create_test_peer_with_state;
+    use crate::peer::BgpOpenParams;
+    use crate::peer::PeerCapabilities;
 
     #[tokio::test]
     async fn test_established_ignores_start_events() {
@@ -758,7 +809,7 @@ mod tests {
                 peer_bgp_id: 0x02020202,
                 local_asn: 65000,
                 local_hold_time: 180,
-                peer_capabilities: vec![],
+                peer_capabilities: PeerCapabilities::default(),
             }),
             FsmEvent::BgpHeaderErr(NotificationMessage::new(
                 BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),

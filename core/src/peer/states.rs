@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use super::fsm::{BgpState, FsmEvent};
+use super::PeerCapabilities;
 use super::{Peer, PeerError, PeerOp, TcpConnection};
+use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::server::{AdminState, ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 impl Peer {
@@ -75,9 +78,13 @@ impl Peer {
                             // RFC violation: UPDATEs not allowed in OpenSent/OpenConfirm
                             // Drop silently
                         }
-                        PeerOp::SendRouteRefresh => {
+                        PeerOp::SendRouteRefresh { .. } => {
                             // ROUTE_REFRESH only allowed in Established state
                             // Drop silently
+                        }
+                        PeerOp::GetNegotiatedCapabilities(response) => {
+                            // Return empty capabilities if not in Established state
+                            let _ = response.send(PeerCapabilities::default());
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
@@ -85,6 +92,30 @@ impl Peer {
                         PeerOp::GetAdjRibIn(response) => {
                             let routes = self.rib_in.get_all_routes();
                             let _ = response.send(routes);
+                        }
+                        PeerOp::HardReset => {
+                            info!(&self.logger, "hard reset requested", "peer_ip" => peer_ip.to_string());
+
+                            // Send CEASE/ADMINISTRATIVE_RESET notification
+                            let notif = NotificationMessage::new(
+                                BgpError::Cease(CeaseSubcode::AdministrativeReset),
+                                Vec::new()
+                            );
+
+                            if let Some(conn) = &mut self.conn {
+                                if let Err(e) = conn.tx.write_all(&notif.serialize()).await {
+                                    error!(&self.logger, "failed to send hard reset notification",
+                                          "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                } else {
+                                    self.statistics.notification_sent += 1;
+                                }
+                            }
+
+                            // Close connection and transition to Idle (FSM handles this)
+                            self.try_process_event(&FsmEvent::NotifMsgVerErr(notif)).await;
+
+                            // Do NOT return true - keep task alive for reconnection
+                            return false;
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
@@ -305,7 +336,7 @@ pub(super) mod tests {
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::log::Logger;
-    use crate::peer::fsm::BgpOpenParams;
+    use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use std::collections::HashSet;
@@ -363,7 +394,7 @@ pub(super) mod tests {
             sent_open: None,
             received_open: None,
             logger: Arc::new(Logger::default()),
-            negotiated_capabilities: HashSet::new(),
+            negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
         }
     }
@@ -531,7 +562,7 @@ pub(super) mod tests {
             peer_bgp_id: 0x02020202,
             local_asn: 65000,
             local_hold_time: 180,
-            peer_capabilities: vec![],
+            peer_capabilities: PeerCapabilities::default(),
         }))
         .await
         .unwrap();

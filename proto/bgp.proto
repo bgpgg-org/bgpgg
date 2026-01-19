@@ -10,7 +10,7 @@ service BgpService {
     rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
     rpc DisablePeer(DisablePeerRequest) returns (DisablePeerResponse);
     rpc EnablePeer(EnablePeerRequest) returns (EnablePeerResponse);
-    rpc SoftResetPeer(SoftResetPeerRequest) returns (SoftResetPeerResponse);
+    rpc ResetPeer(ResetPeerRequest) returns (ResetPeerResponse);
     rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
     rpc ListPeersStream(ListPeersRequest) returns (stream Peer);
     rpc GetPeer(GetPeerRequest) returns (GetPeerResponse);
@@ -102,12 +102,34 @@ message EnablePeerRequest {
 
 message EnablePeerResponse {}
 
-// Soft reset peer request/response (sends ROUTE_REFRESH)
-message SoftResetPeerRequest {
-    string address = 1;
+// Reset type for ResetPeer operation
+enum ResetType {
+    SOFT_IN = 0;
+    SOFT_OUT = 1;
+    SOFT = 2;
+    HARD = 3;
 }
 
-message SoftResetPeerResponse {}
+// Address Family Identifier
+enum Afi {
+    IPV4 = 0;
+    IPV6 = 1;
+}
+
+// Subsequent Address Family Identifier
+enum Safi {
+    UNICAST = 0;
+}
+
+// Reset peer request/response (flexible reset supporting multiple types and AFI/SAFI)
+message ResetPeerRequest {
+    string address = 1;
+    ResetType reset_type = 2;
+    optional Afi afi = 3;      // If unset, applies to all negotiated AFIs
+    optional Safi safi = 4;    // If unset, applies to all negotiated SAFIs for the AFI(s)
+}
+
+message ResetPeerResponse {}
 
 // List peers request/response
 message ListPeersRequest {}

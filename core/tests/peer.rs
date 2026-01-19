@@ -18,7 +18,9 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Peer, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    AdminState, Afi, BgpState, Origin, Peer, ResetType, Route, Safi, SessionConfig,
+};
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 
@@ -974,9 +976,182 @@ async fn test_ipv6_peering() {
     poll_peer_stats(&server2, "::1", expected).await;
 }
 
+// Table-driven test for soft reset combinations
 #[tokio::test]
-async fn test_route_refresh() {
-    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+async fn test_reset_peer_soft() {
+    struct TestCase {
+        name: &'static str,
+        reset_type: ResetType,
+        afi: Option<Afi>,
+        safi: Option<Safi>,
+        // For SoftIn: server calling reset_peer, peer to verify updates on
+        // For SoftOut: server calling reset_peer (also peer to verify updates on)
+        reset_caller_is_server2: bool,
+    }
+
+    let test_cases = vec![
+        TestCase {
+            name: "soft_in_ipv4_unicast_explicit",
+            reset_type: ResetType::SoftIn,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: true,
+        },
+        TestCase {
+            name: "soft_in_all_negotiated",
+            reset_type: ResetType::SoftIn,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: true,
+        },
+        TestCase {
+            name: "soft_out_ipv4_unicast_explicit",
+            reset_type: ResetType::SoftOut,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_out_all_negotiated",
+            reset_type: ResetType::SoftOut,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_both_ipv4_unicast",
+            reset_type: ResetType::Soft,
+            afi: Some(Afi::Ipv4),
+            safi: Some(Safi::Unicast),
+            reset_caller_is_server2: false,
+        },
+        TestCase {
+            name: "soft_both_all_negotiated",
+            reset_type: ResetType::Soft,
+            afi: None,
+            safi: None,
+            reset_caller_is_server2: false,
+        },
+    ];
+
+    for tc in test_cases {
+        println!("Running test case: {}", tc.name);
+        let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+
+        // Server1 announces a route to server2
+        announce_route(
+            &mut server1,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Wait for route to propagate
+        poll_route_propagation(&[(
+            &server2,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            }],
+        )])
+        .await;
+
+        // Get initial stats
+        let (_, s1_initial_stats) = server1
+            .client
+            .get_peer(server2.address.to_string())
+            .await
+            .unwrap();
+        let s1_initial_update_sent = s1_initial_stats.unwrap().update_sent;
+
+        let (_, s2_initial_stats) = server2
+            .client
+            .get_peer(server1.address.to_string())
+            .await
+            .unwrap();
+        let s2_initial_update_received = s2_initial_stats.unwrap().update_received;
+
+        // Execute reset based on test case
+        if tc.reset_caller_is_server2 {
+            // SoftIn: Server2 requests routes from server1
+            server2
+                .client
+                .reset_peer(server1.address.to_string(), tc.reset_type, tc.afi, tc.safi)
+                .await
+                .unwrap();
+        } else {
+            // SoftOut or Soft: Server1 resends routes to server2
+            server1
+                .client
+                .reset_peer(server2.address.to_string(), tc.reset_type, tc.afi, tc.safi)
+                .await
+                .unwrap();
+        }
+
+        // Verify server1 re-sent the route to server2
+        poll_peer_stats(
+            &server1,
+            &server2.address.to_string(),
+            ExpectedStats {
+                min_update_sent: Some(s1_initial_update_sent + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Verify server2 received the re-sent/re-advertised route from server1
+        poll_peer_stats(
+            &server2,
+            &server1.address.to_string(),
+            ExpectedStats {
+                min_update_received: Some(s2_initial_update_received + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_hard_reset_established() {
+    // Use short idle_hold_time (1s) to avoid long waits in test
+    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, true);
+    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90, true);
+
+    let mut server1 = start_test_server(config1).await;
+    let server2 = start_test_server(config2).await;
+
+    // Server1 adds server2 as a configured peer with 1s idle_hold_time
+    server1
+        .client
+        .add_peer(
+            format!("{}:{}", server2.address, server2.bgp_port),
+            Some(SessionConfig {
+                idle_hold_time_secs: Some(1),
+                passive_mode: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for peering to establish
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(
+        &server2,
+        vec![server1.to_peer(BgpState::Established, false)],
+    )
+    .await;
 
     // Server1 announces a route to server2
     announce_route(
@@ -1012,41 +1187,137 @@ async fn test_route_refresh() {
         .get_peer(server2.address.to_string())
         .await
         .unwrap();
-    let s1_initial_update_sent = s1_initial_stats.unwrap().update_sent;
+    let s1_initial_notification_sent = s1_initial_stats.unwrap().notification_sent;
 
-    let (_, s2_initial_stats) = server2
+    // Execute hard reset on server1's peer (server2)
+    server1
         .client
-        .get_peer(server1.address.to_string())
-        .await
-        .unwrap();
-    let s2_initial_update_received = s2_initial_stats.unwrap().update_received;
-
-    // Server2 sends ROUTE_REFRESH to server1 (soft reset IN)
-    server2
-        .client
-        .soft_reset_peer(server1.address.to_string())
+        .reset_peer(server2.address.to_string(), ResetType::Hard, None, None)
         .await
         .unwrap();
 
-    // Verify server1 re-sent the route to server2
+    // Verify notification was sent
     poll_peer_stats(
         &server1,
         &server2.address.to_string(),
         ExpectedStats {
-            min_update_sent: Some(s1_initial_update_sent + 1),
+            min_notification_sent: Some(s1_initial_notification_sent + 1),
             ..Default::default()
         },
     )
     .await;
 
-    // Verify server2 received the re-advertised route from server1
-    poll_peer_stats(
+    // Verify route was withdrawn from server2
+    poll_route_withdrawal(&[&server2]).await;
+
+    // Verify configured peer (server2 from server1's perspective) reconnects
+    // Note: server1 adds server2 as configured, but server2 accepts server1 as unconfigured.
+    // After hard reset:
+    // - server1's peer task for server2 stays alive (configured) and reconnects after 1s
+    // - server2's peer task for server1 is removed (unconfigured)
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+    // Server2 should have a new unconfigured peer connection from server1
+    poll_peers(
         &server2,
-        &server1.address.to_string(),
-        ExpectedStats {
-            min_update_received: Some(s2_initial_update_received + 1),
-            ..Default::default()
-        },
+        vec![server1.to_peer(BgpState::Established, false)],
     )
     .await;
+
+    // Verify route is automatically re-advertised after reconnection
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
+async fn test_hard_reset_non_established_error() {
+    use bgpgg::config::Config;
+
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        "127.0.0.1".parse().unwrap(),
+        30,
+        true,
+    ))
+    .await;
+
+    // Add a peer that will never establish (no listening server, passive mode)
+    server1
+        .client
+        .add_peer(
+            "127.0.0.1:9999".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for peer to be added (will be in Idle state in passive mode)
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Try hard reset - should fail because not in Established state
+    // Note: reset_peer expects IP address, not IP:PORT
+    let result = server1
+        .client
+        .reset_peer("127.0.0.1".to_string(), ResetType::Hard, None, None)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Hard reset should fail on non-Established peer"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not in Established state") || err_msg.contains("Established"),
+        "Error message should mention Established state requirement: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_hard_reset_peer_not_found() {
+    use bgpgg::config::Config;
+
+    let mut server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        "127.0.0.1".parse().unwrap(),
+        30,
+        true,
+    ))
+    .await;
+
+    // Try hard reset on non-existent peer
+    // Note: reset_peer expects IP address, not IP:PORT
+    let result = server1
+        .client
+        .reset_peer("192.168.99.99".to_string(), ResetType::Hard, None, None)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Hard reset should fail on non-existent peer"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not found"),
+        "Error message should mention peer not found: {}",
+        err_msg
+    );
 }

@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use super::proto::{
-    bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddDefinedSetRequest,
+    self, bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddDefinedSetRequest,
     AddPeerRequest, AddPolicyRequest, AddRouteRequest, AsPathSegment, DefinedSetConfig,
     DefinedSetInfo, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
     ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
     ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
-    RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest, Route,
-    SessionConfig, SetPolicyAssignmentRequest, SoftResetPeerRequest, StatementConfig,
+    RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest,
+    ResetPeerRequest, Route, SessionConfig, SetPolicyAssignmentRequest, StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -363,10 +363,21 @@ impl BgpClient {
         Ok(())
     }
 
-    /// Soft reset a BGP peer (sends ROUTE_REFRESH message)
-    pub async fn soft_reset_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+    /// Reset a BGP peer with flexible reset types and AFI/SAFI support
+    pub async fn reset_peer(
+        &mut self,
+        address: String,
+        reset_type: proto::ResetType,
+        afi: Option<proto::Afi>,
+        safi: Option<proto::Safi>,
+    ) -> Result<(), tonic::Status> {
         self.inner
-            .soft_reset_peer(SoftResetPeerRequest { address })
+            .reset_peer(ResetPeerRequest {
+                address,
+                reset_type: reset_type as i32,
+                afi: afi.map(|a| a as i32),
+                safi: safi.map(|s| s as i32),
+            })
             .await?;
         Ok(())
     }
