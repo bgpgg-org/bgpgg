@@ -404,6 +404,7 @@ async fn test_add_route_stream() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
         (
             "10.0.1.0/24".to_string(),
@@ -415,6 +416,7 @@ async fn test_add_route_stream() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
         (
             "10.0.2.0/24".to_string(),
@@ -426,6 +428,7 @@ async fn test_add_route_stream() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
     ];
 
@@ -463,6 +466,7 @@ async fn test_add_route_stream_with_invalid_route() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
         (
             "invalid-prefix".to_string(),
@@ -474,6 +478,7 @@ async fn test_add_route_stream_with_invalid_route() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
         (
             "10.0.2.0/24".to_string(),
@@ -485,6 +490,7 @@ async fn test_add_route_stream_with_invalid_route() {
             false,
             vec![],
             vec![],
+            vec![], // large_communities
         ),
     ];
 
@@ -716,6 +722,7 @@ async fn test_extended_community_roundtrip() {
             false,
             vec![],
             ext_comms.clone(),
+            vec![], // large_communities
         )
         .await
         .unwrap();

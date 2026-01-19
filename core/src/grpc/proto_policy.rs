@@ -65,6 +65,18 @@ pub(super) fn proto_to_defined_set_config(
                 neighbors: ns.addresses.clone(),
             })
         }
+        Some(super::proto::defined_set_config::Config::ExtCommunitySet(ecs)) => {
+            DefinedSetConfig::ExtCommunitySet(crate::config::ExtCommunitySetConfig {
+                name,
+                ext_communities: ecs.ext_communities.clone(),
+            })
+        }
+        Some(super::proto::defined_set_config::Config::LargeCommunitySet(lcs)) => {
+            DefinedSetConfig::LargeCommunitySet(crate::config::LargeCommunitySetConfig {
+                name,
+                large_communities: lcs.large_communities.clone(),
+            })
+        }
         None => return Err("missing set config data".to_string()),
     };
 
@@ -98,6 +110,14 @@ pub(super) fn proto_to_statement_config(
                 set_name: m.set_name,
                 match_option: parse_match_option(m.match_option),
             }),
+            match_ext_community_set: c.match_ext_community_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
+            match_large_community_set: c.match_large_community_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
             prefix: c.prefix,
             neighbor: c.neighbor,
             has_asn: None,
@@ -125,6 +145,8 @@ pub(super) fn proto_to_statement_config(
         } else {
             None
         },
+        ext_community: None,   // TODO: Add proto support for extended communities
+        large_community: None, // TODO: Add proto support for large communities
         accept: a.accept,
         reject: a.reject,
     });
@@ -181,6 +203,24 @@ pub(super) fn defined_set_config_to_proto(config: DefinedSetConfig) -> DefinedSe
                 },
             )),
         ),
+        DefinedSetConfig::ExtCommunitySet(ecs) => (
+            "ext-community-set".to_string(),
+            ecs.name,
+            Some(super::proto::defined_set_info::SetData::ExtCommunitySet(
+                super::proto::ExtendedCommunitySetData {
+                    ext_communities: ecs.ext_communities,
+                },
+            )),
+        ),
+        DefinedSetConfig::LargeCommunitySet(lcs) => (
+            "large-community-set".to_string(),
+            lcs.name,
+            Some(super::proto::defined_set_info::SetData::LargeCommunitySet(
+                super::proto::LargeCommunitySetData {
+                    large_communities: lcs.large_communities,
+                },
+            )),
+        ),
     };
 
     DefinedSetInfo {
@@ -227,6 +267,26 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                         MatchOptionConfig::All => "all".to_string(),
                         MatchOptionConfig::Invert => "invert".to_string(),
                     },
+                }),
+                match_ext_community_set: s.conditions.match_ext_community_set.map(|m| {
+                    MatchSetRef {
+                        set_name: m.set_name,
+                        match_option: match m.match_option {
+                            MatchOptionConfig::Any => "any".to_string(),
+                            MatchOptionConfig::All => "all".to_string(),
+                            MatchOptionConfig::Invert => "invert".to_string(),
+                        },
+                    }
+                }),
+                match_large_community_set: s.conditions.match_large_community_set.map(|m| {
+                    MatchSetRef {
+                        set_name: m.set_name,
+                        match_option: match m.match_option {
+                            MatchOptionConfig::Any => "any".to_string(),
+                            MatchOptionConfig::All => "all".to_string(),
+                            MatchOptionConfig::Invert => "invert".to_string(),
+                        },
+                    }
                 }),
                 prefix: s.conditions.prefix.clone(),
                 neighbor: s.conditions.neighbor.clone(),

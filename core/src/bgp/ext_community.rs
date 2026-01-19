@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::Ipv4Addr;
 
 // RFC 4360: BGP Extended Communities Attribute
@@ -136,6 +137,20 @@ pub enum ParseExtCommunityError {
     InvalidLocal,
     InvalidHex,
     InvalidMac,
+}
+
+impl fmt::Display for ParseExtCommunityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseExtCommunityError::InvalidFormat => write!(f, "invalid format"),
+            ParseExtCommunityError::InvalidPrefix => write!(f, "invalid prefix"),
+            ParseExtCommunityError::InvalidAsn => write!(f, "invalid ASN"),
+            ParseExtCommunityError::InvalidIpv4 => write!(f, "invalid IPv4 address"),
+            ParseExtCommunityError::InvalidLocal => write!(f, "invalid local value"),
+            ParseExtCommunityError::InvalidHex => write!(f, "invalid hex value"),
+            ParseExtCommunityError::InvalidMac => write!(f, "invalid MAC address"),
+        }
+    }
 }
 
 /// Parse an extended community from a string

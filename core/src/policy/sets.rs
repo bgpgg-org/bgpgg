@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_update_types::LargeCommunity;
 use crate::config::{DefinedSetsConfig, PrefixMatchConfig};
 use crate::net::IpNetwork;
 use regex::Regex;
@@ -28,6 +29,8 @@ pub enum DefinedSetType {
     PrefixSet,
     AsPathSet,
     CommunitySet,
+    ExtCommunitySet,
+    LargeCommunitySet,
     NeighborSet,
 }
 
@@ -38,6 +41,8 @@ impl DefinedSetType {
             "prefix-set" => Ok(DefinedSetType::PrefixSet),
             "as-path-set" => Ok(DefinedSetType::AsPathSet),
             "community-set" => Ok(DefinedSetType::CommunitySet),
+            "ext-community-set" => Ok(DefinedSetType::ExtCommunitySet),
+            "large-community-set" => Ok(DefinedSetType::LargeCommunitySet),
             "neighbor-set" => Ok(DefinedSetType::NeighborSet),
             _ => Err(format!("invalid set type: {}", s)),
         }
@@ -49,6 +54,8 @@ impl DefinedSetType {
             DefinedSetType::PrefixSet => "prefix-set",
             DefinedSetType::AsPathSet => "as-path-set",
             DefinedSetType::CommunitySet => "community-set",
+            DefinedSetType::ExtCommunitySet => "ext-community-set",
+            DefinedSetType::LargeCommunitySet => "large-community-set",
             DefinedSetType::NeighborSet => "neighbor-set",
         }
     }
@@ -61,6 +68,8 @@ pub struct DefinedSets {
     pub neighbor_sets: HashMap<String, NeighborSet>,
     pub as_path_sets: HashMap<String, AsPathSet>,
     pub community_sets: HashMap<String, CommunitySet>,
+    pub ext_community_sets: HashMap<String, ExtCommunitySet>,
+    pub large_community_sets: HashMap<String, LargeCommunitySet>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +162,18 @@ pub struct CommunitySet {
     pub communities: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtCommunitySet {
+    pub name: String,
+    pub ext_communities: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LargeCommunitySet {
+    pub name: String,
+    pub large_communities: Vec<LargeCommunity>,
+}
+
 impl DefinedSets {
     /// Create new DefinedSets from config, validating and compiling all sets
     pub fn new(config: &DefinedSetsConfig) -> Result<Self, String> {
@@ -236,6 +257,50 @@ impl DefinedSets {
             );
         }
 
+        // Build extended community sets
+        for ext_community_set in &config.ext_community_sets {
+            let mut ext_communities = Vec::new();
+            for ext_community_str in &ext_community_set.ext_communities {
+                let value = crate::bgp::ext_community::parse_extended_community(ext_community_str)
+                    .map_err(|e| {
+                        format!(
+                            "ext-community-set '{}': invalid extended community '{}': {}",
+                            ext_community_set.name, ext_community_str, e
+                        )
+                    })?;
+                ext_communities.push(value);
+            }
+            sets.ext_community_sets.insert(
+                ext_community_set.name.clone(),
+                ExtCommunitySet {
+                    name: ext_community_set.name.clone(),
+                    ext_communities,
+                },
+            );
+        }
+
+        // Build large community sets
+        for large_community_set in &config.large_community_sets {
+            let mut large_communities = Vec::new();
+            for large_community_str in &large_community_set.large_communities {
+                let value = crate::bgp::large_community::parse_large_community(large_community_str)
+                    .map_err(|e| {
+                        format!(
+                            "large-community-set '{}': invalid large community '{}': {}",
+                            large_community_set.name, large_community_str, e
+                        )
+                    })?;
+                large_communities.push(value);
+            }
+            sets.large_community_sets.insert(
+                large_community_set.name.clone(),
+                LargeCommunitySet {
+                    name: large_community_set.name.clone(),
+                    large_communities,
+                },
+            );
+        }
+
         Ok(sets)
     }
 
@@ -245,6 +310,8 @@ impl DefinedSets {
             DefinedSetType::PrefixSet => self.prefix_sets.contains_key(name),
             DefinedSetType::AsPathSet => self.as_path_sets.contains_key(name),
             DefinedSetType::CommunitySet => self.community_sets.contains_key(name),
+            DefinedSetType::ExtCommunitySet => self.ext_community_sets.contains_key(name),
+            DefinedSetType::LargeCommunitySet => self.large_community_sets.contains_key(name),
             DefinedSetType::NeighborSet => self.neighbor_sets.contains_key(name),
         }
     }
@@ -255,6 +322,8 @@ impl DefinedSets {
             DefinedSetType::PrefixSet => self.prefix_sets.remove(name).is_some(),
             DefinedSetType::AsPathSet => self.as_path_sets.remove(name).is_some(),
             DefinedSetType::CommunitySet => self.community_sets.remove(name).is_some(),
+            DefinedSetType::ExtCommunitySet => self.ext_community_sets.remove(name).is_some(),
+            DefinedSetType::LargeCommunitySet => self.large_community_sets.remove(name).is_some(),
             DefinedSetType::NeighborSet => self.neighbor_sets.remove(name).is_some(),
         }
     }
@@ -265,6 +334,8 @@ impl DefinedSets {
             DefinedSetType::PrefixSet => self.prefix_sets.clear(),
             DefinedSetType::AsPathSet => self.as_path_sets.clear(),
             DefinedSetType::CommunitySet => self.community_sets.clear(),
+            DefinedSetType::ExtCommunitySet => self.ext_community_sets.clear(),
+            DefinedSetType::LargeCommunitySet => self.large_community_sets.clear(),
             DefinedSetType::NeighborSet => self.neighbor_sets.clear(),
         }
     }
@@ -456,6 +527,8 @@ mod tests {
                 name: "test-community".to_string(),
                 communities: vec!["65000:100".to_string()],
             }],
+            ext_community_sets: vec![],
+            large_community_sets: vec![],
         };
 
         let sets = DefinedSets::new(&config).unwrap();

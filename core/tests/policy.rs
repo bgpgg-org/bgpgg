@@ -188,3 +188,307 @@ async fn test_export_policy_prefix_match() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn test_export_policy_large_community_match() {
+    use bgpgg::bgp::msg_update_types::LargeCommunity;
+    use bgpgg::grpc::proto::{self, defined_set_config};
+
+    let (server1, mut server2) = setup_two_peered_servers(None).await;
+
+    // Add large-community-set
+    server2
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "large-community-set".to_string(),
+                name: "blocked-lcs".to_string(),
+                config: Some(defined_set_config::Config::LargeCommunitySet(
+                    proto::LargeCommunitySetData {
+                        large_communities: vec![
+                            "65536:100:200".to_string(),
+                            "4200000000:1:2".to_string(),
+                        ],
+                    },
+                )),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Create policy: reject routes with matching large communities
+    server2
+        .client
+        .add_policy(
+            "export-policy".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_large_community_set: Some(proto::MatchSetRef {
+                            set_name: "blocked-lcs".to_string(),
+                            match_option: "any".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Assign to peer
+    server2
+        .client
+        .set_policy_assignment(
+            server1.address.to_string(),
+            "export".to_string(),
+            vec!["export-policy".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce route with blocked large community (should be rejected)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            large_communities: vec![LargeCommunity::new(65536, 100, 200)],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Announce route with different large community (should propagate)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.2.0.0/24".to_string(),
+            next_hop: "192.168.1.2".to_string(),
+            large_communities: vec![LargeCommunity::new(65536, 999, 999)],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Announce route with no large communities (should propagate)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.3.0.0/24".to_string(),
+            next_hop: "192.168.1.3".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    let expected = vec![
+        Route {
+            prefix: "10.2.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                large_communities: vec![proto::LargeCommunity {
+                    global_admin: 65536,
+                    local_data_1: 999,
+                    local_data_2: 999,
+                }],
+                ..Default::default()
+            })],
+        },
+        Route {
+            prefix: "10.3.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        },
+    ];
+
+    poll_until_stable(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes_match(&routes, &expected)
+        },
+        Duration::from_millis(500),
+        "Routes with blocked large communities should be rejected",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_export_policy_ext_community_match() {
+    use bgpgg::grpc::proto::{self, defined_set_config};
+
+    let (server1, mut server2) = setup_two_peered_servers(None).await;
+
+    // Add ext-community-set
+    server2
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "ext-community-set".to_string(),
+                name: "blocked-ecs".to_string(),
+                config: Some(defined_set_config::Config::ExtCommunitySet(
+                    proto::ExtendedCommunitySetData {
+                        ext_communities: vec![
+                            "rt:65000:100".to_string(),
+                            "rt:192.168.1.1:200".to_string(),
+                        ],
+                    },
+                )),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Create policy: reject routes with matching extended communities
+    server2
+        .client
+        .add_policy(
+            "export-policy".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_ext_community_set: Some(proto::MatchSetRef {
+                            set_name: "blocked-ecs".to_string(),
+                            match_option: "any".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Assign to peer
+    server2
+        .client
+        .set_policy_assignment(
+            server1.address.to_string(),
+            "export".to_string(),
+            vec!["export-policy".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce route with blocked ext community (should be rejected)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            extended_communities: vec![0x0002FDE800000064u64], // rt:65000:100
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Announce route with different ext community (should propagate)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.2.0.0/24".to_string(),
+            next_hop: "192.168.1.2".to_string(),
+            extended_communities: vec![0x0002FDE8000003E7u64], // rt:65000:999
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Announce route with no ext communities (should propagate)
+    announce_route(
+        &mut server2,
+        RouteParams {
+            prefix: "10.3.0.0/24".to_string(),
+            next_hop: "192.168.1.3".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let peers = server1.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+
+    let expected = vec![
+        Route {
+            prefix: "10.2.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                extended_communities: vec![proto::ExtendedCommunity {
+                    community: Some(proto::extended_community::Community::TwoOctetAs(
+                        proto::extended_community::TwoOctetAsSpecific {
+                            is_transitive: true,
+                            sub_type: 0x02,
+                            asn: 65000,
+                            local_admin: 999,
+                        },
+                    )),
+                }],
+                ..Default::default()
+            })],
+        },
+        Route {
+            prefix: "10.3.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: server2.address.to_string(),
+                peer_address: peer_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        },
+    ];
+
+    poll_until_stable(
+        || async {
+            let routes = server1.client.get_routes().await.unwrap();
+            routes_match(&routes, &expected)
+        },
+        Duration::from_millis(500),
+        "Routes with blocked extended communities should be rejected",
+    )
+    .await;
+}

@@ -15,8 +15,8 @@
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
-    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, MpReachNlri,
-    MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, LargeCommunity,
+    MpReachNlri, MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{
@@ -83,6 +83,7 @@ pub(super) fn validate_attribute_length(
         AttrType::MpReachNlri => true, // Variable length
         AttrType::MpUnreachNlri => true, // Variable length
         AttrType::ExtendedCommunities => attr_len.is_multiple_of(8), // Must be multiple of 8
+        AttrType::LargeCommunities => attr_len.is_multiple_of(12), // Must be multiple of 12
     };
 
     if !valid {
@@ -341,6 +342,27 @@ pub(super) fn read_attr_extended_communities(bytes: &[u8]) -> Result<Vec<u64>, P
     Ok(ext_communities)
 }
 
+pub(super) fn read_attr_large_communities(
+    bytes: &[u8],
+) -> Result<Vec<LargeCommunity>, ParserError> {
+    // Length must be multiple of 12 (each large community is 12 octets)
+    if !bytes.len().is_multiple_of(12) {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            data: Vec::new(),
+        });
+    }
+
+    let mut large_communities = Vec::new();
+    for chunk in bytes.chunks_exact(12) {
+        let mut buf = [0u8; 12];
+        buf.copy_from_slice(chunk);
+        large_communities.push(LargeCommunity::from_bytes(buf));
+    }
+
+    Ok(large_communities)
+}
+
 pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, ParserError> {
     // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
     const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
@@ -579,6 +601,10 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
                     let ext_communities = read_attr_extended_communities(attr_data)?;
                     PathAttrValue::ExtendedCommunities(ext_communities)
                 }
+                AttrType::LargeCommunities => {
+                    let large_communities = read_attr_large_communities(attr_data)?;
+                    PathAttrValue::LargeCommunities(large_communities)
+                }
             }
         }
         None => {
@@ -724,6 +750,13 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             }
             ext_comm_bytes
         }
+        PathAttrValue::LargeCommunities(large_communities) => {
+            let mut large_comm_bytes = Vec::new();
+            for lc in large_communities {
+                large_comm_bytes.extend_from_slice(&lc.to_bytes());
+            }
+            large_comm_bytes
+        }
         PathAttrValue::Unknown { data, .. } => data.clone(),
     };
 
@@ -747,6 +780,7 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::MpReachNlri(_) => AttrType::MpReachNlri as u8,
         PathAttrValue::MpUnreachNlri(_) => AttrType::MpUnreachNlri as u8,
         PathAttrValue::ExtendedCommunities(_) => AttrType::ExtendedCommunities as u8,
+        PathAttrValue::LargeCommunities(_) => AttrType::LargeCommunities as u8,
         PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
     bytes.push(attr_type);
@@ -1418,6 +1452,70 @@ mod tests {
             }
         );
         assert_eq!(offset, 19);
+    }
+
+    #[test]
+    fn test_large_communities_roundtrip() {
+        let original_large_communities = vec![
+            LargeCommunity::new(65536, 100, 200),
+            LargeCommunity::new(4200000000, 1, 2),
+            LargeCommunity::new(0, 0, 0),
+        ];
+        let attr = PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::LargeCommunities(original_large_communities.clone()),
+        };
+
+        let bytes = write_path_attribute(&attr);
+        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
+
+        if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
+            assert_eq!(large_communities, original_large_communities);
+        } else {
+            panic!("Expected LargeCommunities attribute after roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_read_attr_large_communities() {
+        // Wire format: [GA:4][LD1:4][LD2:4] for each community
+        let bytes = vec![
+            0x00, 0x01, 0x00, 0x00, // GA = 65536
+            0x00, 0x00, 0x00, 0x64, // LD1 = 100
+            0x00, 0x00, 0x00, 0xC8, // LD2 = 200
+            0xFA, 0x56, 0xEA, 0x00, // GA = 4200000000
+            0x00, 0x00, 0x00, 0x01, // LD1 = 1
+            0x00, 0x00, 0x00, 0x02, // LD2 = 2
+        ];
+
+        let large_communities = read_attr_large_communities(&bytes).unwrap();
+        assert_eq!(large_communities.len(), 2);
+
+        assert_eq!(large_communities[0], LargeCommunity::new(65536, 100, 200));
+        assert_eq!(large_communities[1], LargeCommunity::new(4200000000, 1, 2));
+
+        // Verify field extraction
+        assert_eq!(large_communities[0].global_admin, 65536);
+        assert_eq!(large_communities[0].local_data_1, 100);
+        assert_eq!(large_communities[0].local_data_2, 200);
+    }
+
+    #[test]
+    fn test_read_attr_large_communities_invalid_length() {
+        // Length not multiple of 12
+        let bytes = vec![0x00, 0x01, 0x00, 0x00, 0x00];
+
+        let result = read_attr_large_communities(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(ParserError::BgpError { error, .. }) => {
+                assert_eq!(
+                    error,
+                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
+                );
+            }
+            _ => panic!("Expected OptionalAttributeError for invalid length"),
+        }
     }
 
     #[test]

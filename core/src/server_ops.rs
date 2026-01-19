@@ -23,7 +23,10 @@ use crate::peer::outgoing::{
     should_propagate_to_peer,
 };
 use crate::peer::{BgpState, PeerOp};
-use crate::policy::sets::{AsPathSet, CommunitySet, NeighborSet, PrefixMatch, PrefixSet};
+use crate::policy::sets::{
+    AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
+    PrefixSet,
+};
 use crate::policy::{DefinedSetType, PolicyResult};
 use crate::rib::{Path, Route, RouteSource};
 use crate::server::PolicyDirection;
@@ -80,6 +83,7 @@ impl BgpServer {
                 atomic_aggregate,
                 communities,
                 extended_communities,
+                large_communities,
                 response,
             } => {
                 self.handle_add_route(
@@ -92,6 +96,7 @@ impl BgpServer {
                     atomic_aggregate,
                     communities,
                     extended_communities,
+                    large_communities,
                     response,
                 )
                 .await;
@@ -820,6 +825,7 @@ impl BgpServer {
         atomic_aggregate: bool,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
+        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => format!("{:?}", next_hop));
@@ -835,6 +841,7 @@ impl BgpServer {
             atomic_aggregate,
             communities,
             extended_communities,
+            large_communities,
         );
 
         // Propagate to all peers using the common propagation logic
@@ -1185,6 +1192,7 @@ impl BgpServer {
                     batch.path.atomic_aggregate,
                     batch.path.communities.clone(),
                     batch.path.extended_communities.clone(),
+                    batch.path.large_communities.clone(),
                     batch.path.unknown_attrs.clone(),
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
@@ -1304,6 +1312,27 @@ impl BgpServer {
                     },
                 );
             }
+            DefinedSetConfig::ExtCommunitySet(config) => {
+                use crate::bgp::ext_community::parse_extended_community;
+                let mut ext_community_values = Vec::new();
+                for ec_str in &config.ext_communities {
+                    match parse_extended_community(ec_str) {
+                        Ok(val) => ext_community_values.push(val),
+                        Err(e) => {
+                            let _ =
+                                response.send(Err(format!("invalid extended community: {}", e)));
+                            return;
+                        }
+                    }
+                }
+                new_sets.ext_community_sets.insert(
+                    config.name.clone(),
+                    ExtCommunitySet {
+                        name: config.name.clone(),
+                        ext_communities: ext_community_values,
+                    },
+                );
+            }
             DefinedSetConfig::NeighborSet(config) => {
                 let mut neighbor_addrs = Vec::new();
                 for addr_str in &config.neighbors {
@@ -1320,6 +1349,26 @@ impl BgpServer {
                     NeighborSet {
                         name: config.name.clone(),
                         neighbors: neighbor_addrs,
+                    },
+                );
+            }
+            DefinedSetConfig::LargeCommunitySet(config) => {
+                use crate::bgp::msg_update_types::parse_large_community;
+                let mut large_community_values = Vec::new();
+                for lc_str in &config.large_communities {
+                    match parse_large_community(lc_str) {
+                        Ok(val) => large_community_values.push(val),
+                        Err(e) => {
+                            let _ = response.send(Err(format!("invalid large community: {}", e)));
+                            return;
+                        }
+                    }
+                }
+                new_sets.large_community_sets.insert(
+                    config.name.clone(),
+                    LargeCommunitySet {
+                        name: config.name.clone(),
+                        large_communities: large_community_values,
                     },
                 );
             }
@@ -1393,6 +1442,20 @@ impl BgpServer {
                 }
                 DefinedSetType::CommunitySet => {
                     if let Some(ref match_set) = config.conditions.match_community_set {
+                        if match_set.set_name == set_name {
+                            return true;
+                        }
+                    }
+                }
+                DefinedSetType::ExtCommunitySet => {
+                    if let Some(ref match_set) = config.conditions.match_ext_community_set {
+                        if match_set.set_name == set_name {
+                            return true;
+                        }
+                    }
+                }
+                DefinedSetType::LargeCommunitySet => {
+                    if let Some(ref match_set) = config.conditions.match_large_community_set {
                         if match_set.set_name == set_name {
                             return true;
                         }
@@ -1688,6 +1751,7 @@ fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
                 batch.path.atomic_aggregate,
                 batch.path.communities.clone(),
                 batch.path.extended_communities.clone(),
+                batch.path.large_communities.clone(),
                 batch.path.unknown_attrs.clone(),
             )
         })

@@ -43,7 +43,10 @@ use super::proto::{
 };
 
 // Proto conversion functions from sibling modules
-use super::proto_extcomm::{proto_extcomm_to_u64, u64_to_proto_extcomm};
+use super::proto_community::{
+    internal_to_proto_large_community, proto_extcomm_to_u64, proto_large_community_to_internal,
+    u64_to_proto_extcomm,
+};
 use super::proto_policy::{
     defined_set_config_to_proto, policy_info_to_proto, proto_to_defined_set_config,
     proto_to_statement_config,
@@ -122,6 +125,11 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 .extended_communities
                 .iter()
                 .map(|&ec| u64_to_proto_extcomm(ec))
+                .collect(),
+            large_communities: path
+                .large_communities
+                .iter()
+                .map(internal_to_proto_large_community)
                 .collect(),
         })
         .collect();
@@ -579,6 +587,13 @@ impl BgpService for BgpGrpcService {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| Status::invalid_argument(format!("Invalid extended community: {}", e)))?;
 
+        // Convert proto large communities to internal LargeCommunity
+        let large_communities = req
+            .large_communities
+            .iter()
+            .map(proto_large_community_to_internal)
+            .collect();
+
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
@@ -591,6 +606,7 @@ impl BgpService for BgpGrpcService {
             atomic_aggregate: req.atomic_aggregate,
             communities: req.communities,
             extended_communities,
+            large_communities,
             response: tx,
         };
 
@@ -640,6 +656,13 @@ impl BgpService for BgpGrpcService {
                 Err(_) => continue, // Skip routes with invalid extended communities
             };
 
+            // Convert proto large communities to internal LargeCommunity
+            let large_communities = req
+                .large_communities
+                .iter()
+                .map(proto_large_community_to_internal)
+                .collect();
+
             // Send request to BGP server
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
@@ -652,6 +675,7 @@ impl BgpService for BgpGrpcService {
                 atomic_aggregate: req.atomic_aggregate,
                 communities: req.communities,
                 extended_communities,
+                large_communities,
                 response: tx,
             };
 

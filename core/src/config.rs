@@ -149,6 +149,10 @@ pub struct DefinedSetsConfig {
     pub as_path_sets: Vec<AsPathSetConfig>,
     #[serde(default)]
     pub community_sets: Vec<CommunitySetConfig>,
+    #[serde(default)]
+    pub ext_community_sets: Vec<ExtCommunitySetConfig>,
+    #[serde(default)]
+    pub large_community_sets: Vec<LargeCommunitySetConfig>,
 }
 
 /// Named prefix set with masklength range support (YAML representation)
@@ -190,6 +194,20 @@ pub struct CommunitySetConfig {
     pub communities: Vec<String>, // "65000:100" format or decimal
 }
 
+/// Named extended community set (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExtCommunitySetConfig {
+    pub name: String,
+    pub ext_communities: Vec<String>, // "rt:65000:100" or hex format
+}
+
+/// Named large community set (YAML representation)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LargeCommunitySetConfig {
+    pub name: String,
+    pub large_communities: Vec<String>, // "GA:LD1:LD2" format
+}
+
 /// Enum wrapper for any defined set config type (used in management API)
 #[derive(Debug, Clone)]
 pub enum DefinedSetConfig {
@@ -197,6 +215,8 @@ pub enum DefinedSetConfig {
     NeighborSet(NeighborSetConfig),
     AsPathSet(AsPathSetConfig),
     CommunitySet(CommunitySetConfig),
+    ExtCommunitySet(ExtCommunitySetConfig),
+    LargeCommunitySet(LargeCommunitySetConfig),
 }
 
 impl DefinedSetConfig {
@@ -206,6 +226,8 @@ impl DefinedSetConfig {
             DefinedSetConfig::NeighborSet(c) => &c.name,
             DefinedSetConfig::AsPathSet(c) => &c.name,
             DefinedSetConfig::CommunitySet(c) => &c.name,
+            DefinedSetConfig::ExtCommunitySet(c) => &c.name,
+            DefinedSetConfig::LargeCommunitySet(c) => &c.name,
         }
     }
 
@@ -215,6 +237,10 @@ impl DefinedSetConfig {
             DefinedSetConfig::NeighborSet(_) => crate::policy::DefinedSetType::NeighborSet,
             DefinedSetConfig::AsPathSet(_) => crate::policy::DefinedSetType::AsPathSet,
             DefinedSetConfig::CommunitySet(_) => crate::policy::DefinedSetType::CommunitySet,
+            DefinedSetConfig::ExtCommunitySet(_) => crate::policy::DefinedSetType::ExtCommunitySet,
+            DefinedSetConfig::LargeCommunitySet(_) => {
+                crate::policy::DefinedSetType::LargeCommunitySet
+            }
         }
     }
 }
@@ -249,6 +275,10 @@ pub struct ConditionsConfig {
     pub match_as_path_set: Option<MatchSetRefConfig>,
     #[serde(default)]
     pub match_community_set: Option<MatchSetRefConfig>,
+    #[serde(default)]
+    pub match_ext_community_set: Option<MatchSetRefConfig>,
+    #[serde(default)]
+    pub match_large_community_set: Option<MatchSetRefConfig>,
 
     // Direct conditions (backward compatibility)
     #[serde(default)]
@@ -302,6 +332,10 @@ pub struct ActionsConfig {
     pub med: Option<MedActionConfig>,
     #[serde(default)]
     pub community: Option<CommunityActionConfig>,
+    #[serde(default)]
+    pub ext_community: Option<ExtCommunityActionConfig>,
+    #[serde(default)]
+    pub large_community: Option<LargeCommunityActionConfig>,
 }
 
 /// Local preference action
@@ -331,6 +365,24 @@ pub struct CommunityActionConfig {
     pub operation: String,
     /// Community values to add/remove/replace
     pub communities: Vec<String>,
+}
+
+/// Extended Community action
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExtCommunityActionConfig {
+    /// Operation: "add", "remove", "replace"
+    pub operation: String,
+    /// Extended community values to add/remove/replace
+    pub ext_communities: Vec<String>,
+}
+
+/// Large Community action
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LargeCommunityActionConfig {
+    /// Operation: "add", "remove", "replace"
+    pub operation: String,
+    /// Large community values to add/remove/replace (format: "GA:LD1:LD2")
+    pub large_communities: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

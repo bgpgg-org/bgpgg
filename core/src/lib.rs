@@ -48,6 +48,7 @@ pub(crate) mod test_helpers {
             atomic_aggregate: false,
             communities: vec![],
             extended_communities: vec![],
+            large_communities: vec![],
             unknown_attrs: vec![],
         })
     }
@@ -67,6 +68,7 @@ pub(crate) mod test_helpers {
             atomic_aggregate: false,
             communities: vec![],
             extended_communities: vec![],
+            large_communities: vec![],
             unknown_attrs: vec![],
         };
         f(&mut path);

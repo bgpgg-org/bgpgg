@@ -135,7 +135,8 @@ pub fn create_update_message(
         med,
         false,
         communities,
-        vec![],
+        vec![], // extended_communities
+        vec![], // large_communities
         vec![],
     );
 
@@ -247,6 +248,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
         proto_path.atomic_aggregate,
         communities,
         vec![], // extended_communities
+        vec![], // large_communities
         vec![], // unknown_attrs not compared
     ))
 }

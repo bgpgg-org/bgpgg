@@ -3,7 +3,10 @@ use crate::config::{
     StatementConfig,
 };
 use crate::net::IpNetwork;
-use crate::policy::sets::{AsPathSet, CommunitySet, DefinedSets, NeighborSet, PrefixSet};
+use crate::policy::sets::{
+    AsPathSet, CommunitySet, DefinedSets, ExtCommunitySet, LargeCommunitySet, NeighborSet,
+    PrefixSet,
+};
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -27,6 +30,22 @@ pub enum CommunityOp {
     Add(Vec<u32>),
     Remove(Vec<u32>),
     Replace(Vec<u32>),
+}
+
+/// Extended Community modification operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtCommunityOp {
+    Add(Vec<u64>),
+    Remove(Vec<u64>),
+    Replace(Vec<u64>),
+}
+
+/// Large Community modification operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LargeCommunityOp {
+    Add(Vec<crate::bgp::msg_update_types::LargeCommunity>),
+    Remove(Vec<crate::bgp::msg_update_types::LargeCommunity>),
+    Replace(Vec<crate::bgp::msg_update_types::LargeCommunity>),
 }
 
 // ============================================================================
@@ -98,6 +117,18 @@ impl Statement {
                 }
                 Condition::CommunitySet(arc_set, opt) => {
                     conditions.match_community_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::ExtCommunitySet(arc_set, opt) => {
+                    conditions.match_ext_community_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::LargeCommunitySet(arc_set, opt) => {
+                    conditions.match_large_community_set = Some(MatchSetRefConfig {
                         set_name: arc_set.name.clone(),
                         match_option: *opt,
                     });
@@ -184,6 +215,64 @@ impl Statement {
                         });
                     }
                 },
+                Action::SetExtCommunity(op) => {
+                    use crate::bgp::ext_community::format_extended_community;
+                    use crate::config::ExtCommunityActionConfig;
+
+                    match op {
+                        ExtCommunityOp::Add(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "add".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                        ExtCommunityOp::Remove(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "remove".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                        ExtCommunityOp::Replace(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "replace".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+                Action::SetLargeCommunity(op) => {
+                    use crate::config::LargeCommunityActionConfig;
+
+                    match op {
+                        LargeCommunityOp::Add(lcs) => {
+                            actions.large_community = Some(LargeCommunityActionConfig {
+                                operation: "add".to_string(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                            });
+                        }
+                        LargeCommunityOp::Remove(lcs) => {
+                            actions.large_community = Some(LargeCommunityActionConfig {
+                                operation: "remove".to_string(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                            });
+                        }
+                        LargeCommunityOp::Replace(lcs) => {
+                            actions.large_community = Some(LargeCommunityActionConfig {
+                                operation: "replace".to_string(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -235,6 +324,8 @@ pub enum Action {
     SetLocalPref { value: u32, force: bool },
     SetMed(Option<u32>),
     SetCommunity(CommunityOp),
+    SetExtCommunity(ExtCommunityOp),
+    SetLargeCommunity(LargeCommunityOp),
 }
 
 impl Action {
@@ -270,6 +361,43 @@ impl Action {
                 }
                 true
             }
+            Action::SetExtCommunity(op) => {
+                match op {
+                    ExtCommunityOp::Add(to_add) => {
+                        for &ec in to_add {
+                            if !path.extended_communities.contains(&ec) {
+                                path.extended_communities.push(ec);
+                            }
+                        }
+                    }
+                    ExtCommunityOp::Remove(to_remove) => {
+                        path.extended_communities
+                            .retain(|ec| !to_remove.contains(ec));
+                    }
+                    ExtCommunityOp::Replace(new_ext_communities) => {
+                        path.extended_communities = new_ext_communities.clone();
+                    }
+                }
+                true
+            }
+            Action::SetLargeCommunity(op) => {
+                match op {
+                    LargeCommunityOp::Add(to_add) => {
+                        for &lc in to_add {
+                            if !path.large_communities.contains(&lc) {
+                                path.large_communities.push(lc);
+                            }
+                        }
+                    }
+                    LargeCommunityOp::Remove(to_remove) => {
+                        path.large_communities.retain(|lc| !to_remove.contains(lc));
+                    }
+                    LargeCommunityOp::Replace(new_large_communities) => {
+                        path.large_communities = new_large_communities.clone();
+                    }
+                }
+                true
+            }
         }
     }
 }
@@ -289,6 +417,8 @@ pub enum Condition {
     AsPathSet(Arc<AsPathSet>, MatchOptionConfig),
     Community(u32),
     CommunitySet(Arc<CommunitySet>, MatchOptionConfig),
+    ExtCommunitySet(Arc<ExtCommunitySet>, MatchOptionConfig),
+    LargeCommunitySet(Arc<LargeCommunitySet>, MatchOptionConfig),
     RouteType(RouteType),
 }
 
@@ -348,6 +478,34 @@ impl Condition {
                 MatchOptionConfig::Invert => {
                     !path.communities.iter().any(|c| set.communities.contains(c))
                 }
+            },
+            Condition::ExtCommunitySet(set, match_opt) => match match_opt {
+                MatchOptionConfig::Any => path
+                    .extended_communities
+                    .iter()
+                    .any(|ec| set.ext_communities.contains(ec)),
+                MatchOptionConfig::All => path
+                    .extended_communities
+                    .iter()
+                    .all(|ec| set.ext_communities.contains(ec)),
+                MatchOptionConfig::Invert => !path
+                    .extended_communities
+                    .iter()
+                    .any(|ec| set.ext_communities.contains(ec)),
+            },
+            Condition::LargeCommunitySet(set, match_opt) => match match_opt {
+                MatchOptionConfig::Any => path
+                    .large_communities
+                    .iter()
+                    .any(|lc| set.large_communities.contains(lc)),
+                MatchOptionConfig::All => path
+                    .large_communities
+                    .iter()
+                    .all(|lc| set.large_communities.contains(lc)),
+                MatchOptionConfig::Invert => !path
+                    .large_communities
+                    .iter()
+                    .any(|lc| set.large_communities.contains(lc)),
             },
             Condition::RouteType(route_type) => matches!(
                 (route_type, &path.source),
@@ -460,6 +618,30 @@ fn add_conditions(
         ));
     }
 
+    if let Some(ref match_set) = cond.match_ext_community_set {
+        let ext_community_set = defined_sets
+            .ext_community_sets
+            .get(&match_set.set_name)
+            .ok_or_else(|| format!("ext-community-set '{}' not found", match_set.set_name))?;
+
+        stmt = stmt.when(Condition::ExtCommunitySet(
+            Arc::new(ext_community_set.clone()),
+            match_set.match_option,
+        ));
+    }
+
+    if let Some(ref match_set) = cond.match_large_community_set {
+        let large_community_set = defined_sets
+            .large_community_sets
+            .get(&match_set.set_name)
+            .ok_or_else(|| format!("large-community-set '{}' not found", match_set.set_name))?;
+
+        stmt = stmt.when(Condition::LargeCommunitySet(
+            Arc::new(large_community_set.clone()),
+            match_set.match_option,
+        ));
+    }
+
     // Direct conditions (backward compat)
     if let Some(ref prefix_str) = cond.prefix {
         let prefix = IpNetwork::from_str(prefix_str)
@@ -549,6 +731,56 @@ fn add_actions(mut stmt: Statement, actions: &ActionsConfig) -> Result<Statement
                     "invalid community operation '{}' (must be 'add', 'remove', or 'replace')",
                     comm_action.operation
                 ))
+            }
+        };
+        stmt = stmt.then(action);
+    }
+
+    // Extended Community
+    if let Some(ref ec_action) = actions.ext_community {
+        use crate::bgp::ext_community::parse_extended_community;
+
+        let ext_communities = ec_action
+            .ext_communities
+            .iter()
+            .map(|s| parse_extended_community(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid extended community: {}", e))?;
+
+        let action = match ec_action.operation.as_str() {
+            "add" => Action::SetExtCommunity(ExtCommunityOp::Add(ext_communities)),
+            "remove" => Action::SetExtCommunity(ExtCommunityOp::Remove(ext_communities)),
+            "replace" => Action::SetExtCommunity(ExtCommunityOp::Replace(ext_communities)),
+            _ => {
+                return Err(format!(
+                "invalid extended community operation '{}' (must be 'add', 'remove', or 'replace')",
+                ec_action.operation
+            ))
+            }
+        };
+        stmt = stmt.then(action);
+    }
+
+    // Large Community
+    if let Some(ref lc_action) = actions.large_community {
+        use crate::bgp::large_community::parse_large_community;
+
+        let large_communities = lc_action
+            .large_communities
+            .iter()
+            .map(|s| parse_large_community(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid large community: {}", e))?;
+
+        let action = match lc_action.operation.as_str() {
+            "add" => Action::SetLargeCommunity(LargeCommunityOp::Add(large_communities)),
+            "remove" => Action::SetLargeCommunity(LargeCommunityOp::Remove(large_communities)),
+            "replace" => Action::SetLargeCommunity(LargeCommunityOp::Replace(large_communities)),
+            _ => {
+                return Err(format!(
+                "invalid large community operation '{}' (must be 'add', 'remove', or 'replace')",
+                lc_action.operation
+            ))
             }
         };
         stmt = stmt.then(action);

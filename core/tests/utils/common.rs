@@ -125,6 +125,7 @@ pub struct PathParams {
     pub unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
     pub communities: Vec<u32>,
     pub extended_communities: Vec<bgpgg::grpc::proto::ExtendedCommunity>,
+    pub large_communities: Vec<bgpgg::grpc::proto::LargeCommunity>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -140,6 +141,7 @@ pub fn build_path(params: PathParams) -> Path {
         unknown_attributes: params.unknown_attributes,
         communities: params.communities,
         extended_communities: params.extended_communities,
+        large_communities: params.large_communities,
     }
 }
 
@@ -923,6 +925,7 @@ pub struct RouteParams {
     pub atomic_aggregate: bool,
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
+    pub large_communities: Vec<bgpgg::bgp::msg_update_types::LargeCommunity>,
 }
 
 /// Announce a route with customizable attributes
@@ -958,6 +961,7 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
             params.atomic_aggregate,
             params.communities,
             params.extended_communities,
+            params.large_communities,
         )
         .await
         .unwrap();

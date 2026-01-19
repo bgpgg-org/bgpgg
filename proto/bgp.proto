@@ -199,6 +199,7 @@ message AddRouteRequest {
     bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
     repeated uint32 communities = 8;    // BGP Communities (RFC 1997)
     repeated ExtendedCommunity extended_communities = 9; // Extended Communities (RFC 4360)
+    repeated LargeCommunity large_communities = 10; // Large Communities (RFC 8092)
 }
 
 message AddRouteResponse {
@@ -275,6 +276,7 @@ message Path {
     repeated UnknownAttribute unknown_attributes = 8;
     repeated uint32 communities = 9;
     repeated ExtendedCommunity extended_communities = 10;
+    repeated LargeCommunity large_communities = 11;
 }
 
 // Unknown attribute
@@ -282,6 +284,13 @@ message UnknownAttribute {
     uint32 attr_type = 1;
     uint32 flags = 2;
     bytes value = 3;
+}
+
+// Large Community (RFC 8092)
+message LargeCommunity {
+    uint32 global_admin = 1;
+    uint32 local_data_1 = 2;
+    uint32 local_data_2 = 3;
 }
 
 // Extended Community (RFC 4360, RFC 5668, RFC 9012, draft-ietf-idr-link-bandwidth)
@@ -420,6 +429,8 @@ message DefinedSetInfo {
         AsPathSetData as_path_set = 4;
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
+        LargeCommunitySetData large_community_set = 7;
+        ExtendedCommunitySetData ext_community_set = 8;
     }
 }
 
@@ -440,6 +451,14 @@ message CommunitySetData {
     repeated string communities = 1;
 }
 
+message ExtendedCommunitySetData {
+    repeated string ext_communities = 1;  // Format: "rt:65000:100" or hex
+}
+
+message LargeCommunitySetData {
+    repeated string large_communities = 1;  // Format: "GA:LD1:LD2"
+}
+
 message NeighborSetData {
     repeated string addresses = 1;
 }
@@ -453,6 +472,8 @@ message DefinedSetConfig {
         AsPathSetData as_path_set = 4;
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
+        LargeCommunitySetData large_community_set = 7;
+        ExtendedCommunitySetData ext_community_set = 8;
     }
 }
 
@@ -477,8 +498,10 @@ message ConditionsConfig {
     optional MatchSetRef match_neighbor_set = 2;
     optional MatchSetRef match_as_path_set = 3;
     optional MatchSetRef match_community_set = 4;
-    optional string prefix = 5;  // Direct prefix match
-    optional string neighbor = 6;  // Direct neighbor match
+    optional MatchSetRef match_large_community_set = 5;
+    optional string prefix = 6;  // Direct prefix match
+    optional string neighbor = 7;  // Direct neighbor match
+    optional MatchSetRef match_ext_community_set = 8;
 }
 
 message MatchSetRef {

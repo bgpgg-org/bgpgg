@@ -126,6 +126,17 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
     }
 }
 
+/// Convert internal LargeCommunity to proto LargeCommunity
+fn large_community_to_proto(
+    large_comm: &crate::bgp::msg_update_types::LargeCommunity,
+) -> super::proto::LargeCommunity {
+    super::proto::LargeCommunity {
+        global_admin: large_comm.global_admin,
+        local_data_1: large_comm.local_data_1,
+        local_data_2: large_comm.local_data_2,
+    }
+}
+
 /// Simplified wrapper around the gRPC client that hides boilerplate
 pub struct BgpClient {
     inner: BgpServiceClient<Channel>,
@@ -395,11 +406,18 @@ impl BgpClient {
         atomic_aggregate: bool,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
+        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
     ) -> Result<String, tonic::Status> {
         // Convert u64 extended communities to proto format
         let extended_communities_proto = extended_communities
             .into_iter()
             .map(u64_to_proto_extcomm)
+            .collect();
+
+        // Convert LargeCommunity to proto format
+        let large_communities_proto = large_communities
+            .iter()
+            .map(large_community_to_proto)
             .collect();
 
         let resp = self
@@ -414,6 +432,7 @@ impl BgpClient {
                 atomic_aggregate,
                 communities,
                 extended_communities: extended_communities_proto,
+                large_communities: large_communities_proto,
             })
             .await?
             .into_inner();
@@ -439,6 +458,7 @@ impl BgpClient {
             bool,
             Vec<u32>,
             Vec<u64>,
+            Vec<crate::bgp::msg_update_types::LargeCommunity>,
         )>,
     ) -> Result<u64, tonic::Status> {
         let requests = routes.into_iter().map(
@@ -452,11 +472,18 @@ impl BgpClient {
                 atomic_aggregate,
                 communities,
                 extended_communities,
+                large_communities,
             )| {
                 // Convert u64 extended communities to proto format
                 let extended_communities_proto = extended_communities
                     .into_iter()
                     .map(u64_to_proto_extcomm)
+                    .collect();
+
+                // Convert LargeCommunity to proto format
+                let large_communities_proto = large_communities
+                    .iter()
+                    .map(large_community_to_proto)
                     .collect();
 
                 AddRouteRequest {
@@ -469,6 +496,7 @@ impl BgpClient {
                     atomic_aggregate,
                     communities,
                     extended_communities: extended_communities_proto,
+                    large_communities: large_communities_proto,
                 }
             },
         );
