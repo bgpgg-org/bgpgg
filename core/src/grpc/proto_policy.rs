@@ -65,6 +65,12 @@ pub(super) fn proto_to_defined_set_config(
                 neighbors: ns.addresses.clone(),
             })
         }
+        Some(super::proto::defined_set_config::Config::LargeCommunitySet(lcs)) => {
+            DefinedSetConfig::LargeCommunitySet(crate::config::LargeCommunitySetConfig {
+                name,
+                large_communities: lcs.large_communities.clone(),
+            })
+        }
         None => return Err("missing set config data".to_string()),
     };
 
@@ -98,7 +104,10 @@ pub(super) fn proto_to_statement_config(
                 set_name: m.set_name,
                 match_option: parse_match_option(m.match_option),
             }),
-            match_large_community_set: None, // TODO: Add proto support
+            match_large_community_set: c.match_large_community_set.map(|m| MatchSetRefConfig {
+                set_name: m.set_name,
+                match_option: parse_match_option(m.match_option),
+            }),
             prefix: c.prefix,
             neighbor: c.neighbor,
             has_asn: None,
@@ -186,8 +195,11 @@ pub(super) fn defined_set_config_to_proto(config: DefinedSetConfig) -> DefinedSe
         DefinedSetConfig::LargeCommunitySet(lcs) => (
             "large-community-set".to_string(),
             lcs.name,
-            // TODO: Add proto support for large community set data
-            None,
+            Some(super::proto::defined_set_info::SetData::LargeCommunitySet(
+                super::proto::LargeCommunitySetData {
+                    large_communities: lcs.large_communities,
+                },
+            )),
         ),
     };
 
@@ -235,6 +247,16 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                         MatchOptionConfig::All => "all".to_string(),
                         MatchOptionConfig::Invert => "invert".to_string(),
                     },
+                }),
+                match_large_community_set: s.conditions.match_large_community_set.map(|m| {
+                    MatchSetRef {
+                        set_name: m.set_name,
+                        match_option: match m.match_option {
+                            MatchOptionConfig::Any => "any".to_string(),
+                            MatchOptionConfig::All => "all".to_string(),
+                            MatchOptionConfig::Invert => "invert".to_string(),
+                        },
+                    }
                 }),
                 prefix: s.conditions.prefix.clone(),
                 neighbor: s.conditions.neighbor.clone(),

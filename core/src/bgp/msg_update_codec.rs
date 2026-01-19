@@ -15,9 +15,8 @@
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
-    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType,
-    LargeCommunity, MpReachNlri, MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue,
-    PathAttribute,
+    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, LargeCommunity,
+    MpReachNlri, MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{

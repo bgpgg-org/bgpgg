@@ -207,28 +207,19 @@ impl Statement {
                         LargeCommunityOp::Add(lcs) => {
                             actions.large_community = Some(LargeCommunityActionConfig {
                                 operation: "add".to_string(),
-                                large_communities: lcs
-                                    .iter()
-                                    .map(|lc| lc.to_string())
-                                    .collect(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
                             });
                         }
                         LargeCommunityOp::Remove(lcs) => {
                             actions.large_community = Some(LargeCommunityActionConfig {
                                 operation: "remove".to_string(),
-                                large_communities: lcs
-                                    .iter()
-                                    .map(|lc| lc.to_string())
-                                    .collect(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
                             });
                         }
                         LargeCommunityOp::Replace(lcs) => {
                             actions.large_community = Some(LargeCommunityActionConfig {
                                 operation: "replace".to_string(),
-                                large_communities: lcs
-                                    .iter()
-                                    .map(|lc| lc.to_string())
-                                    .collect(),
+                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
                             });
                         }
                     }

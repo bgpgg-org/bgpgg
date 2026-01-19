@@ -1459,3 +1459,64 @@ async fn test_extended_communities_filtering() {
         println!("{} test passed", name);
     }
 }
+
+#[tokio::test]
+async fn test_large_community_propagation() {
+    use bgpgg::bgp::msg_update_types::LargeCommunity;
+    use bgpgg::grpc::proto;
+
+    let (mut server1, server2) = setup_two_peered_servers(None).await;
+
+    let large_comms = vec![
+        LargeCommunity::new(65536, 100, 200),
+        LargeCommunity::new(4200000000, 1, 2),
+        LargeCommunity::new(0, 0, 0),
+    ];
+
+    announce_route(
+        &mut server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            large_communities: large_comms.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Build expected large communities in proto format
+    let expected_large_comms = vec![
+        proto::LargeCommunity {
+            global_admin: 65536,
+            local_data_1: 100,
+            local_data_2: 200,
+        },
+        proto::LargeCommunity {
+            global_admin: 4200000000,
+            local_data_1: 1,
+            local_data_2: 2,
+        },
+        proto::LargeCommunity {
+            global_admin: 0,
+            local_data_1: 0,
+            local_data_2: 0,
+        },
+    ];
+
+    poll_route_propagation(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                large_communities: expected_large_comms,
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+}

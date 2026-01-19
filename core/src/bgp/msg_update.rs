@@ -14,8 +14,8 @@
 
 // Re-export public types
 pub use super::msg_update_types::{
-    attr_flags, attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, LargeCommunity,
-    NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+    attr_flags, attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType,
+    LargeCommunity, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 
 use super::msg::{Message, MessageType};

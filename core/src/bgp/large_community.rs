@@ -99,7 +99,11 @@ pub fn parse_large_community(s: &str) -> Result<LargeCommunity, ParseLargeCommun
         .parse()
         .map_err(|_| ParseLargeCommunityError::InvalidLocalData2)?;
 
-    Ok(LargeCommunity::new(global_admin, local_data_1, local_data_2))
+    Ok(LargeCommunity::new(
+        global_admin,
+        local_data_1,
+        local_data_2,
+    ))
 }
 
 impl std::fmt::Display for LargeCommunity {
@@ -158,10 +162,22 @@ mod tests {
             ("65536:100", ParseLargeCommunityError::InvalidFormat),
             ("65536:100:200:300", ParseLargeCommunityError::InvalidFormat),
             ("", ParseLargeCommunityError::InvalidFormat),
-            ("notanumber:100:200", ParseLargeCommunityError::InvalidGlobalAdmin),
-            ("65536:notanumber:200", ParseLargeCommunityError::InvalidLocalData1),
-            ("65536:100:notanumber", ParseLargeCommunityError::InvalidLocalData2),
-            ("4294967296:100:200", ParseLargeCommunityError::InvalidGlobalAdmin),
+            (
+                "notanumber:100:200",
+                ParseLargeCommunityError::InvalidGlobalAdmin,
+            ),
+            (
+                "65536:notanumber:200",
+                ParseLargeCommunityError::InvalidLocalData1,
+            ),
+            (
+                "65536:100:notanumber",
+                ParseLargeCommunityError::InvalidLocalData2,
+            ),
+            (
+                "4294967296:100:200",
+                ParseLargeCommunityError::InvalidGlobalAdmin,
+            ),
         ];
 
         for (input, expected_error) in test_cases {

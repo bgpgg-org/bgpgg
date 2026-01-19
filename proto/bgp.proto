@@ -429,6 +429,7 @@ message DefinedSetInfo {
         AsPathSetData as_path_set = 4;
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
+        LargeCommunitySetData large_community_set = 7;
     }
 }
 
@@ -449,6 +450,10 @@ message CommunitySetData {
     repeated string communities = 1;
 }
 
+message LargeCommunitySetData {
+    repeated string large_communities = 1;  // Format: "GA:LD1:LD2"
+}
+
 message NeighborSetData {
     repeated string addresses = 1;
 }
@@ -462,6 +467,7 @@ message DefinedSetConfig {
         AsPathSetData as_path_set = 4;
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
+        LargeCommunitySetData large_community_set = 7;
     }
 }
 
@@ -486,8 +492,9 @@ message ConditionsConfig {
     optional MatchSetRef match_neighbor_set = 2;
     optional MatchSetRef match_as_path_set = 3;
     optional MatchSetRef match_community_set = 4;
-    optional string prefix = 5;  // Direct prefix match
-    optional string neighbor = 6;  // Direct neighbor match
+    optional MatchSetRef match_large_community_set = 5;
+    optional string prefix = 6;  // Direct prefix match
+    optional string neighbor = 7;  // Direct neighbor match
 }
 
 message MatchSetRef {

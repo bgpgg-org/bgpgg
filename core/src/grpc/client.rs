@@ -127,7 +127,9 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
 }
 
 /// Convert internal LargeCommunity to proto LargeCommunity
-fn large_community_to_proto(large_comm: &crate::bgp::msg_update_types::LargeCommunity) -> super::proto::LargeCommunity {
+fn large_community_to_proto(
+    large_comm: &crate::bgp::msg_update_types::LargeCommunity,
+) -> super::proto::LargeCommunity {
     super::proto::LargeCommunity {
         global_admin: large_comm.global_admin,
         local_data_1: large_comm.local_data_1,
