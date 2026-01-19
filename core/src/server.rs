@@ -87,6 +87,7 @@ pub enum ResetType {
     SoftIn,  // Send ROUTE_REFRESH to peer
     SoftOut, // Resend our routes
     Soft,    // Both
+    Hard,    // Send CEASE/ADMINISTRATIVE_RESET and reconnect
 }
 
 #[derive(Debug, Clone)]

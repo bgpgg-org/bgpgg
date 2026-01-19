@@ -15,7 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::Message;
-use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_route_refresh::RouteRefreshMessage;
 use crate::types::PeerDownReason;
 use crate::{debug, error, info};
@@ -207,6 +207,30 @@ impl Peer {
                         }
                         PeerOp::GetNegotiatedCapabilities(response) => {
                             let _ = response.send(self.negotiated_capabilities.clone());
+                        }
+                        PeerOp::HardReset => {
+                            info!(&self.logger, "hard reset requested", "peer_ip" => peer_ip.to_string());
+
+                            // Send CEASE/ADMINISTRATIVE_RESET notification
+                            let notif = NotificationMessage::new(
+                                BgpError::Cease(CeaseSubcode::AdministrativeReset),
+                                Vec::new()
+                            );
+
+                            if let Some(conn) = &mut self.conn {
+                                if let Err(e) = conn.tx.write_all(&notif.serialize()).await {
+                                    error!(&self.logger, "failed to send hard reset notification",
+                                          "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                } else {
+                                    self.statistics.notification_sent += 1;
+                                }
+                            }
+
+                            // Close connection and transition to Idle (FSM handles this)
+                            self.try_process_event(&FsmEvent::NotifMsgVerErr(notif)).await;
+
+                            // Do NOT return true - keep task alive for reconnection
+                            return false;
                         }
                         PeerOp::Shutdown(subcode) => {
                             info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());

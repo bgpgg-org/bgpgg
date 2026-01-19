@@ -398,6 +398,7 @@ impl BgpService for BgpGrpcService {
             Ok(proto::ResetType::SoftIn) => ResetType::SoftIn,
             Ok(proto::ResetType::SoftOut) => ResetType::SoftOut,
             Ok(proto::ResetType::Soft) => ResetType::Soft,
+            Ok(proto::ResetType::Hard) => ResetType::Hard,
             Err(_) => return Err(Status::invalid_argument("invalid reset type")),
         };
 

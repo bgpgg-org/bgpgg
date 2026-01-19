@@ -198,7 +198,7 @@ impl BgpServer {
                     info!(&self.logger, "peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
                 }
 
-                // Send BMP PeerUp when transitioning to Established
+                // When peer becomes Established, send BMP PeerUp and propagate all routes
                 if state == BgpState::Established {
                     if let Some(peer) = self.peers.get(&peer_ip) {
                         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
@@ -215,6 +215,17 @@ impl BgpServer {
                                 received_open: conn_info.received_open.clone(),
                             });
                         }
+                    }
+
+                    // Propagate all routes from loc-rib to newly established peer
+                    let all_prefixes: Vec<_> = self
+                        .loc_rib
+                        .iter_routes()
+                        .map(|route| route.prefix)
+                        .collect();
+
+                    if !all_prefixes.is_empty() {
+                        self.propagate_routes(all_prefixes, None).await;
                     }
                 }
             }
@@ -608,7 +619,38 @@ impl BgpServer {
                 self.handle_reset_soft_in(peer_ip, &afi_safis, None);
                 self.handle_reset_soft_out(peer_ip, &afi_safis, response);
             }
+            ResetType::Hard => {
+                self.handle_reset_hard(peer_ip, response);
+            }
         }
+    }
+
+    fn handle_reset_hard(
+        &mut self,
+        peer_ip: IpAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let Some(peer) = self.peers.get(&peer_ip) else {
+            let _ = response.send(Err(format!("peer {} not found", peer_ip)));
+            return;
+        };
+
+        let Some(peer_tx) = &peer.peer_tx else {
+            let _ = response.send(Err(format!("peer {} has no active task", peer_ip)));
+            return;
+        };
+
+        // Send hard reset operation to peer task
+        if peer_tx.send(PeerOp::HardReset).is_err() {
+            let _ = response.send(Err(format!(
+                "failed to send hard reset to peer {}",
+                peer_ip
+            )));
+            return;
+        }
+
+        info!(&self.logger, "hard reset initiated", "peer_ip" => peer_ip.to_string());
+        let _ = response.send(Ok(()));
     }
 
     /// Helper to query negotiated capabilities from peer

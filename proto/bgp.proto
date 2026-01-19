@@ -107,6 +107,7 @@ enum ResetType {
     SOFT_IN = 0;
     SOFT_OUT = 1;
     SOFT = 2;
+    HARD = 3;
 }
 
 // Address Family Identifier

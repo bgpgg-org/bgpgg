@@ -105,6 +105,9 @@ pub enum PeerOp {
     GetNegotiatedCapabilities(oneshot::Sender<HashSet<crate::bgp::multiprotocol::AfiSafi>>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
+    /// Hard reset - sends CEASE/ADMINISTRATIVE_RESET, closes connection, but keeps task alive
+    /// Peer will auto-reconnect after idle hold timer
+    HardReset,
     /// RFC 4271 Event 1: ManualStart - admin starts the peer connection
     ManualStart,
     /// RFC 4271 Event 2: ManualStop - admin stops the peer connection
