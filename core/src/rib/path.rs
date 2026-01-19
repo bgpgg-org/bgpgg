@@ -15,6 +15,7 @@
 use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttribute, UpdateMessage,
 };
+use crate::bgp::msg_update_types::LargeCommunity;
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 
@@ -30,6 +31,7 @@ pub struct Path {
     pub atomic_aggregate: bool,
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
+    pub large_communities: Vec<LargeCommunity>,
     pub unknown_attrs: Vec<PathAttribute>,
 }
 
@@ -46,6 +48,7 @@ impl Path {
         atomic_aggregate: bool,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
+        large_communities: Vec<LargeCommunity>,
         unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         Path {
@@ -58,6 +61,7 @@ impl Path {
             atomic_aggregate,
             communities,
             extended_communities,
+            large_communities,
             unknown_attrs,
         }
     }
@@ -77,6 +81,7 @@ impl Path {
             atomic_aggregate: update_msg.atomic_aggregate(),
             communities: update_msg.communities().unwrap_or_default(),
             extended_communities: update_msg.extended_communities().unwrap_or_default(),
+            large_communities: update_msg.large_communities().unwrap_or_default(),
             unknown_attrs: update_msg.unknown_attrs(),
         })
     }
@@ -212,6 +217,7 @@ mod tests {
             atomic_aggregate: false,
             communities: vec![],
             extended_communities: vec![],
+            large_communities: vec![],
             unknown_attrs: vec![],
         }
     }
@@ -357,6 +363,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         let path = Path::from_update_msg(&update, source);
         assert!(path.is_some());

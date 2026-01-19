@@ -268,6 +268,7 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
+                vec![],
             );
 
             let result = peer.handle_update(update);
@@ -382,6 +383,7 @@ mod tests {
                     vec![],
                     vec![],
                     vec![],
+                    vec![], // large_communities
                 );
                 peer.handle_update(initial_update).unwrap();
             }
@@ -410,6 +412,7 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
+                vec![], // large_communities
             );
 
             let result = peer.handle_update(update);

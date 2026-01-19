@@ -306,6 +306,25 @@ pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
     }
 }
 
+/// Convert proto LargeCommunity to internal LargeCommunity struct
+pub(super) fn proto_large_community_to_internal(
+    proto: &proto::LargeCommunity,
+) -> crate::bgp::msg_update_types::LargeCommunity {
+    use crate::bgp::msg_update_types::LargeCommunity;
+    LargeCommunity::new(proto.global_admin, proto.local_data_1, proto.local_data_2)
+}
+
+/// Convert internal LargeCommunity struct to proto LargeCommunity
+pub(super) fn internal_to_proto_large_community(
+    large_comm: &crate::bgp::msg_update_types::LargeCommunity,
+) -> proto::LargeCommunity {
+    proto::LargeCommunity {
+        global_admin: large_comm.global_admin,
+        local_data_1: large_comm.local_data_1,
+        local_data_2: large_comm.local_data_2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +759,68 @@ mod tests {
         }
 
         let result = proto_extcomm_to_u64(&proto_ec).unwrap();
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_large_community_roundtrip() {
+        use crate::bgp::msg_update_types::LargeCommunity;
+
+        let original = LargeCommunity::new(65536, 100, 200);
+
+        // Internal -> proto
+        let proto_lc = internal_to_proto_large_community(&original);
+        assert_eq!(proto_lc.global_admin, 65536);
+        assert_eq!(proto_lc.local_data_1, 100);
+        assert_eq!(proto_lc.local_data_2, 200);
+
+        // proto -> Internal
+        let result = proto_large_community_to_internal(&proto_lc);
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_large_community_32bit_asn() {
+        use crate::bgp::msg_update_types::LargeCommunity;
+
+        let original = LargeCommunity::new(4200000000, 1, 2);
+
+        let proto_lc = internal_to_proto_large_community(&original);
+        assert_eq!(proto_lc.global_admin, 4200000000);
+        assert_eq!(proto_lc.local_data_1, 1);
+        assert_eq!(proto_lc.local_data_2, 2);
+
+        let result = proto_large_community_to_internal(&proto_lc);
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_large_community_zero() {
+        use crate::bgp::msg_update_types::LargeCommunity;
+
+        let original = LargeCommunity::new(0, 0, 0);
+
+        let proto_lc = internal_to_proto_large_community(&original);
+        assert_eq!(proto_lc.global_admin, 0);
+        assert_eq!(proto_lc.local_data_1, 0);
+        assert_eq!(proto_lc.local_data_2, 0);
+
+        let result = proto_large_community_to_internal(&proto_lc);
+        assert_eq!(original, result);
+    }
+
+    #[test]
+    fn test_large_community_max_values() {
+        use crate::bgp::msg_update_types::LargeCommunity;
+
+        let original = LargeCommunity::new(u32::MAX, u32::MAX, u32::MAX);
+
+        let proto_lc = internal_to_proto_large_community(&original);
+        assert_eq!(proto_lc.global_admin, u32::MAX);
+        assert_eq!(proto_lc.local_data_1, u32::MAX);
+        assert_eq!(proto_lc.local_data_2, u32::MAX);
+
+        let result = proto_large_community_to_internal(&proto_lc);
         assert_eq!(original, result);
     }
 }

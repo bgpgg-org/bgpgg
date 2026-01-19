@@ -98,6 +98,7 @@ pub(super) fn proto_to_statement_config(
                 set_name: m.set_name,
                 match_option: parse_match_option(m.match_option),
             }),
+            match_large_community_set: None, // TODO: Add proto support
             prefix: c.prefix,
             neighbor: c.neighbor,
             has_asn: None,
@@ -125,6 +126,7 @@ pub(super) fn proto_to_statement_config(
         } else {
             None
         },
+        large_community: None, // TODO: Add proto support for large communities
         accept: a.accept,
         reject: a.reject,
     });
@@ -180,6 +182,12 @@ pub(super) fn defined_set_config_to_proto(config: DefinedSetConfig) -> DefinedSe
                     addresses: ns.neighbors,
                 },
             )),
+        ),
+        DefinedSetConfig::LargeCommunitySet(lcs) => (
+            "large-community-set".to_string(),
+            lcs.name,
+            // TODO: Add proto support for large community set data
+            None,
         ),
     };
 

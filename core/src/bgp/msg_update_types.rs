@@ -32,6 +32,9 @@ pub use super::ext_community::{
     TYPE_OPAQUE, TYPE_TWO_OCTET_AS,
 };
 
+// Re-export large community
+pub use super::large_community::{parse_large_community, LargeCommunity};
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct PathAttrFlag(pub u8);
 
@@ -66,6 +69,7 @@ pub mod attr_type_code {
     pub const MP_REACH_NLRI: u8 = 14;
     pub const MP_UNREACH_NLRI: u8 = 15;
     pub const EXTENDED_COMMUNITIES: u8 = 16;
+    pub const LARGE_COMMUNITIES: u8 = 32;
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
@@ -96,6 +100,7 @@ pub enum PathAttrValue {
     MpReachNlri(MpReachNlri),
     MpUnreachNlri(MpUnreachNlri),
     ExtendedCommunities(Vec<u64>),
+    LargeCommunities(Vec<LargeCommunity>),
     Unknown {
         type_code: u8,
         flags: u8,
@@ -131,6 +136,7 @@ impl PathAttribute {
             PathAttrValue::MpReachNlri(_) => attr_type_code::MP_REACH_NLRI,
             PathAttrValue::MpUnreachNlri(_) => attr_type_code::MP_UNREACH_NLRI,
             PathAttrValue::ExtendedCommunities(_) => attr_type_code::EXTENDED_COMMUNITIES,
+            PathAttrValue::LargeCommunities(_) => attr_type_code::LARGE_COMMUNITIES,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
     }
@@ -149,6 +155,7 @@ pub(crate) enum AttrType {
     MpReachNlri = 14,
     MpUnreachNlri = 15,
     ExtendedCommunities = 16,
+    LargeCommunities = 32,
 }
 
 impl TryFrom<u8> for AttrType {
@@ -167,6 +174,7 @@ impl TryFrom<u8> for AttrType {
             14 => Ok(AttrType::MpReachNlri),
             15 => Ok(AttrType::MpUnreachNlri),
             16 => Ok(AttrType::ExtendedCommunities),
+            32 => Ok(AttrType::LargeCommunities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
                 data: Vec::new(),
@@ -189,6 +197,7 @@ impl AttrType {
             AttrType::MpReachNlri => PathAttrFlag::OPTIONAL,
             AttrType::MpUnreachNlri => PathAttrFlag::OPTIONAL,
             AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::LargeCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
 
@@ -212,6 +221,7 @@ impl AttrType {
                 | AttrType::MpReachNlri
                 | AttrType::MpUnreachNlri
                 | AttrType::ExtendedCommunities
+                | AttrType::LargeCommunities
         )
     }
 }

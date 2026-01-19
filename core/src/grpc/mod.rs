@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub mod client;
-mod proto_extcomm;
+mod proto_community;
 mod proto_policy;
 pub mod service;
 

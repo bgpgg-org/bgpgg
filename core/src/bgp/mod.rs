@@ -14,6 +14,7 @@
 
 pub mod community;
 pub mod ext_community;
+pub mod large_community;
 pub mod msg;
 pub mod msg_keepalive;
 pub mod msg_notification;

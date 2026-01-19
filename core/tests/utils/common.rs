@@ -140,6 +140,7 @@ pub fn build_path(params: PathParams) -> Path {
         unknown_attributes: params.unknown_attributes,
         communities: params.communities,
         extended_communities: params.extended_communities,
+        large_communities: vec![],
     }
 }
 
@@ -958,6 +959,7 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
             params.atomic_aggregate,
             params.communities,
             params.extended_communities,
+            vec![], // large_communities
         )
         .await
         .unwrap();

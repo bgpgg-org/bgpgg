@@ -128,6 +128,7 @@ impl PeerRoute {
             false, // atomic_aggregate
             self.communities.clone(),
             vec![], // extended_communities
+            vec![], // large_communities
             vec![], // unknown_attrs
         )
     }

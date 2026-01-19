@@ -164,6 +164,7 @@ pub enum MgmtOp {
         atomic_aggregate: bool,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
+        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {

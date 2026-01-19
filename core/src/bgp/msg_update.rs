@@ -14,8 +14,8 @@
 
 // Re-export public types
 pub use super::msg_update_types::{
-    attr_flags, attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, NextHopAddr,
-    Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+    attr_flags, attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, LargeCommunity,
+    NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 
 use super::msg::{Message, MessageType};
@@ -43,6 +43,7 @@ impl UpdateMessage {
         atomic_aggregate: bool,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
+        large_communities: Vec<LargeCommunity>,
         unknown_attrs: Vec<PathAttribute>,
     ) -> Self {
         // Partition routes by address family
@@ -105,6 +106,13 @@ impl UpdateMessage {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::ExtendedCommunities(extended_communities),
+            });
+        }
+
+        if !large_communities.is_empty() {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::LargeCommunities(large_communities),
             });
         }
 
@@ -299,6 +307,16 @@ impl UpdateMessage {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::ExtendedCommunities(ref ext_communities) = attr.value {
                 Some(ext_communities.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn large_communities(&self) -> Option<Vec<LargeCommunity>> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::LargeCommunities(ref large_communities) = attr.value {
+                Some(large_communities.clone())
             } else {
                 None
             }
@@ -806,6 +824,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -820,6 +839,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg_no_pref.local_pref(), None);
     }
@@ -837,6 +857,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg.med(), Some(50));
 
@@ -851,6 +872,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg_no_med.med(), None);
     }
@@ -877,6 +899,7 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
+                vec![], // large_communities
             );
 
             let bytes = msg.to_bytes();
@@ -1477,6 +1500,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -1491,6 +1515,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
         assert_eq!(msg_empty_path.leftmost_as(), None);
     }
@@ -1618,6 +1643,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![], // large_communities
         );
 
         // Encode and decode
