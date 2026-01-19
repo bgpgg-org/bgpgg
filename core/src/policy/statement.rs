@@ -4,7 +4,8 @@ use crate::config::{
 };
 use crate::net::IpNetwork;
 use crate::policy::sets::{
-    AsPathSet, CommunitySet, DefinedSets, LargeCommunitySet, NeighborSet, PrefixSet,
+    AsPathSet, CommunitySet, DefinedSets, ExtCommunitySet, LargeCommunitySet, NeighborSet,
+    PrefixSet,
 };
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
@@ -29,6 +30,14 @@ pub enum CommunityOp {
     Add(Vec<u32>),
     Remove(Vec<u32>),
     Replace(Vec<u32>),
+}
+
+/// Extended Community modification operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtCommunityOp {
+    Add(Vec<u64>),
+    Remove(Vec<u64>),
+    Replace(Vec<u64>),
 }
 
 /// Large Community modification operation
@@ -108,6 +117,12 @@ impl Statement {
                 }
                 Condition::CommunitySet(arc_set, opt) => {
                     conditions.match_community_set = Some(MatchSetRefConfig {
+                        set_name: arc_set.name.clone(),
+                        match_option: *opt,
+                    });
+                }
+                Condition::ExtCommunitySet(arc_set, opt) => {
+                    conditions.match_ext_community_set = Some(MatchSetRefConfig {
                         set_name: arc_set.name.clone(),
                         match_option: *opt,
                     });
@@ -200,6 +215,40 @@ impl Statement {
                         });
                     }
                 },
+                Action::SetExtCommunity(op) => {
+                    use crate::bgp::ext_community::format_extended_community;
+                    use crate::config::ExtCommunityActionConfig;
+
+                    match op {
+                        ExtCommunityOp::Add(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "add".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                        ExtCommunityOp::Remove(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "remove".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                        ExtCommunityOp::Replace(ecs) => {
+                            actions.ext_community = Some(ExtCommunityActionConfig {
+                                operation: "replace".to_string(),
+                                ext_communities: ecs
+                                    .iter()
+                                    .map(|ec| format_extended_community(*ec))
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
                 Action::SetLargeCommunity(op) => {
                     use crate::config::LargeCommunityActionConfig;
 
@@ -275,6 +324,7 @@ pub enum Action {
     SetLocalPref { value: u32, force: bool },
     SetMed(Option<u32>),
     SetCommunity(CommunityOp),
+    SetExtCommunity(ExtCommunityOp),
     SetLargeCommunity(LargeCommunityOp),
 }
 
@@ -307,6 +357,25 @@ impl Action {
                     }
                     CommunityOp::Replace(new_communities) => {
                         path.communities = new_communities.clone();
+                    }
+                }
+                true
+            }
+            Action::SetExtCommunity(op) => {
+                match op {
+                    ExtCommunityOp::Add(to_add) => {
+                        for &ec in to_add {
+                            if !path.extended_communities.contains(&ec) {
+                                path.extended_communities.push(ec);
+                            }
+                        }
+                    }
+                    ExtCommunityOp::Remove(to_remove) => {
+                        path.extended_communities
+                            .retain(|ec| !to_remove.contains(ec));
+                    }
+                    ExtCommunityOp::Replace(new_ext_communities) => {
+                        path.extended_communities = new_ext_communities.clone();
                     }
                 }
                 true
@@ -348,6 +417,7 @@ pub enum Condition {
     AsPathSet(Arc<AsPathSet>, MatchOptionConfig),
     Community(u32),
     CommunitySet(Arc<CommunitySet>, MatchOptionConfig),
+    ExtCommunitySet(Arc<ExtCommunitySet>, MatchOptionConfig),
     LargeCommunitySet(Arc<LargeCommunitySet>, MatchOptionConfig),
     RouteType(RouteType),
 }
@@ -408,6 +478,20 @@ impl Condition {
                 MatchOptionConfig::Invert => {
                     !path.communities.iter().any(|c| set.communities.contains(c))
                 }
+            },
+            Condition::ExtCommunitySet(set, match_opt) => match match_opt {
+                MatchOptionConfig::Any => path
+                    .extended_communities
+                    .iter()
+                    .any(|ec| set.ext_communities.contains(ec)),
+                MatchOptionConfig::All => path
+                    .extended_communities
+                    .iter()
+                    .all(|ec| set.ext_communities.contains(ec)),
+                MatchOptionConfig::Invert => !path
+                    .extended_communities
+                    .iter()
+                    .any(|ec| set.ext_communities.contains(ec)),
             },
             Condition::LargeCommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
@@ -534,6 +618,18 @@ fn add_conditions(
         ));
     }
 
+    if let Some(ref match_set) = cond.match_ext_community_set {
+        let ext_community_set = defined_sets
+            .ext_community_sets
+            .get(&match_set.set_name)
+            .ok_or_else(|| format!("ext-community-set '{}' not found", match_set.set_name))?;
+
+        stmt = stmt.when(Condition::ExtCommunitySet(
+            Arc::new(ext_community_set.clone()),
+            match_set.match_option,
+        ));
+    }
+
     if let Some(ref match_set) = cond.match_large_community_set {
         let large_community_set = defined_sets
             .large_community_sets
@@ -635,6 +731,31 @@ fn add_actions(mut stmt: Statement, actions: &ActionsConfig) -> Result<Statement
                     "invalid community operation '{}' (must be 'add', 'remove', or 'replace')",
                     comm_action.operation
                 ))
+            }
+        };
+        stmt = stmt.then(action);
+    }
+
+    // Extended Community
+    if let Some(ref ec_action) = actions.ext_community {
+        use crate::bgp::ext_community::parse_extended_community;
+
+        let ext_communities = ec_action
+            .ext_communities
+            .iter()
+            .map(|s| parse_extended_community(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("invalid extended community: {}", e))?;
+
+        let action = match ec_action.operation.as_str() {
+            "add" => Action::SetExtCommunity(ExtCommunityOp::Add(ext_communities)),
+            "remove" => Action::SetExtCommunity(ExtCommunityOp::Remove(ext_communities)),
+            "replace" => Action::SetExtCommunity(ExtCommunityOp::Replace(ext_communities)),
+            _ => {
+                return Err(format!(
+                "invalid extended community operation '{}' (must be 'add', 'remove', or 'replace')",
+                ec_action.operation
+            ))
             }
         };
         stmt = stmt.then(action);

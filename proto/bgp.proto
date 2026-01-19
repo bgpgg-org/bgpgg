@@ -430,6 +430,7 @@ message DefinedSetInfo {
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
         LargeCommunitySetData large_community_set = 7;
+        ExtendedCommunitySetData ext_community_set = 8;
     }
 }
 
@@ -450,6 +451,10 @@ message CommunitySetData {
     repeated string communities = 1;
 }
 
+message ExtendedCommunitySetData {
+    repeated string ext_communities = 1;  // Format: "rt:65000:100" or hex
+}
+
 message LargeCommunitySetData {
     repeated string large_communities = 1;  // Format: "GA:LD1:LD2"
 }
@@ -468,6 +473,7 @@ message DefinedSetConfig {
         CommunitySetData community_set = 5;
         NeighborSetData neighbor_set = 6;
         LargeCommunitySetData large_community_set = 7;
+        ExtendedCommunitySetData ext_community_set = 8;
     }
 }
 
@@ -495,6 +501,7 @@ message ConditionsConfig {
     optional MatchSetRef match_large_community_set = 5;
     optional string prefix = 6;  // Direct prefix match
     optional string neighbor = 7;  // Direct neighbor match
+    optional MatchSetRef match_ext_community_set = 8;
 }
 
 message MatchSetRef {

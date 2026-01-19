@@ -24,7 +24,8 @@ use crate::peer::outgoing::{
 };
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::sets::{
-    AsPathSet, CommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch, PrefixSet,
+    AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
+    PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
 use crate::rib::{Path, Route, RouteSource};
@@ -1311,6 +1312,27 @@ impl BgpServer {
                     },
                 );
             }
+            DefinedSetConfig::ExtCommunitySet(config) => {
+                use crate::bgp::ext_community::parse_extended_community;
+                let mut ext_community_values = Vec::new();
+                for ec_str in &config.ext_communities {
+                    match parse_extended_community(ec_str) {
+                        Ok(val) => ext_community_values.push(val),
+                        Err(e) => {
+                            let _ =
+                                response.send(Err(format!("invalid extended community: {}", e)));
+                            return;
+                        }
+                    }
+                }
+                new_sets.ext_community_sets.insert(
+                    config.name.clone(),
+                    ExtCommunitySet {
+                        name: config.name.clone(),
+                        ext_communities: ext_community_values,
+                    },
+                );
+            }
             DefinedSetConfig::NeighborSet(config) => {
                 let mut neighbor_addrs = Vec::new();
                 for addr_str in &config.neighbors {
@@ -1420,6 +1442,13 @@ impl BgpServer {
                 }
                 DefinedSetType::CommunitySet => {
                     if let Some(ref match_set) = config.conditions.match_community_set {
+                        if match_set.set_name == set_name {
+                            return true;
+                        }
+                    }
+                }
+                DefinedSetType::ExtCommunitySet => {
+                    if let Some(ref match_set) = config.conditions.match_ext_community_set {
                         if match_set.set_name == set_name {
                             return true;
                         }
