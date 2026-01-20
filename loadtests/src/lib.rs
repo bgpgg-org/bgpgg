@@ -28,12 +28,16 @@ pub async fn bgp_handshake(
     peer_asn: u16,
     hold_time: u16,
 ) -> io::Result<()> {
-    // Send OPEN
-    let open = OpenMessage::new(local_asn.into(), hold_time, u32::from(local_router_id));
+    // Send OPEN with Four-Octet ASN capability (RFC 6793)
+    let open = OpenMessage::with_four_octet_asn_capability(
+        local_asn.into(),
+        hold_time,
+        u32::from(local_router_id),
+    );
     stream.write_all(&open.serialize()).await?;
 
-    // Read peer's OPEN
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, false)
+    // Read peer's OPEN (use_4byte_asn=true since we advertised the capability)
+    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
         .await
         .map_err(|e| {
             io::Error::new(
@@ -63,8 +67,8 @@ pub async fn bgp_handshake(
     let keepalive = KeepaliveMessage {};
     stream.write_all(&keepalive.serialize()).await?;
 
-    // Read peer's KEEPALIVE
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, false)
+    // Read peer's KEEPALIVE (use_4byte_asn=true for consistency)
+    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
         .await
         .map_err(|e| {
             io::Error::new(

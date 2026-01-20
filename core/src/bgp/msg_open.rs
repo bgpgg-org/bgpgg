@@ -139,6 +139,30 @@ impl OpenMessage {
         }
     }
 
+    /// Creates a new OpenMessage with Four-Octet ASN capability (RFC 6793)
+    ///
+    /// # Arguments
+    /// * `asn` - Autonomous System Number
+    /// * `hold_time` - Hold time in seconds
+    /// * `bgp_identifier` - BGP identifier (usually an IPv4 address as u32)
+    ///
+    /// # Returns
+    /// A new OpenMessage with version 4 and Four-Octet ASN capability
+    pub fn with_four_octet_asn_capability(asn: u32, hold_time: u16, bgp_identifier: u32) -> Self {
+        let capability = Capability::new_four_octet_asn(asn);
+        let optional_param = OptionalParam::new_capability(capability);
+        let optional_params_len = 2 + optional_param.param_len as usize; // type(1) + len(1) + value
+
+        OpenMessage {
+            version: BGP_VERSION,
+            asn,
+            hold_time,
+            bgp_identifier,
+            optional_params_len: optional_params_len as u8,
+            optional_params: vec![optional_param],
+        }
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
         if bytes.len() < 10 {
             // Malformed OPEN message - use Unspecific subcode (0)
