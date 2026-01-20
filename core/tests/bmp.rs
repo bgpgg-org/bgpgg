@@ -114,7 +114,7 @@ async fn test_add_bmp_server_with_existing_peers() {
         &ExpectedPeerUp {
             local_addr: server.address,
             peer_addr: peers[0].address,
-            peer_as: peers[0].asn as u32,
+            peer_as: peers[0].asn,
             peer_bgp_id: u32::from(peers[0].client.router_id),
             peer_port: peers[0].bgp_port,
         },
@@ -124,7 +124,7 @@ async fn test_add_bmp_server_with_existing_peers() {
         &ExpectedPeerUp {
             local_addr: server.address,
             peer_addr: peers[1].address,
-            peer_as: peers[1].asn as u32,
+            peer_as: peers[1].asn,
             peer_bgp_id: u32::from(peers[1].client.router_id),
             peer_port: peers[1].bgp_port,
         },
@@ -160,7 +160,7 @@ async fn test_add_bmp_server_with_existing_peers() {
             rm,
             &ExpectedRouteMonitoring {
                 peer_addr: peer.address,
-                peer_as: peer.asn as u32,
+                peer_as: peer.asn,
                 peer_bgp_id: u32::from(peer.client.router_id),
                 peer_flags: 0,
                 nlri: nlri.to_vec(),
@@ -189,7 +189,7 @@ async fn test_peer_up_down() {
         .assert_peer_up(&ExpectedPeerUp {
             local_addr: server1.address,
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             peer_port: server2.bgp_port,
         })
@@ -205,7 +205,7 @@ async fn test_peer_up_down() {
     bmp_server
         .assert_peer_down(&ExpectedPeerDown {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             reason: bgpgg::types::PeerDownReason::PeerDeConfigured,
         })
@@ -257,7 +257,7 @@ async fn test_route_monitoring_on_updates() {
     bmp_server
         .assert_route_monitoring(&ExpectedRouteMonitoring {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             peer_flags: 0,
             nlri: vec![IpNetwork::V4(Ipv4Net {
@@ -271,7 +271,7 @@ async fn test_route_monitoring_on_updates() {
     bmp_server
         .assert_route_monitoring(&ExpectedRouteMonitoring {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             peer_flags: 0,
             nlri: vec![IpNetwork::V4(Ipv4Net {
@@ -324,7 +324,7 @@ async fn test_route_monitoring_on_updates() {
     bmp_server
         .assert_route_monitoring(&ExpectedRouteMonitoring {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             peer_flags: 0,
             nlri: vec![],
@@ -339,7 +339,7 @@ async fn test_route_monitoring_on_updates() {
     bmp_server
         .assert_route_monitoring(&ExpectedRouteMonitoring {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             peer_flags: 0,
             nlri: vec![IpNetwork::V4(Ipv4Net {
@@ -402,13 +402,13 @@ async fn test_bmp_statistics() {
             ExpectedBmpMessage::PeerUp(ExpectedPeerUp {
                 local_addr: server1.address,
                 peer_addr: server2.address,
-                peer_as: server2.asn as u32,
+                peer_as: server2.asn,
                 peer_bgp_id: u32::from(server2.client.router_id),
                 peer_port: server2.bgp_port,
             }),
             ExpectedBmpMessage::Statistics(ExpectedStatistics {
                 peer_addr: server2.address,
-                peer_as: server2.asn as u32,
+                peer_as: server2.asn,
                 peer_bgp_id: u32::from(server2.client.router_id),
                 stats: vec![(StatType::RoutesInAdjRibIn as u16, 0)],
             }),
@@ -454,7 +454,7 @@ async fn test_bmp_statistics() {
     bmp_server
         .assert_statistics(&ExpectedStatistics {
             peer_addr: server2.address,
-            peer_as: server2.asn as u32,
+            peer_as: server2.asn,
             peer_bgp_id: u32::from(server2.client.router_id),
             stats: vec![(StatType::RoutesInAdjRibIn as u16, 2)],
         })

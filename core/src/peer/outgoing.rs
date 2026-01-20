@@ -45,7 +45,7 @@ pub struct AnnouncementBatch {
 
 /// Check if a route should be filtered based on well-known communities
 /// RFC 1997 Section 3: Well-known communities
-fn should_filter_by_community(communities: &[u32], local_asn: u16, peer_asn: u16) -> bool {
+fn should_filter_by_community(communities: &[u32], local_asn: u32, peer_asn: u32) -> bool {
     if communities.contains(&NO_ADVERTISE) {
         return true;
     }
@@ -84,7 +84,7 @@ pub fn should_propagate_to_peer(
 /// - Learned routes to iBGP: unchanged
 ///
 /// Preserves AS_SET segments during propagation
-pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<AsPathSegment> {
+pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<AsPathSegment> {
     let is_ebgp = peer_asn != local_asn;
 
     if matches!(path.source, RouteSource::Local) && path.as_path.is_empty() {
@@ -147,7 +147,7 @@ pub fn build_export_as_path(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<A
 /// RFC 4271 Section 5.1.5:
 /// - iBGP: LOCAL_PREF SHALL be included
 /// - eBGP: LOCAL_PREF MUST NOT be included
-pub fn build_export_local_pref(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u32> {
+pub fn build_export_local_pref(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
     let is_ibgp = local_asn == peer_asn;
     if is_ibgp {
         path.local_pref
@@ -160,7 +160,7 @@ pub fn build_export_local_pref(path: &Path, local_asn: u16, peer_asn: u16) -> Op
 /// RFC 4271 Section 5.1.4:
 /// - iBGP: MED MAY be propagated to other BGP speakers within the same AS
 /// - eBGP: MED MUST NOT be propagated to other neighboring ASes
-pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u32> {
+pub fn build_export_med(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
     let is_ibgp = local_asn == peer_asn;
     if is_ibgp {
         // Propagate MED over iBGP
@@ -176,7 +176,7 @@ pub fn build_export_med(path: &Path, local_asn: u16, peer_asn: u16) -> Option<u3
 
 /// Filter extended communities for export to peer
 /// RFC 4360: Non-transitive extended communities (bit 6 = 1) must be filtered when advertising to eBGP peers
-pub fn build_export_extended_communities(path: &Path, local_asn: u16, peer_asn: u16) -> Vec<u64> {
+pub fn build_export_extended_communities(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<u64> {
     let is_ebgp = local_asn != peer_asn;
 
     if is_ebgp {
@@ -197,14 +197,16 @@ pub fn send_withdrawals_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
+    peer_supports_4byte_asn: bool,
     logger: &Arc<Logger>,
 ) {
     if to_withdraw.is_empty() {
         return;
     }
 
-    let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec());
-    if let Err(e) = peer_tx.send(PeerOp::SendUpdate(withdraw_msg)) {
+    let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec(), peer_supports_4byte_asn);
+    let serialized = withdraw_msg.serialize();
+    if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
         error!(logger, "failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
     } else {
         info!(logger, "propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
@@ -308,8 +310,8 @@ fn build_ibgp_next_hop(
 fn build_export_next_hop(
     path: &Path,
     local_next_hop: IpAddr,
-    local_asn: u16,
-    peer_asn: u16,
+    local_asn: u32,
+    peer_asn: u32,
     prefix: &IpNetwork,
     logger: &Logger,
 ) -> Option<NextHopAddr> {
@@ -324,8 +326,8 @@ fn build_export_next_hop(
 /// Returns Vec of (prefix, transformed_path) ready to advertise
 pub fn compute_routes_for_peer(
     to_announce: &[(IpNetwork, Arc<Path>)],
-    local_asn: u16,
-    peer_asn: u16,
+    local_asn: u32,
+    peer_asn: u32,
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
     logger: &Arc<Logger>,
@@ -392,10 +394,11 @@ pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_announce: &[(IpNetwork, Arc<Path>)],
-    local_asn: u16,
-    peer_asn: u16,
+    local_asn: u32,
+    peer_asn: u32,
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
+    peer_supports_4byte_asn: bool,
     logger: &Arc<Logger>,
 ) {
     if to_announce.is_empty() {
@@ -461,12 +464,15 @@ pub fn send_announcements_to_peer(
             local_pref,
             med,
             atomic_aggregate,
+            batch.path.aggregator.clone(),
             batch.path.communities.clone(),
             extended_communities,
             batch.path.large_communities.clone(),
             unknown_attrs,
+            peer_supports_4byte_asn,
         );
 
+        // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
         // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
@@ -478,7 +484,7 @@ pub fn send_announcements_to_peer(
             continue;
         }
 
-        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(update_msg)) {
+        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
             error!(logger, "failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
         } else {
             info!(logger, "propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
@@ -509,6 +515,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -863,6 +870,7 @@ mod tests {
             local_pref: Some(200),
             med: None,
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -887,6 +895,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -908,6 +917,7 @@ mod tests {
             local_pref: Some(100),
             med: Some(50),
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -965,6 +975,7 @@ mod tests {
             65001,
             IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             &policies,
+            false,
             &logger,
         );
 
@@ -1040,6 +1051,7 @@ mod tests {
             local_pref: None,
             med: None,
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![transitive, non_transitive],
             large_communities: vec![],

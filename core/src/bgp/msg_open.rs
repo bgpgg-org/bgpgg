@@ -22,6 +22,7 @@ pub use super::msg_open_types::OptionalParam;
 use super::msg_open_types::{
     BgpCapabiltyCode, Capability, OptionalParamTypes, ParamVal, BGP_VERSION,
 };
+use super::msg_update_types::{AS_TRANS, MAX_2BYTE_ASN};
 
 fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
     let mut cursor = 0;
@@ -110,7 +111,7 @@ fn validate_bgp_identifier(bgp_identifier: u32) -> Result<(), ParserError> {
 #[derive(Debug, Clone)]
 pub struct OpenMessage {
     pub version: u8,
-    pub asn: u16,
+    pub asn: u32,
     pub hold_time: u16,
     pub bgp_identifier: u32,
     pub optional_params_len: u8,
@@ -127,7 +128,7 @@ impl OpenMessage {
     ///
     /// # Returns
     /// A new OpenMessage with version 4 and no optional parameters
-    pub fn new(asn: u16, hold_time: u16, bgp_identifier: u32) -> Self {
+    pub fn new(asn: u32, hold_time: u16, bgp_identifier: u32) -> Self {
         OpenMessage {
             version: BGP_VERSION,
             asn,
@@ -135,6 +136,30 @@ impl OpenMessage {
             bgp_identifier,
             optional_params_len: 0,
             optional_params: vec![],
+        }
+    }
+
+    /// Creates a new OpenMessage with Four-Octet ASN capability (RFC 6793)
+    ///
+    /// # Arguments
+    /// * `asn` - Autonomous System Number
+    /// * `hold_time` - Hold time in seconds
+    /// * `bgp_identifier` - BGP identifier (usually an IPv4 address as u32)
+    ///
+    /// # Returns
+    /// A new OpenMessage with version 4 and Four-Octet ASN capability
+    pub fn with_four_octet_asn_capability(asn: u32, hold_time: u16, bgp_identifier: u32) -> Self {
+        let capability = Capability::new_four_octet_asn(asn);
+        let optional_param = OptionalParam::new_capability(capability);
+        let optional_params_len = 2 + optional_param.param_len as usize; // type(1) + len(1) + value
+
+        OpenMessage {
+            version: BGP_VERSION,
+            asn,
+            hold_time,
+            bgp_identifier,
+            optional_params_len: optional_params_len as u8,
+            optional_params: vec![optional_param],
         }
     }
 
@@ -148,7 +173,7 @@ impl OpenMessage {
         }
 
         let version = bytes[0];
-        let asn = u16::from_be_bytes([bytes[1], bytes[2]]);
+        let asn_2byte = u16::from_be_bytes([bytes[1], bytes[2]]);
         let hold_time = u16::from_be_bytes([bytes[3], bytes[4]]);
         let bgp_identifier = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
 
@@ -174,6 +199,23 @@ impl OpenMessage {
             _ => read_optional_parameters(bytes[10..10 + optional_params_len as usize].to_vec()),
         };
 
+        // RFC 6793: Extract real ASN from capability 65 if AS_TRANS is present
+        let asn = if asn_2byte == AS_TRANS {
+            // Must have capability 65 to use AS_TRANS
+            match OptionalParam::find_four_octet_asn(&optional_params) {
+                Some(asn) => asn,
+                None => {
+                    // AS_TRANS without capability 65 is an error - RFC 6793
+                    return Err(ParserError::BgpError {
+                        error: BgpError::OpenMessageError(OpenMessageError::BadPeerAs),
+                        data: AS_TRANS.to_be_bytes().to_vec(),
+                    });
+                }
+            }
+        } else {
+            asn_2byte as u32
+        };
+
         Ok(OpenMessage {
             version,
             asn,
@@ -196,8 +238,14 @@ impl Message for OpenMessage {
         // Version
         bytes.push(self.version);
 
-        // ASN
-        bytes.extend_from_slice(&self.asn.to_be_bytes());
+        // RFC 6793: ASN field (2 bytes)
+        // If ASN > 65535, write AS_TRANS (23456)
+        let asn_2byte = if self.asn > MAX_2BYTE_ASN {
+            AS_TRANS.to_be_bytes()
+        } else {
+            (self.asn as u16).to_be_bytes()
+        };
+        bytes.extend_from_slice(&asn_2byte);
 
         // Hold time
         bytes.extend_from_slice(&self.hold_time.to_be_bytes());

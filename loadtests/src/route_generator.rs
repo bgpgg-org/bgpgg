@@ -114,7 +114,7 @@ impl PeerRoute {
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: self.as_path.len() as u8,
-                asn_list: self.as_path.clone(),
+                asn_list: self.as_path.iter().map(|&asn| asn as u32).collect(),
             }]
         };
 
@@ -126,6 +126,7 @@ impl PeerRoute {
             Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
             self.med,
             false, // atomic_aggregate
+            None,  // aggregator
             self.communities.clone(),
             vec![], // extended_communities
             vec![], // large_communities

@@ -27,37 +27,26 @@ async fn test_remove_peer() {
     let hold_timer_secs = 3;
     let (mut server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
-    // Server2 announces a route to Server1 via gRPC
-    announce_route(
+    // Server2 announces a route to Server1
+    let server2_addr = server2.address.to_string();
+    let peer_addr = server2_addr.clone();
+    announce_and_verify_route(
         &mut server2,
+        &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: server2_addr.clone(),
+            peer_address: server2_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Get the actual peer address (with OS-allocated port)
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
-    // Poll for route to appear in Server1's RIB
-    // eBGP: NEXT_HOP rewritten to sender's local address
-    poll_route_propagation(&[(
-        &server1,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
     .await;
 
     // Remove peer via API call instead of killing the server
@@ -90,26 +79,25 @@ async fn test_remove_peer_withdraw_routes() {
     )
     .await;
 
-    // Get the actual peer address
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
-    // Poll for route to appear in Server1's RIB
-    // eBGP: NEXT_HOP rewritten to router ID
-    poll_route_propagation(&[(
-        &server1,
-        vec![Route {
+    let server2_addr = server2.address.to_string();
+    let peer_addr = server2_addr.clone();
+    announce_and_verify_route(
+        &mut server2,
+        &[&server1],
+        RouteParams {
             prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
+            next_hop: "192.168.2.1".to_string(),
+            ..Default::default()
+        },
+        PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: server2_addr.clone(),
+            peer_address: server2_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
+    )
     .await;
 
     // Remove Server2's peer from Server1 via API call
@@ -132,63 +120,25 @@ async fn test_remove_peer_four_node_mesh() {
     let (mut server1, server2, server3, mut server4) =
         setup_four_meshed_servers(Some(hold_timer_secs)).await;
 
-    // Server4 announces a route
-    announce_route(
+    // Server4 announces a route to all peers
+    let server4_addr = server4.address.to_string();
+    announce_and_verify_route(
         &mut server4,
+        &[&server1, &server2, &server3],
         RouteParams {
             prefix: "10.4.0.0/24".to_string(),
             next_hop: "192.168.4.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65004])],
+            next_hop: server4_addr.clone(),
+            peer_address: server4_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Poll for route to propagate to all peers
-    // eBGP: NEXT_HOP rewritten to router IDs
-    poll_route_propagation(&[
-        (
-            &server1,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65004])],
-                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server4.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-        (
-            &server2,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65004])],
-                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server4.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-        (
-            &server3,
-            vec![Route {
-                prefix: "10.4.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65004])],
-                    next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server4.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-    ])
     .await;
 
     // Remove Server4's peer from Server1 via API call

@@ -61,7 +61,7 @@ impl Policy {
     }
 
     /// Create a default inbound policy with AS loop prevention and default local pref
-    pub fn default_in(local_asn: u16) -> Self {
+    pub fn default_in(local_asn: u32) -> Self {
         use statement::{stmt_default_local_pref, stmt_reject_as_loop, Action};
         Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
             .with(stmt_reject_as_loop(local_asn))
@@ -70,7 +70,7 @@ impl Policy {
     }
 
     /// Create a default outbound policy with iBGP reflection prevention
-    pub fn default_out(local_asn: u16, peer_asn: u16) -> Self {
+    pub fn default_out(local_asn: u32, peer_asn: u32) -> Self {
         use statement::{stmt_reject_ibgp, Action};
         if local_asn == peer_asn {
             Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
@@ -176,6 +176,7 @@ pub(crate) mod test_helpers {
             local_pref: None,
             med: None,
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],

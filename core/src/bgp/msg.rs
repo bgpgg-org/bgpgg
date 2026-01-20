@@ -104,17 +104,24 @@ pub enum BgpMessage {
 
 impl BgpMessage {
     /// Serialize the BGP message to bytes with BGP header
+    ///
+    /// NOTE: Cannot serialize UPDATE messages - use UpdateMessage::serialize()
+    /// directly (encoding context set at construction).
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Self::Open(m) => m.serialize(),
-            Self::Update(m) => m.serialize(),
+            Self::Update(_) => panic!("Use UpdateMessage::serialize() instead - UPDATE encoding context set at construction"),
             Self::Keepalive(m) => m.serialize(),
             Self::Notification(m) => m.serialize(),
             Self::RouteRefresh(m) => m.serialize(),
         }
     }
 
-    fn from_bytes(message_type_val: u8, bytes: Vec<u8>) -> Result<Self, ParserError> {
+    pub fn from_bytes(
+        message_type_val: u8,
+        bytes: Vec<u8>,
+        use_4byte_asn: bool,
+    ) -> Result<Self, ParserError> {
         let message_type = MessageType::try_from(message_type_val)?;
 
         match message_type {
@@ -123,7 +130,7 @@ impl BgpMessage {
                 Ok(BgpMessage::Open(message))
             }
             MessageType::Update => {
-                let message = UpdateMessage::from_bytes(bytes)?;
+                let message = UpdateMessage::from_bytes(bytes, use_4byte_asn)?;
                 Ok(BgpMessage::Update(message))
             }
             MessageType::Keepalive => Ok(BgpMessage::Keepalive(KeepaliveMessage {})),
@@ -139,9 +146,14 @@ impl BgpMessage {
     }
 }
 
-pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
+/// Read complete BGP message (header + body) as raw bytes without parsing.
+/// Returns the complete message including the 19-byte header.
+///
+/// This function validates the header (marker, length, type) but does not
+/// parse the message body. Header validation errors are returned as ParserError.
+pub async fn read_bgp_message_bytes<R: AsyncReadExt + Unpin>(
     mut stream: R,
-) -> Result<BgpMessage, ParserError> {
+) -> Result<Vec<u8>, ParserError> {
     let mut header_buffer = [0u8; BGP_HEADER_SIZE_BYTES];
 
     stream
@@ -158,17 +170,34 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
     validate_length(message_length, message_type)?;
     validate_message_type(message_type)?;
 
+    // Build complete message (header + body)
+    let mut message = header_buffer.to_vec();
     let body_length = message_length - BGP_HEADER_SIZE_BYTES as u16;
-    let mut message_buffer = vec![0u8; body_length.into()];
 
     if body_length > 0 {
+        let mut body_buffer = vec![0u8; body_length as usize];
         stream
-            .read_exact(&mut message_buffer)
+            .read_exact(&mut body_buffer)
             .await
             .map_err(|err| ParserError::IoError(err.to_string()))?;
+        message.extend_from_slice(&body_buffer);
     }
 
-    BgpMessage::from_bytes(message_type, message_buffer)
+    Ok(message)
+}
+
+/// Read and parse a BGP message.
+///
+/// NOTE: This is a convenience wrapper for tests and utilities. Production code should use
+/// `read_bgp_message_bytes()` and parse separately with negotiated capabilities.
+pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
+    stream: R,
+    use_4byte_asn: bool,
+) -> Result<BgpMessage, ParserError> {
+    let bytes = read_bgp_message_bytes(stream).await?;
+    let message_type = bytes[18];
+    let body = bytes[BGP_HEADER_SIZE_BYTES..].to_vec();
+    BgpMessage::from_bytes(message_type, body, use_4byte_asn)
 }
 
 fn validate_marker(header: &[u8]) -> Result<(), ParserError> {
@@ -254,7 +283,7 @@ mod tests {
     async fn test_read_open_message() {
         let stream = Cursor::new(MOCK_OPEN_MESSAGE);
 
-        match read_bgp_message(stream).await.unwrap() {
+        match read_bgp_message(stream, false).await.unwrap() {
             BgpMessage::Open(open_message) => {
                 assert_eq!(open_message.version, 4);
                 assert_eq!(open_message.asn, 1234);
@@ -272,7 +301,7 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[0] = 0x00;
         let stream = Cursor::new(msg);
-        match read_bgp_message(stream).await {
+        match read_bgp_message(stream, false).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -290,7 +319,7 @@ mod tests {
         msg[16] = 0x00;
         msg[17] = 0x12; // 18
         let stream = Cursor::new(msg);
-        match read_bgp_message(stream).await {
+        match read_bgp_message(stream, false).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -308,7 +337,7 @@ mod tests {
         msg[16] = 0x10;
         msg[17] = 0x01; // 4097
         let stream = Cursor::new(msg);
-        match read_bgp_message(stream).await {
+        match read_bgp_message(stream, false).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -325,7 +354,7 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[18] = 99;
         let stream = Cursor::new(msg);
-        match read_bgp_message(stream).await {
+        match read_bgp_message(stream, false).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,

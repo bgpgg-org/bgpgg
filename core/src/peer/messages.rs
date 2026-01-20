@@ -16,10 +16,10 @@ use super::fsm::FsmEvent;
 use super::{BgpOpenParams, PeerCapabilities};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, ParamVal};
-use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::IpNetwork;
 use crate::rib::Path;
@@ -41,7 +41,7 @@ fn default_local_capabilities() -> Vec<AfiSafi> {
     ]
 }
 
-/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760)
+/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793)
 fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
     let mut capabilities = PeerCapabilities::default();
 
@@ -56,6 +56,14 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                 BgpCapabiltyCode::RouteRefresh => {
                     capabilities.route_refresh = true;
                 }
+                BgpCapabiltyCode::FourOctetAsn => {
+                    // RFC 6793: Parse 4-byte ASN from capability value
+                    if cap.val.len() == 4 {
+                        let asn =
+                            u32::from_be_bytes([cap.val[0], cap.val[1], cap.val[2], cap.val[3]]);
+                        capabilities.four_octet_asn = Some(asn);
+                    }
+                }
                 _ => {}
             }
         }
@@ -65,7 +73,7 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
 }
 
 /// Create an OPEN message with multiprotocol capabilities
-fn create_open_message(asn: u16, hold_time: u16, router_id: Ipv4Addr) -> OpenMessage {
+fn create_open_message(asn: u32, hold_time: u16, router_id: Ipv4Addr) -> OpenMessage {
     // Create multiprotocol capabilities
     let local_capabilities = default_local_capabilities();
     let mut optional_params = Vec::new();
@@ -79,6 +87,11 @@ fn create_open_message(asn: u16, hold_time: u16, router_id: Ipv4Addr) -> OpenMes
     // Add Route Refresh capability (RFC 2918)
     optional_params.push(OptionalParam::new_capability(
         Capability::new_route_refresh(),
+    ));
+
+    // Always add Four-Octet ASN capability (RFC 6793)
+    optional_params.push(OptionalParam::new_capability(
+        Capability::new_four_octet_asn(asn),
     ));
 
     // Calculate total optional params length
@@ -119,9 +132,9 @@ impl Peer {
     /// Handle entering OpenConfirm state - negotiate timers, send KEEPALIVE, notify server
     pub(super) async fn enter_open_confirm(
         &mut self,
-        peer_asn: u16,
+        peer_asn: u32,
         peer_hold_time: u16,
-        local_asn: u16,
+        local_asn: u32,
         local_hold_time: u16,
         peer_capabilities: PeerCapabilities,
     ) -> Result<(), io::Error> {
@@ -145,14 +158,42 @@ impl Peer {
         // We always advertise it, so it's negotiated if the peer also advertises it
         let negotiated_route_refresh = peer_capabilities.route_refresh;
 
+        // Negotiate Four-Octet ASN capability (RFC 6793)
+        // Both must advertise for it to be negotiated
+        let negotiated_four_octet_asn = peer_capabilities.four_octet_asn;
+
         self.negotiated_capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
             route_refresh: negotiated_route_refresh,
+            four_octet_asn: negotiated_four_octet_asn,
         };
+
+        // RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers is only
+        // possible if the NEW speaker has a two-octet AS number
+        let local_asn = self.fsm.local_asn();
+        if local_asn > MAX_2BYTE_ASN && negotiated_four_octet_asn.is_none() {
+            // We have a large ASN but peer doesn't support 4-byte ASNs
+            // This violates RFC 6793 - the session cannot function correctly
+            warn!(&self.logger, "rejecting session: peer does not support 4-byte ASNs but local ASN exceeds 65535",
+                  "local_asn" => local_asn,
+                  "peer_ip" => self.addr.to_string());
+
+            let notif = NotificationMessage::new(
+                BgpError::OpenMessageError(OpenMessageError::UnsupportedOptionalParameter),
+                vec![],
+            );
+            self.send_notification(notif).await?;
+
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "peer does not support 4-byte ASNs (RFC 6793)",
+            ));
+        }
 
         info!(&self.logger, "negotiated capabilities",
               "multiprotocol" => format!("{:?}", self.negotiated_capabilities.multiprotocol),
               "route_refresh" => self.negotiated_capabilities.route_refresh,
+              "four_octet_asn" => format!("{:?}", self.negotiated_capabilities.four_octet_asn),
               "peer_ip" => self.addr.to_string());
 
         // Negotiate hold time: use minimum (RFC 4271).
@@ -409,13 +450,13 @@ impl Peer {
         });
     }
 
-    /// Send UPDATE message and reset keepalive timer (RFC 4271 requirement)
-    pub(super) async fn send_update(&mut self, update_msg: UpdateMessage) -> Result<(), io::Error> {
+    /// Send UPDATE message bytes and reset keepalive timer (RFC 4271 requirement)
+    pub(super) async fn send_update(&mut self, update_bytes: Vec<u8>) -> Result<(), io::Error> {
         let conn = self
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no TCP connection"))?;
-        conn.tx.write_all(&update_msg.serialize()).await?;
+        conn.tx.write_all(&update_bytes).await?;
         self.statistics.update_sent += 1;
         // RFC 4271: "Each time the local system sends a KEEPALIVE or UPDATE message,
         // it restarts its KeepaliveTimer, unless the negotiated HoldTime value is zero"
@@ -538,10 +579,12 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 vec![],
                 vec![],
                 vec![],
                 vec![], // large_communities
+                true,
             );
 
             let result = peer.handle_message(BgpMessage::Update(update)).await;
@@ -585,10 +628,12 @@ mod tests {
             None,
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![],
+            true,
         );
 
         let result = peer.handle_message(BgpMessage::Update(update)).await;

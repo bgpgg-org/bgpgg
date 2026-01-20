@@ -390,7 +390,7 @@ impl BgpggProcess {
         let grpc_addr = format!("127.0.0.1:{}", grpc_port);
 
         let config = Config {
-            asn,
+            asn: asn as u32,
             listen_addr: "127.0.0.1:0".to_string(),
             router_id,
             grpc_listen_addr: grpc_addr.clone(),

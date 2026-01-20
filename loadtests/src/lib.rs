@@ -28,12 +28,16 @@ pub async fn bgp_handshake(
     peer_asn: u16,
     hold_time: u16,
 ) -> io::Result<()> {
-    // Send OPEN
-    let open = OpenMessage::new(local_asn, hold_time, u32::from(local_router_id));
+    // Send OPEN with Four-Octet ASN capability (RFC 6793)
+    let open = OpenMessage::with_four_octet_asn_capability(
+        local_asn.into(),
+        hold_time,
+        u32::from(local_router_id),
+    );
     stream.write_all(&open.serialize()).await?;
 
-    // Read peer's OPEN
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream)
+    // Read peer's OPEN (use_4byte_asn=true since we advertised the capability)
+    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
         .await
         .map_err(|e| {
             io::Error::new(
@@ -44,7 +48,7 @@ pub async fn bgp_handshake(
 
     match msg {
         BgpMessage::Open(peer_open) => {
-            if peer_open.asn != peer_asn {
+            if peer_open.asn != peer_asn as u32 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Expected ASN {}, got {}", peer_asn, peer_open.asn),
@@ -63,8 +67,8 @@ pub async fn bgp_handshake(
     let keepalive = KeepaliveMessage {};
     stream.write_all(&keepalive.serialize()).await?;
 
-    // Read peer's KEEPALIVE
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream)
+    // Read peer's KEEPALIVE (use_4byte_asn=true for consistency)
+    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
         .await
         .map_err(|e| {
             io::Error::new(
@@ -122,7 +126,7 @@ pub fn create_update_message(
         vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: as_path.len() as u8,
-            asn_list: as_path,
+            asn_list: as_path.iter().map(|&asn| asn as u32).collect(),
         }]
     };
 
@@ -134,10 +138,12 @@ pub fn create_update_message(
         local_pref,
         med,
         false,
+        None,
         communities,
         vec![], // extended_communities
         vec![], // large_communities
         vec![],
+        true, // use_4byte_asn
     );
 
     update.serialize()
@@ -157,7 +163,7 @@ pub fn transform_path_for_ebgp_export(
         let first_segment = &exported.as_path[0];
         if first_segment.segment_type == AsPathSegmentType::AsSequence {
             // Prepend to existing AS_SEQUENCE
-            let mut new_asn_list = vec![local_asn];
+            let mut new_asn_list = vec![local_asn as u32];
             new_asn_list.extend_from_slice(&first_segment.asn_list);
             exported.as_path[0] = AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
@@ -169,7 +175,7 @@ pub fn transform_path_for_ebgp_export(
             let mut new_segments = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
-                asn_list: vec![local_asn],
+                asn_list: vec![local_asn as u32],
             }];
             new_segments.extend_from_slice(&exported.as_path);
             exported.as_path = new_segments;
@@ -179,7 +185,7 @@ pub fn transform_path_for_ebgp_export(
         exported.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
-            asn_list: vec![local_asn],
+            asn_list: vec![local_asn as u32],
         }];
     }
 
@@ -217,7 +223,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
             AsPathSegment {
                 segment_type,
                 segment_len: seg.asns.len() as u8,
-                asn_list: seg.asns.iter().map(|asn| *asn as u16).collect(),
+                asn_list: seg.asns.clone(),
             }
         })
         .collect();
@@ -246,6 +252,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
         proto_path.local_pref,
         proto_path.med,
         proto_path.atomic_aggregate,
+        None, // aggregator
         communities,
         vec![], // extended_communities
         vec![], // large_communities

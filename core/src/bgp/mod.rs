@@ -27,6 +27,9 @@ pub mod msg_update_types;
 pub mod multiprotocol;
 pub mod utils;
 
+// Re-export AS4_PATH merge function for use by rib module
+pub use msg_update_codec::merge_as_paths;
+
 #[cfg(test)]
 use msg_update_types::{AttrType, PathAttrFlag};
 

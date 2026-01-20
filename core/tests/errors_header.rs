@@ -47,10 +47,10 @@ async fn test_invalid_marker() {
         65002,
         300,
         u32::from(Ipv4Addr::new(2, 2, 2, 2)),
-        None,
-        Some(corrupted_marker),
-        None,
-        None,
+        RawOpenOptions {
+            marker_override: Some(corrupted_marker),
+            ..Default::default()
+        },
     );
 
     peer.send_raw(&msg).await;
@@ -88,10 +88,10 @@ async fn test_bad_message_length() {
             65002,
             300,
             u32::from(Ipv4Addr::new(2, 2, 2, 2)),
-            None,
-            None,
-            Some(wrong_length),
-            None,
+            RawOpenOptions {
+                length_override: Some(wrong_length),
+                ..Default::default()
+            },
         );
 
         peer.send_raw(&msg).await;
@@ -186,10 +186,10 @@ async fn test_invalid_message_type() {
         65002,
         300,
         u32::from(Ipv4Addr::new(2, 2, 2, 2)),
-        None,
-        None,
-        None,
-        Some(99),
+        RawOpenOptions {
+            msg_type_override: Some(99),
+            ..Default::default()
+        },
     );
 
     peer.send_raw(&msg).await;
@@ -225,10 +225,10 @@ async fn test_send_notification_without_open() {
             65002,
             300,
             0x02020202,
-            None,
-            Some(corrupted_marker),
-            None,
-            None,
+            RawOpenOptions {
+                marker_override: Some(corrupted_marker),
+                ..Default::default()
+            },
         );
         peer.send_raw(&msg).await;
 

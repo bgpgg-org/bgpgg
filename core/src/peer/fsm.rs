@@ -280,7 +280,7 @@ pub struct Fsm {
     pub connect_retry_counter: u32,
 
     /// Local BGP configuration
-    local_asn: u16,
+    local_asn: u32,
     local_hold_time: u16,
     local_bgp_id: u32,
     local_addr: IpAddr,
@@ -293,7 +293,7 @@ pub struct Fsm {
 impl Fsm {
     /// Create a new FSM in Idle state (RFC 4271 8.2.2).
     pub fn new(
-        local_asn: u16,
+        local_asn: u32,
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: IpAddr,
@@ -316,7 +316,7 @@ impl Fsm {
     #[cfg(test)]
     pub fn with_state(
         state: BgpState,
-        local_asn: u16,
+        local_asn: u32,
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: IpAddr,
@@ -340,7 +340,7 @@ impl Fsm {
     }
 
     /// Get local ASN
-    pub fn local_asn(&self) -> u16 {
+    pub fn local_asn(&self) -> u32 {
         self.local_asn
     }
 

@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use crate::bgp::msg::BgpMessage;
-use crate::bgp::msg_notification::CeaseSubcode;
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
-use crate::debug;
 use crate::log::Logger;
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
+use crate::{debug, error};
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Error;
@@ -43,6 +42,9 @@ pub struct PeerCapabilities {
     pub multiprotocol: HashSet<AfiSafi>,
     /// Route Refresh capability (RFC 2918)
     pub route_refresh: bool,
+    /// Four-Octet ASN capability (RFC 6793)
+    /// Contains the peer's 4-byte ASN if advertised
+    pub four_octet_asn: Option<u32>,
 }
 
 impl PeerCapabilities {
@@ -50,15 +52,20 @@ impl PeerCapabilities {
     pub fn supports_afi_safi(&self, afi_safi: &AfiSafi) -> bool {
         self.multiprotocol.contains(afi_safi)
     }
+
+    /// Check if peer supports 4-byte ASNs (RFC 6793)
+    pub fn supports_four_octet_asn(&self) -> bool {
+        self.four_octet_asn.is_some()
+    }
 }
 
 /// Parameters from received BGP OPEN message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgpOpenParams {
-    pub peer_asn: u16,
+    pub peer_asn: u32,
     pub peer_hold_time: u16,
     pub peer_bgp_id: u32,
-    pub local_asn: u16,
+    pub local_asn: u32,
     pub local_hold_time: u16,
     pub peer_capabilities: PeerCapabilities,
 }
@@ -123,7 +130,7 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 
 /// Operations that can be sent to a peer task
 pub enum PeerOp {
-    SendUpdate(UpdateMessage),
+    SendUpdate(Vec<u8>),
     SendRouteRefresh {
         afi: crate::bgp::multiprotocol::Afi,
         safi: crate::bgp::multiprotocol::Safi,
@@ -182,7 +189,7 @@ pub struct PeerStatistics {
 /// Spawns a dedicated read task to avoid tokio::select! cancellation issues
 struct TcpConnection {
     tx: OwnedWriteHalf,
-    msg_rx: mpsc::Receiver<Result<BgpMessage, ParserError>>,
+    msg_rx: mpsc::Receiver<Result<Vec<u8>, ParserError>>,
     read_task: JoinHandle<()>,
 }
 
@@ -196,19 +203,20 @@ impl Drop for TcpConnection {
 impl TcpConnection {
     /// Creates a new TcpConnection and spawns a dedicated read task
     ///
-    /// The read task runs `read_bgp_message` in a loop, sending results to a channel.
+    /// The read task runs `read_bgp_message_bytes` in a loop, sending raw bytes to a channel.
     /// This ensures the read operation cannot be cancelled mid-execution by tokio::select!,
     /// preventing TCP stream desynchronization.
+    /// The Peer task will parse these bytes using negotiated capabilities.
     fn new(tx: OwnedWriteHalf, mut rx: OwnedReadHalf) -> Self {
-        use crate::bgp::msg::read_bgp_message;
+        use crate::bgp::msg::read_bgp_message_bytes;
 
         let (msg_tx, msg_rx) = mpsc::channel(16);
 
         let read_task = tokio::spawn(async move {
             loop {
-                match read_bgp_message(&mut rx).await {
-                    Ok(msg) => {
-                        if msg_tx.send(Ok(msg)).await.is_err() {
+                match read_bgp_message_bytes(&mut rx).await {
+                    Ok(bytes) => {
+                        if msg_tx.send(Ok(bytes)).await.is_err() {
                             // Receiver dropped, exit cleanly
                             break;
                         }
@@ -234,7 +242,7 @@ pub struct Peer {
     pub addr: IpAddr,
     pub port: u16,
     pub fsm: Fsm,
-    pub asn: Option<u16>,
+    pub asn: Option<u32>,
     pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
@@ -258,8 +266,8 @@ pub struct Peer {
     established_at: Option<Instant>,
     /// RFC 4271 9.2.1.1: Last time we sent an UPDATE
     last_update_sent: Option<Instant>,
-    /// Queued UPDATE messages waiting for MRAI timer
-    pending_updates: Vec<UpdateMessage>,
+    /// Queued serialized UPDATE messages waiting for MRAI timer
+    pending_updates: Vec<Vec<u8>>,
     /// MinRouteAdvertisementIntervalTimer from config
     mrai_interval: Duration,
     /// OPEN message sent to peer (for BMP PeerUp)
@@ -281,7 +289,7 @@ impl Peer {
         port: u16,
         peer_rx: mpsc::UnboundedReceiver<PeerOp>,
         server_tx: mpsc::UnboundedSender<ServerOp>,
-        local_asn: u16,
+        local_asn: u32,
         local_hold_time: u16,
         local_bgp_id: u32,
         local_addr: SocketAddr,
@@ -411,6 +419,97 @@ impl Peer {
     fn can_send_notification(&self) -> bool {
         self.conn.is_some()
             && (self.config.send_notification_without_open || self.statistics.open_sent > 0)
+    }
+
+    /// Parse BGP message from raw bytes received from TCP connection.
+    ///
+    /// RFC 4271 Section 4.1: BGP header is 19 bytes, message type at byte 18.
+    ///
+    /// # Arguments
+    /// * `bytes` - Complete BGP message including header
+    /// * `use_4byte_asn` - Whether to use 4-byte ASN encoding
+    ///
+    /// # Note on use_4byte_asn during OPEN exchange
+    /// During OPEN message exchange, `use_4byte_asn` MUST be `false` because:
+    /// - RFC 6793: OPEN messages always use 2-byte ASN encoding
+    /// - If peer ASN > 65535, OPEN uses AS_TRANS (23456) and real ASN goes in capability
+    /// - Only after OPEN negotiation can we determine if peer supports 4-byte ASNs
+    /// - After negotiation, set `use_4byte_asn = negotiated_capabilities.supports_four_octet_asn()`
+    fn parse_bgp_message(bytes: &[u8], use_4byte_asn: bool) -> Result<BgpMessage, ParserError> {
+        let message_type = bytes[18];
+        let body = bytes[19..].to_vec();
+        BgpMessage::from_bytes(message_type, body, use_4byte_asn)
+    }
+
+    /// Convert BGP parse error to FSM event for error handling.
+    ///
+    /// RFC 4271 Events 21, 22: Different error types trigger different FSM events.
+    fn parse_error_to_fsm_event(error: &ParserError) -> FsmEvent {
+        if let Some(notif) = NotificationMessage::from_parser_error(error) {
+            match notif.error() {
+                BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
+                BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),
+                _ => FsmEvent::TcpConnectionFails,
+            }
+        } else {
+            FsmEvent::TcpConnectionFails
+        }
+    }
+
+    /// Handle received message during DelayOpen timer wait.
+    ///
+    /// Common logic for both Active and Connect states while waiting for DelayOpenTimer.
+    /// Handles OPEN, NOTIFICATION, parse errors, and connection failures.
+    ///
+    /// RFC 4271 Section 8: DelayOpen optional session attribute allows delaying
+    /// OPEN message to reduce resource consumption from connection collisions.
+    async fn handle_delay_open_message(&mut self, result: Option<Result<Vec<u8>, ParserError>>) {
+        match result {
+            Some(Ok(bytes)) => {
+                // RFC 6793: OPEN messages always use 2-byte ASN encoding
+                match Self::parse_bgp_message(&bytes, false) {
+                    Ok(BgpMessage::Open(open)) => {
+                        debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
+                        self.fsm.timers.stop_delay_open_timer();
+                        let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                            peer_asn: open.asn,
+                            peer_hold_time: open.hold_time,
+                            local_asn: self.fsm.local_asn(),
+                            local_hold_time: self.fsm.local_hold_time(),
+                            peer_capabilities: PeerCapabilities::default(),
+                            peer_bgp_id: open.bgp_identifier,
+                        });
+                        if let Err(e) = self.process_event(&event).await {
+                            error!(&self.logger, "failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            self.disconnect(true, PeerDownReason::LocalNoNotification(event));
+                        }
+                    }
+                    Ok(BgpMessage::Notification(notif)) => {
+                        self.handle_notification_received(&notif).await;
+                    }
+                    Ok(_) => {
+                        error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
+                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                    }
+                    Err(e) => {
+                        debug!(&self.logger, "parse error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", e));
+                        let event = Self::parse_error_to_fsm_event(&e);
+                        self.try_process_event(&event).await;
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                // Header validation error from read task
+                debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                let event = Self::parse_error_to_fsm_event(&e);
+                self.try_process_event(&event).await;
+            }
+            None => {
+                // Read task exited without error - connection failure
+                debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
+                self.try_process_event(&FsmEvent::TcpConnectionFails).await;
+            }
+        }
     }
 }
 

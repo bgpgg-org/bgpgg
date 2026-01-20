@@ -23,7 +23,7 @@ use super::msg_update_codec::{
     read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
-use super::msg_update_types::{MpReachNlri, MpUnreachNlri};
+use super::msg_update_types::{MpReachNlri, MpUnreachNlri, AS_TRANS, MAX_2BYTE_ASN};
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{parse_nlri_list, ParserError};
 use crate::net::IpNetwork;
@@ -41,10 +41,12 @@ impl UpdateMessage {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        aggregator: Option<Aggregator>,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<LargeCommunity>,
         unknown_attrs: Vec<PathAttribute>,
+        use_4byte_asn: bool,
     ) -> Self {
         // Partition routes by address family
         // IPv4 routes go in traditional NLRI field, IPv6 routes go in MP_REACH_NLRI
@@ -95,6 +97,13 @@ impl UpdateMessage {
             });
         }
 
+        if let Some(agg) = aggregator {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Aggregator(agg),
+            });
+        }
+
         if !communities.is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
@@ -132,7 +141,7 @@ impl UpdateMessage {
         // Append unknown attributes
         path_attributes.extend(unknown_attrs);
 
-        let path_attributes_bytes = write_path_attributes(&path_attributes);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, use_4byte_asn);
 
         UpdateMessage {
             withdrawn_routes_len: 0,
@@ -140,10 +149,11 @@ impl UpdateMessage {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: ipv4_routes, // Only IPv4 in traditional NLRI field
+            use_4byte_asn,
         }
     }
 
-    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>) -> Self {
+    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>, use_4byte_asn: bool) -> Self {
         // Partition withdrawals by address family
         let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn_routes
             .into_iter()
@@ -164,7 +174,7 @@ impl UpdateMessage {
         }
 
         let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn);
-        let path_attributes_bytes = write_path_attributes(&path_attributes);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, use_4byte_asn);
 
         UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
@@ -172,6 +182,7 @@ impl UpdateMessage {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: vec![],
+            use_4byte_asn,
         }
     }
 
@@ -221,12 +232,157 @@ impl UpdateMessage {
         })
     }
 
+    /// RFC 6793: Extract AS4_PATH attribute if present
+    pub fn as4_path(&self) -> Option<Vec<AsPathSegment>> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::As4Path(ref as4_path) = attr.value {
+                Some(as4_path.segments.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// RFC 6793: Extract AGGREGATOR attribute if present
+    pub fn aggregator(&self) -> Option<Aggregator> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::Aggregator(ref aggregator) = attr.value {
+                Some(aggregator.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// RFC 6793: Extract AS4_AGGREGATOR attribute if present
+    pub fn as4_aggregator(&self) -> Option<Aggregator> {
+        self.path_attributes.iter().find_map(|attr| {
+            if let PathAttrValue::As4Aggregator(ref as4_aggregator) = attr.value {
+                Some(as4_aggregator.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// RFC 6793: Transform AS_PATH for old speakers (2-byte ASN only)
+    /// Returns replacement attributes: AS_PATH with AS_TRANS + AS4_PATH
+    fn transform_as_path_for_old_speaker(
+        attr: &PathAttribute,
+        as_path: &AsPath,
+    ) -> Vec<PathAttribute> {
+        // Check if any ASN > 65535
+        let has_large_asn = as_path
+            .segments
+            .iter()
+            .any(|seg| seg.asn_list.iter().any(|&asn| asn > MAX_2BYTE_ASN));
+
+        if !has_large_asn {
+            // No large ASNs, keep as-is
+            return vec![attr.clone()];
+        }
+
+        let mut result = Vec::new();
+
+        // Create AS_PATH with AS_TRANS substitution
+        let mut segments_2byte = Vec::new();
+        for seg in &as_path.segments {
+            let asn_list_2byte: Vec<u32> = seg
+                .asn_list
+                .iter()
+                .map(|&asn| {
+                    if asn > MAX_2BYTE_ASN {
+                        AS_TRANS as u32
+                    } else {
+                        asn
+                    }
+                })
+                .collect();
+            segments_2byte.push(AsPathSegment {
+                segment_type: seg.segment_type,
+                segment_len: seg.segment_len,
+                asn_list: asn_list_2byte,
+            });
+        }
+
+        result.push(PathAttribute {
+            flags: attr.flags.clone(),
+            value: PathAttrValue::AsPath(AsPath {
+                segments: segments_2byte,
+            }),
+        });
+
+        // Generate AS4_PATH (exclude confederation segments per RFC 6793)
+        let segments_4byte: Vec<AsPathSegment> = as_path
+            .segments
+            .iter()
+            .filter(|seg| {
+                !matches!(
+                    seg.segment_type,
+                    AsPathSegmentType::AsConfedSequence | AsPathSegmentType::AsConfedSet
+                )
+            })
+            .cloned()
+            .collect();
+
+        if !segments_4byte.is_empty() {
+            result.push(PathAttribute {
+                flags: PathAttrFlag(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+                value: PathAttrValue::As4Path(AsPath {
+                    segments: segments_4byte,
+                }),
+            });
+        }
+
+        result
+    }
+
+    /// RFC 6793: Transform AGGREGATOR for old speakers (2-byte ASN only)
+    /// Returns replacement attributes: AGGREGATOR with AS_TRANS + AS4_AGGREGATOR
+    fn transform_aggregator_for_old_speaker(
+        attr: &PathAttribute,
+        agg: &Aggregator,
+    ) -> Vec<PathAttribute> {
+        if agg.asn <= MAX_2BYTE_ASN {
+            // ASN fits in 2 bytes, keep as-is
+            return vec![attr.clone()];
+        }
+
+        vec![
+            // AGGREGATOR with AS_TRANS
+            PathAttribute {
+                flags: attr.flags.clone(),
+                value: PathAttrValue::Aggregator(Aggregator {
+                    asn: AS_TRANS as u32,
+                    ip_addr: agg.ip_addr,
+                }),
+            },
+            // AS4_AGGREGATOR with real ASN
+            PathAttribute {
+                flags: PathAttrFlag(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+                value: PathAttrValue::As4Aggregator(agg.clone()),
+            },
+        ]
+    }
+
+    /// RFC 6793 Section 4.1: Strip AS4_PATH/AS4_AGGREGATOR from NEW speakers
+    /// NEW speakers MUST NOT send these attributes to other NEW speakers
+    /// This method discards them when received (protocol violation)
+    pub fn strip_as4_attributes(&mut self) {
+        self.path_attributes.retain(|attr| {
+            !matches!(
+                attr.value,
+                PathAttrValue::As4Path(_) | PathAttrValue::As4Aggregator(_)
+            )
+        });
+    }
+
     pub fn path_attributes(&self) -> &[PathAttribute] {
         &self.path_attributes
     }
 
     /// Returns the leftmost AS in the AS_PATH attribute.
-    pub fn leftmost_as(&self) -> Option<u16> {
+    pub fn leftmost_as(&self) -> Option<u32> {
         self.path_attributes.iter().find_map(|attr| {
             if let PathAttrValue::AsPath(ref as_path) = attr.value {
                 as_path.leftmost_as()
@@ -323,7 +479,7 @@ impl UpdateMessage {
         })
     }
 
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParserError> {
+    pub fn from_bytes(bytes: Vec<u8>, use_4byte_asn: bool) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;
 
@@ -343,7 +499,8 @@ impl UpdateMessage {
 
         data = data[TOTAL_ATTR_LENGTH_SIZE..].to_vec();
 
-        let path_attributes = read_path_attributes(&data[..total_path_attributes_len])?;
+        let path_attributes =
+            read_path_attributes(&data[..total_path_attributes_len], use_4byte_asn)?;
         data = data[total_path_attributes_len..].to_vec();
 
         let nlri_list = match total_path_attributes_len {
@@ -359,6 +516,7 @@ impl UpdateMessage {
             total_path_attributes_len: total_path_attributes_len as u16,
             path_attributes,
             nlri_list,
+            use_4byte_asn,
         })
     }
 }
@@ -370,6 +528,8 @@ pub struct UpdateMessage {
     total_path_attributes_len: u16,
     path_attributes: Vec<PathAttribute>,
     nlri_list: Vec<IpNetwork>,
+    /// Whether this message uses 4-byte ASN encoding (RFC 6793)
+    use_4byte_asn: bool,
 }
 
 impl Message for UpdateMessage {
@@ -378,16 +538,48 @@ impl Message for UpdateMessage {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
+        // RFC 6793: Transform attributes based on peer capability
+        let path_attributes = if self.use_4byte_asn {
+            // NEW speaker: Strip AS4_PATH/AS4_AGGREGATOR
+            self.path_attributes
+                .iter()
+                .filter(|attr| {
+                    !matches!(
+                        attr.value,
+                        PathAttrValue::As4Path(_) | PathAttrValue::As4Aggregator(_)
+                    )
+                })
+                .cloned()
+                .collect()
+        } else {
+            // OLD speaker: Transform AS_PATH/AGGREGATOR for 2-byte ASN encoding
+            let mut new_attrs = Vec::new();
+            for attr in &self.path_attributes {
+                match &attr.value {
+                    PathAttrValue::AsPath(as_path) => {
+                        new_attrs.extend(Self::transform_as_path_for_old_speaker(attr, as_path));
+                    }
+                    PathAttrValue::Aggregator(agg) => {
+                        new_attrs.extend(Self::transform_aggregator_for_old_speaker(attr, agg));
+                    }
+                    _ => {
+                        new_attrs.push(attr.clone());
+                    }
+                }
+            }
+            new_attrs
+        };
+
         let mut bytes = Vec::new();
 
         // Withdrawn routes
         let withdrawn_routes_bytes = write_nlri_list(&self.withdrawn_routes);
-        bytes.extend_from_slice(&self.withdrawn_routes_len.to_be_bytes());
+        bytes.extend_from_slice(&(withdrawn_routes_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&withdrawn_routes_bytes);
 
         // Path attributes
-        let path_attributes_bytes = write_path_attributes(&self.path_attributes);
-        bytes.extend_from_slice(&self.total_path_attributes_len.to_be_bytes());
+        let path_attributes_bytes = write_path_attributes(&path_attributes, self.use_4byte_asn);
+        bytes.extend_from_slice(&(path_attributes_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&path_attributes_bytes);
 
         // NLRI
@@ -395,6 +587,19 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&nlri_bytes);
 
         bytes
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        let body = self.to_bytes();
+
+        let mut message = Vec::new();
+        message.extend_from_slice(&super::msg::BGP_MARKER);
+        let length = super::msg::BGP_HEADER_SIZE_BYTES as u16 + body.len() as u16;
+        message.extend_from_slice(&length.to_be_bytes());
+        message.push(MessageType::Update.as_u8());
+        message.extend_from_slice(&body);
+
+        message
     }
 }
 
@@ -509,7 +714,7 @@ mod tests {
         ($name: ident, $input: expr, expected $expected:expr) => {
             #[test]
             fn $name() {
-                let message = UpdateMessage::from_bytes($input).unwrap();
+                let message = UpdateMessage::from_bytes($input, false).unwrap();
                 assert_eq!(message, $expected)
             }
         };
@@ -548,6 +753,7 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 20,
+            use_4byte_asn: false,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -604,6 +810,7 @@ mod tests {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
             total_path_attributes_len: 20,
+            use_4byte_asn: false,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -662,6 +869,7 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 0,
+            use_4byte_asn: false,
             path_attributes: vec![],
             nlri_list: vec![],
         }
@@ -717,9 +925,9 @@ mod tests {
     #[test]
     fn test_update_message_encode_decode() {
         // Decode the message
-        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec()).unwrap();
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), false).unwrap();
 
-        // Encode it back
+        // Encode it back (message was decoded with use_4byte_asn=false)
         let encoded = message.to_bytes();
 
         // Should match the original input
@@ -729,9 +937,9 @@ mod tests {
     #[test]
     fn test_update_message_serialize() {
         // Decode the message
-        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec()).unwrap();
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), false).unwrap();
 
-        // Serialize it (includes BGP header)
+        // Serialize it (includes BGP header) - message was decoded with use_4byte_asn=false
         let serialized = message.serialize();
 
         // Check BGP header
@@ -758,7 +966,7 @@ mod tests {
             }),
         ];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone());
+        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone(), true);
 
         // Verify message structure
         assert_eq!(message.withdrawn_routes, withdrawn_routes);
@@ -781,9 +989,9 @@ mod tests {
             prefix_length: 24,
         })];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes);
+        let message = UpdateMessage::new_withdraw(withdrawn_routes, true);
 
-        // Serialize the message
+        // Serialize the message - created with use_4byte_asn=true
         let serialized = message.serialize();
 
         // Verify BGP header
@@ -821,10 +1029,12 @@ mod tests {
             Some(200),
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -836,10 +1046,12 @@ mod tests {
             None,
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg_no_pref.local_pref(), None);
     }
@@ -854,10 +1066,12 @@ mod tests {
             None,
             Some(50),
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg.med(), Some(50));
 
@@ -869,10 +1083,12 @@ mod tests {
             None,
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg_no_med.med(), None);
     }
@@ -896,14 +1112,16 @@ mod tests {
                 local_pref,
                 med,
                 atomic_aggregate,
+                None,
                 vec![],
                 vec![],
                 vec![],
                 vec![], // large_communities
+                false,
             );
 
             let bytes = msg.to_bytes();
-            let parsed = UpdateMessage::from_bytes(bytes).unwrap();
+            let parsed = UpdateMessage::from_bytes(bytes, false).unwrap();
 
             assert_eq!(parsed.origin(), Some(origin));
             assert_eq!(parsed.as_path(), Some(vec![]));
@@ -950,7 +1168,7 @@ mod tests {
             },
         ];
 
-        let path_attributes_bytes = write_path_attributes(&path_attributes);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, false);
 
         // Add traditional withdrawn routes and NLRI to test coexistence with MP extensions
         let withdrawn_routes = vec![IpNetwork::V4(Ipv4Net {
@@ -970,10 +1188,11 @@ mod tests {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list,
+            use_4byte_asn: false,
         };
 
         let bytes = msg.to_bytes();
-        let parsed = UpdateMessage::from_bytes(bytes).unwrap();
+        let parsed = UpdateMessage::from_bytes(bytes, false).unwrap();
 
         // Verify MP_REACH_NLRI was preserved
         assert_eq!(
@@ -1046,7 +1265,7 @@ mod tests {
             },
         ];
 
-        let path_attributes_bytes = write_path_attributes(&path_attributes);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, false);
 
         let msg = UpdateMessage {
             withdrawn_routes_len: 0,
@@ -1054,10 +1273,11 @@ mod tests {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: vec![],
+            use_4byte_asn: false,
         };
 
         let bytes = msg.to_bytes();
-        let result = UpdateMessage::from_bytes(bytes);
+        let result = UpdateMessage::from_bytes(bytes, false);
 
         // Should fail with MalformedAttributeList
         assert!(result.is_err());
@@ -1083,7 +1303,7 @@ mod tests {
                   // Check: 4 + 100 + 4 = 108 > 8, should error
         ];
 
-        match UpdateMessage::from_bytes(input.to_vec()) {
+        match UpdateMessage::from_bytes(input.to_vec(), false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1121,7 +1341,7 @@ mod tests {
             let mut input = vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input) {
+            match read_path_attribute(&input, false) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1171,7 +1391,7 @@ mod tests {
             let mut input = vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input) {
+            match read_path_attribute(&input, false) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1216,7 +1436,7 @@ mod tests {
             let mut input = vec![wrong_flags, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input) {
+            match read_path_attribute(&input, false) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1246,7 +1466,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1280,7 +1500,8 @@ mod tests {
             0x0d,
         ];
 
-        let (attr, offset) = read_path_attribute(input).unwrap();
+        let (attr_opt, offset) = read_path_attribute(input, false).unwrap();
+        let attr = attr_opt.unwrap();
         assert_eq!(
             attr.flags.0,
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL
@@ -1300,7 +1521,8 @@ mod tests {
             0x01,
         ];
 
-        let (attr, offset) = read_path_attribute(input).unwrap();
+        let (attr_opt, offset) = read_path_attribute(input, false).unwrap();
+        let attr = attr_opt.unwrap();
         assert_eq!(attr.flags.0, PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL);
         assert_eq!(offset, 7);
     }
@@ -1347,7 +1569,7 @@ mod tests {
         ];
 
         for (name, input, expected_missing_type) in test_cases {
-            match UpdateMessage::from_bytes(input) {
+            match UpdateMessage::from_bytes(input, false) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1366,7 +1588,7 @@ mod tests {
     fn test_no_missing_well_known_attribute_without_nlri() {
         let input = build_update_body(&[], &[]);
 
-        let result = UpdateMessage::from_bytes(input);
+        let result = UpdateMessage::from_bytes(input, false);
         assert!(result.is_ok());
     }
 
@@ -1381,7 +1603,7 @@ mod tests {
         let mut input = vec![flags, attr_type, attr_len];
         input.extend_from_slice(&attr_value);
 
-        let result = read_path_attribute(&input);
+        let result = read_path_attribute(&input, false);
 
         match result {
             Err(ParserError::BgpError { error, data }) => {
@@ -1418,7 +1640,8 @@ mod tests {
             let mut input = vec![input_flags, attr_type, attr_value.len() as u8];
             input.extend_from_slice(&attr_value);
 
-            let (attr, offset) = read_path_attribute(&input).unwrap();
+            let (attr_opt, offset) = read_path_attribute(&input, false).unwrap();
+            let attr = attr_opt.unwrap();
 
             assert_eq!(
                 attr,
@@ -1434,8 +1657,9 @@ mod tests {
             assert_eq!(offset as usize, input.len());
 
             // Roundtrip test
-            let output = write_path_attribute(&attr);
-            let (parsed_attr, _) = read_path_attribute(&output).unwrap();
+            let output = write_path_attribute(&attr, false);
+            let (parsed_attr_opt, _) = read_path_attribute(&output, false).unwrap();
+            let parsed_attr = parsed_attr_opt.unwrap();
             assert_eq!(parsed_attr, attr);
         }
     }
@@ -1497,10 +1721,12 @@ mod tests {
             None,
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -1512,10 +1738,12 @@ mod tests {
             None,
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            true,
         );
         assert_eq!(msg_empty_path.leftmost_as(), None);
     }
@@ -1525,7 +1753,7 @@ mod tests {
         // Two ORIGIN attributes in the same UPDATE message
         let input = build_update_body(&[PATH_ATTR_ORIGIN_IGP, PATH_ATTR_ORIGIN_IGP], &[]);
 
-        match UpdateMessage::from_bytes(input) {
+        match UpdateMessage::from_bytes(input, false) {
             Err(ParserError::BgpError { error, .. }) => {
                 assert_eq!(
                     error,
@@ -1548,7 +1776,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body).unwrap();
+        let msg = UpdateMessage::from_bytes(body, false).unwrap();
 
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert_eq!(msg.communities(), Some(vec![0x00010064, 0xFFFFFF01]));
@@ -1577,7 +1805,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body).unwrap();
+        let msg = UpdateMessage::from_bytes(body, false).unwrap();
 
         assert_eq!(msg.communities(), None);
     }
@@ -1594,7 +1822,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body).unwrap();
+        let msg = UpdateMessage::from_bytes(body, false).unwrap();
 
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert_eq!(
@@ -1640,20 +1868,124 @@ mod tests {
             Some(100),
             None,
             false,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            false,
         );
 
         // Encode and decode
         let bytes = msg.to_bytes();
-        let decoded = UpdateMessage::from_bytes(bytes).unwrap();
+        let decoded = UpdateMessage::from_bytes(bytes, false).unwrap();
 
         // Verify
         assert_eq!(decoded.nlri_list(), vec![ipv6_prefix]);
         assert_eq!(decoded.next_hop(), Some(next_hop));
         assert_eq!(decoded.origin(), Some(Origin::IGP));
         assert_eq!(decoded.local_pref(), Some(100));
+    }
+
+    #[test]
+    fn test_strip_as4_attributes_removes_as4_path_and_aggregator() {
+        use crate::bgp::msg_update_types::{Aggregator, AsPath};
+        use std::net::Ipv4Addr;
+
+        // Create an UPDATE with AS4_PATH and AS4_AGGREGATOR (protocol violation from NEW speaker)
+        let mut msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![65001],
+            }],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+            vec![],
+            None,
+            None,
+            false,
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            true,
+        );
+
+        // Manually add AS4_PATH and AS4_AGGREGATOR to simulate receiving from NEW speaker
+        msg.path_attributes.push(PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::As4Path(AsPath {
+                segments: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![4200000001],
+                }],
+            }),
+        });
+
+        msg.path_attributes.push(PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+            value: PathAttrValue::As4Aggregator(Aggregator {
+                asn: 4200000002,
+                ip_addr: Ipv4Addr::new(10, 0, 0, 1),
+            }),
+        });
+
+        // Verify attributes exist before stripping
+        assert!(msg.as4_path().is_some());
+        assert!(msg.as4_aggregator().is_some());
+
+        // Strip AS4 attributes (RFC 6793 Section 4.1)
+        msg.strip_as4_attributes();
+
+        // Verify attributes were removed
+        assert!(msg.as4_path().is_none());
+        assert!(msg.as4_aggregator().is_none());
+
+        // Verify other attributes remain
+        assert_eq!(msg.origin(), Some(Origin::IGP));
+        assert!(msg.as_path().is_some());
+        assert_eq!(
+            msg.next_hop(),
+            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
+    }
+
+    #[test]
+    fn test_strip_as4_attributes_preserves_other_attributes() {
+        // Create UPDATE with various attributes but no AS4 attributes
+        let mut msg = UpdateMessage::new(
+            Origin::IGP,
+            vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![65001, 65002],
+            }],
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+            vec![],
+            Some(100),
+            Some(50),
+            false,
+            None,
+            vec![65001u32],
+            vec![],
+            vec![],
+            vec![],
+            true,
+        );
+
+        let attr_count_before = msg.path_attributes.len();
+
+        // Strip (should be no-op since no AS4 attributes present)
+        msg.strip_as4_attributes();
+
+        // Verify all attributes preserved
+        assert_eq!(msg.path_attributes.len(), attr_count_before);
+        assert_eq!(msg.origin(), Some(Origin::IGP));
+        assert_eq!(msg.local_pref(), Some(100));
+        assert_eq!(msg.med(), Some(50));
+        assert_eq!(msg.communities(), Some(vec![65001]));
     }
 }

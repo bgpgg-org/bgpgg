@@ -211,7 +211,7 @@ impl BgpServer {
                         {
                             self.broadcast_bmp(BmpOp::PeerUp {
                                 peer_ip,
-                                peer_as: asn as u32,
+                                peer_as: asn,
                                 peer_bgp_id: bgp_id,
                                 local_address: conn_info.local_address,
                                 local_port: conn_info.local_port,
@@ -288,7 +288,7 @@ impl BgpServer {
                     // BMP: Send route monitoring for this update
                     if let (Some(asn), Some(bgp_id)) = (peer_asn, peer_bgp_id) {
                         self.send_bmp_route_monitoring(
-                            peer_ip, asn as u32, bgp_id, &withdrawn, &announced,
+                            peer_ip, asn, bgp_id, &withdrawn, &announced,
                         );
                     }
                 } else {
@@ -309,6 +309,7 @@ impl BgpServer {
                 remote_port,
                 sent_open,
                 received_open,
+                negotiated_capabilities,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.conn_info = Some(ConnectionInfo {
@@ -318,6 +319,7 @@ impl BgpServer {
                         local_port,
                         remote_port,
                     });
+                    peer.negotiated_capabilities = Some(negotiated_capabilities);
                 }
             }
             ServerOp::PeerDisconnected { peer_ip, reason } => {
@@ -328,7 +330,7 @@ impl BgpServer {
                 // Extract peer info for BMP before potentially removing the peer
                 // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
-                    (Some(asn), Some(bgp_id)) => Some((asn as u32, bgp_id)),
+                    (Some(asn), Some(bgp_id)) => Some((asn, bgp_id)),
                     _ => None,
                 };
 
@@ -481,7 +483,7 @@ impl BgpServer {
             if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
                 self.broadcast_bmp(BmpOp::PeerDown {
                     peer_ip,
-                    peer_as: asn as u32,
+                    peer_as: asn,
                     peer_bgp_id: bgp_id,
                     reason: PeerDownReason::PeerDeConfigured,
                 });
@@ -748,6 +750,12 @@ impl BgpServer {
         const CHUNK_SIZE: usize = 10_000;
 
         if let Some(peer_tx) = &peer_info.peer_tx {
+            let peer_supports_4byte_asn = peer_info
+                .negotiated_capabilities
+                .as_ref()
+                .map(|caps| caps.supports_four_octet_asn())
+                .unwrap_or(false);
+
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
 
@@ -764,6 +772,7 @@ impl BgpServer {
                                 peer_asn,
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
+                                peer_supports_4byte_asn,
                                 &self.logger,
                             );
                             total_sent += chunk.len();
@@ -783,6 +792,7 @@ impl BgpServer {
                                 peer_asn,
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
+                                peer_supports_4byte_asn,
                                 &self.logger,
                             );
                             total_sent += chunk.len();
@@ -801,6 +811,7 @@ impl BgpServer {
                     peer_asn,
                     IpAddr::V4(self.config.router_id),
                     export_policies,
+                    peer_supports_4byte_asn,
                     &self.logger,
                 );
                 total_sent += chunk.len();
@@ -1167,9 +1178,16 @@ impl BgpServer {
         withdrawn: &[IpNetwork],
         announced: &[(IpNetwork, Arc<Path>)],
     ) {
+        // Determine if peer supports 4-byte ASN to mirror actual BGP encoding
+        let use_4byte_asn = self
+            .peers
+            .get(&peer_ip)
+            .map(peer_supports_4byte_asn)
+            .unwrap_or(true); // Default to true if peer not found
+
         // Send withdrawals if any
         if !withdrawn.is_empty() {
-            let update = UpdateMessage::new_withdraw(withdrawn.to_vec());
+            let update = UpdateMessage::new_withdraw(withdrawn.to_vec(), use_4byte_asn);
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
@@ -1190,10 +1208,12 @@ impl BgpServer {
                     batch.path.local_pref,
                     batch.path.med,
                     batch.path.atomic_aggregate,
+                    batch.path.aggregator.clone(),
                     batch.path.communities.clone(),
                     batch.path.extended_communities.clone(),
                     batch.path.large_communities.clone(),
                     batch.path.unknown_attrs.clone(),
+                    use_4byte_asn,
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
                     peer_ip,
@@ -1227,7 +1247,7 @@ impl BgpServer {
             if let Ok(peer_stats) = rx.await {
                 stats.push(BmpPeerStats {
                     peer_ip,
-                    peer_as: asn as u32,
+                    peer_as: asn,
                     peer_bgp_id: bgp_id,
                     adj_rib_in_count: peer_stats.adj_rib_in_count,
                 });
@@ -1721,8 +1741,17 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     ))
 }
 
+/// Determine if peer supports 4-byte ASN for BMP encoding
+fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
+    peer_info
+        .negotiated_capabilities
+        .as_ref()
+        .map(|caps| caps.supports_four_octet_asn())
+        .unwrap_or(true) // Default to true if not negotiated (BMP is newer protocol)
+}
+
 /// Convert routes to UpdateMessages, batching by shared path attributes
-fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
+fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<UpdateMessage> {
     // Convert routes to (prefix, path) tuples for batching
     let announcements: Vec<(IpNetwork, Arc<Path>)> = routes
         .iter()
@@ -1749,10 +1778,12 @@ fn routes_to_update_messages(routes: &[Route]) -> Vec<UpdateMessage> {
                 batch.path.local_pref,
                 batch.path.med,
                 batch.path.atomic_aggregate,
+                batch.path.aggregator.clone(),
                 batch.path.communities.clone(),
                 batch.path.extended_communities.clone(),
                 batch.path.large_communities.clone(),
                 batch.path.unknown_attrs.clone(),
+                use_4byte_asn,
             )
         })
         .collect()
@@ -1778,7 +1809,7 @@ async fn send_initial_bmp_state_to_task(
         {
             let _ = task_tx.send(Arc::new(BmpOp::PeerUp {
                 peer_ip: *peer_ip,
-                peer_as: asn as u32,
+                peer_as: asn,
                 peer_bgp_id: bgp_id,
                 local_address: conn_info.local_address,
                 local_port: conn_info.local_port,
@@ -1795,11 +1826,12 @@ async fn send_initial_bmp_state_to_task(
             (peer_info.asn, peer_info.bgp_id, &peer_info.peer_tx)
         {
             if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
-                let updates = routes_to_update_messages(&routes);
+                let use_4byte_asn = peer_supports_4byte_asn(peer_info);
+                let updates = routes_to_update_messages(&routes, use_4byte_asn);
                 for update in updates {
                     let _ = task_tx.send(Arc::new(BmpOp::RouteMonitoring {
                         peer_ip,
-                        peer_as: asn as u32,
+                        peer_as: asn,
                         peer_bgp_id: bgp_id,
                         update,
                     }));
@@ -1858,6 +1890,12 @@ impl BgpServer {
               "chunk_size" => CHUNK_SIZE);
 
         if let Some(peer_tx) = &peer_info.peer_tx {
+            let peer_supports_4byte_asn = peer_info
+                .negotiated_capabilities
+                .as_ref()
+                .map(|caps| caps.supports_four_octet_asn())
+                .unwrap_or(false);
+
             // Get iterator (no allocation)
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
@@ -1877,6 +1915,7 @@ impl BgpServer {
                                 peer_asn,
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
+                                peer_supports_4byte_asn,
                                 &self.logger,
                             );
                             total_sent += chunk.len();
@@ -1897,6 +1936,7 @@ impl BgpServer {
                                 peer_asn,
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
+                                peer_supports_4byte_asn,
                                 &self.logger,
                             );
                             total_sent += chunk.len();
@@ -1916,6 +1956,7 @@ impl BgpServer {
                     peer_asn,
                     std::net::IpAddr::V4(self.config.router_id),
                     export_policies,
+                    peer_supports_4byte_asn,
                     &self.logger,
                 );
                 total_sent += chunk.len();

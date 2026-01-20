@@ -133,14 +133,32 @@ impl Peer {
             tokio::select! {
                 result = conn.msg_rx.recv() => {
                     match result {
-                        Some(Ok(message)) => {
-                            if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
-                                return false;
+                        Some(Ok(bytes)) => {
+                            // Parse bytes using negotiated 4-byte ASN capability
+                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            match Self::parse_bgp_message(&bytes, use_4byte_asn) {
+                                Ok(message) => {
+                                    if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                        error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                                        return false;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Parse error - convert to NOTIFICATION if possible
+                                    error!(&self.logger, "error parsing message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                                    if let Some(notif) = NotificationMessage::from_parser_error(&e) {
+                                        let _ = self.send_notification(notif.clone()).await;
+                                        self.disconnect(true, PeerDownReason::LocalNotification(notif));
+                                    } else {
+                                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                                    }
+                                    return false;
+                                }
                             }
                         }
                         Some(Err(e)) => {
+                            // Header validation error from read task
                             error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
@@ -161,14 +179,14 @@ impl Peer {
 
                 Some(msg) = self.peer_rx.recv() => {
                     match msg {
-                        PeerOp::SendUpdate(update_msg) => {
+                        PeerOp::SendUpdate(update_bytes) => {
                             // RFC 4271 9.2.1.1: MRAI rate limiting
                             let can_send = self.mrai_interval.is_zero() ||
                                 self.last_update_sent.is_none_or(|t| t.elapsed() >= self.mrai_interval);
 
                             if can_send {
                                 // Send immediately
-                                if let Err(e) = self.send_update(update_msg).await {
+                                if let Err(e) = self.send_update(update_bytes).await {
                                     error!(&self.logger, "failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
                                     self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                                     return false;
@@ -176,7 +194,7 @@ impl Peer {
                                 self.last_update_sent = Some(Instant::now());
                             } else {
                                 // Queue for later
-                                self.pending_updates.push(update_msg);
+                                self.pending_updates.push(update_bytes);
                             }
                         }
                         PeerOp::GetStatistics(response) => {

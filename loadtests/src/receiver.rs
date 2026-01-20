@@ -39,7 +39,7 @@ pub async fn run_receiver(
     };
 
     loop {
-        match bgpgg::bgp::msg::read_bgp_message(&mut stream).await {
+        match bgpgg::bgp::msg::read_bgp_message(&mut stream, false).await {
             Ok(BgpMessage::Update(update)) => {
                 let nlri_count = update.nlri_list().len();
 
