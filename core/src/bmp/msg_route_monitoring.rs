@@ -72,7 +72,7 @@ impl Message for RouteMonitoringMessage {
         // Per-Peer Header (42 bytes)
         bytes.extend_from_slice(&self.peer_header.to_bytes());
 
-        // BGP UPDATE Message
+        // BGP UPDATE Message (BMP uses 4-byte ASN encoding per RFC 7854)
         bytes.extend_from_slice(&self.bgp_update.serialize());
 
         bytes
@@ -92,10 +92,13 @@ mod tests {
         use std::net::Ipv4Addr;
 
         // Create a withdrawal UPDATE message
-        let update = UpdateMessage::new_withdraw(vec![IpNetwork::V4(Ipv4Net {
-            address: Ipv4Addr::new(10, 0, 0, 0),
-            prefix_length: 24,
-        })]);
+        let update = UpdateMessage::new_withdraw(
+            vec![IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            })],
+            true,
+        );
 
         let msg = RouteMonitoringMessage::new(
             PeerDistinguisher::Global,

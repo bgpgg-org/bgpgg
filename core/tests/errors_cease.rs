@@ -412,6 +412,7 @@ async fn test_collision_deferred() {
                 address: "127.0.0.3".to_string(),
                 asn: 65002,
                 listener: None,
+                supports_4byte_asn: false,
             };
 
             incoming_peer.read_open().await;

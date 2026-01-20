@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt release setup loadtest
+.PHONY: all build clean run test fmt release setup loadtest lint
 
 all: build
 
@@ -17,8 +17,10 @@ clean:
 run: setup
 	cargo run
 
-test: setup
+lint: setup
 	cargo clippy --all-targets --all-features -- -D warnings
+
+test: lint
 	cargo test --workspace --exclude loadtests
 
 fmt:

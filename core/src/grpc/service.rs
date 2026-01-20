@@ -82,14 +82,21 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
             as_path: path
                 .as_path
                 .iter()
-                .map(|segment| proto::AsPathSegment {
-                    segment_type: match segment.segment_type {
-                        AsPathSegmentType::AsSet => proto::AsPathSegmentType::AsSet as i32,
-                        AsPathSegmentType::AsSequence => {
-                            proto::AsPathSegmentType::AsSequence as i32
+                .filter_map(|segment| {
+                    // Filter out confederation segments per RFC 5065 (not exposed externally)
+                    match segment.segment_type {
+                        AsPathSegmentType::AsSet => Some(proto::AsPathSegment {
+                            segment_type: proto::AsPathSegmentType::AsSet as i32,
+                            asns: segment.asn_list.clone(),
+                        }),
+                        AsPathSegmentType::AsSequence => Some(proto::AsPathSegment {
+                            segment_type: proto::AsPathSegmentType::AsSequence as i32,
+                            asns: segment.asn_list.clone(),
+                        }),
+                        AsPathSegmentType::AsConfedSequence | AsPathSegmentType::AsConfedSet => {
+                            None
                         }
-                    },
-                    asns: segment.asn_list.iter().map(|asn| *asn as u32).collect(),
+                    }
                 })
                 .collect(),
             next_hop: path.next_hop.to_string(),
@@ -199,7 +206,7 @@ fn parse_add_route_request(
                 _ => AsPathSegmentType::AsSequence, // Default to AS_SEQUENCE
             },
             segment_len: seg.asns.len() as u8,
-            asn_list: seg.asns.iter().map(|asn| *asn as u16).collect(),
+            asn_list: seg.asns.to_vec(),
         })
         .collect();
 
@@ -462,7 +469,7 @@ impl BgpService for BgpGrpcService {
             .iter()
             .map(|peer| ProtoPeer {
                 address: peer.address.clone(),
-                asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
@@ -494,7 +501,7 @@ impl BgpService for BgpGrpcService {
         let stream = UnboundedReceiverStream::new(rx).map(|peer| {
             Ok(ProtoPeer {
                 address: peer.address,
-                asn: peer.asn.unwrap_or(0) as u32,
+                asn: peer.asn.unwrap_or(0),
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
                 configured: peer.configured,
@@ -533,7 +540,7 @@ impl BgpService for BgpGrpcService {
             Some(peer) => {
                 let proto_peer = ProtoPeer {
                     address: peer.address.clone(),
-                    asn: peer.asn.unwrap_or(0) as u32, // 0 for peers still in handshake
+                    asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                     state: to_proto_state(peer.state),
                     admin_state: to_proto_admin_state(peer.admin_state),
                     configured: peer.configured,

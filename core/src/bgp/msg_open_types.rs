@@ -18,6 +18,7 @@ pub(crate) const BGP_VERSION: u8 = 4;
 pub(crate) enum BgpCapabiltyCode {
     Multiprotocol = 1,
     RouteRefresh = 2,
+    FourOctetAsn = 65,
     Unknown,
 }
 
@@ -26,6 +27,7 @@ impl From<u8> for BgpCapabiltyCode {
         match value {
             1 => BgpCapabiltyCode::Multiprotocol,
             2 => BgpCapabiltyCode::RouteRefresh,
+            65 => BgpCapabiltyCode::FourOctetAsn,
             _ => BgpCapabiltyCode::Unknown,
         }
     }
@@ -36,6 +38,7 @@ impl BgpCapabiltyCode {
         match self {
             BgpCapabiltyCode::Multiprotocol => 1,
             BgpCapabiltyCode::RouteRefresh => 2,
+            BgpCapabiltyCode::FourOctetAsn => 65,
             BgpCapabiltyCode::Unknown => 0,
         }
     }
@@ -126,6 +129,29 @@ impl Capability {
             val,
         }
     }
+
+    /// Create a Four-Octet ASN capability (RFC 6793)
+    pub(crate) fn new_four_octet_asn(asn: u32) -> Self {
+        Capability {
+            code: BgpCapabiltyCode::FourOctetAsn,
+            len: 4,
+            val: asn.to_be_bytes().to_vec(),
+        }
+    }
+
+    /// Extract the four-octet ASN value if this is a FourOctetAsn capability
+    pub(crate) fn as_four_octet_asn(&self) -> Option<u32> {
+        if matches!(self.code, BgpCapabiltyCode::FourOctetAsn) && self.val.len() == 4 {
+            Some(u32::from_be_bytes([
+                self.val[0],
+                self.val[1],
+                self.val[2],
+                self.val[3],
+            ]))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -151,6 +177,17 @@ impl OptionalParam {
             param_len: 2 + capability.len, // code(1) + len(1) + val
             param_value: ParamVal::Capability(capability),
         }
+    }
+
+    /// Find and extract the four-octet ASN capability from a list of optional parameters
+    pub(crate) fn find_four_octet_asn(params: &[OptionalParam]) -> Option<u32> {
+        params.iter().find_map(|param| {
+            if let ParamVal::Capability(cap) = &param.param_value {
+                cap.as_four_octet_asn()
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -180,5 +217,35 @@ mod tests {
             let bytes = afi_safi_to_capability_bytes(&afi_safi);
             assert_eq!(bytes, expected_bytes, "{:?}", afi_safi);
         }
+    }
+
+    #[test]
+    fn test_find_four_octet_asn() {
+        // Test with four-octet ASN capability
+        let cap = Capability::new_four_octet_asn(65536);
+        let param = OptionalParam::new_capability(cap);
+        assert_eq!(OptionalParam::find_four_octet_asn(&[param]), Some(65536));
+
+        // Test with multiple capabilities including four-octet ASN
+        let cap1 = Capability::new_route_refresh();
+        let cap2 = Capability::new_four_octet_asn(4200000000);
+        let cap3 = Capability::new_multiprotocol(&AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        let params = vec![
+            OptionalParam::new_capability(cap1),
+            OptionalParam::new_capability(cap2),
+            OptionalParam::new_capability(cap3),
+        ];
+        assert_eq!(
+            OptionalParam::find_four_octet_asn(&params),
+            Some(4200000000)
+        );
+
+        // Test without four-octet ASN capability
+        let cap = Capability::new_route_refresh();
+        let param = OptionalParam::new_capability(cap);
+        assert_eq!(OptionalParam::find_four_octet_asn(&[param]), None);
+
+        // Test with empty list
+        assert_eq!(OptionalParam::find_four_octet_asn(&[]), None);
     }
 }

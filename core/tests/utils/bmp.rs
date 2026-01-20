@@ -315,7 +315,8 @@ impl FakeBmpServer {
         // Skip BGP header (19 bytes: 16 marker + 2 length + 1 type) to get UPDATE body
         let bgp_msg_offset = PEER_HEADER_SIZE;
         let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
-        let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec()).unwrap();
+        // BMP uses 4-byte ASN encoding per RFC 7854
+        let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec(), true).unwrap();
 
         RouteMonitoringMessage {
             peer_header,
@@ -562,7 +563,8 @@ impl FakeBmpServer {
         let peer_header = parse_peer_header(body);
         let bgp_msg_offset = PEER_HEADER_SIZE;
         let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
-        let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec()).unwrap();
+        let bgp_update =
+            UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec(), false).unwrap();
 
         RouteMonitoringMessage {
             peer_header,

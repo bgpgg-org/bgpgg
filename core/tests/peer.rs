@@ -17,6 +17,7 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     AdminState, Afi, BgpState, Origin, Peer, ResetType, Route, Safi, SessionConfig,
@@ -29,37 +30,25 @@ async fn test_peer_down() {
     let hold_timer_secs = 3;
     let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
 
-    // Server2 announces a route to Server1 via gRPC
-    announce_route(
+    // Server2 announces a route to Server1
+    let server2_addr = server2.address.to_string();
+    announce_and_verify_route(
         &mut server2,
+        &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: server2_addr.clone(),
+            peer_address: server2_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Get the actual peer address (with OS-allocated port)
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
-    // Poll for route to appear in Server1's RIB
-    // eBGP: NEXT_HOP rewritten to sender's local address
-    poll_route_propagation(&[(
-        &server1,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
     .await;
 
     // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
@@ -79,63 +68,25 @@ async fn test_peer_down_four_node_mesh() {
     let (mut server1, server2, server3, mut server4) =
         setup_four_meshed_servers(Some(hold_timer_secs)).await;
 
-    // Server1 announces a route
-    announce_route(
+    // Server1 announces a route to all peers
+    let server1_addr = server1.address.to_string();
+    announce_and_verify_route(
         &mut server1,
+        &[&server2, &server3, &server4],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65001])],
+            next_hop: server1_addr.clone(),
+            peer_address: server1_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Poll for route to propagate to all peers
-    // eBGP: NEXT_HOP rewritten to router IDs
-    poll_route_propagation(&[
-        (
-            &server2,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-        (
-            &server3,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-        (
-            &server4,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-    ])
     .await;
 
     // Kill Server4 to simulate peer going down
@@ -1319,5 +1270,61 @@ async fn test_hard_reset_peer_not_found() {
         err_msg.contains("not found"),
         "Error message should mention peer not found: {}",
         err_msg
+    );
+}
+
+/// RFC 6793: Test peering establishment between peers with large ASNs
+#[tokio::test]
+async fn test_large_asn_peering() {
+    let [s1, s2] = &mut create_asn_chain([4200000001, 4200000002], None).await;
+
+    verify_peers(s1, vec![s2.to_peer(BgpState::Established, false)]).await;
+    verify_peers(s2, vec![s1.to_peer(BgpState::Established, false)]).await;
+}
+
+/// RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers
+/// is only possible if NEW speaker has a two-octet AS number.
+///
+/// Test verifies that when local ASN > 65535, the session is rejected
+/// if peer doesn't support 4-byte ASN capability (detected during OPEN exchange).
+#[tokio::test]
+async fn test_large_asn_requires_4byte_capability() {
+    // Create server with large ASN (> 65535)
+    let large_asn = 4200000001;
+    let server = start_test_server(Config::new(
+        large_asn,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        300,
+        true,
+    ))
+    .await;
+
+    // OLD speaker connects (FakePeer will send OPEN without capability 65)
+    let mut peer = FakePeer::connect(None, &server).await;
+
+    // Read the server's OPEN message
+    // Server will send AS_TRANS (23456) in wire format but also capability 65 with real ASN
+    let msg = peer.read_open().await;
+    // The parsed OPEN contains the real ASN from capability 65
+    assert_eq!(msg.asn, large_asn);
+
+    // OLD speaker sends OPEN without capability 65 (no optional parameters)
+    // This simulates an OLD BGP speaker that doesn't understand 4-byte ASNs
+    let old_speaker_open = build_raw_open(
+        65002,                                // OLD speaker ASN
+        300,                                  // hold_time
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)), // router_id
+        RawOpenOptions::default(),            // No capabilities for OLD speaker
+    );
+    peer.send_raw(&old_speaker_open).await;
+
+    // Server should reject the session and send NOTIFICATION
+    // RFC 6793: Cannot peer with OLD speaker when local ASN > 65535
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::OpenMessageError(OpenMessageError::UnsupportedOptionalParameter),
+        "Server should reject OLD speaker when local ASN > 65535"
     );
 }

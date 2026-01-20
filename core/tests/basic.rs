@@ -23,37 +23,25 @@ use std::net::Ipv4Addr;
 async fn test_announce_withdraw() {
     let (server1, mut server2) = setup_two_peered_servers(None).await;
 
-    // Server2 announces a route to Server1 via gRPC
-    announce_route(
+    // Server2 announces a route to Server1
+    let server2_addr = server2.address.to_string();
+    announce_and_verify_route(
         &mut server2,
+        &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: server2_addr.clone(),
+            peer_address: server2_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Get the actual peer address (with OS-allocated port)
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
-    // Poll for route to appear in Server1's RIB
-    // eBGP: NEXT_HOP rewritten to sender's local address
-    poll_route_propagation(&[(
-        &server1,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
     .await;
 
     // Server2 withdraws the route
@@ -80,49 +68,25 @@ async fn test_announce_withdraw() {
 async fn test_announce_withdraw_mesh() {
     let (mut server1, server2, server3) = setup_three_meshed_servers(None).await;
 
-    // Server1 announces a route
-    announce_route(
+    // Server1 announces a route to both server2 and server3
+    let server1_addr = server1.address.to_string();
+    announce_and_verify_route(
         &mut server1,
+        &[&server2, &server3],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65001])],
+            next_hop: server1_addr.clone(),
+            peer_address: server1_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Poll for route propagation with expected AS paths
-    // eBGP: NEXT_HOP rewritten to sender's local address
-    poll_route_propagation(&[
-        (
-            &server2,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-        (
-            &server3,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
-        ),
-    ])
     .await;
 
     // Server1 withdraws the route
@@ -183,8 +147,7 @@ async fn test_announce_withdraw_four_node_mesh() {
     )
     .await;
 
-    // Wait for full mesh convergence: routes + UPDATE received/sent counts
-    // eBGP: NEXT_HOP rewritten to sender's local address
+    // Expected route for convergence check
     let expected_route = vec![Route {
         prefix: "10.1.0.0/24".to_string(),
         paths: vec![build_path(PathParams {
@@ -426,36 +389,25 @@ async fn test_as_loop_prevention() {
     ])
     .await;
 
-    // Server1_A announces a route
-    announce_route(
+    // Server1_A announces a route to server2
+    let server1_a_addr = server1_a.address.to_string();
+    announce_and_verify_route(
         &mut server1_a,
+        &[&server2],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65001])],
+            next_hop: server1_a_addr.clone(),
+            peer_address: server1_a_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    // Poll for route propagation to server2
-    // AS path progression:
-    // - AS1_A: originates route (AS_PATH = [])
-    // - AS2: receives from AS1_A (AS_PATH = [65001])
-    // eBGP: NEXT_HOP rewritten to sender's local address
-    poll_route_propagation(&[(
-        &server2,
-        vec![Route {
-            prefix: "10.1.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1_a.address.to_string(),
-                peer_address: server1_a.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
     .await;
 
     // Wait for server1_b to receive UPDATE from server2
@@ -625,34 +577,24 @@ async fn test_ipv6_nexthop_rewrite() {
     let [server1, mut server2] = chain_servers([server1, server2]).await;
 
     // Server2 announces IPv6 route with explicit next-hop
-    announce_route(
+    let server2_addr = server2.address.to_string();
+    announce_and_verify_route(
         &mut server2,
+        &[&server1],
         RouteParams {
             prefix: "2001:db8::/32".to_string(),
             next_hop: "2001:db8::1".to_string(),
             ..Default::default()
         },
+        PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: server2_addr.clone(),
+            peer_address: server2_addr,
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        },
     )
-    .await;
-
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
-    // eBGP over IPv6: next-hop rewritten to sender's IPv6 address
-    poll_route_propagation(&[(
-        &server1,
-        vec![Route {
-            prefix: "2001:db8::/32".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: "::ffff:127.0.0.2".to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
     .await;
 
     // Withdraw the route

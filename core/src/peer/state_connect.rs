@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use super::fsm::{BgpState, FsmEvent};
-use super::{BgpOpenParams, PeerCapabilities};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
-use crate::bgp::msg::BgpMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::net::create_and_bind_tcp_socket;
 use crate::types::PeerDownReason;
@@ -110,50 +108,7 @@ impl Peer {
 
         tokio::select! {
             result = conn.msg_rx.recv() => {
-                match result {
-                    Some(Ok(BgpMessage::Open(open))) => {
-                        debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
-                        self.fsm.timers.stop_delay_open_timer();
-                        let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
-                            peer_asn: open.asn,
-                            peer_hold_time: open.hold_time,
-                            local_asn: self.fsm.local_asn(),
-                            local_hold_time: self.fsm.local_hold_time(),
-                            peer_capabilities: PeerCapabilities::default(),
-                            peer_bgp_id: open.bgp_identifier,
-                        });
-                        if let Err(e) = self.process_event(&event).await {
-                            error!(&self.logger, "failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                            self.disconnect(true, PeerDownReason::LocalNoNotification(event));
-                        }
-                    }
-                    Some(Ok(BgpMessage::Notification(notif))) => {
-                        self.handle_notification_received(&notif).await;
-                    }
-                    Some(Ok(_)) => {
-                        error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
-                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
-                    }
-                    Some(Err(e)) => {
-                        debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
-                        // RFC 4271 Events 21, 22: Determine error type and send appropriate event
-                        let event = if let Some(notif) = NotificationMessage::from_parser_error(&e) {
-                            match notif.error() {
-                                BgpError::MessageHeaderError(_) => FsmEvent::BgpHeaderErr(notif),
-                                BgpError::OpenMessageError(_) => FsmEvent::BgpOpenMsgErr(notif),
-                                _ => FsmEvent::TcpConnectionFails,
-                            }
-                        } else {
-                            FsmEvent::TcpConnectionFails
-                        };
-                        self.try_process_event(&event).await;
-                    }
-                    None => {
-                        // Read task exited without error - connection failure
-                        debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
-                        self.try_process_event(&FsmEvent::TcpConnectionFails).await;
-                    }
-                }
+                self.handle_delay_open_message(result).await;
             }
             _ = timer_interval.tick() => {
                 // RFC 4271 8.2.2: Check ConnectRetryTimer first (Event 9 in Connect state)
@@ -332,7 +287,7 @@ mod tests {
         CeaseSubcode, MessageHeaderError, OpenMessageError, UpdateMessageError,
     };
     use crate::peer::states::tests::create_test_peer_with_state;
-    use crate::peer::BgpOpenParams;
+    use crate::peer::{BgpOpenParams, PeerCapabilities};
 
     #[tokio::test]
     async fn test_bgp_message_errors_in_connect_active() {

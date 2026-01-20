@@ -19,6 +19,7 @@ use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
+use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
@@ -35,7 +36,7 @@ use tokio::time::{sleep, timeout, Duration};
 pub struct TestServer {
     pub client: BgpClient,
     pub bgp_port: u16,
-    pub asn: u16,
+    pub asn: u32,
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
     pub config: Config,
     runtime: Option<tokio::runtime::Runtime>,
@@ -65,7 +66,7 @@ impl TestServer {
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
             address: self.address.to_string(),
-            asn: self.asn as u32,
+            asn: self.asn,
             state: state.into(),
             admin_state: AdminState::Up.into(),
             configured,
@@ -161,7 +162,7 @@ pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
 }
 
 /// Helper to create a standard test config with sane defaults
-pub fn test_config(asn: u16, ip_last_octet: u8) -> Config {
+pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
     let ip = format!("127.0.0.{}", ip_last_octet);
     let mut config = Config::new(
         asn,
@@ -1036,6 +1037,128 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
     servers
 }
 
+/// Create chain of servers with given ASNs, auto-generating IPs and router IDs
+///
+/// This helper reduces boilerplate for tests that need servers with specific ASNs.
+/// IPs are auto-assigned as 127.0.0.N where N is the server index (1-based).
+/// Router IDs are auto-assigned as N.N.N.N.
+///
+/// # Arguments
+/// * `asns` - Array of AS numbers for the servers
+/// * `hold_timer` - Optional hold timer in seconds (defaults to 90 if None)
+///
+/// # Example
+/// ```
+/// let [s1, s2] = create_asn_chain([4200000001, 4200000002], None).await;
+/// let [s1, s2, s3] = create_asn_chain([65001, 65002, 65003], Some(300)).await;
+/// ```
+pub async fn create_asn_chain<const N: usize>(
+    asns: [u32; N],
+    hold_timer: Option<u64>,
+) -> [TestServer; N] {
+    let hold = hold_timer.unwrap_or(90);
+    let mut servers = Vec::new();
+    for (i, asn) in asns.iter().enumerate() {
+        let octet = (i + 1) as u8;
+        servers.push(
+            start_test_server(Config::new(
+                *asn,
+                &format!("127.0.0.{}:0", octet),
+                Ipv4Addr::new(octet, octet, octet, octet),
+                hold,
+                true,
+            ))
+            .await,
+        );
+    }
+    let servers_array: [TestServer; N] = match servers.try_into() {
+        Ok(arr) => arr,
+        Err(_) => panic!("Failed to convert Vec to array"),
+    };
+    chain_servers(servers_array).await
+}
+
+/// Announce route from source and verify it propagates to destinations
+///
+/// Reduces boilerplate for route propagation tests by handling the announce + verify pattern.
+/// Supports both single and multiple destinations.
+///
+/// # Arguments
+/// * `source` - Server that announces the route
+/// * `dests` - Slice of servers that should receive the route
+/// * `announce_params` - RouteParams for announcement (prefix, next_hop, communities, etc.)
+/// * `expected_path` - Expected PathParams after propagation (caller sets ALL fields)
+///
+/// # Examples
+/// ```
+/// // eBGP: next_hop rewritten, AS prepended, local_pref set
+/// announce_and_verify_route(
+///     &mut s1,
+///     &[&s2],
+///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     PathParams {
+///         as_path: vec![as_sequence(vec![65001])],
+///         next_hop: s1.address.to_string(),
+///         peer_address: s1.address.to_string(),
+///         local_pref: Some(100),
+///         origin: Some(Origin::Igp),
+///         ..Default::default()
+///     }
+/// ).await;
+///
+/// // iBGP: next_hop preserved, no AS prepend
+/// announce_and_verify_route(
+///     &mut s1,
+///     &[&s2],
+///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     PathParams {
+///         as_path: vec![],
+///         next_hop: "192.168.1.1".to_string(),
+///         peer_address: s1.address.to_string(),
+///         local_pref: Some(100),
+///         origin: Some(Origin::Igp),
+///         ..Default::default()
+///     }
+/// ).await;
+///
+/// // Multiple destinations with same expected path
+/// announce_and_verify_route(
+///     &mut s1,
+///     &[&s2, &s3, &s4],
+///     RouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() },
+///     PathParams {
+///         as_path: vec![as_sequence(vec![65001])],
+///         next_hop: s1.address.to_string(),
+///         peer_address: s1.address.to_string(),
+///         local_pref: Some(100),
+///         origin: Some(Origin::Igp),
+///         ..Default::default()
+///     }
+/// ).await;
+/// ```
+pub async fn announce_and_verify_route(
+    source: &mut TestServer,
+    dests: &[&TestServer],
+    announce_params: RouteParams,
+    expected_path: PathParams,
+) {
+    let prefix = announce_params.prefix.clone();
+    announce_route(source, announce_params).await;
+
+    let mut expectations = Vec::new();
+    for dest in dests {
+        expectations.push((
+            *dest,
+            vec![Route {
+                prefix: prefix.clone(),
+                paths: vec![build_path(expected_path.clone())],
+            }],
+        ));
+    }
+
+    poll_route_propagation(&expectations).await;
+}
+
 /// Meshes BGP servers together in a full mesh topology
 ///
 /// Connects each server to all other servers in the mesh.
@@ -1151,8 +1274,10 @@ pub async fn verify_server_info(
 pub struct FakePeer {
     pub stream: Option<TcpStream>,
     pub address: String,
-    pub asn: u16,
+    pub asn: u32,
     pub listener: Option<TcpListener>,
+    /// Whether this peer advertised 4-byte ASN capability
+    pub supports_4byte_asn: bool,
 }
 
 impl FakePeer {
@@ -1178,11 +1303,12 @@ impl FakePeer {
             address,
             asn: 0,
             listener: None,
+            supports_4byte_asn: false,
         }
     }
 
     /// Create a FakePeer. Call accept() to accept the connection.
-    pub async fn new(bind_addr: &str, local_asn: u16) -> Self {
+    pub async fn new(bind_addr: &str, local_asn: u32) -> Self {
         let listener = TcpListener::bind(bind_addr).await.unwrap();
         let address = listener.local_addr().unwrap().ip().to_string();
         FakePeer {
@@ -1190,6 +1316,7 @@ impl FakePeer {
             address,
             asn: local_asn,
             listener: Some(listener),
+            supports_4byte_asn: false,
         }
     }
 
@@ -1207,7 +1334,7 @@ impl FakePeer {
 
     /// Exchange OPEN messages with peer (ends up in OpenConfirm state).
     /// For outgoing connections: sends OPEN then reads OPEN.
-    pub async fn handshake_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+    pub async fn handshake_open(&mut self, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
         self.asn = asn;
 
         // Send our OPEN
@@ -1220,7 +1347,7 @@ impl FakePeer {
             .expect("Failed to send OPEN");
 
         // Read their OPEN
-        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1231,11 +1358,11 @@ impl FakePeer {
 
     /// Exchange OPEN messages for accepted connections (ends up in OpenConfirm state).
     /// For incoming connections: reads OPEN then sends OPEN.
-    pub async fn accept_handshake_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+    pub async fn accept_handshake_open(&mut self, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
         self.asn = asn;
 
         // Read their OPEN (they connected, they send first)
-        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1263,7 +1390,7 @@ impl FakePeer {
             .await
             .expect("Failed to send KEEPALIVE");
 
-        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
@@ -1275,7 +1402,7 @@ impl FakePeer {
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
             address: self.address.clone(),
-            asn: self.asn as u32,
+            asn: self.asn,
             state: state.into(),
             admin_state: AdminState::Up.into(),
             configured,
@@ -1306,7 +1433,7 @@ impl FakePeer {
     }
 
     /// Send an OPEN message
-    pub async fn send_open(&mut self, asn: u16, router_id: Ipv4Addr, hold_time: u16) {
+    pub async fn send_open(&mut self, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
         let open = OpenMessage::new(asn, hold_time, u32::from(router_id));
         self.stream
             .as_mut()
@@ -1317,16 +1444,19 @@ impl FakePeer {
     }
 
     /// Read and discard an OPEN message
-    pub async fn read_open(&mut self) {
-        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+    pub async fn read_open(&mut self) -> OpenMessage {
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
             .await
             .unwrap();
-        assert!(matches!(msg, BgpMessage::Open(_)));
+        match msg {
+            BgpMessage::Open(open) => open,
+            _ => panic!("Expected OPEN message"),
+        }
     }
 
     /// Read and discard a KEEPALIVE message
     pub async fn read_keepalive(&mut self) {
-        let msg = read_bgp_message(self.stream.as_mut().unwrap())
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
             .await
             .unwrap();
         assert!(matches!(msg, BgpMessage::Keepalive(_)));
@@ -1336,7 +1466,7 @@ impl FakePeer {
     pub async fn read_notification(&mut self) -> NotificationMessage {
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(self.stream.as_mut().unwrap())
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
                     .await
                     .expect("Failed to read message");
 
@@ -1359,7 +1489,7 @@ impl FakePeer {
     pub async fn read_update(&mut self) -> UpdateMessage {
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(self.stream.as_mut().unwrap())
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), self.supports_4byte_asn)
                     .await
                     .expect("Failed to read UPDATE");
 
@@ -1376,6 +1506,72 @@ impl FakePeer {
             Ok(update) => update,
             Err(_) => panic!("Timeout waiting for UPDATE message"),
         }
+    }
+
+    /// Connect and complete BGP handshake with custom capabilities
+    ///
+    /// # Arguments
+    /// * `local_ip` - Optional local IP to bind to
+    /// * `server` - Server to connect to
+    /// * `asn` - AS number (use value > 65535 to require capability 65)
+    /// * `router_id` - BGP router ID
+    /// * `capabilities` - Optional BGP capabilities (e.g., Some(vec![build_capability_4byte_asn(asn)]))
+    ///
+    /// # Examples
+    /// ```
+    /// // RFC 6793 OLD speaker (no capability 65)
+    /// FakePeer::connect_and_handshake(None, &server, 65002, router_id, None).await;
+    ///
+    /// // RFC 6793 NEW speaker (with capability 65)
+    /// FakePeer::connect_and_handshake(
+    ///     None, &server, 4200000002, router_id,
+    ///     Some(vec![build_capability_4byte_asn(4200000002)])
+    /// ).await;
+    /// ```
+    pub async fn connect_and_handshake(
+        local_ip: Option<&str>,
+        server: &TestServer,
+        asn: u32,
+        router_id: Ipv4Addr,
+        capabilities: Option<Vec<Vec<u8>>>,
+    ) -> Self {
+        let mut peer = Self::connect(local_ip, server).await;
+
+        // Read server's OPEN
+        let _server_open = peer.read_open().await;
+
+        // Determine 2-byte ASN field value
+        // RFC 6793: Use AS_TRANS if ASN > 65535 and using capability 65
+        let asn_2byte = if asn > 65535 && capabilities.is_some() {
+            AS_TRANS
+        } else if asn > 65535 {
+            panic!("ASN {} requires capability 65 (4-byte ASN support)", asn)
+        } else {
+            asn as u16
+        };
+
+        // Check if we're advertising 4-byte ASN capability
+        let supports_4byte_asn = capabilities.is_some();
+
+        // Send OPEN
+        let open = build_raw_open(
+            asn_2byte,
+            300,
+            u32::from(router_id),
+            RawOpenOptions {
+                capabilities,
+                ..Default::default()
+            },
+        );
+        peer.send_raw(&open).await;
+
+        // Exchange KEEPALIVEs
+        peer.send_raw(&build_raw_keepalive(None)).await;
+        peer.read_keepalive().await;
+
+        peer.asn = asn;
+        peer.supports_4byte_asn = supports_4byte_asn;
+        peer
     }
 
     /// Initiate new connection to server from same IP as this peer.
@@ -1473,28 +1669,103 @@ pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
     build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
 }
 
-// Build raw OPEN message with optional custom version, marker, length, and message type
+/// Build AGGREGATOR attribute with 4-byte ASN encoding (RFC 6793)
+pub fn attr_aggregator(asn: u32, ip: Ipv4Addr) -> Vec<u8> {
+    let mut value = Vec::new();
+    value.extend_from_slice(&asn.to_be_bytes());
+    value.extend_from_slice(&ip.octets());
+    build_attr_bytes(
+        attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        attr_type_code::AGGREGATOR,
+        8,
+        &value,
+    )
+}
+
+/// Build AS_PATH attribute with 2-byte ASN encoding (legacy/OLD speaker)
+pub fn attr_as_path_2byte(asns: Vec<u16>) -> Vec<u8> {
+    let mut value = Vec::new();
+    value.push(2); // AS_SEQUENCE
+    value.push(asns.len() as u8);
+    for asn in asns {
+        value.extend_from_slice(&asn.to_be_bytes());
+    }
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::AS_PATH,
+        value.len() as u8,
+        &value,
+    )
+}
+
+/// Build AS_PATH attribute with 4-byte ASN encoding (RFC 6793)
+pub fn attr_as_path_4byte(asns: Vec<u32>) -> Vec<u8> {
+    let mut value = Vec::new();
+    value.push(2); // AS_SEQUENCE
+    value.push(asns.len() as u8);
+    for asn in asns {
+        value.extend_from_slice(&asn.to_be_bytes());
+    }
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::AS_PATH,
+        value.len() as u8,
+        &value,
+    )
+}
+
+/// Build capability 65 (4-byte ASN support) for use with build_raw_open
+pub fn build_capability_4byte_asn(asn: u32) -> Vec<u8> {
+    let mut cap = vec![65u8, 4u8]; // Type 65, Length 4
+    cap.extend_from_slice(&asn.to_be_bytes());
+    cap
+}
+
+/// Optional parameters for building raw OPEN messages
+#[derive(Default)]
+pub struct RawOpenOptions {
+    pub version_override: Option<u8>,
+    pub marker_override: Option<[u8; 16]>,
+    pub length_override: Option<u16>,
+    pub msg_type_override: Option<u8>,
+    pub capabilities: Option<Vec<Vec<u8>>>,
+}
+
+// Build raw OPEN message with optional custom version, marker, length, message type, and capabilities
 pub fn build_raw_open(
     asn: u16,
     hold_time: u16,
     router_id: u32,
-    version_override: Option<u8>,
-    marker_override: Option<[u8; 16]>,
-    length_override: Option<u16>,
-    msg_type_override: Option<u8>,
+    options: RawOpenOptions,
 ) -> Vec<u8> {
-    let version = version_override.unwrap_or(4);
-    let marker = marker_override.unwrap_or(BGP_MARKER);
-    let msg_type = msg_type_override.unwrap_or(MessageType::Open.as_u8());
+    let version = options.version_override.unwrap_or(4);
+    let marker = options.marker_override.unwrap_or(BGP_MARKER);
+    let msg_type = options
+        .msg_type_override
+        .unwrap_or(MessageType::Open.as_u8());
 
     let mut body = Vec::new();
     body.push(version);
     body.extend_from_slice(&asn.to_be_bytes());
     body.extend_from_slice(&hold_time.to_be_bytes());
     body.extend_from_slice(&router_id.to_be_bytes());
-    body.push(0); // Optional parameters length = 0
 
-    build_raw_message(marker, length_override, msg_type, &body)
+    // Build optional parameters for capabilities
+    if let Some(caps) = options.capabilities {
+        let mut opt_params = Vec::new();
+        for cap in caps {
+            // Optional parameter type 2 = Capabilities
+            opt_params.push(2u8);
+            opt_params.push(cap.len() as u8);
+            opt_params.extend_from_slice(&cap);
+        }
+        body.push(opt_params.len() as u8); // Optional parameters length
+        body.extend_from_slice(&opt_params);
+    } else {
+        body.push(0); // Optional parameters length = 0
+    }
+
+    build_raw_message(marker, options.length_override, msg_type, &body)
 }
 
 // Build raw KEEPALIVE message with optional custom length

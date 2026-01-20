@@ -69,8 +69,14 @@ pub mod attr_type_code {
     pub const MP_REACH_NLRI: u8 = 14;
     pub const MP_UNREACH_NLRI: u8 = 15;
     pub const EXTENDED_COMMUNITIES: u8 = 16;
+    pub const AS4_PATH: u8 = 17;
+    pub const AS4_AGGREGATOR: u8 = 18;
     pub const LARGE_COMMUNITIES: u8 = 32;
 }
+
+// RFC 6793: AS_TRANS and 4-byte ASN constants
+pub const AS_TRANS: u16 = 23456;
+pub const MAX_2BYTE_ASN: u32 = 65535;
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpReachNlri {
@@ -100,6 +106,8 @@ pub enum PathAttrValue {
     MpReachNlri(MpReachNlri),
     MpUnreachNlri(MpUnreachNlri),
     ExtendedCommunities(Vec<u64>),
+    As4Path(AsPath),
+    As4Aggregator(Aggregator),
     LargeCommunities(Vec<LargeCommunity>),
     Unknown {
         type_code: u8,
@@ -115,6 +123,10 @@ pub struct PathAttribute {
 }
 
 impl PathAttribute {
+    pub fn new(flags: PathAttrFlag, value: PathAttrValue) -> Self {
+        PathAttribute { flags, value }
+    }
+
     pub fn is_unknown_transitive(&self) -> bool {
         if let PathAttrValue::Unknown { flags, .. } = &self.value {
             flags & attr_flags::TRANSITIVE != 0
@@ -136,6 +148,8 @@ impl PathAttribute {
             PathAttrValue::MpReachNlri(_) => attr_type_code::MP_REACH_NLRI,
             PathAttrValue::MpUnreachNlri(_) => attr_type_code::MP_UNREACH_NLRI,
             PathAttrValue::ExtendedCommunities(_) => attr_type_code::EXTENDED_COMMUNITIES,
+            PathAttrValue::As4Path(_) => attr_type_code::AS4_PATH,
+            PathAttrValue::As4Aggregator(_) => attr_type_code::AS4_AGGREGATOR,
             PathAttrValue::LargeCommunities(_) => attr_type_code::LARGE_COMMUNITIES,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
@@ -155,6 +169,8 @@ pub(crate) enum AttrType {
     MpReachNlri = 14,
     MpUnreachNlri = 15,
     ExtendedCommunities = 16,
+    As4Path = 17,
+    As4Aggregator = 18,
     LargeCommunities = 32,
 }
 
@@ -174,6 +190,8 @@ impl TryFrom<u8> for AttrType {
             14 => Ok(AttrType::MpReachNlri),
             15 => Ok(AttrType::MpUnreachNlri),
             16 => Ok(AttrType::ExtendedCommunities),
+            17 => Ok(AttrType::As4Path),
+            18 => Ok(AttrType::As4Aggregator),
             32 => Ok(AttrType::LargeCommunities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
@@ -197,6 +215,8 @@ impl AttrType {
             AttrType::MpReachNlri => PathAttrFlag::OPTIONAL,
             AttrType::MpUnreachNlri => PathAttrFlag::OPTIONAL,
             AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::As4Path => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::As4Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::LargeCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
@@ -221,6 +241,8 @@ impl AttrType {
                 | AttrType::MpReachNlri
                 | AttrType::MpUnreachNlri
                 | AttrType::ExtendedCommunities
+                | AttrType::As4Path
+                | AttrType::As4Aggregator
                 | AttrType::LargeCommunities
         )
     }
@@ -253,13 +275,15 @@ impl TryFrom<u8> for Origin {
 pub struct AsPathSegment {
     pub segment_type: AsPathSegmentType,
     pub segment_len: u8,
-    pub asn_list: Vec<u16>,
+    pub asn_list: Vec<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum AsPathSegmentType {
     AsSet = 1,
     AsSequence = 2,
+    AsConfedSequence = 3,
+    AsConfedSet = 4,
 }
 
 impl TryFrom<u8> for AsPathSegmentType {
@@ -269,6 +293,8 @@ impl TryFrom<u8> for AsPathSegmentType {
         match value {
             1 => Ok(AsPathSegmentType::AsSet),
             2 => Ok(AsPathSegmentType::AsSequence),
+            3 => Ok(AsPathSegmentType::AsConfedSequence),
+            4 => Ok(AsPathSegmentType::AsConfedSet),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
                 data: Vec::new(),
@@ -312,13 +338,13 @@ impl From<std::net::IpAddr> for NextHopAddr {
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct AsPath {
-    pub(super) segments: Vec<AsPathSegment>,
+    pub segments: Vec<AsPathSegment>,
 }
 
 impl AsPath {
     /// Returns the leftmost AS in the AS_PATH (first AS of the first segment).
     /// Per RFC 4271, this is the AS that most recently added itself to the path.
-    pub fn leftmost_as(&self) -> Option<u16> {
+    pub fn leftmost_as(&self) -> Option<u32> {
         self.segments
             .first()
             .and_then(|seg| seg.asn_list.first().copied())
@@ -327,7 +353,7 @@ impl AsPath {
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct Aggregator {
-    pub(super) asn: u16,
+    pub asn: u32,
     // TODO: support IPv6?
-    pub(super) ip_addr: Ipv4Addr,
+    pub ip_addr: Ipv4Addr,
 }

@@ -46,14 +46,35 @@ impl Peer {
             tokio::select! {
                 result = conn.msg_rx.recv() => {
                     match result {
-                        Some(Ok(message)) => {
-                            if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
-                                self.disconnect(true, PeerDownReason::RemoteNoNotification);
-                                return false;
+                        Some(Ok(bytes)) => {
+                            // Parse bytes using negotiated capabilities
+                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            let message_type = bytes[18]; // Type is in header byte 18
+                            let body = bytes[19..].to_vec(); // Body starts after header
+
+                            match crate::bgp::msg::BgpMessage::from_bytes(message_type, body, use_4byte_asn) {
+                                Ok(message) => {
+                                    if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                        error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                                        return false;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Parse error - convert to NOTIFICATION if possible
+                                    error!(&self.logger, "error parsing message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                                    if let Some(notif) = NotificationMessage::from_parser_error(&e) {
+                                        let _ = self.send_notification(notif.clone()).await;
+                                        self.disconnect(true, PeerDownReason::LocalNotification(notif));
+                                    } else {
+                                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                                    }
+                                    return false;
+                                }
                             }
                         }
                         Some(Err(e)) => {
+                            // Header validation error from read task
                             error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;

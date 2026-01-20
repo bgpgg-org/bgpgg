@@ -286,7 +286,7 @@ pub struct ConditionsConfig {
     #[serde(default)]
     pub neighbor: Option<String>,
     #[serde(default)]
-    pub has_asn: Option<u16>,
+    pub has_asn: Option<u32>,
     #[serde(default)]
     pub route_type: Option<String>, // "ebgp", "ibgp", "local"
     #[serde(default)]
@@ -387,7 +387,7 @@ pub struct LargeCommunityActionConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    pub asn: u16,
+    pub asn: u32,
     pub listen_addr: String,
     pub router_id: Ipv4Addr,
     #[serde(default = "default_grpc_listen_addr")]
@@ -440,7 +440,7 @@ fn default_log_level() -> String {
 impl Config {
     /// Create a new configuration
     pub fn new(
-        asn: u16,
+        asn: u32,
         listen_addr: &str,
         router_id: Ipv4Addr,
         hold_time_secs: u64,

@@ -23,6 +23,7 @@ use super::utils::{
     is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
 };
 use crate::net::IpNetwork;
+use crate::warn;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -77,12 +78,14 @@ pub(super) fn validate_attribute_length(
         AttrType::MultiExtiDisc => attr_len == 4,
         AttrType::LocalPref => attr_len == 4,
         AttrType::AtomicAggregate => attr_len == 0,
-        AttrType::Aggregator => attr_len == 6,
-        AttrType::AsPath => true, // Variable length
-        AttrType::Communities => attr_len.is_multiple_of(4), // Must be multiple of 4
-        AttrType::MpReachNlri => true, // Variable length
-        AttrType::MpUnreachNlri => true, // Variable length
+        AttrType::Aggregator => attr_len == 6 || attr_len == 8, // 2-byte or 4-byte ASN + IPv4
+        AttrType::AsPath => true,                               // Variable length
+        AttrType::Communities => attr_len.is_multiple_of(4),    // Must be multiple of 4
+        AttrType::MpReachNlri => true,                          // Variable length
+        AttrType::MpUnreachNlri => true,                        // Variable length
         AttrType::ExtendedCommunities => attr_len.is_multiple_of(8), // Must be multiple of 8
+        AttrType::As4Path => true,                              // Variable length (RFC 6793)
+        AttrType::As4Aggregator => true, // Variable length - validation in parser (RFC 6793)
         AttrType::LargeCommunities => attr_len.is_multiple_of(12), // Must be multiple of 12
     };
 
@@ -252,15 +255,23 @@ pub(super) fn parse_attr_type(
     }
 }
 
-pub(super) fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
+pub(super) fn read_attr_as_path(bytes: &[u8], use_4byte_asn: bool) -> Result<AsPath, ParserError> {
+    // Empty AS_PATH is valid (iBGP or locally originated routes)
+    if bytes.is_empty() {
+        return Ok(AsPath { segments: vec![] });
+    }
+
+    // RFC 6793: Use encoding based on negotiated four-octet AS capability
+    let asn_size = if use_4byte_asn { 4 } else { 2 };
+    try_read_as_path(bytes, asn_size)
+}
+
+fn try_read_as_path(bytes: &[u8], asn_size: usize) -> Result<AsPath, ParserError> {
     let mut segments = vec![];
     let mut cursor = 0;
 
     while cursor < bytes.len() {
-        // Calculate total bytes needed for this segment (header + ASN data)
-        let segment_size = 2 + (bytes.get(cursor + 1).copied().unwrap_or(0) as usize * 2);
-
-        if cursor + segment_size > bytes.len() {
+        if cursor + 2 > bytes.len() {
             return Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
                 data: Vec::new(),
@@ -268,25 +279,91 @@ pub(super) fn read_attr_as_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
         }
 
         let segment_type = AsPathSegmentType::try_from(bytes[cursor])?;
-        let segment_len = bytes[cursor + 1];
+        let segment_len = bytes[cursor + 1] as usize;
+
+        // Path segment length cannot be zero
+        if segment_len == 0 {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+                data: Vec::new(),
+            });
+        }
+
+        let segment_data_size = segment_len * asn_size;
+        let segment_total_size = 2 + segment_data_size;
+
+        if cursor + segment_total_size > bytes.len() {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+                data: Vec::new(),
+            });
+        }
 
         let asn_list = (0..segment_len)
             .map(|i| {
-                let pos = cursor + 2 + (i as usize * 2);
-                u16::from_be_bytes([bytes[pos], bytes[pos + 1]])
+                let pos = cursor + 2 + (i * asn_size);
+                if asn_size == 4 {
+                    u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                } else {
+                    u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as u32
+                }
             })
             .collect();
 
         segments.push(AsPathSegment {
             segment_type,
-            segment_len,
+            segment_len: segment_len as u8,
             asn_list,
         });
 
-        cursor += segment_size;
+        cursor += segment_total_size;
+    }
+
+    // Verify we consumed all bytes
+    if cursor != bytes.len() {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+            data: Vec::new(),
+        });
     }
 
     Ok(AsPath { segments })
+}
+
+pub(super) fn read_attr_as4_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
+    // RFC 6793 §10: AS4_PATH validation
+    // - Attribute length must be at least 6 bytes to carry one AS number
+    // - Attribute length must be multiple of 2
+    if bytes.len() < 6 || !bytes.len().is_multiple_of(2) {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
+            data: Vec::new(),
+        });
+    }
+
+    // Parse using the common AS_PATH parser with 4-byte ASNs
+    let mut path = try_read_as_path(bytes, 4)?;
+
+    // RFC 6793: AS_CONFED_SEQUENCE and AS_CONFED_SET MUST NOT be carried in AS4_PATH
+    // If received, discard these segments
+    let original_len = path.segments.len();
+    path.segments.retain(|seg| {
+        !matches!(
+            seg.segment_type,
+            AsPathSegmentType::AsConfedSequence | AsPathSegmentType::AsConfedSet
+        )
+    });
+
+    // Log if we discarded confederation segments
+    if path.segments.len() < original_len {
+        let logger = crate::log::Logger::default();
+        warn!(
+            &logger,
+            "discarded AS_CONFED segments from AS4_PATH per RFC 6793"
+        );
+    }
+
+    Ok(path)
 }
 
 pub(super) fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
@@ -297,11 +374,104 @@ pub(super) fn read_attr_next_hop(bytes: &[u8]) -> NextHopAddr {
 }
 
 pub(super) fn read_attr_aggregator(bytes: &[u8]) -> Aggregator {
-    // Length already validated by validate_attribute_length
-    let asn = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
+    // RFC 6793: AGGREGATOR can be 6 bytes (2-byte ASN) or 8 bytes (4-byte ASN)
+    // depending on whether both peers support 4-byte ASN capability
+    if bytes.len() == 8 {
+        // 4-byte ASN encoding (NEW speaker to NEW speaker)
+        let asn = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let ip_addr = Ipv4Addr::new(bytes[4], bytes[5], bytes[6], bytes[7]);
+        Aggregator { asn, ip_addr }
+    } else {
+        // 2-byte ASN encoding (OLD speaker or to OLD speaker)
+        let asn = u16::from_be_bytes([bytes[0], bytes[1]]) as u32;
+        let ip_addr = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
+        Aggregator { asn, ip_addr }
+    }
+}
 
-    Aggregator { asn, ip_addr }
+pub(super) fn read_attr_as4_aggregator(bytes: &[u8]) -> Result<Aggregator, ParserError> {
+    if bytes.len() != 8 {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            data: Vec::new(),
+        });
+    }
+
+    Ok(read_attr_aggregator(bytes))
+}
+
+/// Check if a segment type is a confederation segment
+fn is_confed_segment(segment_type: AsPathSegmentType) -> bool {
+    matches!(
+        segment_type,
+        AsPathSegmentType::AsConfedSequence | AsPathSegmentType::AsConfedSet
+    )
+}
+
+/// Count non-confederation ASNs in an AS path
+fn count_non_confed_asns(path: &AsPath) -> usize {
+    path.segments
+        .iter()
+        .filter(|seg| !is_confed_segment(seg.segment_type))
+        .map(|seg| seg.asn_list.len())
+        .sum()
+}
+
+/// Merge AS_PATH and AS4_PATH per RFC 6793 Section 4.2.3
+/// This is used when receiving routes from a 2-byte-only speaker that added AS4_PATH
+pub fn merge_as_paths(as_path: &AsPath, as4_path: &AsPath) -> AsPath {
+    // Count non-confederation ASNs in each path
+    let as_path_count = count_non_confed_asns(as_path);
+    let as4_path_count = count_non_confed_asns(as4_path);
+
+    // RFC 6793: If AS4_PATH is longer than AS_PATH, discard it (malformed)
+    if as4_path_count > as_path_count {
+        return as_path.clone();
+    }
+
+    // Calculate how many ASNs to prepend from AS_PATH
+    let prepend_count = as_path_count - as4_path_count;
+
+    let mut result_segments = Vec::new();
+    let mut prepended = 0;
+
+    // RFC 6793: Copy prepend_count ASNs from AS_PATH
+    // Include confederation segments only if they are leading or adjacent to prepended segments
+    for segment in &as_path.segments {
+        if is_confed_segment(segment.segment_type) {
+            // Only include confederation segments if we're still prepending
+            if prepended < prepend_count {
+                result_segments.push(segment.clone());
+            } else {
+                // Done prepending - stop processing AS_PATH
+                break;
+            }
+        } else if prepended < prepend_count {
+            let take_count = (prepend_count - prepended).min(segment.asn_list.len());
+            if take_count > 0 {
+                result_segments.push(AsPathSegment {
+                    segment_type: segment.segment_type,
+                    segment_len: take_count as u8,
+                    asn_list: segment.asn_list[..take_count].to_vec(),
+                });
+                prepended += take_count;
+            }
+        } else {
+            // Done prepending - stop processing AS_PATH
+            break;
+        }
+    }
+
+    // Then, append all non-confederation segments from AS4_PATH
+    for segment in &as4_path.segments {
+        if !is_confed_segment(segment.segment_type) {
+            result_segments.push(segment.clone());
+        }
+    }
+
+    AsPath {
+        segments: result_segments,
+    }
 }
 
 pub(super) fn read_attr_communities(bytes: &[u8]) -> Result<Vec<u32>, ParserError> {
@@ -491,7 +661,10 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     bytes
 }
 
-pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), ParserError> {
+pub(super) fn read_path_attribute(
+    bytes: &[u8],
+    use_4byte_asn: bool,
+) -> Result<(Option<PathAttribute>, u8), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
 
@@ -501,6 +674,9 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
     };
 
     let attr_type_opt = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
+
+    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
+    let total_offset = offset + attr_len as usize;
 
     let attr_val = match attr_type_opt {
         Some(attr_type) => {
@@ -534,7 +710,7 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
                     PathAttrValue::Origin(origin)
                 }
                 AttrType::AsPath => {
-                    let as_path = read_attr_as_path(attr_data)?;
+                    let as_path = read_attr_as_path(attr_data, use_4byte_asn)?;
                     PathAttrValue::AsPath(as_path)
                 }
                 AttrType::NextHop => {
@@ -605,6 +781,24 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
                     let large_communities = read_attr_large_communities(attr_data)?;
                     PathAttrValue::LargeCommunities(large_communities)
                 }
+                AttrType::As4Path => {
+                    match read_attr_as4_path(attr_data) {
+                        Ok(as4_path) => PathAttrValue::As4Path(as4_path),
+                        Err(_) => {
+                            // RFC 6793 §10.2: Discard malformed AS4_PATH
+                            return Ok((None, total_offset as u8));
+                        }
+                    }
+                }
+                AttrType::As4Aggregator => {
+                    match read_attr_as4_aggregator(attr_data) {
+                        Ok(as4_aggregator) => PathAttrValue::As4Aggregator(as4_aggregator),
+                        Err(_) => {
+                            // RFC 6793 §10.3: Discard malformed AS4_AGGREGATOR
+                            return Ok((None, total_offset as u8));
+                        }
+                    }
+                }
             }
         }
         None => {
@@ -626,9 +820,6 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
         }
     };
 
-    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-    let total_offset = offset + attr_len as usize;
-
     // Update PathAttribute flags if PARTIAL bit was set for unknown transitive
     let final_flags = match &attr_val {
         PathAttrValue::Unknown { flags, .. } => PathAttrFlag(*flags),
@@ -640,27 +831,41 @@ pub(super) fn read_path_attribute(bytes: &[u8]) -> Result<(PathAttribute, u8), P
         value: attr_val,
     };
 
-    Ok((attribute, total_offset as u8))
+    Ok((Some(attribute), total_offset as u8))
 }
 
-pub(super) fn read_path_attributes(bytes: &[u8]) -> Result<Vec<PathAttribute>, ParserError> {
+pub(super) fn read_path_attributes(
+    bytes: &[u8],
+    use_4byte_asn: bool,
+) -> Result<Vec<PathAttribute>, ParserError> {
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
     let mut seen_type_codes: HashSet<u8> = HashSet::new();
 
     while cursor < bytes.len() {
-        let (attribute, offset) = read_path_attribute(&bytes[cursor..])?;
-        cursor += offset as usize;
+        let (attribute_opt, offset) = read_path_attribute(&bytes[cursor..], use_4byte_asn)?;
+        let offset_usize = offset as usize;
 
-        let type_code = attribute.type_code();
-        if !seen_type_codes.insert(type_code) {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-                data: Vec::new(),
-            });
+        if let Some(attribute) = attribute_opt {
+            let type_code = attribute.type_code();
+            if !seen_type_codes.insert(type_code) {
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+                    data: Vec::new(),
+                });
+            }
+            path_attributes.push(attribute);
+        } else {
+            // Attribute was discarded - extract type code from raw bytes for logging
+            let attr_type_code = bytes[cursor + 1];
+            warn!(
+                &crate::log::Logger::default(),
+                "discarded malformed attribute per RFC 6793",
+                "type_code" => attr_type_code
+            );
         }
 
-        path_attributes.push(attribute);
+        cursor += offset_usize;
     }
 
     // Validate that we don't have both NEXT_HOP and MP_REACH_NLRI
@@ -702,7 +907,15 @@ pub(super) fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
     bytes
 }
 
-pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
+fn encode_asn(asn: u32, use_4byte_asn: bool) -> Vec<u8> {
+    if use_4byte_asn {
+        asn.to_be_bytes().to_vec()
+    } else {
+        (asn as u16).to_be_bytes().to_vec()
+    }
+}
+
+pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) -> Vec<u8> {
     let mut bytes = Vec::new();
 
     // Serialize attribute value first to determine length
@@ -716,7 +929,7 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
                 path_bytes.push(segment.segment_type as u8);
                 path_bytes.push(segment.segment_len);
                 for asn in &segment.asn_list {
-                    path_bytes.extend_from_slice(&asn.to_be_bytes());
+                    path_bytes.extend_from_slice(&encode_asn(*asn, use_4byte_asn));
                 }
             }
             path_bytes
@@ -729,8 +942,7 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),
         PathAttrValue::AtomicAggregate => vec![],
         PathAttrValue::Aggregator(agg) => {
-            let mut agg_bytes = Vec::new();
-            agg_bytes.extend_from_slice(&agg.asn.to_be_bytes());
+            let mut agg_bytes = encode_asn(agg.asn, use_4byte_asn);
             agg_bytes.extend_from_slice(&agg.ip_addr.octets());
             agg_bytes
         }
@@ -757,6 +969,27 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
             }
             large_comm_bytes
         }
+        PathAttrValue::As4Path(as_path) => {
+            // RFC 6793: AS4_PATH always uses 4-byte ASN encoding
+            let mut path_bytes = Vec::new();
+            for segment in &as_path.segments {
+                path_bytes.push(segment.segment_type as u8);
+                path_bytes.push(segment.segment_len);
+                for asn in &segment.asn_list {
+                    let asn_4byte = asn.to_be_bytes();
+                    path_bytes.extend_from_slice(&asn_4byte);
+                }
+            }
+            path_bytes
+        }
+        PathAttrValue::As4Aggregator(agg) => {
+            // RFC 6793: AS4_AGGREGATOR always uses 4-byte ASN encoding
+            let mut agg_bytes = Vec::new();
+            let asn_4byte = agg.asn.to_be_bytes();
+            agg_bytes.extend_from_slice(&asn_4byte);
+            agg_bytes.extend_from_slice(&agg.ip_addr.octets());
+            agg_bytes
+        }
         PathAttrValue::Unknown { data, .. } => data.clone(),
     };
 
@@ -780,6 +1013,8 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
         PathAttrValue::MpReachNlri(_) => AttrType::MpReachNlri as u8,
         PathAttrValue::MpUnreachNlri(_) => AttrType::MpUnreachNlri as u8,
         PathAttrValue::ExtendedCommunities(_) => AttrType::ExtendedCommunities as u8,
+        PathAttrValue::As4Path(_) => AttrType::As4Path as u8,
+        PathAttrValue::As4Aggregator(_) => AttrType::As4Aggregator as u8,
         PathAttrValue::LargeCommunities(_) => AttrType::LargeCommunities as u8,
         PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
@@ -800,10 +1035,13 @@ pub(super) fn write_path_attribute(attr: &PathAttribute) -> Vec<u8> {
     bytes
 }
 
-pub(super) fn write_path_attributes(path_attributes: &[PathAttribute]) -> Vec<u8> {
+pub(super) fn write_path_attributes(
+    path_attributes: &[PathAttribute],
+    use_4byte_asn: bool,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     for attr in path_attributes {
-        bytes.extend_from_slice(&write_path_attribute(attr));
+        bytes.extend_from_slice(&write_path_attribute(attr, use_4byte_asn));
     }
     bytes
 }
@@ -831,7 +1069,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_origin() {
-        let (attribute, offset) = read_path_attribute(PATH_ATTR_ORIGIN_EGP).unwrap();
+        let (attribute_opt, offset) = read_path_attribute(PATH_ATTR_ORIGIN_EGP, false).unwrap();
+        let attribute = attribute_opt.unwrap();
 
         assert_eq!(
             attribute,
@@ -847,7 +1086,7 @@ mod tests {
     fn test_read_path_attribute_origin_invalid_value() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -861,7 +1100,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities() {
-        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_TWO).unwrap();
+        let (attr_opt, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, false).unwrap();
+        let attr = attr_opt.unwrap();
 
         assert_eq!(
             attr,
@@ -880,7 +1120,7 @@ mod tests {
             value: PathAttrValue::Communities(vec![0x00010064, 0xFFFFFF01]),
         };
 
-        let bytes = write_path_attribute(&attr);
+        let bytes = write_path_attribute(&attr, false);
         assert_eq!(bytes, PATH_ATTR_COMMUNITIES_TWO);
     }
 
@@ -892,8 +1132,9 @@ mod tests {
             value: PathAttrValue::Communities(original_communities.clone()),
         };
 
-        let bytes = write_path_attribute(&attr);
-        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
+        let bytes = write_path_attribute(&attr, false);
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = parsed_attr.value {
             assert_eq!(communities, original_communities);
@@ -928,7 +1169,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities_empty() {
-        let (attr, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY).unwrap();
+        let (attr_opt, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, false).unwrap();
+        let attr = attr_opt.unwrap();
 
         assert_eq!(
             attr,
@@ -942,7 +1184,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities_well_known() {
-        let (attr, _) = read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN).unwrap();
+        let (attr_opt, _) = read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, false).unwrap();
+        let attr = attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = attr.value {
             assert_eq!(communities.len(), 3);
@@ -966,7 +1209,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, .. }) => {
                 assert_eq!(
                     error,
@@ -984,7 +1227,7 @@ mod tests {
             value: PathAttrValue::Communities(vec![]),
         };
 
-        let bytes = write_path_attribute(&attr);
+        let bytes = write_path_attribute(&attr, false);
         assert_eq!(bytes, PATH_ATTR_COMMUNITIES_EMPTY);
     }
 
@@ -998,7 +1241,7 @@ mod tests {
             ]),
         };
 
-        let bytes = write_path_attribute(&attr);
+        let bytes = write_path_attribute(&attr, false);
         assert_eq!(bytes, PATH_ATTR_EXTENDED_COMMUNITIES_TWO);
     }
 
@@ -1020,8 +1263,9 @@ mod tests {
             value: PathAttrValue::ExtendedCommunities(original_ext_communities.clone()),
         };
 
-        let bytes = write_path_attribute(&attr);
-        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
+        let bytes = write_path_attribute(&attr, false);
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::ExtendedCommunities(ext_communities) = parsed_attr.value {
             assert_eq!(ext_communities, original_ext_communities);
@@ -1045,7 +1289,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_as_path() {
-        let (as_path, offset) = read_path_attribute(PATH_ATTR_AS_PATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         let segments = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
             segment_len: 2,
@@ -1071,7 +1316,7 @@ mod tests {
             AsPathSegmentType::AsSet as u8,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1095,7 +1340,7 @@ mod tests {
             0x10,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1111,7 +1356,8 @@ mod tests {
     fn test_read_path_attribute_as_path_empty() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1140,7 +1386,8 @@ mod tests {
             0x1e,
         ];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1177,7 +1424,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
-        let (as_path, offset) = read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1201,7 +1449,7 @@ mod tests {
             0x0e,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1233,7 +1481,7 @@ mod tests {
                 ip_bytes[3],
             ];
 
-            match read_path_attribute(&input) {
+            match read_path_attribute(&input, false) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1261,7 +1509,8 @@ mod tests {
             0x01,
         ];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1283,7 +1532,7 @@ mod tests {
             0x01,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1308,7 +1557,8 @@ mod tests {
             0x01,
         ];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1330,7 +1580,7 @@ mod tests {
             0x0f,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1351,7 +1601,8 @@ mod tests {
             0x00,
         ];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1371,7 +1622,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1400,7 +1651,8 @@ mod tests {
             0x0d,
         ];
 
-        let (as_path, offset) = read_path_attribute(input).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1425,7 +1677,7 @@ mod tests {
             0x0a,
         ];
 
-        match read_path_attribute(input) {
+        match read_path_attribute(input, false) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1439,7 +1691,9 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_extended_communities() {
-        let (attr, offset) = read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO).unwrap();
+        let (attr_opt, offset) =
+            read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, false).unwrap();
+        let attr = attr_opt.unwrap();
 
         assert_eq!(
             attr,
@@ -1466,8 +1720,9 @@ mod tests {
             value: PathAttrValue::LargeCommunities(original_large_communities.clone()),
         };
 
-        let bytes = write_path_attribute(&attr);
-        let (parsed_attr, _) = read_path_attribute(&bytes).unwrap();
+        let bytes = write_path_attribute(&attr, false);
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
             assert_eq!(large_communities, original_large_communities);
@@ -1674,7 +1929,7 @@ mod tests {
         attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
 
         // Should fail with MalformedAttributeList
-        let result = read_path_attributes(&attrs_bytes);
+        let result = read_path_attributes(&attrs_bytes, false);
         assert!(result.is_err());
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(
@@ -1684,5 +1939,429 @@ mod tests {
         } else {
             panic!("Expected MalformedAttributeList error");
         }
+    }
+
+    // RFC 6793 Attribute Discard Tests
+
+    #[test]
+    fn test_malformed_as4_path_aggreator_attributes_discarded() {
+        struct TestCase {
+            name: &'static str,
+            input: &'static [u8],
+            expected_offset: Option<u8>,
+        }
+
+        let tests = vec![
+            TestCase {
+                name: "AS4_PATH truncated - segment length claims 2 ASNs but only 1 present",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x06, // Length: 6 bytes
+                    AsPathSegmentType::AsSequence as u8,
+                    0x02, // Segment length claims 2 ASNs (but we only have data for 1)
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // First ASN: 10 (second ASN missing)
+                ],
+                expected_offset: Some(9),
+            },
+            TestCase {
+                name: "AS4_PATH invalid segment type",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x06, // Length: 6 bytes
+                    0xFF, // Invalid segment type (255)
+                    0x01, // Segment length: 1 ASN
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // ASN: 10
+                ],
+                expected_offset: None,
+            },
+            TestCase {
+                name: "AS4_AGGREGATOR wrong length",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Aggregator as u8,
+                    0x06, // Length: 6 bytes (should be 8)
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // ASN: 10
+                    0xc0,
+                    0xa8, // IP incomplete
+                ],
+                expected_offset: Some(9),
+            },
+            TestCase {
+                name: "AS4_PATH too short",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x04, // Length: 4 bytes (too short - need at least 6)
+                    AsPathSegmentType::AsSequence as u8,
+                    0x00, // Segment length: 0
+                    0x00,
+                    0x00,
+                ],
+                expected_offset: None,
+            },
+            TestCase {
+                name: "AS4_PATH odd length",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x07, // Length: 7 bytes (not multiple of 2)
+                    AsPathSegmentType::AsSequence as u8,
+                    0x01, // Segment length: 1 ASN
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // ASN: 10
+                    0x00, // Extra odd byte
+                ],
+                expected_offset: None,
+            },
+            TestCase {
+                name: "AS4_PATH zero segment length",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x06, // Length: 6 bytes
+                    AsPathSegmentType::AsSequence as u8,
+                    0x00, // Segment length: 0 (invalid)
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                ],
+                expected_offset: None,
+            },
+        ];
+
+        for test in tests {
+            let result = read_path_attribute(test.input, false);
+            assert!(result.is_ok(), "{}: should return Ok", test.name);
+            let (attr_opt, offset) = result.unwrap();
+            assert!(
+                attr_opt.is_none(),
+                "{}: malformed attribute should be discarded",
+                test.name
+            );
+            if let Some(expected) = test.expected_offset {
+                assert_eq!(offset, expected, "{}: offset mismatch", test.name);
+            }
+        }
+    }
+
+    #[test]
+    fn test_as4_path_well_formed_accepted() {
+        // Well-formed AS4_PATH should still be accepted
+        let input: &[u8] = &[
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::As4Path as u8,
+            0x0a, // Length: 10 bytes
+            AsPathSegmentType::AsSequence as u8,
+            0x02, // Segment length: 2 ASNs
+            0x00,
+            0x00,
+            0x00,
+            0x0a, // First ASN: 10
+            0x00,
+            0x00,
+            0x00,
+            0x14, // Second ASN: 20
+        ];
+
+        let result = read_path_attribute(input, false);
+        assert!(result.is_ok());
+        let (attr_opt, _) = result.unwrap();
+        assert!(
+            attr_opt.is_some(),
+            "Well-formed AS4_PATH should be accepted"
+        );
+
+        let attr = attr_opt.unwrap();
+        if let PathAttrValue::As4Path(as_path) = attr.value {
+            assert_eq!(as_path.segments.len(), 1);
+            assert_eq!(as_path.segments[0].asn_list, vec![10, 20]);
+        } else {
+            panic!("Expected As4Path attribute");
+        }
+    }
+
+    #[test]
+    fn test_malformed_as_path() {
+        // Regular AS_PATH (well-known mandatory) should still cause errors
+        // Segment length claims 2 ASNs but we only provide data for 1
+        let input: &[u8] = &[
+            PathAttrFlag::TRANSITIVE,
+            AttrType::AsPath as u8,
+            0x04, // Length: 4 bytes (segment header=2, 1 ASN in 2-byte format=2)
+            AsPathSegmentType::AsSequence as u8,
+            0x02, // Segment length claims: 2 ASNs (but only 1 ASN worth of data follows)
+            0x00,
+            0x0a, // First ASN: 10 (second ASN missing - truncated)
+        ];
+
+        let result = read_path_attribute(input, false);
+        assert!(result.is_err(), "Malformed AS_PATH should cause error");
+
+        if let Err(ParserError::BgpError { error, .. }) = result {
+            assert_eq!(
+                error,
+                BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
+            );
+        } else {
+            panic!("Expected MalformedASPath error");
+        }
+    }
+
+    #[test]
+    fn test_as4_path_confed_segment_filtering() {
+        struct TestCase {
+            name: &'static str,
+            input: &'static [u8],
+            expected_segments: usize,
+            expected_asns: Vec<u32>,
+        }
+
+        let tests = vec![
+            TestCase {
+                name: "only confederation segments - result is empty",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x0a, // Length: 10 bytes
+                    AsPathSegmentType::AsConfedSequence as u8,
+                    0x02, // Segment length: 2 ASNs
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // ASN: 10
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x14, // ASN: 20
+                ],
+                expected_segments: 0,
+                expected_asns: vec![],
+            },
+            TestCase {
+                name: "mixed regular and confederation segments",
+                input: &[
+                    PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+                    AttrType::As4Path as u8,
+                    0x12, // Length: 18 bytes (3 segments: 6+6+6)
+                    // First segment: regular AS_SEQUENCE
+                    AsPathSegmentType::AsSequence as u8,
+                    0x01, // Segment length: 1 ASN
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x0a, // ASN: 10
+                    // Second segment: AS_CONFED_SEQUENCE (filtered)
+                    AsPathSegmentType::AsConfedSequence as u8,
+                    0x01, // Segment length: 1 ASN
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x14, // ASN: 20
+                    // Third segment: AS_CONFED_SET (filtered)
+                    AsPathSegmentType::AsConfedSet as u8,
+                    0x01, // Segment length: 1 ASN
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x1e, // ASN: 30
+                ],
+                expected_segments: 1,
+                expected_asns: vec![10],
+            },
+        ];
+
+        for test in tests {
+            let result = read_path_attribute(test.input, false);
+            assert!(result.is_ok(), "{}: should return Ok", test.name);
+            let (attr_opt, _) = result.unwrap();
+            assert!(
+                attr_opt.is_some(),
+                "{}: AS4_PATH should not be discarded",
+                test.name
+            );
+
+            let attr = attr_opt.unwrap();
+            if let PathAttrValue::As4Path(as_path) = attr.value {
+                assert_eq!(
+                    as_path.segments.len(),
+                    test.expected_segments,
+                    "{}: segment count mismatch",
+                    test.name
+                );
+                if test.expected_segments > 0 {
+                    assert_eq!(
+                        as_path.segments[0].segment_type,
+                        AsPathSegmentType::AsSequence,
+                        "{}: segment type mismatch",
+                        test.name
+                    );
+                    assert_eq!(
+                        as_path.segments[0].asn_list, test.expected_asns,
+                        "{}: ASN list mismatch",
+                        test.name
+                    );
+                }
+            } else {
+                panic!("{}: Expected As4Path attribute", test.name);
+            }
+        }
+    }
+
+    // Helper function to create AS path segments
+    fn make_as_path(segments: Vec<(AsPathSegmentType, Vec<u32>)>) -> AsPath {
+        AsPath {
+            segments: segments
+                .into_iter()
+                .map(|(segment_type, asn_list)| AsPathSegment {
+                    segment_type,
+                    segment_len: asn_list.len() as u8,
+                    asn_list,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_merge_as_paths() {
+        use AsPathSegmentType::{AsConfedSequence, AsSequence};
+
+        struct TestCase {
+            name: &'static str,
+            as_path: Vec<(AsPathSegmentType, Vec<u32>)>,
+            as4_path: Vec<(AsPathSegmentType, Vec<u32>)>,
+            expected: Vec<(AsPathSegmentType, Vec<u32>)>,
+        }
+
+        let tests = vec![
+            TestCase {
+                name: "normal merge",
+                as_path: vec![(AsSequence, vec![100, 200, 300])],
+                as4_path: vec![(AsSequence, vec![300])],
+                expected: vec![(AsSequence, vec![100, 200]), (AsSequence, vec![300])],
+            },
+            TestCase {
+                name: "malformed as4_path longer than as_path",
+                as_path: vec![(AsSequence, vec![100, 200])],
+                as4_path: vec![(AsSequence, vec![100, 200, 300])],
+                expected: vec![(AsSequence, vec![100, 200])],
+            },
+            TestCase {
+                name: "same length paths",
+                as_path: vec![(AsSequence, vec![100, 200])],
+                as4_path: vec![(AsSequence, vec![100, 200])],
+                expected: vec![(AsSequence, vec![100, 200])],
+            },
+            TestCase {
+                name: "leading confederation segments",
+                as_path: vec![
+                    (AsConfedSequence, vec![50, 60]),
+                    (AsSequence, vec![100, 200, 300]),
+                ],
+                as4_path: vec![(AsSequence, vec![300])],
+                expected: vec![
+                    (AsConfedSequence, vec![50, 60]),
+                    (AsSequence, vec![100, 200]),
+                    (AsSequence, vec![300]),
+                ],
+            },
+            TestCase {
+                name: "trailing confederation segments discarded",
+                as_path: vec![
+                    (AsSequence, vec![100, 200, 300]),
+                    (AsConfedSequence, vec![50, 60]),
+                ],
+                as4_path: vec![(AsSequence, vec![300])],
+                expected: vec![(AsSequence, vec![100, 200]), (AsSequence, vec![300])],
+            },
+            TestCase {
+                name: "multiple segments",
+                as_path: vec![(AsSequence, vec![100, 200]), (AsSequence, vec![300, 400])],
+                as4_path: vec![(AsSequence, vec![400])],
+                expected: vec![
+                    (AsSequence, vec![100, 200]),
+                    (AsSequence, vec![300]),
+                    (AsSequence, vec![400]),
+                ],
+            },
+            TestCase {
+                name: "partial segment prepend",
+                as_path: vec![(AsSequence, vec![100, 200, 300])],
+                as4_path: vec![(AsSequence, vec![200, 300])],
+                expected: vec![(AsSequence, vec![100]), (AsSequence, vec![200, 300])],
+            },
+            TestCase {
+                name: "as4_path with confed segments filtered",
+                as_path: vec![(AsSequence, vec![100, 200])],
+                as4_path: vec![(AsConfedSequence, vec![50]), (AsSequence, vec![200])],
+                expected: vec![(AsSequence, vec![100]), (AsSequence, vec![200])],
+            },
+        ];
+
+        for test in tests {
+            let as_path = make_as_path(test.as_path);
+            let as4_path = make_as_path(test.as4_path);
+            let expected = make_as_path(test.expected);
+
+            let result = merge_as_paths(&as_path, &as4_path);
+
+            assert_eq!(
+                result.segments.len(),
+                expected.segments.len(),
+                "{}: segment count mismatch",
+                test.name
+            );
+
+            for (i, (result_seg, expected_seg)) in result
+                .segments
+                .iter()
+                .zip(expected.segments.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    result_seg.segment_type, expected_seg.segment_type,
+                    "{}: segment {} type mismatch",
+                    test.name, i
+                );
+                assert_eq!(
+                    result_seg.asn_list, expected_seg.asn_list,
+                    "{}: segment {} ASN list mismatch",
+                    test.name, i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_count_non_confed_asns() {
+        let path = make_as_path(vec![
+            (AsPathSegmentType::AsConfedSequence, vec![50, 60]),
+            (AsPathSegmentType::AsSequence, vec![100, 200]),
+            (AsPathSegmentType::AsConfedSet, vec![70]),
+            (AsPathSegmentType::AsSequence, vec![300]),
+        ]);
+
+        assert_eq!(count_non_confed_asns(&path), 3); // 100, 200, 300
+    }
+
+    #[test]
+    fn test_is_confed_segment() {
+        assert!(is_confed_segment(AsPathSegmentType::AsConfedSequence));
+        assert!(is_confed_segment(AsPathSegmentType::AsConfedSet));
+        assert!(!is_confed_segment(AsPathSegmentType::AsSequence));
+        assert!(!is_confed_segment(AsPathSegmentType::AsSet));
     }
 }

@@ -42,10 +42,10 @@ async fn test_open_unsupported_version() {
         65002,
         300,
         u32::from(Ipv4Addr::new(2, 2, 2, 2)),
-        Some(3),
-        None,
-        None,
-        None,
+        RawOpenOptions {
+            version_override: Some(3),
+            ..Default::default()
+        },
     );
 
     peer.send_raw(&msg).await;

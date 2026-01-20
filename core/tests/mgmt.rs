@@ -147,7 +147,7 @@ async fn test_get_peers_with_peers() {
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].address, server2.address.to_string());
-    assert_eq!(peers[0].asn, server2.asn as u32);
+    assert_eq!(peers[0].asn, server2.asn);
     assert_eq!(peers[0].state, BgpState::Established as i32);
 }
 
@@ -178,7 +178,7 @@ async fn test_get_peer_success() {
 
     let peer = peer_opt.unwrap();
     assert_eq!(peer.address, server2.address.to_string());
-    assert_eq!(peer.asn, server2.asn as u32);
+    assert_eq!(peer.asn, server2.asn);
     assert_eq!(peer.state, BgpState::Established as i32);
 
     // Verify statistics exist
@@ -575,7 +575,7 @@ async fn test_list_routes_impl(use_stream: bool) {
         .map(|i| Route {
             prefix: format!("10.{}.0.0/24", i),
             paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server2.asn as u32])],
+                as_path: vec![as_sequence(vec![server2.asn])],
                 next_hop: server2.address.to_string(),
                 peer_address: server2.address.to_string(),
                 origin: Some(Origin::Igp),
@@ -608,7 +608,7 @@ async fn test_list_routes_impl(use_stream: bool) {
         .map(|i| Route {
             prefix: format!("10.{}.0.0/24", i),
             paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server1.asn as u32])],
+                as_path: vec![as_sequence(vec![server1.asn])],
                 next_hop: server1.config.router_id.to_string(),
                 peer_address: "127.0.0.1".to_string(),
                 origin: Some(Origin::Igp),

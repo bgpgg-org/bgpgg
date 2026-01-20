@@ -27,7 +27,7 @@ use crate::peer::outgoing::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
 use crate::peer::BgpState;
-use crate::peer::{Peer, PeerOp, PeerStatistics};
+use crate::peer::{Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{Path, Route};
@@ -93,7 +93,7 @@ pub enum ResetType {
 #[derive(Debug, Clone)]
 pub struct GetPeersResponse {
     pub address: String,
-    pub asn: Option<u16>,
+    pub asn: Option<u32>,
     pub state: BgpState,
     pub admin_state: AdminState,
     pub configured: bool,
@@ -104,7 +104,7 @@ pub struct GetPeersResponse {
 #[derive(Debug, Clone)]
 pub struct GetPeerResponse {
     pub address: String,
-    pub asn: Option<u16>,
+    pub asn: Option<u32>,
     pub state: BgpState,
     pub admin_state: AdminState,
     pub configured: bool,
@@ -260,7 +260,7 @@ pub enum ServerOp {
     },
     PeerHandshakeComplete {
         peer_ip: IpAddr,
-        asn: u16,
+        asn: u32,
     },
     /// Sent when peer receives OPEN message, for collision detection (RFC 4271 Section 6.8)
     OpenReceived {
@@ -276,6 +276,7 @@ pub enum ServerOp {
         remote_port: u16,
         sent_open: OpenMessage,
         received_open: OpenMessage,
+        negotiated_capabilities: PeerCapabilities,
     },
     PeerUpdate {
         peer_ip: IpAddr,
@@ -366,7 +367,7 @@ pub struct PeerInfo {
     pub admin_state: AdminState,
     /// true if explicitly configured, false if accepted via accept_unconfigured_peers
     pub configured: bool,
-    pub asn: Option<u16>,
+    pub asn: Option<u32>,
     /// BGP Identifier from OPEN message, used for collision detection (RFC 4271 Section 6.8)
     pub bgp_id: Option<u32>,
     pub import_policies: Vec<Arc<Policy>>,
@@ -380,6 +381,8 @@ pub struct PeerInfo {
     pub pending_incoming: Option<TcpStream>,
     /// Connection info (Some when Established, None otherwise)
     pub conn_info: Option<ConnectionInfo>,
+    /// Negotiated capabilities (available when Established)
+    pub negotiated_capabilities: Option<PeerCapabilities>,
 }
 
 impl PeerInfo {
@@ -400,6 +403,7 @@ impl PeerInfo {
             config,
             pending_incoming: None,
             conn_info: None,
+            negotiated_capabilities: None,
         }
     }
 
@@ -491,7 +495,7 @@ impl BgpServer {
     pub(crate) fn resolve_export_policies(
         &self,
         peer_config: &PeerConfig,
-        peer_asn: u16,
+        peer_asn: u32,
     ) -> Vec<Arc<Policy>> {
         // Always start with default_out policy (iBGP reflection prevention, etc.)
         let mut policies = vec![Arc::new(Policy::default_out(self.config.asn, peer_asn))];
@@ -851,7 +855,19 @@ impl BgpServer {
 
             let export_policies = entry.policy_out();
             if !export_policies.is_empty() {
-                send_withdrawals_to_peer(*peer_addr, peer_tx, &to_withdraw, &self.logger);
+                let peer_supports_4byte_asn = entry
+                    .negotiated_capabilities
+                    .as_ref()
+                    .map(|caps| caps.supports_four_octet_asn())
+                    .unwrap_or(false);
+
+                send_withdrawals_to_peer(
+                    *peer_addr,
+                    peer_tx,
+                    &to_withdraw,
+                    peer_supports_4byte_asn,
+                    &self.logger,
+                );
                 send_announcements_to_peer(
                     *peer_addr,
                     peer_tx,
@@ -860,6 +876,7 @@ impl BgpServer {
                     peer_asn,
                     local_next_hop,
                     export_policies,
+                    peer_supports_4byte_asn,
                     &self.logger,
                 );
             } else {

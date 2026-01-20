@@ -82,7 +82,7 @@ impl Peer {
     /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
     pub(super) fn handle_update(
         &mut self,
-        update_msg: UpdateMessage,
+        mut update_msg: UpdateMessage,
     ) -> Result<UpdateResult, BgpError> {
         // RFC 4760 Section 7: Validate multiprotocol NLRI against negotiated capabilities
         if !self.validate_multiprotocol_capabilities(&update_msg) {
@@ -91,17 +91,48 @@ impl Peer {
 
         // RFC 4271 Section 6.3: For eBGP, check that leftmost AS in AS_PATH equals peer AS.
         // If mismatch, MUST set error subcode to MalformedASPath.
+        // RFC 6793: If AS_TRANS is present, get real ASN from AS4_PATH
         if self.session_type == Some(SessionType::Ebgp) {
             if let Some(leftmost_as) = update_msg.leftmost_as() {
                 if let Some(peer_asn) = self.asn {
-                    if leftmost_as != peer_asn {
+                    use crate::bgp::msg_update_types::AS_TRANS;
+                    let actual_leftmost = if leftmost_as == AS_TRANS as u32 {
+                        // AS_TRANS present - get real ASN from AS4_PATH
+                        update_msg
+                            .as4_path()
+                            .and_then(|segments| {
+                                segments
+                                    .first()
+                                    .and_then(|seg| seg.asn_list.first().copied())
+                            })
+                            .unwrap_or(leftmost_as)
+                    } else {
+                        leftmost_as
+                    };
+
+                    if actual_leftmost != peer_asn {
                         warn!(&self.logger, "AS_PATH first AS does not match peer AS",
-                              "peer_ip" => self.addr.to_string(), "leftmost_as" => leftmost_as, "peer_asn" => peer_asn);
+                              "peer_ip" => self.addr.to_string(), "leftmost_as" => actual_leftmost, "peer_asn" => peer_asn);
                         return Err(BgpError::UpdateMessageError(
                             UpdateMessageError::MalformedASPath,
                         ));
                     }
                 }
+            }
+        }
+
+        // RFC 6793 Section 4.1: NEW speakers MUST NOT send AS4_PATH/AS4_AGGREGATOR
+        // MUST discard these attributes if received from another NEW speaker
+        let peer_supports_4byte_asn = self.negotiated_capabilities.four_octet_asn.is_some();
+        if peer_supports_4byte_asn {
+            let has_as4_path = update_msg.as4_path().is_some();
+            let has_as4_aggregator = update_msg.as4_aggregator().is_some();
+            if has_as4_path || has_as4_aggregator {
+                warn!(&self.logger, "received AS4_PATH/AS4_AGGREGATOR from NEW speaker, discarding per RFC 6793",
+                      "peer_ip" => self.addr.to_string(),
+                      "has_as4_path" => has_as4_path,
+                      "has_as4_aggregator" => has_as4_aggregator);
+                update_msg.strip_as4_attributes();
             }
         }
 
@@ -161,7 +192,9 @@ impl Peer {
             self.addr,
         );
 
-        let Some(path) = Path::from_update_msg(update_msg, source) else {
+        let peer_supports_4byte_asn = self.negotiated_capabilities.four_octet_asn.is_some();
+
+        let Some(path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn) else {
             if !update_msg.nlri_list().is_empty() {
                 warn!(&self.logger, "UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => self.addr.to_string());
             }
@@ -223,6 +256,7 @@ mod tests {
             peer.negotiated_capabilities = PeerCapabilities {
                 multiprotocol: negotiated.into_iter().collect(),
                 route_refresh: false,
+                four_octet_asn: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 
@@ -265,10 +299,12 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 vec![],
                 vec![],
                 vec![],
                 vec![],
+                false,
             );
 
             let result = peer.handle_update(update);
@@ -380,10 +416,12 @@ mod tests {
                     None,
                     None,
                     false,
+                    None,
                     vec![],
                     vec![],
                     vec![],
                     vec![], // large_communities
+                    false,
                 );
                 peer.handle_update(initial_update).unwrap();
             }
@@ -409,10 +447,12 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 vec![],
                 vec![],
                 vec![],
                 vec![], // large_communities
+                false,
             );
 
             let result = peer.handle_update(update);

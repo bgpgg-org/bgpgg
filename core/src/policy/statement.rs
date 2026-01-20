@@ -413,7 +413,7 @@ pub enum Condition {
     PrefixSet(Arc<PrefixSet>, MatchOptionConfig),
     Neighbor(IpAddr),
     NeighborSet(Arc<NeighborSet>, MatchOptionConfig),
-    AsPath(u16),
+    AsPath(u32),
     AsPathSet(Arc<AsPathSet>, MatchOptionConfig),
     Community(u32),
     CommunitySet(Arc<CommunitySet>, MatchOptionConfig),
@@ -530,7 +530,7 @@ pub fn stmt_default_local_pref(value: u32) -> Statement {
 }
 
 /// Reject routes with local ASN in AS_PATH (AS loop prevention)
-pub fn stmt_reject_as_loop(local_asn: u16) -> Statement {
+pub fn stmt_reject_as_loop(local_asn: u32) -> Statement {
     Statement::new()
         .when(Condition::AsPath(local_asn))
         .then(Action::Reject)

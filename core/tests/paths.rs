@@ -37,6 +37,7 @@ pub use utils::*;
 use bgpgg::bgp::community;
 use bgpgg::bgp::ext_community::*;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     extended_community::{Community, TwoOctetAsSpecific},
@@ -51,33 +52,7 @@ async fn test_origin_preservation() {
     //
     // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65003)
     //                          eBGP           eBGP
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65003,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65001, 65002, 65003], None).await;
 
     // S1 originates routes with different ORIGIN values
     let test_routes = [
@@ -150,41 +125,8 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     //
     // Topology: S1(AS65001) -> S2(AS65002) -> S3(AS65002) -> S4(AS65003)
     //                          eBGP           iBGP           eBGP
-    let [server1, server2, server3, server4] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65003,
-            "127.0.0.4:0",
-            Ipv4Addr::new(4, 4, 4, 4),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3, server4] =
+        &mut create_asn_chain([65001, 65002, 65002, 65003], None).await;
 
     // S1 originates a route (starts with empty AS_PATH)
     announce_route(
@@ -258,33 +200,7 @@ async fn test_originating_speaker_as_path() {
     //
     // Topology: S1(AS65001) -> S2(AS65001) -> S3(AS65002)
     //                          iBGP           eBGP
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65001, 65001, 65002], None).await;
 
     // S1 originates a route
     announce_route(
@@ -344,25 +260,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // S1 injects a route with AS_SET[65003, 65004] as the first segment.
     // S2 should receive it with AS_SEQUENCE[65001] prepended by S1.
 
-    let [server1, server2] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2] = &mut create_asn_chain([65001, 65002], None).await;
 
     // S1 adds a route with AS_SET as the first segment
     announce_route(
@@ -420,25 +318,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     //
     // Note: NEXT_HOP is only auto-set when it's unspecified.
     // If explicitly set to a non-zero value, it's preserved.
-    let [server1, server2] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2] = &mut create_asn_chain([65001, 65001], None).await;
 
     // S1 originates a route with NEXT_HOP unspecified (0.0.0.0)
     announce_route(
@@ -483,33 +363,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
     //
     // When S1 sends a route to S2 via iBGP, S2 preserves NEXT_HOP.
     // When S2 advertises to S3 via eBGP, S2 SHOULD rewrite NEXT_HOP to self.
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65001, 65001, 65002], None).await;
 
     // S1 originates a route with explicit NEXT_HOP
     announce_route(
@@ -572,33 +426,7 @@ async fn test_local_pref_send_to_ibgp() {
     // - S1 originates route (external AS)
     // - S2 receives via eBGP, DefaultLocalPref policy sets to 100
     // - S3 receives via iBGP with LOCAL_PREF=100 (proves it was in UPDATE)
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65000,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65000, 65001, 65001], None).await;
 
     // S1 originates a route
     announce_route(
@@ -664,33 +492,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
     // - S1 originates route with LOCAL_PREF=200
     // - S2 receives via iBGP with LOCAL_PREF=200
     // - S3 receives via eBGP with LOCAL_PREF=100 (set by policy, NOT from S2)
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65001, 65001, 65002], None).await;
 
     // S1 originates a route with LOCAL_PREF=200
     announce_route(
@@ -754,33 +556,7 @@ async fn test_med_propagation_over_ibgp() {
     // - S1 originates route with MED=50 (external AS)
     // - S2 receives via eBGP with MED=50
     // - S3 receives via iBGP with MED=50 (proves it was propagated)
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65000,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65000, 65001, 65001], None).await;
 
     // S1 originates a route with MED=50
     announce_route(
@@ -846,33 +622,7 @@ async fn test_med_not_propagated_to_other_as() {
     // - S1 originates route with MED=50
     // - S2 receives via eBGP with MED=50
     // - S3 receives via eBGP with MED=None (MED was NOT propagated to different AS)
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65000,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65000, 65001, 65002], None).await;
 
     // S1 originates a route with MED=50
     announce_route(
@@ -937,33 +687,7 @@ async fn test_atomic_aggregate_propagation() {
     // - S1 originates route with ATOMIC_AGGREGATE=true
     // - S2 receives via eBGP with ATOMIC_AGGREGATE=true
     // - S3 receives via iBGP with ATOMIC_AGGREGATE=true (proves propagation)
-    let [server1, server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server1, server2, server3] = &mut create_asn_chain([65001, 65002, 65002], None).await;
 
     // S1 originates a route with ATOMIC_AGGREGATE=true
     announce_route(
@@ -1039,25 +763,7 @@ async fn test_unknown_optional_attribute_handling(
 ) {
     // Topology: FakePeer(S1) -> S2(AS65002) -> S3(AS65003)
     //                            iBGP            eBGP
-    let [server2, server3] = &mut chain_servers([
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            300,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65003,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            300,
-            true,
-        ))
-        .await,
-    ])
-    .await;
+    let [server2, server3] = &mut create_asn_chain([65002, 65003], Some(300)).await;
 
     let mut server1 = FakePeer::connect(None, server2).await;
     server1
@@ -1403,25 +1109,7 @@ async fn test_extended_communities_filtering() {
     ];
 
     for (name, asn1, asn2, expected_as_path, expected_communities) in tests {
-        let [server1, server2] = &mut chain_servers([
-            start_test_server(Config::new(
-                asn1,
-                "127.0.0.1:0",
-                Ipv4Addr::new(1, 1, 1, 1),
-                90,
-                true,
-            ))
-            .await,
-            start_test_server(Config::new(
-                asn2,
-                "127.0.0.2:0",
-                Ipv4Addr::new(2, 2, 2, 2),
-                90,
-                true,
-            ))
-            .await,
-        ])
-        .await;
+        let [server1, server2] = &mut create_asn_chain([asn1, asn2], None).await;
 
         let expected_next_hop = if asn1 == asn2 {
             announced_next_hop.clone()
@@ -1519,4 +1207,330 @@ async fn test_large_community_propagation() {
         }],
     )])
     .await;
+}
+
+/// RFC 6793: Test route propagation with large ASNs (4-byte) and boundary conditions
+#[tokio::test]
+async fn test_asn_route_propagation() {
+    let test_cases = [
+        ("large_asns", [4200000001, 4200000002]),
+        ("boundary", [65535, 65536]),
+    ];
+
+    for (name, asns) in test_cases {
+        let [s1, s2] = &mut create_asn_chain(asns, None).await;
+        verify_peers(s1, vec![s2.to_peer(BgpState::Established, false)]).await;
+        announce_and_verify_route(
+            s1,
+            &[s2],
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+            PathParams {
+                as_path: vec![as_sequence(vec![asns[0]])],
+                next_hop: s1.address.to_string(),
+                peer_address: s1.address.to_string(),
+                local_pref: Some(100),
+                origin: Some(bgpgg::grpc::proto::Origin::Igp),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Debug info for test failures
+        if cfg!(test) {
+            println!("✓ {}: route propagated correctly", name);
+        }
+    }
+}
+
+/// RFC 6793: Test routes propagate through mixed AS path with both small and large ASNs
+#[tokio::test]
+async fn test_mixed_asn_propagation() {
+    // Chain: large ASN -> small ASN -> large ASN
+    let [s1, s2, s3] = &mut create_asn_chain([4200000001, 65001, 4200000003], None).await;
+
+    // Announce route on s1
+    announce_route(
+        s1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Verify route reaches s3 with correct AS path and next_hop rewritten to s2
+    poll_route_propagation(&[(
+        s3,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                origin: Some(Origin::Igp),
+                as_path: vec![as_sequence(vec![65001, 4200000001])],
+                next_hop: s2.address.to_string(),
+                peer_address: s2.address.to_string(),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+}
+
+/// RFC 6793: Test 4-byte ASN route propagation to OLD and NEW speakers
+///
+/// Topology: originator (NEW) -> server -> old_speaker
+///                                       -> new_speaker
+///
+/// Verifies that server correctly propagates routes with large ASNs:
+/// - To OLD speakers: AS_TRANS substitution + AS4_PATH/AS4_AGGREGATOR
+/// - To NEW speakers: native 4-byte encoding, no AS4_* attributes
+#[tokio::test]
+async fn test_four_octet_asn_propagation() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        300,
+        true,
+    ))
+    .await;
+
+    let mut old_speaker = FakePeer::connect_and_handshake(
+        None,
+        &server,
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        None, // No capability 65
+    )
+    .await;
+
+    let mut originator = FakePeer::connect_and_handshake(
+        Some("127.0.0.2"),
+        &server,
+        4200000002,
+        Ipv4Addr::new(3, 3, 3, 3),
+        Some(vec![build_capability_4byte_asn(4200000002)]),
+    )
+    .await;
+
+    let mut new_speaker = FakePeer::connect_and_handshake(
+        Some("127.0.0.3"),
+        &server,
+        4200000003,
+        Ipv4Addr::new(4, 4, 4, 4),
+        Some(vec![build_capability_4byte_asn(4200000003)]),
+    )
+    .await;
+
+    // Originator sends UPDATE with large ASNs in AS_PATH and AGGREGATOR
+    let aggregator_asn = 4200000010u32;
+    let aggregator_ip = Ipv4Addr::new(192, 168, 1, 100);
+
+    originator
+        .send_raw(&build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_4byte(vec![4200000002]),
+                &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+                &attr_aggregator(aggregator_asn, aggregator_ip),
+            ],
+            &[24, 10, 0, 0], // 10.0.0.0/24
+            None,
+        ))
+        .await;
+
+    // Verify OLD speaker receives AS_TRANS conversion
+    let old_update = old_speaker.read_update().await;
+
+    // AS_PATH: large ASNs substituted with AS_TRANS
+    let as_path = old_update.as_path().expect("UPDATE should have AS_PATH");
+    assert_eq!(as_path[0].asn_list, vec![65001, AS_TRANS as u32]);
+
+    // AS4_PATH: original large ASNs preserved
+    let as4_path = old_update.as4_path().expect("UPDATE should have AS4_PATH");
+    assert_eq!(as4_path[0].asn_list, vec![65001, 4200000002]);
+
+    // AGGREGATOR: large ASN substituted with AS_TRANS
+    let aggregator = old_update
+        .aggregator()
+        .expect("UPDATE should have AGGREGATOR");
+    assert_eq!(aggregator.asn, AS_TRANS as u32);
+    assert_eq!(aggregator.ip_addr, aggregator_ip);
+
+    // AS4_AGGREGATOR: original large ASN preserved
+    let as4_aggregator = old_update
+        .as4_aggregator()
+        .expect("UPDATE should have AS4_AGGREGATOR");
+    assert_eq!(as4_aggregator.asn, aggregator_asn);
+    assert_eq!(as4_aggregator.ip_addr, aggregator_ip);
+
+    // Verify NEW speaker receives native 4-byte encoding
+    let new_update = new_speaker.read_update().await;
+
+    // AS_PATH: native 4-byte encoding (no AS_TRANS)
+    let as_path = new_update.as_path().expect("UPDATE should have AS_PATH");
+    assert_eq!(as_path[0].asn_list, vec![65001, 4200000002]);
+    for segment in &as_path {
+        for asn in &segment.asn_list {
+            assert_ne!(*asn, AS_TRANS as u32);
+        }
+    }
+
+    // AS4_PATH: not present (only used for OLD speakers)
+    assert!(new_update.as4_path().is_none());
+
+    // AGGREGATOR: unchanged (no AS_TRANS substitution)
+    let aggregator = new_update
+        .aggregator()
+        .expect("UPDATE should have AGGREGATOR");
+    assert_eq!(aggregator.asn, aggregator_asn);
+    assert_eq!(aggregator.ip_addr, aggregator_ip);
+
+    // AS4_AGGREGATOR: not present (only used for OLD speakers)
+    assert!(new_update.as4_aggregator().is_none());
+}
+
+/// RFC 6793: Test server ignores malformed AS4_PATH (longer than AS_PATH)
+#[tokio::test]
+async fn test_four_octet_asn_malformed_as4_path() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        300,
+        true,
+    ))
+    .await;
+
+    let mut fake_peer =
+        FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
+            .await;
+
+    let mut receiver = FakePeer::connect_and_handshake(
+        Some("127.0.0.2"),
+        &server,
+        65003,
+        Ipv4Addr::new(3, 3, 3, 3),
+        None,
+    )
+    .await;
+
+    // AS_PATH: [AS_TRANS, AS_TRANS] (2 ASNs)
+    // AS4_PATH: [65002, 4200000001, 4200000002] (3 ASNs - malformed! longer than AS_PATH)
+    // Expected: AS4_PATH discarded, AS_TRANS values remain
+    let mut as_path_value = Vec::new();
+    as_path_value.push(2); // AS_SEQUENCE
+    as_path_value.push(2); // 2 ASNs
+    as_path_value.extend_from_slice(&AS_TRANS.to_be_bytes());
+    as_path_value.extend_from_slice(&AS_TRANS.to_be_bytes());
+
+    let mut as4_path_value = Vec::new();
+    as4_path_value.push(2); // AS_SEQUENCE
+    as4_path_value.push(3); // 3 ASNs - malformed!
+    as4_path_value.extend_from_slice(&65002u32.to_be_bytes());
+    as4_path_value.extend_from_slice(&4200000001u32.to_be_bytes());
+    as4_path_value.extend_from_slice(&4200000002u32.to_be_bytes());
+
+    fake_peer
+        .send_raw(&build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::AS_PATH,
+                    as_path_value.len() as u8,
+                    &as_path_value,
+                ),
+                &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+                &build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::AS4_PATH,
+                    as4_path_value.len() as u8,
+                    &as4_path_value,
+                ),
+            ],
+            &[24, 10, 0, 0],
+            None,
+        ))
+        .await;
+
+    // Verify receiver gets UPDATE with AS4_PATH discarded
+    let update = receiver.read_update().await;
+
+    // AS_PATH: server AS prepended + AS_TRANS values remain (malformed AS4_PATH was discarded)
+    let as_path = update.as_path().expect("UPDATE should have AS_PATH");
+    assert_eq!(
+        as_path[0].asn_list,
+        vec![65001, AS_TRANS as u32, AS_TRANS as u32]
+    );
+
+    // AS4_PATH: discarded (was malformed - longer than AS_PATH)
+    assert!(update.as4_path().is_none());
+}
+
+/// RFC 6793: Test server ignores malformed AS4_AGGREGATOR (invalid length)
+#[tokio::test]
+async fn test_four_octet_asn_malformed_as4_aggregator() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        300,
+        true,
+    ))
+    .await;
+
+    let mut fake_peer =
+        FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
+            .await;
+
+    let mut receiver = FakePeer::connect_and_handshake(
+        Some("127.0.0.2"),
+        &server,
+        65003,
+        Ipv4Addr::new(3, 3, 3, 3),
+        None,
+    )
+    .await;
+
+    // Send UPDATE with malformed AS4_AGGREGATOR (wrong length - 6 bytes instead of 8)
+    let mut as4_agg_data = Vec::new();
+    as4_agg_data.extend_from_slice(&4200000001u32.to_be_bytes()[0..2]); // Only 2 bytes
+    as4_agg_data.extend_from_slice(&Ipv4Addr::new(192, 168, 1, 100).octets());
+
+    fake_peer
+        .send_raw(&build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_2byte(vec![65002]),
+                &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+                &build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::AS4_AGGREGATOR,
+                    as4_agg_data.len() as u8,
+                    &as4_agg_data,
+                ),
+            ],
+            &[24, 10, 0, 0],
+            None,
+        ))
+        .await;
+
+    // Verify receiver gets UPDATE with AS4_AGGREGATOR discarded
+    let update = receiver.read_update().await;
+
+    // AS_PATH: server AS prepended to original path
+    let as_path = update.as_path().expect("UPDATE should have AS_PATH");
+    assert_eq!(as_path[0].asn_list, vec![65001, 65002]);
+
+    // AS4_AGGREGATOR: discarded (was malformed - wrong length)
+    assert!(update.as4_aggregator().is_none());
 }

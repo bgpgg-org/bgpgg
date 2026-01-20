@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::merge_as_paths;
 use crate::bgp::msg_update::{
-    AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttribute, UpdateMessage,
+    Aggregator, AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttribute, UpdateMessage,
 };
-use crate::bgp::msg_update_types::LargeCommunity;
+use crate::bgp::msg_update_types::{AsPath, LargeCommunity, AS_TRANS};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 
@@ -29,6 +30,7 @@ pub struct Path {
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
     pub atomic_aggregate: bool,
+    pub aggregator: Option<Aggregator>,
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<LargeCommunity>,
@@ -46,6 +48,7 @@ impl Path {
         local_pref: Option<u32>,
         med: Option<u32>,
         atomic_aggregate: bool,
+        aggregator: Option<Aggregator>,
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<LargeCommunity>,
@@ -59,6 +62,7 @@ impl Path {
             local_pref,
             med,
             atomic_aggregate,
+            aggregator,
             communities,
             extended_communities,
             large_communities,
@@ -67,10 +71,20 @@ impl Path {
     }
 
     /// Create a Path from an UPDATE message. Returns None if required attributes are missing.
-    pub fn from_update_msg(update_msg: &UpdateMessage, source: RouteSource) -> Option<Self> {
+    /// peer_supports_4byte_asn: Whether the peer that sent this UPDATE supports 4-byte ASN
+    pub fn from_update_msg(
+        update_msg: &UpdateMessage,
+        source: RouteSource,
+        peer_supports_4byte_asn: bool,
+    ) -> Option<Self> {
         let origin = update_msg.origin()?;
-        let as_path = update_msg.as_path()?;
+        let as_path_segments = update_msg.as_path()?;
         let next_hop = update_msg.next_hop()?;
+
+        let as_path =
+            Self::merge_as4_path_if_needed(update_msg, as_path_segments, peer_supports_4byte_asn);
+        let aggregator = Self::get_aggregator(update_msg, peer_supports_4byte_asn);
+
         Some(Path {
             origin,
             as_path,
@@ -79,6 +93,7 @@ impl Path {
             local_pref: update_msg.local_pref(),
             med: update_msg.med(),
             atomic_aggregate: update_msg.atomic_aggregate(),
+            aggregator,
             communities: update_msg.communities().unwrap_or_default(),
             extended_communities: update_msg.extended_communities().unwrap_or_default(),
             large_communities: update_msg.large_communities().unwrap_or_default(),
@@ -86,21 +101,84 @@ impl Path {
         })
     }
 
+    /// RFC 6793: Merge AS4_PATH into AS_PATH if peer is an OLD speaker
+    /// AS4_PATH/AS4_AGGREGATOR MUST NOT be sent between NEW speakers
+    fn merge_as4_path_if_needed(
+        update_msg: &UpdateMessage,
+        as_path_segments: Vec<AsPathSegment>,
+        peer_supports_4byte_asn: bool,
+    ) -> Vec<AsPathSegment> {
+        // NEW speakers never send AS4_PATH - use AS_PATH directly
+        if peer_supports_4byte_asn {
+            return as_path_segments;
+        }
+
+        // RFC 6793 Section 4.2.3: Check AGGREGATOR to decide whether to merge AS4_PATH
+        // If AGGREGATOR.asn != AS_TRANS, ignore AS4_PATH (OLD speaker aggregated or stale)
+        // If AGGREGATOR.asn == AS_TRANS, merge AS4_PATH (NEW speaker with 4-byte ASN aggregated)
+        if let Some(aggregator) = update_msg.aggregator() {
+            if aggregator.asn != AS_TRANS as u32 {
+                return as_path_segments;
+            }
+        }
+
+        // Merge AS4_PATH if present
+        if let Some(as4_path_segs) = update_msg.as4_path() {
+            merge_as_paths(
+                &AsPath {
+                    segments: as_path_segments,
+                },
+                &AsPath {
+                    segments: as4_path_segs,
+                },
+            )
+            .segments
+        } else {
+            as_path_segments
+        }
+    }
+
+    /// RFC 6793: Get AGGREGATOR, merging AS4_AGGREGATOR if needed
+    fn get_aggregator(
+        update_msg: &UpdateMessage,
+        peer_supports_4byte_asn: bool,
+    ) -> Option<Aggregator> {
+        // NEW speaker - use AGGREGATOR directly
+        if peer_supports_4byte_asn {
+            return update_msg.aggregator();
+        }
+
+        // OLD speaker sent AGGREGATOR - check if we should use AS4_AGGREGATOR
+        if let Some(agg) = update_msg.aggregator() {
+            if agg.asn == AS_TRANS as u32 {
+                // AS_TRANS in AGGREGATOR - prefer AS4_AGGREGATOR if present
+                update_msg.as4_aggregator().or(Some(agg))
+            } else {
+                // Real 2-byte ASN or stale AS4_AGGREGATOR
+                Some(agg)
+            }
+        } else {
+            None
+        }
+    }
+
     /// Calculate AS_PATH length for best path selection per RFC 4271
     /// AS_SEQUENCE counts each ASN, AS_SET counts as 1 regardless of size
+    /// Confederation segments are not counted per RFC 5065
     fn as_path_length(&self) -> usize {
         self.as_path
             .iter()
             .map(|segment| match segment.segment_type {
                 AsPathSegmentType::AsSequence => segment.asn_list.len(),
                 AsPathSegmentType::AsSet => 1,
+                AsPathSegmentType::AsConfedSequence | AsPathSegmentType::AsConfedSet => 0,
             })
             .sum()
     }
 
     /// Determine neighboring AS per RFC 4271 Section 9.1.2.2(c)
     /// Returns the first AS in the AS_PATH if present, None for locally originated routes
-    fn neighboring_as(&self) -> Option<u16> {
+    fn neighboring_as(&self) -> Option<u32> {
         // Find first AS_SEQUENCE segment and return its first ASN
         for segment in &self.as_path {
             if segment.segment_type == AsPathSegmentType::AsSequence && !segment.asn_list.is_empty()
@@ -215,6 +293,7 @@ mod tests {
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
+            aggregator: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -360,12 +439,14 @@ mod tests {
             Some(100),
             Some(50),
             true,
+            None,
             vec![],
             vec![],
             vec![],
             vec![], // large_communities
+            false,
         );
-        let path = Path::from_update_msg(&update, source);
+        let path = Path::from_update_msg(&update, source, false);
         assert!(path.is_some());
         let path = path.unwrap();
         assert_eq!(path.origin, Origin::IGP);
@@ -375,8 +456,8 @@ mod tests {
         assert!(path.atomic_aggregate);
 
         // Missing required attrs -> None
-        let empty_update = UpdateMessage::new_withdraw(vec![]);
-        assert!(Path::from_update_msg(&empty_update, source).is_none());
+        let empty_update = UpdateMessage::new_withdraw(vec![], false);
+        assert!(Path::from_update_msg(&empty_update, source, false).is_none());
     }
 
     #[test]
