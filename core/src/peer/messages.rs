@@ -14,6 +14,8 @@
 
 use super::fsm::FsmEvent;
 use super::{BgpOpenParams, PeerCapabilities};
+#[cfg(test)]
+use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
@@ -470,7 +472,6 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::Message;
     use crate::bgp::msg_update::{
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
@@ -584,7 +585,9 @@ mod tests {
                 vec![],
                 vec![],
                 vec![], // large_communities
-                true,
+                MessageFormat {
+                    use_4byte_asn: true,
+                },
             );
 
             let result = peer.handle_message(BgpMessage::Update(update)).await;
@@ -633,7 +636,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
 
         let result = peer.handle_message(BgpMessage::Update(update)).await;

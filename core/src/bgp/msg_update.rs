@@ -18,7 +18,7 @@ pub use super::msg_update_types::{
     LargeCommunity, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 
-use super::msg::{Message, MessageType};
+use super::msg::{Message, MessageFormat, MessageType};
 use super::msg_update_codec::{
     read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
@@ -46,7 +46,7 @@ impl UpdateMessage {
         extended_communities: Vec<u64>,
         large_communities: Vec<LargeCommunity>,
         unknown_attrs: Vec<PathAttribute>,
-        use_4byte_asn: bool,
+        format: MessageFormat,
     ) -> Self {
         // Partition routes by address family
         // IPv4 routes go in traditional NLRI field, IPv6 routes go in MP_REACH_NLRI
@@ -141,7 +141,7 @@ impl UpdateMessage {
         // Append unknown attributes
         path_attributes.extend(unknown_attrs);
 
-        let path_attributes_bytes = write_path_attributes(&path_attributes, use_4byte_asn);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
         UpdateMessage {
             withdrawn_routes_len: 0,
@@ -149,11 +149,11 @@ impl UpdateMessage {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: ipv4_routes, // Only IPv4 in traditional NLRI field
-            use_4byte_asn,
+            format,
         }
     }
 
-    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>, use_4byte_asn: bool) -> Self {
+    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>, format: MessageFormat) -> Self {
         // Partition withdrawals by address family
         let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn_routes
             .into_iter()
@@ -174,7 +174,7 @@ impl UpdateMessage {
         }
 
         let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn);
-        let path_attributes_bytes = write_path_attributes(&path_attributes, use_4byte_asn);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
         UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
@@ -182,7 +182,7 @@ impl UpdateMessage {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: vec![],
-            use_4byte_asn,
+            format,
         }
     }
 
@@ -516,7 +516,7 @@ impl UpdateMessage {
             total_path_attributes_len: total_path_attributes_len as u16,
             path_attributes,
             nlri_list,
-            use_4byte_asn,
+            format: MessageFormat { use_4byte_asn },
         })
     }
 }
@@ -528,8 +528,8 @@ pub struct UpdateMessage {
     total_path_attributes_len: u16,
     path_attributes: Vec<PathAttribute>,
     nlri_list: Vec<IpNetwork>,
-    /// Whether this message uses 4-byte ASN encoding (RFC 6793)
-    use_4byte_asn: bool,
+    /// Message encoding format based on negotiated capabilities
+    format: MessageFormat,
 }
 
 impl Message for UpdateMessage {
@@ -539,7 +539,7 @@ impl Message for UpdateMessage {
 
     fn to_bytes(&self) -> Vec<u8> {
         // RFC 6793: Transform attributes based on peer capability
-        let path_attributes = if self.use_4byte_asn {
+        let path_attributes = if self.format.use_4byte_asn {
             // NEW speaker: Strip AS4_PATH/AS4_AGGREGATOR
             self.path_attributes
                 .iter()
@@ -578,7 +578,8 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&withdrawn_routes_bytes);
 
         // Path attributes
-        let path_attributes_bytes = write_path_attributes(&path_attributes, self.use_4byte_asn);
+        let path_attributes_bytes =
+            write_path_attributes(&path_attributes, self.format.use_4byte_asn);
         bytes.extend_from_slice(&(path_attributes_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&path_attributes_bytes);
 
@@ -587,19 +588,6 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&nlri_bytes);
 
         bytes
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        let body = self.to_bytes();
-
-        let mut message = Vec::new();
-        message.extend_from_slice(&super::msg::BGP_MARKER);
-        let length = super::msg::BGP_HEADER_SIZE_BYTES as u16 + body.len() as u16;
-        message.extend_from_slice(&length.to_be_bytes());
-        message.push(MessageType::Update.as_u8());
-        message.extend_from_slice(&body);
-
-        message
     }
 }
 
@@ -753,7 +741,7 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 20,
-            use_4byte_asn: false,
+            format: MessageFormat { use_4byte_asn: false },
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -810,7 +798,7 @@ mod tests {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
             total_path_attributes_len: 20,
-            use_4byte_asn: false,
+            format: MessageFormat { use_4byte_asn: false },
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -869,7 +857,7 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 0,
-            use_4byte_asn: false,
+            format: MessageFormat { use_4byte_asn: false },
             path_attributes: vec![],
             nlri_list: vec![],
         }
@@ -966,7 +954,12 @@ mod tests {
             }),
         ];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone(), true);
+        let message = UpdateMessage::new_withdraw(
+            withdrawn_routes.clone(),
+            MessageFormat {
+                use_4byte_asn: true,
+            },
+        );
 
         // Verify message structure
         assert_eq!(message.withdrawn_routes, withdrawn_routes);
@@ -989,7 +982,12 @@ mod tests {
             prefix_length: 24,
         })];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes, true);
+        let message = UpdateMessage::new_withdraw(
+            withdrawn_routes,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
+        );
 
         // Serialize the message - created with use_4byte_asn=true
         let serialized = message.serialize();
@@ -1034,7 +1032,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -1051,7 +1051,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg_no_pref.local_pref(), None);
     }
@@ -1071,7 +1073,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg.med(), Some(50));
 
@@ -1088,7 +1092,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg_no_med.med(), None);
     }
@@ -1117,7 +1123,9 @@ mod tests {
                 vec![],
                 vec![],
                 vec![], // large_communities
-                false,
+                MessageFormat {
+                    use_4byte_asn: false,
+                },
             );
 
             let bytes = msg.to_bytes();
@@ -1188,7 +1196,9 @@ mod tests {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list,
-            use_4byte_asn: false,
+            format: MessageFormat {
+                use_4byte_asn: false,
+            },
         };
 
         let bytes = msg.to_bytes();
@@ -1273,7 +1283,9 @@ mod tests {
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: vec![],
-            use_4byte_asn: false,
+            format: MessageFormat {
+                use_4byte_asn: false,
+            },
         };
 
         let bytes = msg.to_bytes();
@@ -1726,7 +1738,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -1743,7 +1757,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
         assert_eq!(msg_empty_path.leftmost_as(), None);
     }
@@ -1873,7 +1889,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            false,
+            MessageFormat {
+                use_4byte_asn: false,
+            },
         );
 
         // Encode and decode
@@ -1910,7 +1928,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
 
         // Manually add AS4_PATH and AS4_AGGREGATOR to simulate receiving from NEW speaker
@@ -1973,7 +1993,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
 
         let attr_count_before = msg.path_attributes.len();

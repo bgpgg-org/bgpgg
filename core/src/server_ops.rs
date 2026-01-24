@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
@@ -1187,7 +1188,8 @@ impl BgpServer {
 
         // Send withdrawals if any
         if !withdrawn.is_empty() {
-            let update = UpdateMessage::new_withdraw(withdrawn.to_vec(), use_4byte_asn);
+            let update =
+                UpdateMessage::new_withdraw(withdrawn.to_vec(), MessageFormat { use_4byte_asn });
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
@@ -1213,7 +1215,7 @@ impl BgpServer {
                     batch.path.extended_communities.clone(),
                     batch.path.large_communities.clone(),
                     batch.path.unknown_attrs.clone(),
-                    use_4byte_asn,
+                    MessageFormat { use_4byte_asn },
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
                     peer_ip,
@@ -1783,7 +1785,7 @@ fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<Updat
                 batch.path.extended_communities.clone(),
                 batch.path.large_communities.clone(),
                 batch.path.unknown_attrs.clone(),
-                use_4byte_asn,
+                MessageFormat { use_4byte_asn },
             )
         })
         .collect()

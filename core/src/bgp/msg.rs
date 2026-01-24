@@ -23,6 +23,13 @@ use tokio::io::AsyncReadExt;
 pub const BGP_HEADER_SIZE_BYTES: usize = 19;
 pub const MAX_MESSAGE_SIZE: u16 = 4096;
 
+/// Message encoding format based on negotiated capabilities
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageFormat {
+    /// Whether to use 4-byte ASN encoding (RFC 6793)
+    pub use_4byte_asn: bool,
+}
+
 // BGP header marker (16 bytes of 0xFF)
 pub const BGP_MARKER: [u8; 16] = [0xff; 16];
 
@@ -104,13 +111,10 @@ pub enum BgpMessage {
 
 impl BgpMessage {
     /// Serialize the BGP message to bytes with BGP header
-    ///
-    /// NOTE: Cannot serialize UPDATE messages - use UpdateMessage::serialize()
-    /// directly (encoding context set at construction).
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Self::Open(m) => m.serialize(),
-            Self::Update(_) => panic!("Use UpdateMessage::serialize() instead - UPDATE encoding context set at construction"),
+            Self::Update(m) => m.serialize(),
             Self::Keepalive(m) => m.serialize(),
             Self::Notification(m) => m.serialize(),
             Self::RouteRefresh(m) => m.serialize(),

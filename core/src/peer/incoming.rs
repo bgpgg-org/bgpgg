@@ -229,6 +229,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::MessageFormat;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
     use crate::config::MaxPrefixSetting;
     use crate::net::Ipv4Net;
@@ -304,7 +305,9 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
-                false,
+                MessageFormat {
+                    use_4byte_asn: false,
+                },
             );
 
             let result = peer.handle_update(update);
@@ -421,7 +424,9 @@ mod tests {
                     vec![],
                     vec![],
                     vec![], // large_communities
-                    false,
+                    MessageFormat {
+                        use_4byte_asn: false,
+                    },
                 );
                 peer.handle_update(initial_update).unwrap();
             }
@@ -452,7 +457,9 @@ mod tests {
                 vec![],
                 vec![],
                 vec![], // large_communities
-                false,
+                MessageFormat {
+                    use_4byte_asn: false,
+                },
             );
 
             let result = peer.handle_update(update);

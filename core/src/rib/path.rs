@@ -274,6 +274,7 @@ impl Ord for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::MessageFormat;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -444,7 +445,9 @@ mod tests {
             vec![],
             vec![],
             vec![], // large_communities
-            false,
+            MessageFormat {
+                use_4byte_asn: false,
+            },
         );
         let path = Path::from_update_msg(&update, source, false);
         assert!(path.is_some());
@@ -456,7 +459,12 @@ mod tests {
         assert!(path.atomic_aggregate);
 
         // Missing required attrs -> None
-        let empty_update = UpdateMessage::new_withdraw(vec![], false);
+        let empty_update = UpdateMessage::new_withdraw(
+            vec![],
+            MessageFormat {
+                use_4byte_asn: false,
+            },
+        );
         assert!(Path::from_update_msg(&empty_update, source, false).is_none());
     }
 
