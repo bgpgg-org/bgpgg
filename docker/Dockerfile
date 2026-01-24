@@ -21,11 +21,10 @@ RUN case "$TARGETPLATFORM" in \
     esac && \
     TARBALL="bgpgg-${VERSION}-${ARCH}.tar.gz" && \
     echo "Extracting $TARBALL for $TARGETPLATFORM" && \
-    mkdir -p /bgpgg && \
-    tar -xzf "$TARBALL" -C /bgpgg --strip-components=1
+    tar -xzf "$TARBALL" -C /usr/local/bin --strip-components=1
 
-WORKDIR /bgpgg
+WORKDIR /root
 
-CMD ["./bgpggd"]
+CMD ["bgpggd"]
 
 EXPOSE 179
