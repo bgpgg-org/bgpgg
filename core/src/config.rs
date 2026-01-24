@@ -512,9 +512,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             asn: 65000,
-            listen_addr: "127.0.0.1:179".to_string(),
+            listen_addr: "0.0.0.0:179".to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
-            grpc_listen_addr: "[::1]:50051".to_string(),
+            grpc_listen_addr: "[::]:50051".to_string(),
             hold_time_secs: default_hold_time(),
             connect_retry_secs: default_connect_retry_time(),
             accept_unconfigured_peers: false,
@@ -570,8 +570,9 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.asn, 65000);
-        assert_eq!(config.listen_addr, "127.0.0.1:179");
+        assert_eq!(config.listen_addr, "0.0.0.0:179");
         assert_eq!(config.router_id, Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(config.grpc_listen_addr, "[::]:50051");
         assert!(!config.accept_unconfigured_peers);
     }
 

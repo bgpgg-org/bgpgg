@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+release/
+*.md
+Makefile
+Cargo.toml
+Cargo.lock
+src/
+tests/
+script/
+.gitignore
+.claude/

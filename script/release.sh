@@ -52,6 +52,8 @@ build_and_package() {
 # Build all platforms
 build_and_package "x86_64-unknown-linux-musl" "x86_64-linux"
 build_and_package "aarch64-unknown-linux-musl" "aarch64-linux"
+build_and_package "armv7-unknown-linux-musleabihf" "armv7-linux"
+build_and_package "i686-unknown-linux-musl" "i686-linux"
 build_and_package "x86_64-unknown-freebsd" "x86_64-freebsd"
 
 echo ""
