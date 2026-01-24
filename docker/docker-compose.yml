@@ -1,0 +1,31 @@
+services:
+  speaker1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: dev
+    container_name: bgp-speaker1
+    command: ["./bgpggd", "--asn", "65001", "--router-id", "1.1.1.1", "--listen-addr", "0.0.0.0:179", "--grpc-listen-addr", "0.0.0.0:50051"]
+    networks:
+      bgp_network:
+        ipv4_address: 172.20.0.10
+
+  speaker2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: dev
+    container_name: bgp-speaker2
+    command: ["./bgpggd", "--asn", "65002", "--router-id", "2.2.2.2", "--listen-addr", "0.0.0.0:179", "--grpc-listen-addr", "0.0.0.0:50051", "--accept-unconfigured-peers"]
+    networks:
+      bgp_network:
+        ipv4_address: 172.20.0.20
+
+networks:
+  bgp_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

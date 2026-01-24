@@ -25,20 +25,64 @@ use serde_json::json;
 #[command(about = "BGP daemon server", version)]
 struct Args {
     /// Path to configuration file
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// Autonomous System Number
+    #[arg(long)]
+    asn: Option<u32>,
+
+    /// Router ID (IPv4 address)
+    #[arg(long)]
+    router_id: Option<String>,
+
+    /// BGP listen address
+    #[arg(long)]
+    listen_addr: Option<String>,
+
+    /// gRPC listen address
+    #[arg(long)]
+    grpc_listen_addr: Option<String>,
+
+    /// Accept connections from unconfigured peers
+    #[arg(long)]
+    accept_unconfigured_peers: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Load configuration
-    let config = Config::from_file(&args.config).unwrap_or_else(|e| {
-        eprintln!("Error: failed to load config from {}: {}", &args.config, e);
-        eprintln!("Info: using default configuration");
+    // Load configuration from file or use default
+    let mut config = if let Some(config_path) = &args.config {
+        Config::from_file(config_path).unwrap_or_else(|e| {
+            eprintln!("Error: failed to load config from {}: {}", config_path, e);
+            eprintln!("Info: using default configuration");
+            Config::default()
+        })
+    } else {
         Config::default()
-    });
+    };
+
+    // Override with CLI flags if provided
+    if let Some(asn) = args.asn {
+        config.asn = asn;
+    }
+    if let Some(router_id) = args.router_id {
+        config.router_id = router_id.parse().unwrap_or_else(|e| {
+            eprintln!("Error: invalid router-id '{}': {}", router_id, e);
+            std::process::exit(1);
+        });
+    }
+    if let Some(listen_addr) = args.listen_addr {
+        config.listen_addr = listen_addr;
+    }
+    if let Some(grpc_listen_addr) = args.grpc_listen_addr {
+        config.grpc_listen_addr = grpc_listen_addr;
+    }
+    if args.accept_unconfigured_peers {
+        config.accept_unconfigured_peers = true;
+    }
 
     let grpc_addr = config.grpc_listen_addr.parse()?;
 

@@ -41,10 +41,10 @@ impl Peer {
             }
         } else {
             // No connection - first check if incoming connection is already queued
-            // This prevents race where both peers connect simultaneously
             if let Ok(op) = self.peer_rx.try_recv() {
                 match op {
                     PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
+                        // Accept incoming connection when no outgoing attempt yet
                         self.accept_connection(tcp_tx, tcp_rx).await;
                         return;
                     }
@@ -91,7 +91,16 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            self.accept_connection(tcp_tx, tcp_rx).await;
+                            // RFC 4271 6.8: Store second connection for collision detection
+                            // Outgoing attempt is in progress, defer collision resolution
+                            if self.collision_conn.is_none() {
+                                info!(&self.logger, "collision: storing second connection (Connect state)", "peer_ip" => self.addr.to_string());
+                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                            } else {
+                                debug!(&self.logger, "collision: dropping third connection", "peer_ip" => self.addr.to_string());
+                                drop(tcp_tx);
+                                drop(tcp_rx);
+                            }
                         }
                         _ => {}
                     }
@@ -129,9 +138,15 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        debug!(&self.logger, "closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
-                        drop(tcp_tx);
-                        drop(tcp_rx);
+                        // RFC 4271 6.8: Store second connection for collision detection
+                        if self.collision_conn.is_none() {
+                            info!(&self.logger, "collision: storing second connection (Connect DelayOpen)", "peer_ip" => self.addr.to_string());
+                            self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                        } else {
+                            debug!(&self.logger, "collision: dropping third connection", "peer_ip" => self.addr.to_string());
+                            drop(tcp_tx);
+                            drop(tcp_rx);
+                        }
                     }
                     _ => {}
                 }

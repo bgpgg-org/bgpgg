@@ -376,9 +376,6 @@ pub struct PeerInfo {
     pub peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
     /// Per-peer session configuration
     pub config: PeerConfig,
-    /// Pending incoming TCP stream awaiting collision resolution (RFC 4271 6.8).
-    /// Stored when incoming arrives while outgoing is in OpenSent without BGP ID.
-    pub pending_incoming: Option<TcpStream>,
     /// Connection info (Some when Established, None otherwise)
     pub conn_info: Option<ConnectionInfo>,
     /// Negotiated capabilities (available when Established)
@@ -401,7 +398,6 @@ impl PeerInfo {
             state: BgpState::Idle,
             peer_tx,
             config,
-            pending_incoming: None,
             conn_info: None,
             negotiated_capabilities: None,
         }
@@ -538,12 +534,18 @@ impl BgpServer {
             return true; // Reject new connection
         }
 
+        // RFC 4271 6.8: If BGP ID unknown, accept connection
+        // Peer task will resolve collision after OPEN messages are exchanged
+        if peer.bgp_id.is_none() {
+            return false; // Accept - defer to peer task
+        }
+
         // RFC 4271 6.8: Compare BGP Identifiers
         // local < remote: close local-initiated, keep remote-initiated
         // local >= remote: close remote-initiated, keep local-initiated
         let dominated = match conn_type {
-            ConnectionType::Incoming => peer.bgp_id.is_none_or(|id| self.local_bgp_id >= id),
-            ConnectionType::Outgoing => peer.bgp_id.is_some_and(|id| self.local_bgp_id < id),
+            ConnectionType::Incoming => self.local_bgp_id >= peer.bgp_id.unwrap(),
+            ConnectionType::Outgoing => self.local_bgp_id < peer.bgp_id.unwrap(),
         };
 
         if dominated {
@@ -687,16 +689,7 @@ impl BgpServer {
             return;
         }
 
-        // RFC 4271 6.8: Defer collision resolution if peer is in OpenSent without BGP ID.
-        // We can't compare BGP Identifiers until we receive OPEN on the outgoing connection.
-        if let Some(peer) = self.peers.get_mut(&peer_ip) {
-            if peer.state == BgpState::OpenSent && peer.bgp_id.is_none() {
-                peer.pending_incoming = Some(stream);
-                info!(&self.logger, "collision: deferring resolution until OPEN received", "peer_ip" => peer_ip.to_string());
-                return;
-            }
-        }
-
+        // RFC 4271 6.8: Collision detection will be handled when OPENs are received
         if self.resolve_collision(peer_ip, ConnectionType::Incoming) {
             return;
         }

@@ -381,30 +381,11 @@ impl BgpServer {
         }
     }
 
-    /// Handle OPEN message received - store BGP ID and resolve deferred collisions (RFC 4271 6.8)
-    fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, conn_type: ConnectionType) {
+    /// Handle OPEN message received - store BGP ID (RFC 4271 6.8)
+    /// Collision detection is now handled by the peer task
+    fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, _conn_type: ConnectionType) {
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             peer.bgp_id = Some(bgp_id);
-        }
-
-        // RFC 4271 6.8: Resolve deferred collision if pending incoming exists
-        if conn_type == ConnectionType::Outgoing {
-            let pending = self
-                .peers
-                .get_mut(&peer_ip)
-                .and_then(|p| p.pending_incoming.take());
-            if let Some(pending_stream) = pending {
-                // Now we have BGP ID - reuse existing collision resolution logic
-                if self.resolve_collision(peer_ip, ConnectionType::Incoming) {
-                    // Outgoing wins - drop pending incoming
-                    info!(&self.logger, "collision: outgoing wins, dropping pending incoming", "peer_ip" => peer_ip.to_string());
-                    drop(pending_stream);
-                } else {
-                    // Incoming wins - resolve_collision already closed outgoing
-                    info!(&self.logger, "collision: incoming wins, switching connection", "peer_ip" => peer_ip.to_string());
-                    self.accept_incoming_connection(pending_stream, peer_ip);
-                }
-            }
         }
     }
 

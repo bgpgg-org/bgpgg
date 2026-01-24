@@ -361,6 +361,16 @@ impl Peer {
                     conn_type: self.conn_type,
                 });
 
+                // RFC 4271 6.8: Resolve collision if second connection exists
+                let switched =
+                    self.resolve_collision(self.fsm.local_bgp_id(), open_msg.bgp_identifier);
+
+                if switched {
+                    // We switched connections - send OPEN on new connection
+                    self.send_open().await?;
+                    return Ok(None); // Don't process this OPEN from old connection
+                }
+
                 // Extract capabilities from OPEN message
                 let peer_capabilities = extract_capabilities(open_msg);
 

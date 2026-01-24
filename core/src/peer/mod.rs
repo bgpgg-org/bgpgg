@@ -23,7 +23,7 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
-use crate::{debug, error};
+use crate::{debug, error, info};
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Error;
@@ -249,6 +249,8 @@ pub struct Peer {
     pub config: PeerConfig,
     /// TCP connection - None when disconnected (Idle/Connect/Active states)
     conn: Option<TcpConnection>,
+    /// Temporary second connection during collision detection (RFC 4271 6.8)
+    collision_conn: Option<TcpConnection>,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
     server_tx: mpsc::UnboundedSender<ServerOp>,
     /// Local address for binding outbound connections
@@ -310,6 +312,7 @@ impl Peer {
                 config.passive_mode,
             ),
             conn: None,
+            collision_conn: None,
             asn: None,
             rib_in: AdjRibIn::new(),
             session_type: None,
@@ -373,6 +376,7 @@ impl Peer {
     fn disconnect(&mut self, apply_damping: bool, reason: PeerDownReason) {
         let had_connection = self.conn.is_some();
         self.conn = None;
+        self.collision_conn = None;
         self.established_at = None;
         self.fsm.timers.stop_hold_timer();
         self.fsm.timers.stop_keepalive_timer();
@@ -385,6 +389,49 @@ impl Peer {
                 peer_ip: self.addr,
                 reason,
             });
+        }
+    }
+
+    /// Resolve connection collision per RFC 4271 Section 6.8.
+    /// Called after OPEN is received on main connection.
+    /// Compares BGP IDs and keeps the connection from the speaker with higher BGP ID.
+    /// Returns true if connection was switched (caller should not process current OPEN).
+    fn resolve_collision(&mut self, local_bgp_id: u32, remote_bgp_id: u32) -> bool {
+        if self.collision_conn.is_none() {
+            return false; // No collision
+        }
+
+        info!(&self.logger, "collision: resolving", "peer_ip" => self.addr.to_string(),
+              "local_bgp_id" => format!("{}", std::net::Ipv4Addr::from(local_bgp_id)),
+              "remote_bgp_id" => format!("{}", std::net::Ipv4Addr::from(remote_bgp_id)));
+
+        // RFC 4271 6.8: Compare BGP IDs, keep connection from higher BGP ID speaker
+        // conn_type tells us which connection initiated which way
+        let keep_collision = if self.conn_type == ConnectionType::Outgoing {
+            // conn is outgoing, collision_conn is incoming
+            // Keep incoming (collision_conn) if local < remote
+            local_bgp_id < remote_bgp_id
+        } else {
+            // conn is incoming, collision_conn would be outgoing (shouldn't happen in practice)
+            // Keep outgoing (collision_conn) if local >= remote
+            local_bgp_id >= remote_bgp_id
+        };
+
+        if keep_collision {
+            // Switch to collision_conn
+            info!(&self.logger, "collision: switching to collision connection", "peer_ip" => self.addr.to_string());
+            self.conn = self.collision_conn.take();
+            self.conn_type = if self.conn_type == ConnectionType::Outgoing {
+                ConnectionType::Incoming
+            } else {
+                ConnectionType::Outgoing
+            };
+            true // Switched - caller should send OPEN on new connection
+        } else {
+            // Keep current conn, drop collision
+            info!(&self.logger, "collision: keeping current connection", "peer_ip" => self.addr.to_string());
+            self.collision_conn = None;
+            false // Didn't switch - caller should continue processing
         }
     }
 
@@ -548,6 +595,7 @@ pub mod test_helpers {
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
+            collision_conn: None,
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
