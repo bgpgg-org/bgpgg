@@ -9,7 +9,7 @@ build: setup
 	cargo build --release
 
 release:
-	./script/build.sh $(version)
+	./script/release.sh $(version)
 
 clean:
 	cargo clean
