@@ -18,7 +18,7 @@ jobs:
         run: make setup
 
       - name: Build release
-        run: ./script/release.sh ${{ github.ref_name }}
+        run: make build version=${{ github.ref_name }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

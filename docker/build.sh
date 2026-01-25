@@ -34,13 +34,35 @@ SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 PROJECT_DIR="$SCRIPT_DIR/.."
 RELEASE_DIR="$PROJECT_DIR/release/$VERSION"
 
-# Verify release tarballs exist
-if [ ! -f "$RELEASE_DIR/bgpgg-$VERSION-x86_64-linux.tar.gz" ] || \
-   [ ! -f "$RELEASE_DIR/bgpgg-$VERSION-aarch64-linux.tar.gz" ] || \
-   [ ! -f "$RELEASE_DIR/bgpgg-$VERSION-armv7-linux.tar.gz" ] || \
-   [ ! -f "$RELEASE_DIR/bgpgg-$VERSION-i686-linux.tar.gz" ]; then
-  echo "Error: Release tarballs not found in $RELEASE_DIR"
-  echo "Run ./script/release.sh $VERSION first"
+# Determine which tarballs are needed based on platforms
+TARBALLS_NEEDED=()
+if [[ "$PLATFORM" == *"amd64"* ]]; then
+  TARBALLS_NEEDED+=("x86_64-linux")
+fi
+if [[ "$PLATFORM" == *"386"* ]]; then
+  TARBALLS_NEEDED+=("i686-linux")
+fi
+if [[ "$PLATFORM" == *"arm64"* ]]; then
+  TARBALLS_NEEDED+=("aarch64-linux")
+fi
+if [[ "$PLATFORM" == *"arm/v7"* ]]; then
+  TARBALLS_NEEDED+=("armv7-linux")
+fi
+
+# Verify required tarballs exist
+MISSING=()
+for arch in "${TARBALLS_NEEDED[@]}"; do
+  if [ ! -f "$RELEASE_DIR/bgpgg-$VERSION-$arch.tar.gz" ]; then
+    MISSING+=("$arch")
+  fi
+done
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo "Error: Missing release tarballs in $RELEASE_DIR:"
+  for arch in "${MISSING[@]}"; do
+    echo "  - bgpgg-$VERSION-$arch.tar.gz"
+  done
+  echo "Run ./script/release.sh $VERSION [target] first"
   exit 1
 fi
 
@@ -48,12 +70,11 @@ fi
 BUILD_CONTEXT=$(mktemp -d)
 trap "rm -rf $BUILD_CONTEXT" EXIT
 
-# Copy Dockerfile and Linux tarballs to build context
+# Copy Dockerfile and required tarballs to build context
 cp "$SCRIPT_DIR/Dockerfile" "$BUILD_CONTEXT/"
-cp "$RELEASE_DIR/bgpgg-$VERSION-x86_64-linux.tar.gz" "$BUILD_CONTEXT/"
-cp "$RELEASE_DIR/bgpgg-$VERSION-aarch64-linux.tar.gz" "$BUILD_CONTEXT/"
-cp "$RELEASE_DIR/bgpgg-$VERSION-armv7-linux.tar.gz" "$BUILD_CONTEXT/"
-cp "$RELEASE_DIR/bgpgg-$VERSION-i686-linux.tar.gz" "$BUILD_CONTEXT/"
+for arch in "${TARBALLS_NEEDED[@]}"; do
+  cp "$RELEASE_DIR/bgpgg-$VERSION-$arch.tar.gz" "$BUILD_CONTEXT/"
+done
 
 # Count platforms (check for comma)
 if [[ "$PLATFORM" == *","* ]]; then

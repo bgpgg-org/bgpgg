@@ -21,7 +21,7 @@ RUN case "$TARGETPLATFORM" in \
     esac && \
     TARBALL="bgpgg-${VERSION}-${ARCH}.tar.gz" && \
     echo "Extracting $TARBALL for $TARGETPLATFORM" && \
-    tar -xzf "$TARBALL" -C /usr/local/bin --strip-components=1
+    tar -xzf "$TARBALL" -C /usr/bin --strip-components=1
 
 WORKDIR /root
 
