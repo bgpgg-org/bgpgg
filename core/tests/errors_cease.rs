@@ -345,6 +345,67 @@ async fn test_collision_ignored_in_established() {
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
 }
 
+/// RFC 4271 6.8: Collision in Connect state - incoming wins scenario
+/// Without the fix, incoming connection would be dropped and session would fail.
+#[tokio::test]
+async fn test_collision_connect_state() {
+    // Peer listens, server connects with DelayOpen configured
+    let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
+    let listener_addr = format!("127.0.0.3:{}", peer.port());
+
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+    config.peers.push(PeerConfig {
+        address: listener_addr.to_string(),
+        delay_open_time_secs: Some(2), // DelayOpen keeps peer in Connect state long enough
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept outgoing connection - server is now in Connect waiting for DelayOpen timer
+    peer.accept().await;
+
+    // Verify peer is in Connect state (DelayOpen timer running, hasn't sent OPEN yet)
+    poll_until_with_timeout(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Connect as i32
+        },
+        "Timeout waiting for Connect state",
+        10,
+    )
+    .await;
+
+    // Collision: peer initiates incoming while server is in Connect with DelayOpen
+    // Without fix: incoming would be dropped
+    // With fix: incoming stored in collision_conn for later resolution
+    let mut incoming_peer = FakePeer {
+        stream: Some(peer.connect_to(&server).await),
+        address: "127.0.0.3".to_string(),
+        asn: 65002,
+        listener: None,
+        supports_4byte_asn: false,
+    };
+
+    // DelayOpen timer expires, server sends OPEN on outgoing connection
+    peer.read_open().await;
+    peer.send_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300).await;
+
+    // Server resolves collision: local(1.1.1.1) < remote(3.3.3.3) -> switch to incoming, drop outgoing
+    // Outgoing connection gets closed (may or may not receive NOTIFICATION before close)
+
+    // Complete handshake on incoming connection (the winner)
+    incoming_peer.read_open().await;
+    incoming_peer
+        .send_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300)
+        .await;
+    incoming_peer.read_keepalive().await;
+    incoming_peer.send_keepalive().await;
+
+    // Verify session established on incoming connection
+    // Without fix: incoming was dropped, this will timeout
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+}
+
 /// RFC 4271 6.8: Deferred collision detection for outgoing connections
 /// When server has outgoing in OpenSent (no BGP ID), incoming is deferred until OPEN received.
 #[tokio::test]

@@ -14,6 +14,8 @@
 
 use super::fsm::FsmEvent;
 use super::{BgpOpenParams, PeerCapabilities};
+#[cfg(test)]
+use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
@@ -359,6 +361,16 @@ impl Peer {
                     conn_type: self.conn_type,
                 });
 
+                // RFC 4271 6.8: Resolve collision if second connection exists
+                let switched =
+                    self.resolve_collision(self.fsm.local_bgp_id(), open_msg.bgp_identifier);
+
+                if switched {
+                    // We switched connections - send OPEN on new connection
+                    self.send_open().await?;
+                    return Ok(None); // Don't process this OPEN from old connection
+                }
+
                 // Extract capabilities from OPEN message
                 let peer_capabilities = extract_capabilities(open_msg);
 
@@ -470,7 +482,6 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::Message;
     use crate::bgp::msg_update::{
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
@@ -584,7 +595,9 @@ mod tests {
                 vec![],
                 vec![],
                 vec![], // large_communities
-                true,
+                MessageFormat {
+                    use_4byte_asn: true,
+                },
             );
 
             let result = peer.handle_message(BgpMessage::Update(update)).await;
@@ -633,7 +646,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
 
         let result = peer.handle_message(BgpMessage::Update(update)).await;

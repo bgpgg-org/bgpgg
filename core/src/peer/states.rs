@@ -152,9 +152,20 @@ impl Peer {
                         PeerOp::ManualStart
                         | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart
-                        | PeerOp::AutomaticStartPassive
-                        | PeerOp::TcpConnectionAccepted { .. } => {
+                        | PeerOp::AutomaticStartPassive => {
                             // Ignored when connected
+                        }
+                        PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
+                            // RFC 4271 6.8: Store second connection for collision detection
+                            if self.collision_conn.is_none() {
+                                info!(&self.logger, "collision: storing second connection", "peer_ip" => peer_ip.to_string());
+                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                            } else {
+                                // Already have collision_conn - shouldn't happen, drop it
+                                debug!(&self.logger, "collision: dropping third connection", "peer_ip" => peer_ip.to_string());
+                                drop(tcp_tx);
+                                drop(tcp_rx);
+                            }
                         }
                     }
                 }
@@ -396,6 +407,7 @@ pub(super) mod tests {
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
+            collision_conn: None,
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),

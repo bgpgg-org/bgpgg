@@ -82,6 +82,7 @@ impl Message for RouteMonitoringMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::MessageFormat;
     use std::net::IpAddr;
 
     #[test]
@@ -97,7 +98,9 @@ mod tests {
                 address: Ipv4Addr::new(10, 0, 0, 0),
                 prefix_length: 24,
             })],
-            true,
+            MessageFormat {
+                use_4byte_asn: true,
+            },
         );
 
         let msg = RouteMonitoringMessage::new(

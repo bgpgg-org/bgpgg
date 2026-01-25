@@ -19,26 +19,113 @@ use bgpgg::log;
 use bgpgg::server::BgpServer;
 use clap::Parser;
 use serde_json::json;
+use std::env;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "bgpggd")]
 #[command(about = "BGP daemon server", version)]
 struct Args {
     /// Path to configuration file
-    #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// Autonomous System Number
+    #[arg(long)]
+    asn: Option<u32>,
+
+    /// Router ID (IPv4 address)
+    #[arg(long)]
+    router_id: Option<String>,
+
+    /// BGP listen address
+    #[arg(long)]
+    listen_addr: Option<String>,
+
+    /// gRPC listen address
+    #[arg(long)]
+    grpc_listen_addr: Option<String>,
+
+    /// Accept connections from unconfigured peers
+    #[arg(long)]
+    accept_unconfigured_peers: bool,
+}
+
+fn get_env_or<T: std::str::FromStr>(name: &str) -> Option<T> {
+    env::var(name).ok()?.parse().ok()
+}
+
+fn apply_overrides(config: &mut Config, args: &Args) {
+    // CLI args override config, env vars override everything
+    if let Some(asn) = args.asn.or_else(|| get_env_or("BGPGG_ASN")) {
+        config.asn = asn;
+    }
+
+    if let Some(ref router_id) = args.router_id {
+        config.router_id = router_id.parse().expect("invalid router-id");
+    } else if let Some(router_id) = get_env_or("BGPGG_ROUTER_ID") {
+        config.router_id = router_id;
+    }
+
+    if let Some(ref addr) = args.listen_addr {
+        config.listen_addr = addr.clone();
+    } else if let Ok(addr) = env::var("BGPGG_LISTEN_ADDR") {
+        config.listen_addr = addr;
+    }
+
+    if let Some(ref addr) = args.grpc_listen_addr {
+        config.grpc_listen_addr = addr.clone();
+    } else if let Ok(addr) = env::var("BGPGG_GRPC_LISTEN_ADDR") {
+        config.grpc_listen_addr = addr;
+    }
+
+    if args.accept_unconfigured_peers {
+        config.accept_unconfigured_peers = true;
+    } else if let Ok(val) = env::var("BGPGG_ACCEPT_UNCONFIGURED_PEERS") {
+        config.accept_unconfigured_peers = val == "true" || val == "1";
+    }
+
+    if let Ok(val) = env::var("BGPGG_LOG_LEVEL") {
+        config.log_level = val;
+    }
+
+    if let Some(secs) = get_env_or("BGPGG_HOLD_TIME_SECS") {
+        config.hold_time_secs = secs;
+    }
+
+    if let Some(secs) = get_env_or("BGPGG_CONNECT_RETRY_SECS") {
+        config.connect_retry_secs = secs;
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Load configuration
-    let config = Config::from_file(&args.config).unwrap_or_else(|e| {
-        eprintln!("Error: failed to load config from {}: {}", &args.config, e);
-        eprintln!("Info: using default configuration");
-        Config::default()
+    // Determine config file path: --config flag > BGPGG_CONFIG_PATH env > /etc/bgpgg/config.yaml
+    let config_path = args.config.clone().or_else(|| {
+        env::var("BGPGG_CONFIG_PATH").ok().or_else(|| {
+            let default_path = "/etc/bgpgg/config.yaml";
+            if Path::new(default_path).exists() {
+                Some(default_path.to_string())
+            } else {
+                None
+            }
+        })
     });
+
+    // Load configuration from file or use default
+    let mut config = if let Some(path) = config_path {
+        Config::from_file(&path).unwrap_or_else(|e| {
+            eprintln!("Error: failed to load config from {}: {}", path, e);
+            eprintln!("Info: using default configuration");
+            Config::default()
+        })
+    } else {
+        Config::default()
+    };
+
+    apply_overrides(&mut config, &args);
 
     let grpc_addr = config.grpc_listen_addr.parse()?;
 

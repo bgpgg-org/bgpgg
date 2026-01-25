@@ -18,13 +18,57 @@ jobs:
         run: make setup
 
       - name: Build release
-        run: ./script/build.sh ${{ github.ref_name }}
+        run: make build version=${{ github.ref_name }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Prepare Docker build context
+        run: |
+          VERSION="${{ github.ref_name }}"
+          mkdir -p /tmp/docker-build
+          cp docker/Dockerfile /tmp/docker-build/
+          cp release/$VERSION/bgpgg-$VERSION-x86_64-linux.tar.gz /tmp/docker-build/
+          cp release/$VERSION/bgpgg-$VERSION-aarch64-linux.tar.gz /tmp/docker-build/
+          cp release/$VERSION/bgpgg-$VERSION-armv7-linux.tar.gz /tmp/docker-build/
+          cp release/$VERSION/bgpgg-$VERSION-i686-linux.tar.gz /tmp/docker-build/
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: /tmp/docker-build
+          push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/386
+          tags: |
+            bgpgg/bgpgg:${{ github.ref_name }}
+            bgpgg/bgpgg:latest
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            release/${{ github.ref_name }}/* \
-            --title="${{ github.ref_name }}" \
+          VERSION="${{ github.ref_name }}"
+
+          # Determine if prerelease (version not matching vX.Y.Z)
+          FLAGS=""
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            FLAGS="--prerelease"
+          fi
+
+          gh release create "$VERSION" \
+            release/$VERSION/*.tar.gz \
+            $FLAGS \
+            --title="$VERSION" \
             --generate-notes \
+            --draft

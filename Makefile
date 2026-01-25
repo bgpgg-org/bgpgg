@@ -1,15 +1,21 @@
-.PHONY: all build clean run test fmt release setup loadtest lint
+.PHONY: all build clean run test fmt setup loadtest lint build-docker
 
-all: build
+all: test
 
 setup:
 	./script/setup-protoc.sh
 
-build: setup
-	cargo build --release
+build:
+ifndef version
+	$(error version is required. Usage: make build version=v0.1.0 [platform=linux/amd64])
+endif
+	./script/build.sh $(version) $(platform)
 
-release:
-	./script/build.sh $(version)
+build-docker: build
+ifndef version
+	$(error version is required. Usage: make build-docker version=v0.1.0 [platform=linux/amd64])
+endif
+	./docker/build.sh $(version) $(platform)
 
 clean:
 	cargo clean
@@ -30,3 +36,4 @@ loadtest: setup
 	@echo "Building bgpggd and running load tests..."
 	cargo build --bin bgpggd
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
+

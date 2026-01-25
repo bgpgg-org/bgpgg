@@ -15,7 +15,7 @@
 //! Route propagation logic for BGP UPDATE messages
 
 use crate::bgp::ext_community::is_transitive;
-use crate::bgp::msg::{Message, MAX_MESSAGE_SIZE};
+use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NextHopAddr, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::log::Logger;
@@ -204,7 +204,12 @@ pub fn send_withdrawals_to_peer(
         return;
     }
 
-    let withdraw_msg = UpdateMessage::new_withdraw(to_withdraw.to_vec(), peer_supports_4byte_asn);
+    let withdraw_msg = UpdateMessage::new_withdraw(
+        to_withdraw.to_vec(),
+        MessageFormat {
+            use_4byte_asn: peer_supports_4byte_asn,
+        },
+    );
     let serialized = withdraw_msg.serialize();
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
         error!(logger, "failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
@@ -469,7 +474,9 @@ pub fn send_announcements_to_peer(
             extended_communities,
             batch.path.large_communities.clone(),
             unknown_attrs,
-            peer_supports_4byte_asn,
+            MessageFormat {
+                use_4byte_asn: peer_supports_4byte_asn,
+            },
         );
 
         // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
