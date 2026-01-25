@@ -21,7 +21,7 @@ mod commands;
 #[command(about = "BGP control CLI", version)]
 struct Cli {
     /// gRPC server address
-    #[arg(long, default_value = "http://[::1]:50051")]
+    #[arg(long, default_value = "http://127.0.0.1:50051")]
     addr: String,
 
     #[command(subcommand)]
@@ -43,7 +43,7 @@ enum Commands {
 pub enum PeerCommands {
     /// Add a BGP peer
     Add {
-        /// Peer address (IP:PORT)
+        /// Peer IP address
         address: String,
         /// Remote AS number
         remote_as: u32,
@@ -57,13 +57,13 @@ pub enum PeerCommands {
 
     /// Remove a BGP peer
     Del {
-        /// Peer address (IP:PORT)
+        /// Peer IP address
         address: String,
     },
 
     /// Show specific peer details
     Show {
-        /// Peer address (IP:PORT)
+        /// Peer IP address
         address: String,
     },
 
@@ -157,14 +157,14 @@ mod tests {
 
     #[test]
     fn test_peer_add_command() {
-        let args = vec!["bgpgg", "peer", "add", "192.168.1.1:179", "65001"];
+        let args = vec!["bgpgg", "peer", "add", "192.168.1.1", "65001"];
         let cli = Cli::parse_from(args);
 
         match cli.command {
             Commands::Peer(PeerCommands::Add {
                 address, remote_as, ..
             }) => {
-                assert_eq!(address, "192.168.1.1:179");
+                assert_eq!(address, "192.168.1.1");
                 assert_eq!(remote_as, 65001);
             }
             _ => panic!("Expected Peer Add command"),
@@ -177,7 +177,7 @@ mod tests {
             "bgpgg",
             "peer",
             "add",
-            "10.0.0.1:179",
+            "10.0.0.1",
             "65002",
             "--max-prefix-limit",
             "100",
@@ -193,7 +193,7 @@ mod tests {
                 max_prefix_limit,
                 max_prefix_action,
             }) => {
-                assert_eq!(address, "10.0.0.1:179");
+                assert_eq!(address, "10.0.0.1");
                 assert_eq!(remote_as, 65002);
                 assert_eq!(max_prefix_limit, Some(100));
                 assert_eq!(max_prefix_action, "discard");
@@ -204,12 +204,12 @@ mod tests {
 
     #[test]
     fn test_peer_del_command() {
-        let args = vec!["bgpgg", "peer", "del", "10.0.0.1:179"];
+        let args = vec!["bgpgg", "peer", "del", "10.0.0.1"];
         let cli = Cli::parse_from(args);
 
         match cli.command {
             Commands::Peer(PeerCommands::Del { address }) => {
-                assert_eq!(address, "10.0.0.1:179");
+                assert_eq!(address, "10.0.0.1");
             }
             _ => panic!("Expected Peer Del command"),
         }
@@ -217,12 +217,12 @@ mod tests {
 
     #[test]
     fn test_peer_show_command() {
-        let args = vec!["bgpgg", "peer", "show", "10.0.0.1:179"];
+        let args = vec!["bgpgg", "peer", "show", "10.0.0.1"];
         let cli = Cli::parse_from(args);
 
         match cli.command {
             Commands::Peer(PeerCommands::Show { address }) => {
-                assert_eq!(address, "10.0.0.1:179");
+                assert_eq!(address, "10.0.0.1");
             }
             _ => panic!("Expected Peer Show command"),
         }
@@ -254,7 +254,7 @@ mod tests {
         let args = vec!["bgpgg", "peer", "list"];
         let cli = Cli::parse_from(args);
 
-        assert_eq!(cli.addr, "http://[::1]:50051");
+        assert_eq!(cli.addr, "http://127.0.0.1:50051");
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
         assert!(result.is_err());
 
         // Should fail because remote_as is missing
-        let args = vec!["bgpgg", "peer", "add", "10.0.0.1:179"];
+        let args = vec!["bgpgg", "peer", "add", "10.0.0.1"];
         let result = Cli::try_parse_from(args);
         assert!(result.is_err());
     }
