@@ -388,6 +388,7 @@ pub struct LargeCommunityActionConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub asn: u32,
+    #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
     pub router_id: Ipv4Addr,
     #[serde(default = "default_grpc_listen_addr")]
@@ -419,6 +420,10 @@ pub struct Config {
     /// Policy definitions
     #[serde(default, rename = "policy-definitions")]
     pub policy_definitions: Vec<PolicyDefinitionConfig>,
+}
+
+fn default_listen_addr() -> String {
+    "0.0.0.0:179".to_string()
 }
 
 fn default_grpc_listen_addr() -> String {
