@@ -55,12 +55,14 @@ pub struct PeerDownMessage {
 }
 
 impl PeerDownMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_distinguisher: PeerDistinguisher,
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
+        use_4byte_asn: bool,
         timestamp: Option<SystemTime>,
         reason: PeerDownReason,
     ) -> Self {
@@ -71,7 +73,7 @@ impl PeerDownMessage {
                 peer_as,
                 peer_bgp_id,
                 post_policy,
-                false,
+                use_4byte_asn,
                 timestamp,
             ),
             reason,
@@ -113,6 +115,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            true,
             Some(SystemTime::now()),
             PeerDownReason::LocalNoNotification(FsmEvent::HoldTimerExpires),
         );
@@ -135,6 +138,7 @@ mod tests {
             65001,
             0x01010101,
             false,
+            true,
             Some(SystemTime::now()),
             PeerDownReason::LocalNotification(notif),
         );

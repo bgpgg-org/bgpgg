@@ -2,16 +2,14 @@
 
 A BGP router written in Rust, designed for speed and observability.
 
-Supports Linux (x86_64, aarch64, armv7, i686) and FreeBSD (x86_64).
-
 ## Get Started
 
-```bash
-# Linux x86_64
-curl -LO https://github.com/bgpgg-org/bgpgg/releases/latest/download/bgpgg-latest-x86_64-linux.tar.gz
-tar xzf bgpgg-latest-x86_64-linux.tar.gz
+Download the [latest release](https://github.com/bgpgg-org/bgpgg/releases/latest) for your platform.
 
-# Available: x86_64-linux, aarch64-linux, armv7-linux, i686-linux, x86_64-freebsd
+```bash
+# Example for v0.2.0 on Linux x86_64
+curl -LO https://github.com/bgpgg-org/bgpgg/releases/download/v0.2.0/bgpgg-v0.2.0-x86_64-linux.tar.gz
+tar xzf bgpgg-v0.2.0-x86_64-linux.tar.gz
 ```
 
 Create a config file:
@@ -20,24 +18,25 @@ Create a config file:
 # config.yaml
 asn: 65000
 router_id: 1.1.1.1
+listen_addr: "0.0.0.0:17900"  # (Optional) Use high port to avoid needing root
 peers:
-  - address: "192.168.1.1:179"
+  - address: "192.168.1.1:17900"
     asn: 65001
 ```
 
 Run it:
 
 ```bash
-./bgpggd -c config.yaml &
-./bgpgg peer list
-./bgpgg route add 10.0.0.0/24 --next-hop 192.168.1.1
+./bgpgg-v0.2.0-x86_64-linux/bgpggd -c config.yaml
+./bgpgg-v0.2.0-x86_64-linux/bgpgg peer list
+./bgpgg-v0.2.0-x86_64-linux/bgpgg global rib add 10.0.0.0/24 --nexthop 192.168.1.1
 ```
 
 ## Build from Source
 
 ```bash
 make
-./target/release/bgpggd -c config.yaml &
+./target/release/bgpggd -c config.yaml
 ./target/release/bgpgg peer list
 ```
 
@@ -46,14 +45,15 @@ make
 Run two BGP speakers and watch them peer:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/bgpgg-org/bgpgg/main/docker/docker-compose.yml | docker compose -f - up -d
+curl -LO https://raw.githubusercontent.com/bgpgg-org/bgpgg/master/docker/docker-compose.yml
+docker compose up -d
 
 # Check peering
 docker exec bgpgg1 bgpgg peer list
 
 # Add a route on speaker 1
-docker exec bgpgg1 bgpgg route add 10.0.0.0/24 --next-hop 172.20.0.10
+docker exec bgpgg1 bgpgg global rib add 10.0.0.0/24 --nexthop 172.20.0.10
 
 # See it on speaker 2
-docker exec bgpgg2 bgpgg route list
+docker exec bgpgg2 bgpgg global rib show
 ```

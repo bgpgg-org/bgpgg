@@ -139,7 +139,7 @@ impl PeerHeader {
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
-        legacy_as_path: bool,
+        use_4byte_asn: bool,
         timestamp: Option<SystemTime>,
     ) -> Self {
         let (timestamp_seconds, timestamp_microseconds) = timestamp
@@ -149,7 +149,7 @@ impl PeerHeader {
 
         Self {
             peer_distinguisher,
-            peer_flags: Self::build_peer_flags(peer_address, post_policy, legacy_as_path),
+            peer_flags: Self::build_peer_flags(peer_address, post_policy, use_4byte_asn),
             peer_address,
             peer_as,
             peer_bgp_id,
@@ -186,7 +186,7 @@ impl PeerHeader {
         bytes
     }
 
-    fn build_peer_flags(peer_address: IpAddr, post_policy: bool, legacy_as_path: bool) -> u8 {
+    fn build_peer_flags(peer_address: IpAddr, post_policy: bool, use_4byte_asn: bool) -> u8 {
         let mut flags = match peer_address {
             IpAddr::V6(_) => Self::FLAG_V6,
             IpAddr::V4(_) => 0,
@@ -196,7 +196,7 @@ impl PeerHeader {
             flags |= Self::FLAG_L;
         }
 
-        if legacy_as_path {
+        if !use_4byte_asn {
             flags |= Self::FLAG_A;
         }
 
@@ -313,73 +313,73 @@ mod tests {
     #[test]
     fn test_peer_header_flags() {
         let tests = [
-            // (address, post_policy, legacy_as_path, expected_flags)
+            // (address, post_policy, use_4byte_asn, expected_flags)
             (
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 false,
-                false,
+                true,
                 0b00000000,
             ),
             (
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 true,
-                false,
+                true,
                 0b01000000,
             ),
             (
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 false,
-                true,
+                false,
                 0b00100000,
             ),
             (
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 true,
-                true,
+                false,
                 0b01100000,
             ),
             (
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
                 false,
-                false,
+                true,
                 0b10000000,
             ),
             (
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
                 true,
-                false,
+                true,
                 0b11000000,
             ),
             (
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
                 false,
-                true,
+                false,
                 0b10100000,
             ),
             (
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
                 true,
-                true,
+                false,
                 0b11100000,
             ),
         ];
 
-        for (addr, post_policy, legacy_as_path, expected_flags) in tests {
+        for (addr, post_policy, use_4byte_asn, expected_flags) in tests {
             let header = PeerHeader::new(
                 PeerDistinguisher::Global,
                 addr,
                 65001,
                 0x01010101,
                 post_policy,
-                legacy_as_path,
+                use_4byte_asn,
                 Some(SystemTime::now()),
             );
             let bytes = header.to_bytes();
 
             assert_eq!(
                 bytes[1], expected_flags,
-                "flags mismatch for {:?}, post_policy={}, legacy_as_path={}",
-                addr, post_policy, legacy_as_path
+                "flags mismatch for {:?}, post_policy={}, use_4byte_asn={}",
+                addr, post_policy, use_4byte_asn
             );
         }
     }
