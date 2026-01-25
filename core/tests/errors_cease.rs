@@ -356,7 +356,11 @@ async fn test_collision_connect_state() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
     config.peers.push(PeerConfig {
         address: listener_addr.to_string(),
+<<<<<<< Updated upstream
         delay_open_time_secs: Some(2), // DelayOpen keeps peer in Connect state long enough
+=======
+        delay_open_time_secs: Some(30), // DelayOpen keeps peer in Connect state long enough
+>>>>>>> Stashed changes
         ..Default::default()
     });
     let server = start_test_server(config).await;
@@ -365,6 +369,7 @@ async fn test_collision_connect_state() {
     peer.accept().await;
 
     // Verify peer is in Connect state (DelayOpen timer running, hasn't sent OPEN yet)
+<<<<<<< Updated upstream
     poll_until_with_timeout(
         || async {
             let peers = server.client.get_peers().await.unwrap();
@@ -374,6 +379,9 @@ async fn test_collision_connect_state() {
         10,
     )
     .await;
+=======
+    poll_peers_with_timeout(&server, vec![peer.to_peer(BgpState::Connect, true)], 100).await;
+>>>>>>> Stashed changes
 
     // Collision: peer initiates incoming while server is in Connect with DelayOpen
     // Without fix: incoming would be dropped
@@ -402,7 +410,10 @@ async fn test_collision_connect_state() {
     incoming_peer.send_keepalive().await;
 
     // Verify session established on incoming connection
+<<<<<<< Updated upstream
     // Without fix: incoming was dropped, this will timeout
+=======
+>>>>>>> Stashed changes
     poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 }
 

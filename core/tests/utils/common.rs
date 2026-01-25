@@ -1249,6 +1249,19 @@ pub async fn poll_peers(server: &TestServer, expected_peers: Vec<Peer>) {
     .await;
 }
 
+pub async fn poll_peers_with_timeout(
+    server: &TestServer,
+    expected_peers: Vec<Peer>,
+    max_iterations: usize,
+) {
+    poll_until_with_timeout(
+        || async { verify_peers(server, expected_peers.clone()).await },
+        "Timeout waiting for peers to match expected state",
+        max_iterations,
+    )
+    .await;
+}
+
 /// Verify server info matches expected values
 pub async fn verify_server_info(
     server: &TestServer,
