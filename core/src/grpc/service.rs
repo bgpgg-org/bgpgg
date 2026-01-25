@@ -167,14 +167,24 @@ fn parse_add_route_request(
         .map_err(|_| "Invalid prefix length".to_string())?;
 
     let prefix = match address {
-        IpAddr::V4(ipv4) => IpNetwork::V4(Ipv4Net {
-            address: ipv4,
-            prefix_length,
-        }),
-        IpAddr::V6(ipv6) => IpNetwork::V6(Ipv6Net {
-            address: ipv6,
-            prefix_length,
-        }),
+        IpAddr::V4(ipv4) => {
+            if prefix_length > 32 {
+                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_length));
+            }
+            IpNetwork::V4(Ipv4Net {
+                address: ipv4,
+                prefix_length,
+            })
+        }
+        IpAddr::V6(ipv6) => {
+            if prefix_length > 128 {
+                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_length));
+            }
+            IpNetwork::V6(Ipv6Net {
+                address: ipv6,
+                prefix_length,
+            })
+        }
     };
 
     // Parse next_hop

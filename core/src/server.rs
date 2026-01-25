@@ -315,12 +315,14 @@ pub enum BmpOp {
         remote_port: u16,
         sent_open: OpenMessage,
         received_open: OpenMessage,
+        use_4byte_asn: bool,
     },
     PeerDown {
         peer_ip: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
         reason: PeerDownReason,
+        use_4byte_asn: bool,
     },
     RouteMonitoring {
         peer_ip: IpAddr,

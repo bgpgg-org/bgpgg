@@ -2,45 +2,58 @@
 
 A BGP router written in Rust, designed for speed and observability.
 
-## Quick Start
+## Get Started
+
+Download the [latest release](https://github.com/bgpgg-org/bgpgg/releases/latest) for your platform.
 
 ```bash
-# Build
+# Example for v0.2.0 on Linux x86_64
+curl -LO https://github.com/bgpgg-org/bgpgg/releases/download/v0.2.0/bgpgg-v0.2.0-x86_64-linux.tar.gz
+tar xzf bgpgg-v0.2.0-x86_64-linux.tar.gz
+```
+
+Create a config file:
+
+```yaml
+# config.yaml
+asn: 65000
+router_id: 1.1.1.1
+listen_addr: "0.0.0.0:17900"  # (Optional) Use high port to avoid needing root
+peers:
+  - address: "192.168.1.1:17900"
+    asn: 65001
+```
+
+Run it:
+
+```bash
+./bgpgg-v0.2.0-x86_64-linux/bgpggd -c config.yaml
+./bgpgg-v0.2.0-x86_64-linux/bgpgg peer list
+./bgpgg-v0.2.0-x86_64-linux/bgpgg global rib add 10.0.0.0/24 --nexthop 192.168.1.1
+```
+
+## Build from Source
+
+```bash
 make
-
-# Run daemon
 ./target/release/bgpggd -c config.yaml
-
-# Use CLI (in another terminal)
-./target/release/bgpgg peer add 192.168.1.1:179
 ./target/release/bgpgg peer list
 ```
 
-## Configuration
+## Try with Docker
 
-Edit `config.yaml`:
-
-```yaml
-asn: 65000                      # Your AS number
-listen_addr: "127.0.0.1:1790"   # BGP listen address
-router_id: "1.1.1.1"            # Router ID
-grpc_listen_addr: "[::1]:50051" # gRPC API address
-```
-
-## Development
+Run two BGP speakers and watch them peer:
 
 ```bash
-make        # Build
-make test   # Run tests
-make fmt    # Format code
+curl -LO https://raw.githubusercontent.com/bgpgg-org/bgpgg/master/docker/docker-compose.yml
+docker compose up -d
+
+# Check peering
+docker exec bgpgg1 bgpgg peer list
+
+# Add a route on speaker 1
+docker exec bgpgg1 bgpgg global rib add 10.0.0.0/24 --nexthop 172.20.0.10
+
+# See it on speaker 2
+docker exec bgpgg2 bgpgg global rib show
 ```
-
-## Structure
-
-- `core` - Core BGP protocol implementation
-- `daemon` - BGP daemon server
-- `cli` - Command-line interface
-
-## License
-
-Apache-2.0

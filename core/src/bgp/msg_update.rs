@@ -479,6 +479,10 @@ impl UpdateMessage {
         })
     }
 
+    pub fn use_4byte_asn(&self) -> bool {
+        self.format.use_4byte_asn
+    }
+
     pub fn from_bytes(bytes: Vec<u8>, use_4byte_asn: bool) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;

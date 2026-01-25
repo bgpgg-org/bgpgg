@@ -210,6 +210,7 @@ impl BgpServer {
                         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
                             (peer.asn, peer.bgp_id, &peer.conn_info)
                         {
+                            let use_4byte_asn = peer_supports_4byte_asn(peer);
                             self.broadcast_bmp(BmpOp::PeerUp {
                                 peer_ip,
                                 peer_as: asn,
@@ -219,6 +220,7 @@ impl BgpServer {
                                 remote_port: conn_info.remote_port,
                                 sent_open: conn_info.sent_open.clone(),
                                 received_open: conn_info.received_open.clone(),
+                                use_4byte_asn,
                             });
                         }
                     }
@@ -331,7 +333,7 @@ impl BgpServer {
                 // Extract peer info for BMP before potentially removing the peer
                 // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
-                    (Some(asn), Some(bgp_id)) => Some((asn, bgp_id)),
+                    (Some(asn), Some(bgp_id)) => Some((asn, bgp_id, peer_supports_4byte_asn(peer))),
                     _ => None,
                 };
 
@@ -358,12 +360,13 @@ impl BgpServer {
                 }
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
-                if let Some((peer_as, peer_bgp_id)) = bmp_peer_info {
+                if let Some((peer_as, peer_bgp_id, use_4byte_asn)) = bmp_peer_info {
                     self.broadcast_bmp(BmpOp::PeerDown {
                         peer_ip,
                         peer_as,
                         peer_bgp_id,
                         reason,
+                        use_4byte_asn,
                     });
                 }
             }
@@ -463,11 +466,13 @@ impl BgpServer {
         // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
         if let Some(entry) = self.peers.get(&peer_ip) {
             if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
+                let use_4byte_asn = peer_supports_4byte_asn(entry);
                 self.broadcast_bmp(BmpOp::PeerDown {
                     peer_ip,
                     peer_as: asn,
                     peer_bgp_id: bgp_id,
                     reason: PeerDownReason::PeerDeConfigured,
+                    use_4byte_asn,
                 });
             }
         }
@@ -1790,6 +1795,7 @@ async fn send_initial_bmp_state_to_task(
         if let (Some(asn), Some(bgp_id), Some(conn_info)) =
             (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
         {
+            let use_4byte_asn = peer_supports_4byte_asn(peer_info);
             let _ = task_tx.send(Arc::new(BmpOp::PeerUp {
                 peer_ip: *peer_ip,
                 peer_as: asn,
@@ -1799,6 +1805,7 @@ async fn send_initial_bmp_state_to_task(
                 remote_port: conn_info.remote_port,
                 sent_open: conn_info.sent_open.clone(),
                 received_open: conn_info.received_open.clone(),
+                use_4byte_asn,
             }));
         }
     }

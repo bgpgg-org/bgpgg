@@ -81,6 +81,7 @@ impl StatisticsReportMessage {
         peer_address: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
+        use_4byte_asn: bool,
         timestamp: Option<SystemTime>,
         statistics: Vec<StatisticsTlv>,
     ) -> Self {
@@ -91,7 +92,7 @@ impl StatisticsReportMessage {
                 peer_as,
                 peer_bgp_id,
                 false,
-                false,
+                use_4byte_asn,
                 timestamp,
             ),
             statistics,
@@ -141,6 +142,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             65001,
             0x01010101,
+            true,
             Some(SystemTime::now()),
             stats,
         );

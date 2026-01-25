@@ -34,7 +34,7 @@ impl RouteMonitoringMessage {
         peer_as: u32,
         peer_bgp_id: u32,
         post_policy: bool,
-        legacy_as_path: bool,
+        use_4byte_asn: bool,
         timestamp: Option<SystemTime>,
         bgp_update: UpdateMessage,
     ) -> Self {
@@ -45,7 +45,7 @@ impl RouteMonitoringMessage {
                 peer_as,
                 peer_bgp_id,
                 post_policy,
-                legacy_as_path,
+                use_4byte_asn,
                 timestamp,
             ),
             bgp_update,
@@ -109,7 +109,7 @@ mod tests {
             65001,
             0x01010101,
             false,
-            false,
+            true,
             Some(SystemTime::now()),
             update,
         );

@@ -160,6 +160,7 @@ impl BmpTask {
                 remote_port,
                 sent_open,
                 received_open,
+                use_4byte_asn,
             } => {
                 info!(&self.logger, "BMP: Peer Up", "peer_ip" => peer_ip);
                 Some(BmpMessage::PeerUp(PeerUpMessage::new(
@@ -168,6 +169,7 @@ impl BmpTask {
                     *peer_as,
                     *peer_bgp_id,
                     false, // post_policy
+                    *use_4byte_asn,
                     Some(SystemTime::now()),
                     *local_address,
                     *local_port,
@@ -182,6 +184,7 @@ impl BmpTask {
                 peer_as,
                 peer_bgp_id,
                 reason,
+                use_4byte_asn,
             } => {
                 info!(&self.logger, "BMP: Peer Down", "peer_ip" => peer_ip);
                 Some(BmpMessage::PeerDown(PeerDownMessage::new(
@@ -190,6 +193,7 @@ impl BmpTask {
                     *peer_as,
                     *peer_bgp_id,
                     false, // post_policy
+                    *use_4byte_asn,
                     Some(SystemTime::now()),
                     reason.clone(),
                 )))
@@ -205,7 +209,7 @@ impl BmpTask {
                 *peer_as,
                 *peer_bgp_id,
                 false, // post_policy
-                false, // legacy_as_path
+                update.use_4byte_asn(),
                 Some(SystemTime::now()),
                 update.clone(),
             ))),
@@ -235,6 +239,7 @@ impl BmpTask {
                 peer_stat.peer_ip,
                 peer_stat.peer_as,
                 peer_stat.peer_bgp_id,
+                true, // use_4byte_asn - statistics messages always use 4-byte ASN encoding
                 Some(SystemTime::now()),
                 tlvs,
             ));
