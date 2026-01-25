@@ -770,3 +770,82 @@ async fn test_extended_community_roundtrip() {
         _ => panic!("Expected FourOctetAs"),
     }
 }
+
+#[tokio::test]
+async fn test_add_route_with_invalid_prefix_length() {
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        true,
+    ))
+    .await;
+
+    // Test IPv4 with prefix length > 32
+    let result = server
+        .client
+        .add_route(
+            "1.1.1.0/123".to_string(),
+            "192.0.2.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("IPv4 prefix length 123 exceeds 32"));
+
+    // Test IPv4 with prefix length = 33
+    let result = server
+        .client
+        .add_route(
+            "10.0.0.0/33".to_string(),
+            "192.0.2.1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("IPv4 prefix length 33 exceeds 32"));
+
+    // Test IPv6 with prefix length > 128
+    let result = server
+        .client
+        .add_route(
+            "2001:db8::/200".to_string(),
+            "2001:db8::1".to_string(),
+            Origin::Igp,
+            vec![],
+            None,
+            None,
+            false,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("IPv6 prefix length 200 exceeds 128"));
+
+    // Verify no routes were added
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 0);
+}
