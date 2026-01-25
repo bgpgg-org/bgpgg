@@ -14,10 +14,6 @@ if ! command -v cross &> /dev/null; then
     cargo install cross --git https://github.com/cross-rs/cross
 fi
 
-# Clean to avoid glibc version conflicts between host and container
-echo "Cleaning build artifacts..."
-cargo clean
-
 VERSION=$1
 RELEASE_DIR="release/$VERSION"
 mkdir -p "$RELEASE_DIR"

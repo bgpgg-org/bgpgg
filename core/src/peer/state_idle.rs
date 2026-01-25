@@ -16,6 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::debug;
 use std::time::Duration;
+use tokio::time::Instant;
 
 impl Peer {
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
@@ -34,90 +35,106 @@ impl Peer {
     async fn handle_idle_state_passive(&mut self) -> bool {
         let idle_hold_time = self.get_idle_hold_time();
         let auto_reconnect = idle_hold_time.is_some() && !self.manually_stopped;
-        let idle_hold_time = idle_hold_time.unwrap_or(Duration::ZERO);
+        let idle_hold_deadline = if auto_reconnect {
+            Instant::now() + idle_hold_time.unwrap()
+        } else {
+            Instant::now() + Duration::from_secs(86400 * 365) // Far future if not auto-reconnecting
+        };
 
-        tokio::select! {
-            op = self.peer_rx.recv() => {
-                match op {
-                    Some(PeerOp::ManualStartPassive) => {
-                        debug!(&self.logger, "ManualStartPassive received", "peer_ip" => self.addr.to_string());
-                        self.manually_stopped = false;
-                        self.try_process_event(&FsmEvent::ManualStartPassive).await;
+        loop {
+            tokio::select! {
+                op = self.peer_rx.recv() => {
+                    match op {
+                        Some(PeerOp::ManualStartPassive) => {
+                            debug!(&self.logger, "ManualStartPassive received", "peer_ip" => self.addr.to_string());
+                            self.manually_stopped = false;
+                            self.try_process_event(&FsmEvent::ManualStartPassive).await;
+                            return false;
+                        }
+                        Some(PeerOp::AutomaticStartPassive) => {
+                            debug!(&self.logger, "AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
+                            self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
+                            return false;
+                        }
+                        Some(PeerOp::Shutdown(_)) => return true,
+                        Some(PeerOp::GetStatistics(response)) => {
+                            let _ = response.send(self.statistics.clone());
+                        }
+                        Some(PeerOp::GetAdjRibIn(response)) => {
+                            let routes = self.rib_in.get_all_routes();
+                            let _ = response.send(routes);
+                        }
+                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                            // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                            debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                            drop(tcp_tx);
+                            drop(tcp_rx);
+                        }
+                        Some(_) => {}
+                        None => return true,
                     }
-                    Some(PeerOp::AutomaticStartPassive) => {
-                        debug!(&self.logger, "AutomaticStartPassive received", "peer_ip" => self.addr.to_string());
-                        self.try_process_event(&FsmEvent::AutomaticStartPassive).await;
-                    }
-                    Some(PeerOp::Shutdown(_)) => return true,
-                    Some(PeerOp::GetStatistics(response)) => {
-                        let _ = response.send(self.statistics.clone());
-                    }
-                    Some(PeerOp::GetAdjRibIn(response)) => {
-                        let routes = self.rib_in.get_all_routes();
-                        let _ = response.send(routes);
-                    }
-                    Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                        debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
-                        drop(tcp_tx);
-                        drop(tcp_rx);
-                    }
-                    Some(_) => {}
-                    None => return true,
+                }
+                _ = tokio::time::sleep_until(idle_hold_deadline), if auto_reconnect => {
+                    // RFC 4271 Event 13: IdleHoldTimer_Expires
+                    debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                    self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
+                    return false;
                 }
             }
-            _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
-                // RFC 4271 Event 13: IdleHoldTimer_Expires
-                debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
-                self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
-            }
         }
-        false
     }
 
     /// Non-passive mode: wait for ManualStart, AutomaticStart, or auto-reconnect timer.
     async fn handle_idle_state_active(&mut self) -> bool {
         let idle_hold_time = self.get_idle_hold_time();
         let auto_reconnect = idle_hold_time.is_some() && !self.manually_stopped;
-        let idle_hold_time = idle_hold_time.unwrap_or(Duration::ZERO);
+        let idle_hold_deadline = if auto_reconnect {
+            Instant::now() + idle_hold_time.unwrap()
+        } else {
+            Instant::now() + Duration::from_secs(86400 * 365) // Far future if not auto-reconnecting
+        };
 
-        tokio::select! {
-            op = self.peer_rx.recv() => {
-                match op {
-                    Some(PeerOp::ManualStart) => {
-                        debug!(&self.logger, "ManualStart received", "peer_ip" => self.addr.to_string());
-                        self.manually_stopped = false;
-                        self.try_process_event(&FsmEvent::ManualStart).await;
+        loop {
+            tokio::select! {
+                op = self.peer_rx.recv() => {
+                    match op {
+                        Some(PeerOp::ManualStart) => {
+                            debug!(&self.logger, "ManualStart received", "peer_ip" => self.addr.to_string());
+                            self.manually_stopped = false;
+                            self.try_process_event(&FsmEvent::ManualStart).await;
+                            return false;
+                        }
+                        Some(PeerOp::AutomaticStart) => {
+                            debug!(&self.logger, "AutomaticStart received", "peer_ip" => self.addr.to_string());
+                            self.try_process_event(&FsmEvent::AutomaticStart).await;
+                            return false;
+                        }
+                        Some(PeerOp::Shutdown(_)) => return true,
+                        Some(PeerOp::GetStatistics(response)) => {
+                            let _ = response.send(self.statistics.clone());
+                        }
+                        Some(PeerOp::GetAdjRibIn(response)) => {
+                            let routes = self.rib_in.get_all_routes();
+                            let _ = response.send(routes);
+                        }
+                        Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
+                            // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                            debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
+                            drop(tcp_tx);
+                            drop(tcp_rx);
+                        }
+                        Some(_) => {}
+                        None => return true,
                     }
-                    Some(PeerOp::AutomaticStart) => {
-                        debug!(&self.logger, "AutomaticStart received", "peer_ip" => self.addr.to_string());
-                        self.try_process_event(&FsmEvent::AutomaticStart).await;
-                    }
-                    Some(PeerOp::Shutdown(_)) => return true,
-                    Some(PeerOp::GetStatistics(response)) => {
-                        let _ = response.send(self.statistics.clone());
-                    }
-                    Some(PeerOp::GetAdjRibIn(response)) => {
-                        let routes = self.rib_in.get_all_routes();
-                        let _ = response.send(routes);
-                    }
-                    Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                        debug!(&self.logger, "connection refused in Idle state", "peer_ip" => self.addr.to_string());
-                        drop(tcp_tx);
-                        drop(tcp_rx);
-                    }
-                    Some(_) => {}
-                    None => return true,
+                }
+                _ = tokio::time::sleep_until(idle_hold_deadline), if auto_reconnect => {
+                    // RFC 4271 Event 13: IdleHoldTimer_Expires
+                    debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
+                    self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
+                    return false;
                 }
             }
-            _ = tokio::time::sleep(idle_hold_time), if auto_reconnect => {
-                // RFC 4271 Event 13: IdleHoldTimer_Expires
-                debug!(&self.logger, "IdleHoldTimer expired", "peer_ip" => self.addr.to_string());
-                self.try_process_event(&FsmEvent::IdleHoldTimerExpires).await;
-            }
         }
-        false
     }
 
     /// Handle Idle state transitions.
