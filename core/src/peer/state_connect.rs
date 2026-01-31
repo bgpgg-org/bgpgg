@@ -15,9 +15,9 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
+use crate::log::{debug, error, info};
 use crate::net::create_and_bind_tcp_socket;
 use crate::types::PeerDownReason;
-use crate::{debug, error, info};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ impl Peer {
             if self.config.delay_open_time_secs.is_some() {
                 self.fsm.timers.start_delay_open_timer();
             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-                error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                error!(peer_ip = %self.addr, error = %e, "failed to send OPEN");
                 self.disconnect(
                     true,
                     PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
@@ -63,7 +63,7 @@ impl Peer {
                 result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
                     match result {
                         Ok(stream) => {
-                            info!(&self.logger, "TCP connection established", "peer_ip" => self.addr.to_string());
+                            info!(peer_ip = %self.addr, "TCP connection established");
                             let (rx, tx) = stream.into_split();
                             self.conn = Some(TcpConnection::new(tx, rx));
                             self.fsm.timers.stop_connect_retry();
@@ -71,18 +71,18 @@ impl Peer {
                             if self.config.delay_open_time_secs.is_some() {
                                 self.fsm.timers.start_delay_open_timer();
                             } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-                                error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                                error!(peer_ip = %self.addr, error = %e, "failed to send OPEN");
                                 self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed));
                             }
                         }
                         Err(e) => {
-                            debug!(&self.logger, "TCP connection failed", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            debug!(peer_ip = %self.addr, error = %e, "TCP connection failed");
                             self.try_process_event(&FsmEvent::TcpConnectionFails).await;
                         }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(self.connect_retry_secs)) => {
-                    debug!(&self.logger, "ConnectRetryTimer expired", "peer_ip" => self.addr.to_string());
+                    debug!(peer_ip = %self.addr, "ConnectRetryTimer expired");
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
@@ -94,10 +94,10 @@ impl Peer {
                             // RFC 4271 6.8: Store second connection for collision detection
                             // Outgoing attempt is in progress, defer collision resolution
                             if self.collision_conn.is_none() {
-                                info!(&self.logger, "collision: storing second connection (Connect state)", "peer_ip" => self.addr.to_string());
+                                info!(peer_ip = %self.addr, "collision: storing second connection (Connect state)");
                                 self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
                             } else {
-                                debug!(&self.logger, "collision: dropping third connection", "peer_ip" => self.addr.to_string());
+                                debug!(peer_ip = %self.addr, "collision: dropping third connection");
                                 drop(tcp_tx);
                                 drop(tcp_rx);
                             }
@@ -122,12 +122,12 @@ impl Peer {
             _ = timer_interval.tick() => {
                 // RFC 4271 8.2.2: Check ConnectRetryTimer first (Event 9 in Connect state)
                 if self.fsm.timers.connect_retry_expired() {
-                    debug!(&self.logger, "ConnectRetryTimer expired in Connect while DelayOpen running", "peer_ip" => self.addr.to_string());
+                    debug!(peer_ip = %self.addr, "ConnectRetryTimer expired in Connect while DelayOpen running");
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 } else if self.fsm.timers.delay_open_timer_expired() {
-                    debug!(&self.logger, "DelayOpen timer expired", "peer_ip" => self.addr.to_string());
+                    debug!(peer_ip = %self.addr, "DelayOpen timer expired");
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
-                        error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        error!(peer_ip = %self.addr, error = %e, "failed to send OPEN");
                         self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::DelayOpenTimerExpires));
                     }
                 }
@@ -140,10 +140,10 @@ impl Peer {
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                         // RFC 4271 6.8: Store second connection for collision detection
                         if self.collision_conn.is_none() {
-                            info!(&self.logger, "collision: storing second connection (Connect DelayOpen)", "peer_ip" => self.addr.to_string());
+                            info!(peer_ip = %self.addr, "collision: storing second connection (Connect DelayOpen)");
                             self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
                         } else {
-                            debug!(&self.logger, "collision: dropping third connection", "peer_ip" => self.addr.to_string());
+                            debug!(peer_ip = %self.addr, "collision: dropping third connection");
                             drop(tcp_tx);
                             drop(tcp_rx);
                         }

@@ -17,9 +17,9 @@ use crate::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use crate::bgp::msg_update_types::PathAttrValue;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
+use crate::log::{info, warn};
 use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
-use crate::{info, warn};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -33,22 +33,17 @@ impl Peer {
     fn validate_afi_safi(&mut self, afi_safi: AfiSafi) -> bool {
         // Check if AFI/SAFI is disabled
         if self.disabled_afi_safi.contains(&afi_safi) {
-            warn!(&self.logger, "ignoring UPDATE for disabled AFI/SAFI",
-                  "afi_safi" => format!("{}", afi_safi), "peer" => &self.addr);
+            warn!(afi_safi = %afi_safi, peer = %self.addr, "ignoring UPDATE for disabled AFI/SAFI");
             return false;
         }
 
         // Check if AFI/SAFI was negotiated
         if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
-            warn!(&self.logger, "received UPDATE for non-negotiated AFI/SAFI, disabling",
-                  "afi_safi" => format!("{}", afi_safi), "peer" => &self.addr);
+            warn!(afi_safi = %afi_safi, peer = %self.addr, "received UPDATE for non-negotiated AFI/SAFI, disabling");
 
             // RFC 4760 Section 7: Delete all routes for this AFI/SAFI
             let deleted_count = self.rib_in.clear_afi_safi(afi_safi);
-            warn!(&self.logger, "deleted all routes for AFI/SAFI due to error",
-                  "afi_safi" => format!("{}", afi_safi),
-                  "deleted_count" => deleted_count,
-                  "peer" => &self.addr);
+            warn!(afi_safi = %afi_safi, deleted_count, peer = %self.addr, "deleted all routes for AFI/SAFI due to error");
 
             // Mark AFI/SAFI as disabled for this session
             self.disabled_afi_safi.insert(afi_safi);
@@ -111,8 +106,7 @@ impl Peer {
                     };
 
                     if actual_leftmost != peer_asn {
-                        warn!(&self.logger, "AS_PATH first AS does not match peer AS",
-                              "peer_ip" => self.addr.to_string(), "leftmost_as" => actual_leftmost, "peer_asn" => peer_asn);
+                        warn!(peer_ip = %self.addr, leftmost_as = actual_leftmost, peer_asn, "AS_PATH first AS does not match peer AS");
                         return Err(BgpError::UpdateMessageError(
                             UpdateMessageError::MalformedASPath,
                         ));
@@ -128,10 +122,7 @@ impl Peer {
             let has_as4_path = update_msg.as4_path().is_some();
             let has_as4_aggregator = update_msg.as4_aggregator().is_some();
             if has_as4_path || has_as4_aggregator {
-                warn!(&self.logger, "received AS4_PATH/AS4_AGGREGATOR from NEW speaker, discarding per RFC 6793",
-                      "peer_ip" => self.addr.to_string(),
-                      "has_as4_path" => has_as4_path,
-                      "has_as4_aggregator" => has_as4_aggregator);
+                warn!(peer_ip = %self.addr, has_as4_path, has_as4_aggregator, "received AS4_PATH/AS4_AGGREGATOR from NEW speaker, discarding per RFC 6793");
                 update_msg.strip_as4_attributes();
             }
         }
@@ -145,7 +136,7 @@ impl Peer {
     fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
         let mut withdrawn = Vec::new();
         for prefix in update_msg.withdrawn_routes() {
-            info!(&self.logger, "withdrawing route", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string());
+            info!(prefix = ?prefix, peer_ip = %self.addr, "withdrawing route");
             self.rib_in.remove_route(prefix);
             withdrawn.push(prefix);
         }
@@ -164,13 +155,11 @@ impl Peer {
         }
         match setting.action {
             MaxPrefixAction::Terminate => {
-                warn!(&self.logger, "max prefix limit exceeded",
-                      "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
+                warn!(peer_ip = %self.addr, limit = setting.limit, current, "max prefix limit exceeded");
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached))
             }
             MaxPrefixAction::Discard => {
-                warn!(&self.logger, "max prefix limit reached, discarding new prefixes",
-                      "peer_ip" => self.addr.to_string(), "limit" => setting.limit, "current" => current);
+                warn!(peer_ip = %self.addr, limit = setting.limit, current, "max prefix limit reached, discarding new prefixes");
                 Ok(false)
             }
         }
@@ -196,7 +185,7 @@ impl Peer {
 
         let Some(path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn) else {
             if !update_msg.nlri_list().is_empty() {
-                warn!(&self.logger, "UPDATE has NLRI but missing required attributes, skipping announcements", "peer_ip" => self.addr.to_string());
+                warn!(peer_ip = %self.addr, "UPDATE has NLRI but missing required attributes, skipping announcements");
             }
             return Ok(announced);
         };
@@ -208,8 +197,7 @@ impl Peer {
             _ => false,
         };
         if is_local_nexthop {
-            warn!(&self.logger, "rejecting UPDATE: NEXT_HOP is local address",
-                  "next_hop" => path.next_hop.to_string(), "peer" => &self.addr);
+            warn!(next_hop = %path.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
             return Ok(announced);
         }
 
@@ -217,7 +205,7 @@ impl Peer {
         let path_arc = Arc::new(path);
 
         for prefix in update_msg.nlri_list() {
-            info!(&self.logger, "adding route to Adj-RIB-In", "prefix" => format!("{:?}", prefix), "peer_ip" => self.addr.to_string(), "med" => format!("{:?}", path_arc.med));
+            info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
             self.rib_in.add_route(prefix, Arc::clone(&path_arc));
             announced.push((prefix, Arc::clone(&path_arc)));
         }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::log::LogLevel;
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -481,14 +480,6 @@ impl Config {
         self.sys_descr
             .clone()
             .unwrap_or_else(|| format!("bgpgg version {}", env!("CARGO_PKG_VERSION")))
-    }
-
-    /// Parse log level from config string
-    pub fn parse_log_level(&self) -> LogLevel {
-        LogLevel::from_str(&self.log_level).unwrap_or_else(|e| {
-            eprintln!("Warning: {}. Defaulting to Info", e);
-            LogLevel::Info
-        })
     }
 
     /// Load configuration from a YAML file

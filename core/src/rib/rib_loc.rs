@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
-use crate::log::Logger;
+use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::{Path, Route, RouteSource};
-use crate::{debug, info};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 #[cfg(test)]
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 /// Loc-RIB: Local routing table
 ///
@@ -33,7 +32,6 @@ pub struct LocRib {
     // Per-AFI/SAFI tables
     ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
     ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
-    logger: Arc<Logger>,
 }
 
 // Helper functions to avoid code duplication
@@ -191,7 +189,7 @@ impl LocRib {
 
         // Process withdrawals
         for prefix in withdrawn {
-            info!(&self.logger, "withdrawing route from Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => peer_ip.to_string());
+            info!(prefix = ?prefix, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
             self.remove_peer_path(prefix, peer_ip);
         }
 
@@ -200,10 +198,10 @@ impl LocRib {
             // Clone inner Path for policy mutation
             let mut path = (*path_arc).clone();
             if import_policy(&prefix, &mut path) {
-                info!(&self.logger, "adding route to Loc-RIB", "prefix" => format!("{:?}", prefix), "peer_ip" => peer_ip.to_string());
+                info!(prefix = ?prefix, peer_ip = %peer_ip, "adding route to Loc-RIB");
                 self.add_route(prefix, Arc::new(path));
             } else {
-                debug!(&self.logger, "route rejected by import policy", "prefix" => format!("{:?}", prefix), "peer_ip" => peer_ip.to_string());
+                debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
                 self.remove_peer_path(prefix, peer_ip);
             }
         }
@@ -216,12 +214,17 @@ impl LocRib {
     }
 }
 
+impl Default for LocRib {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocRib {
-    pub fn new(logger: Arc<Logger>) -> Self {
+    pub fn new() -> Self {
         LocRib {
             ipv4_unicast: HashMap::new(),
             ipv6_unicast: HashMap::new(),
-            logger,
         }
     }
 
@@ -265,7 +268,7 @@ impl LocRib {
     /// Remove a locally originated route
     /// Returns true if a route was actually removed.
     pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
-        info!(&self.logger, "removing local route from Loc-RIB", "prefix" => format!("{:?}", prefix));
+        info!(prefix = ?prefix, "removing local route from Loc-RIB");
 
         match prefix {
             IpNetwork::V4(v4_prefix) => remove_local_paths(&mut self.ipv4_unicast, &v4_prefix),
@@ -361,14 +364,14 @@ mod tests {
 
     #[test]
     fn test_new_loc_rib() {
-        let loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let loc_rib = LocRib::new();
         assert_eq!(loc_rib.get_all_routes(), vec![]);
         assert_eq!(loc_rib.routes_len(), 0);
     }
 
     #[test]
     fn test_add_route() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip);
@@ -386,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_routes_different_prefixes() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
 
         let prefix1 = create_test_prefix();
@@ -421,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_paths_same_prefix_different_peers() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
@@ -447,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_add_route_same_peer_updates_path() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
 
@@ -474,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
@@ -498,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_removes_empty_routes() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip);
@@ -512,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_add_and_remove_local_route() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
@@ -541,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_add_local_route_with_custom_local_pref() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
@@ -564,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_mixed_ipv4_ipv6_routes() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
 
         let prefix_v4 = IpNetwork::V4(Ipv4Net {
@@ -589,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_iter_routes_mixed_families() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
 
         let prefix_v4 = create_test_prefix(); // IPv4
@@ -607,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_iter_by_afi() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
 
         let prefix_v4 = create_test_prefix();
@@ -630,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_mixed() {
-        let mut loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let mut loc_rib = LocRib::new();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
 
@@ -653,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_empty_tables() {
-        let loc_rib = LocRib::new(Arc::new(Logger::default()));
+        let loc_rib = LocRib::new();
         assert_eq!(loc_rib.routes_len(), 0);
         assert_eq!(loc_rib.get_all_routes().len(), 0);
         assert_eq!(loc_rib.iter_routes().count(), 0);

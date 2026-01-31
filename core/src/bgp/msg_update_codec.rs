@@ -22,8 +22,8 @@ use super::multiprotocol::{Afi, Safi};
 use super::utils::{
     is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
 };
+use crate::log::warn;
 use crate::net::IpNetwork;
-use crate::warn;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -356,11 +356,7 @@ pub(super) fn read_attr_as4_path(bytes: &[u8]) -> Result<AsPath, ParserError> {
 
     // Log if we discarded confederation segments
     if path.segments.len() < original_len {
-        let logger = crate::log::Logger::default();
-        warn!(
-            &logger,
-            "discarded AS_CONFED segments from AS4_PATH per RFC 6793"
-        );
+        warn!("discarded AS_CONFED segments from AS4_PATH per RFC 6793");
     }
 
     Ok(path)
@@ -859,9 +855,8 @@ pub(super) fn read_path_attributes(
             // Attribute was discarded - extract type code from raw bytes for logging
             let attr_type_code = bytes[cursor + 1];
             warn!(
-                &crate::log::Logger::default(),
-                "discarded malformed attribute per RFC 6793",
-                "type_code" => attr_type_code
+                type_code = attr_type_code,
+                "discarded malformed attribute per RFC 6793"
             );
         }
 

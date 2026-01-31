@@ -15,12 +15,13 @@
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
-use bgpgg::log;
 use bgpgg::server::BgpServer;
 use clap::Parser;
-use serde_json::json;
 use std::env;
 use std::path::Path;
+use tracing::info;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Parser)]
 #[command(name = "bgpggd")]
@@ -127,19 +128,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     apply_overrides(&mut config, &args);
 
+    // Initialize tracing subscriber with configured log level
+    let level = match config.log_level.to_lowercase().as_str() {
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "info" => LevelFilter::INFO,
+        "debug" => LevelFilter::DEBUG,
+        "trace" => LevelFilter::TRACE,
+        _ => LevelFilter::INFO,
+    };
+
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .json()
+        .with_current_span(false)
+        .with_span_events(FmtSpan::NONE)
+        .init();
+
     let grpc_addr = config.grpc_listen_addr.parse()?;
 
-    println!(
-        "{}",
-        json!({
-            "timestamp": log::get_timestamp(),
-            "level": "INFO",
-            "message": "starting BGP daemon",
-            "bgp_addr": &config.listen_addr,
-            "grpc_addr": &config.grpc_listen_addr,
-            "asn": config.asn,
-            "router_id": config.router_id.to_string()
-        })
+    info!(
+        bgp_addr = %config.listen_addr,
+        grpc_addr = %config.grpc_listen_addr,
+        asn = config.asn,
+        router_id = %config.router_id,
+        "starting BGP daemon"
     );
 
     // Create BGP server
@@ -152,12 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {
-                eprintln!("{}", json!({
-                    "timestamp": log::get_timestamp(),
-                    "level": "ERROR",
-                    "message": "BGP server error",
-                    "error": e.to_string()
-                }));
+                tracing::error!(error = %e, "BGP server error");
             }
         },
 
@@ -165,12 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_service(BgpServiceServer::new(grpc_service))
             .serve(grpc_addr) => {
             if let Err(e) = result {
-                eprintln!("{}", json!({
-                    "timestamp": log::get_timestamp(),
-                    "level": "ERROR",
-                    "message": "gRPC server error",
-                    "error": e.to_string()
-                }));
+                tracing::error!(error = %e, "gRPC server error");
             }
         },
     }

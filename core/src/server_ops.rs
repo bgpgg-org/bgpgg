@@ -18,6 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
+use crate::log::{error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
@@ -36,7 +37,6 @@ use crate::server::{
     GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ResetType, ServerOp,
 };
 use crate::types::PeerDownReason;
-use crate::{error, info, warn};
 use regex::Regex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -201,7 +201,7 @@ impl BgpServer {
             ServerOp::PeerStateChanged { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.state = state;
-                    info!(&self.logger, "peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                    info!(%peer_ip, ?state, "peer state changed");
                 }
 
                 // When peer becomes Established, send BMP PeerUp and propagate all routes
@@ -248,7 +248,7 @@ impl BgpServer {
                         peer.asn = Some(asn);
                         peer.import_policies = import_policies;
                         peer.export_policies = export_policies;
-                        info!(&self.logger, "peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                        info!(%peer_ip, asn, "peer handshake complete");
                     }
                 }
             }
@@ -281,7 +281,7 @@ impl BgpServer {
                             false // All policies returned Continue -> default reject
                         },
                     );
-                    info!(&self.logger, "UPDATE processing complete", "peer_ip" => &peer_ip);
+                    info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
                     if !changed_prefixes.is_empty() {
@@ -295,7 +295,7 @@ impl BgpServer {
                         );
                     }
                 } else {
-                    error!(&self.logger, "received UPDATE before handshake complete", "peer_ip" => &peer_ip);
+                    error!(%peer_ip, "received UPDATE before handshake complete");
                 }
             }
             ServerOp::OpenReceived {
@@ -341,14 +341,14 @@ impl BgpServer {
                     // Configured peer: update state, Peer task handles reconnection internally
                     peer.state = BgpState::Idle;
                     peer.conn_info = None;
-                    info!(&self.logger, "peer session ended", "peer_ip" => &peer_ip);
+                    info!(%peer_ip, "peer session ended");
                 } else {
                     // Unconfigured peer: stop task and remove entirely
                     if let Some(peer_tx) = peer.peer_tx.take() {
                         let _ = peer_tx.send(PeerOp::ManualStop);
                     }
                     self.peers.remove(&peer_ip);
-                    info!(&self.logger, "unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                    info!(%peer_ip, total_peers = self.peers.len(), "unconfigured peer removed");
                 }
 
                 // Notify Loc-RIB about disconnection and get affected prefixes
@@ -399,7 +399,7 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
-        info!(&self.logger, "adding peer via request", "peer_addr" => &addr);
+        info!(peer_addr = %addr, "adding peer via request");
 
         // Parse peer address
         let peer_addr = match addr.parse::<SocketAddr>() {
@@ -433,7 +433,7 @@ impl BgpServer {
             let _ = peer_tx.send(PeerOp::ManualStart);
         }
 
-        info!(&self.logger, "peer added", "peer_ip" => peer_ip.to_string(), "passive" => config.passive_mode, "total_peers" => self.peers.len());
+        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
         let _ = response.send(Ok(()));
     }
 
@@ -442,7 +442,7 @@ impl BgpServer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "removing peer via request", "peer_ip" => &addr);
+        info!(peer_ip = %addr, "removing peer via request");
 
         // Parse the address to get IpAddr
         let peer_ip: IpAddr = match addr.parse() {
@@ -651,7 +651,7 @@ impl BgpServer {
             return;
         }
 
-        info!(&self.logger, "hard reset initiated", "peer_ip" => peer_ip.to_string());
+        info!(%peer_ip, "hard reset initiated");
         let _ = response.send(Ok(()));
     }
 
@@ -714,7 +714,7 @@ impl BgpServer {
 
     fn resend_routes_to_peer(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         let Some(peer_info) = self.peers.get(&peer_ip) else {
-            warn!(&self.logger, "SOFT_OUT for unknown peer", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "SOFT_OUT for unknown peer");
             return;
         };
 
@@ -730,7 +730,7 @@ impl BgpServer {
             return;
         }
         if safi != Safi::Unicast {
-            warn!(&self.logger, "unsupported SAFI", "safi" => format!("{:?}", safi));
+            warn!(?safi, "unsupported SAFI");
             return;
         }
 
@@ -760,7 +760,6 @@ impl BgpServer {
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -780,7 +779,6 @@ impl BgpServer {
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -799,15 +797,11 @@ impl BgpServer {
                     IpAddr::V4(self.config.router_id),
                     export_policies,
                     peer_supports_4byte_asn,
-                    &self.logger,
                 );
                 total_sent += chunk.len();
             }
 
-            info!(&self.logger, "completed SOFT_OUT reset",
-                  "peer_ip" => peer_ip.to_string(),
-                  "afi" => format!("{:?}", afi),
-                  "total_routes" => total_sent);
+            info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
         }
     }
 
@@ -826,7 +820,7 @@ impl BgpServer {
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => format!("{:?}", next_hop));
+        info!(?prefix, ?next_hop, "adding route via request");
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
         self.loc_rib.add_local_route(
@@ -853,7 +847,7 @@ impl BgpServer {
         prefix: IpNetwork,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "removing route via request", "prefix" => format!("{:?}", prefix));
+        info!(?prefix, "removing route via request");
 
         // Remove local route from Loc-RIB
         let removed = self.loc_rib.remove_local_route(prefix);
@@ -1058,7 +1052,6 @@ impl BgpServer {
             peer_asn,
             IpAddr::V4(self.config.router_id),
             export_policies,
-            &self.logger,
         );
 
         // Group by prefix for Route struct
@@ -1126,7 +1119,7 @@ impl BgpServer {
         let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
         self.bmp_tasks.insert(addr, task_info);
 
-        info!(&self.logger, "BMP task added", "addr" => &addr.to_string());
+        info!(%addr, "BMP task added");
 
         // Send initial state to new BMP destination
         let established_peers = self.get_established_peers();
@@ -1145,7 +1138,7 @@ impl BgpServer {
     ) {
         if let Some(task_info) = self.bmp_tasks.remove(&addr) {
             drop(task_info.task_tx); // Channel drop triggers graceful shutdown
-            info!(&self.logger, "BMP task removed", "addr" => &addr.to_string());
+            info!(%addr, "BMP task removed");
             let _ = response.send(Ok(()));
         } else {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
@@ -1834,50 +1827,40 @@ async fn send_initial_bmp_state_to_task(
 
 impl BgpServer {
     async fn handle_route_refresh(&mut self, peer_ip: std::net::IpAddr, afi: Afi, safi: Safi) {
-        info!(&self.logger, "processing ROUTE_REFRESH",
-              "peer_ip" => peer_ip.to_string(),
-              "afi" => format!("{:?}", afi),
-              "safi" => format!("{:?}", safi));
+        info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
 
         // Get peer info
         let Some(peer_info) = self.peers.get(&peer_ip) else {
-            warn!(&self.logger, "ROUTE_REFRESH from unknown peer", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "ROUTE_REFRESH from unknown peer");
             return;
         };
 
         // Only process if peer is Established
         if peer_info.state != BgpState::Established {
-            warn!(&self.logger, "ROUTE_REFRESH from non-Established peer",
-                  "peer_ip" => peer_ip.to_string(),
-                  "state" => format!("{:?}", peer_info.state));
+            warn!(%peer_ip, state = ?peer_info.state, "ROUTE_REFRESH from non-Established peer");
             return;
         }
 
         let Some(peer_asn) = peer_info.asn else {
-            warn!(&self.logger, "ROUTE_REFRESH before ASN known", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "ROUTE_REFRESH before ASN known");
             return;
         };
 
         let export_policies = &peer_info.export_policies;
         if export_policies.is_empty() {
-            warn!(&self.logger, "export policies not initialized", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "export policies not initialized");
             return;
         }
 
         // Only Unicast SAFI is supported currently
         if safi != Safi::Unicast {
-            warn!(&self.logger, "unsupported SAFI requested",
-                  "safi" => format!("{:?}", safi));
+            warn!(?safi, "unsupported SAFI requested");
             return;
         }
 
         const CHUNK_SIZE: usize = 10_000;
 
-        info!(&self.logger, "processing ROUTE_REFRESH with chunking",
-              "peer_ip" => peer_ip.to_string(),
-              "afi" => format!("{:?}", afi),
-              "safi" => format!("{:?}", safi),
-              "chunk_size" => CHUNK_SIZE);
+        info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
 
         if let Some(peer_tx) = &peer_info.peer_tx {
             let peer_supports_4byte_asn = peer_info
@@ -1906,7 +1889,6 @@ impl BgpServer {
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1927,7 +1909,6 @@ impl BgpServer {
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1947,14 +1928,11 @@ impl BgpServer {
                     std::net::IpAddr::V4(self.config.router_id),
                     export_policies,
                     peer_supports_4byte_asn,
-                    &self.logger,
                 );
                 total_sent += chunk.len();
             }
 
-            info!(&self.logger, "completed ROUTE_REFRESH",
-                  "peer_ip" => peer_ip.to_string(),
-                  "total_routes" => total_sent);
+            info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
         }
     }
 }

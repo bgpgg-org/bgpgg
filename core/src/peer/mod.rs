@@ -18,17 +18,15 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
-use crate::log::Logger;
+use crate::log::{debug, error, info};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
-use crate::{debug, error, info};
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Error;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -261,7 +259,6 @@ pub struct Peer {
     consecutive_down_count: u32,
     /// Connection type for collision detection
     conn_type: ConnectionType,
-    logger: Arc<Logger>,
     /// True if ManualStop was received - disables auto-reconnect until ManualStart
     manually_stopped: bool,
     /// Timestamp when Established state was entered (for stability-based damping reset)
@@ -297,7 +294,6 @@ impl Peer {
         local_addr: SocketAddr,
         config: PeerConfig,
         connect_retry_secs: u64,
-        logger: Arc<Logger>,
     ) -> Self {
         let local_ip = local_addr.ip();
         Peer {
@@ -335,7 +331,6 @@ impl Peer {
             received_open: None,
             negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
-            logger,
         }
     }
 
@@ -343,7 +338,7 @@ impl Peer {
     /// Runs forever, handling all FSM states including Idle, Connect, Active.
     pub async fn run(mut self) {
         let peer_ip = self.addr;
-        debug!(&self.logger, "starting peer task", "peer_ip" => peer_ip.to_string());
+        debug!(peer_ip = %peer_ip, "starting peer task");
 
         loop {
             match self.fsm.state() {
@@ -401,9 +396,10 @@ impl Peer {
             return false; // No collision
         }
 
-        info!(&self.logger, "collision: resolving", "peer_ip" => self.addr.to_string(),
-              "local_bgp_id" => format!("{}", std::net::Ipv4Addr::from(local_bgp_id)),
-              "remote_bgp_id" => format!("{}", std::net::Ipv4Addr::from(remote_bgp_id)));
+        info!(peer_ip = %self.addr,
+              local_bgp_id = %std::net::Ipv4Addr::from(local_bgp_id),
+              remote_bgp_id = %std::net::Ipv4Addr::from(remote_bgp_id),
+              "collision: resolving");
 
         // RFC 4271 6.8: Compare BGP IDs, keep connection from higher BGP ID speaker
         // conn_type tells us which connection initiated which way
@@ -419,7 +415,7 @@ impl Peer {
 
         if keep_collision {
             // Switch to collision_conn
-            info!(&self.logger, "collision: switching to collision connection", "peer_ip" => self.addr.to_string());
+            info!(peer_ip = %self.addr, "collision: switching to collision connection");
             self.conn = self.collision_conn.take();
             self.conn_type = if self.conn_type == ConnectionType::Outgoing {
                 ConnectionType::Incoming
@@ -429,7 +425,7 @@ impl Peer {
             true // Switched - caller should send OPEN on new connection
         } else {
             // Keep current conn, drop collision
-            info!(&self.logger, "collision: keeping current connection", "peer_ip" => self.addr.to_string());
+            info!(peer_ip = %self.addr, "collision: keeping current connection");
             self.collision_conn = None;
             false // Didn't switch - caller should continue processing
         }
@@ -516,7 +512,7 @@ impl Peer {
                 // RFC 6793: OPEN messages always use 2-byte ASN encoding
                 match Self::parse_bgp_message(&bytes, false) {
                     Ok(BgpMessage::Open(open)) => {
-                        debug!(&self.logger, "OPEN received while DelayOpen running", "peer_ip" => self.addr.to_string());
+                        debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
                         self.fsm.timers.stop_delay_open_timer();
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
                             peer_asn: open.asn,
@@ -527,7 +523,7 @@ impl Peer {
                             peer_bgp_id: open.bgp_identifier,
                         });
                         if let Err(e) = self.process_event(&event).await {
-                            error!(&self.logger, "failed to send response to OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                            error!(peer_ip = %self.addr, error = %e, "failed to send response to OPEN");
                             self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                         }
                     }
@@ -535,11 +531,11 @@ impl Peer {
                         self.handle_notification_received(&notif).await;
                     }
                     Ok(_) => {
-                        error!(&self.logger, "unexpected message while waiting for DelayOpen", "peer_ip" => self.addr.to_string());
+                        error!(peer_ip = %self.addr, "unexpected message while waiting for DelayOpen");
                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                     }
                     Err(e) => {
-                        debug!(&self.logger, "parse error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", e));
+                        debug!(peer_ip = %self.addr, error = ?e, "parse error while waiting for DelayOpen");
                         let event = Self::parse_error_to_fsm_event(&e);
                         self.try_process_event(&event).await;
                     }
@@ -547,13 +543,13 @@ impl Peer {
             }
             Some(Err(e)) => {
                 // Header validation error from read task
-                debug!(&self.logger, "connection error while waiting for DelayOpen", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                debug!(peer_ip = %self.addr, error = %e, "connection error while waiting for DelayOpen");
                 let event = Self::parse_error_to_fsm_event(&e);
                 self.try_process_event(&event).await;
             }
             None => {
                 // Read task exited without error - connection failure
-                debug!(&self.logger, "read task exited unexpectedly", "peer_ip" => self.addr.to_string());
+                debug!(peer_ip = %self.addr, "read task exited unexpectedly");
                 self.try_process_event(&FsmEvent::TcpConnectionFails).await;
             }
         }
@@ -616,7 +612,6 @@ pub mod test_helpers {
             received_open: None,
             negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
-            logger: Arc::new(Logger::default()),
         }
     }
 }

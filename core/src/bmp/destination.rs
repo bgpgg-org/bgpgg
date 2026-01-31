@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use super::msg::BmpMessage;
-use crate::log::Logger;
-use crate::{error, info};
+use crate::log::{error, info};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -26,16 +24,14 @@ pub struct BmpTcpClient {
     addr: SocketAddr,
     conn: Option<TcpStream>,
     reconnect_delay: Duration,
-    logger: Arc<Logger>,
 }
 
 impl BmpTcpClient {
-    pub fn new(addr: SocketAddr, logger: Arc<Logger>) -> Self {
+    pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
             conn: None,
             reconnect_delay: Duration::from_secs(1),
-            logger,
         }
     }
 
@@ -50,13 +46,13 @@ impl BmpTcpClient {
 
         match TcpStream::connect(self.addr).await {
             Ok(stream) => {
-                info!(&self.logger, "BMP: Connected to collector", "addr" => &self.addr);
+                info!(addr = %self.addr, "BMP: Connected to collector");
                 self.conn = Some(stream);
                 self.reconnect_delay = Duration::from_secs(1); // Reset delay
                 true
             }
             Err(e) => {
-                error!(&self.logger, "BMP: Failed to connect to collector", "addr" => &self.addr, "error" => &e.to_string());
+                error!(addr = %self.addr, error = %e, "BMP: Failed to connect to collector");
                 // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
                 self.reconnect_delay =
                     std::cmp::min(self.reconnect_delay * 2, Duration::from_secs(30));
@@ -74,7 +70,7 @@ impl BmpTcpClient {
             match conn.write_all(data).await {
                 Ok(_) => true,
                 Err(e) => {
-                    error!(&self.logger, "BMP: Write failed", "addr" => &self.addr, "error" => &e.to_string());
+                    error!(addr = %self.addr, error = %e, "BMP: Write failed");
                     self.conn = None; // Trigger reconnect
                     false
                 }

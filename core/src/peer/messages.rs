@@ -23,10 +23,10 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, ParamVal};
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::log::{debug, info, warn};
 use crate::net::IpNetwork;
 use crate::rib::Path;
 use crate::server::ServerOp;
-use crate::{debug, info, warn};
 use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -127,7 +127,7 @@ impl Peer {
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
         self.statistics.open_sent += 1;
-        info!(&self.logger, "sent OPEN message", "peer_ip" => self.addr.to_string());
+        info!(peer_ip = %self.addr, "sent OPEN message");
         Ok(())
     }
 
@@ -176,9 +176,9 @@ impl Peer {
         if local_asn > MAX_2BYTE_ASN && negotiated_four_octet_asn.is_none() {
             // We have a large ASN but peer doesn't support 4-byte ASNs
             // This violates RFC 6793 - the session cannot function correctly
-            warn!(&self.logger, "rejecting session: peer does not support 4-byte ASNs but local ASN exceeds 65535",
-                  "local_asn" => local_asn,
-                  "peer_ip" => self.addr.to_string());
+            warn!(local_asn = local_asn,
+                  peer_ip = %self.addr,
+                  "rejecting session: peer does not support 4-byte ASNs but local ASN exceeds 65535");
 
             let notif = NotificationMessage::new(
                 BgpError::OpenMessageError(OpenMessageError::UnsupportedOptionalParameter),
@@ -192,11 +192,11 @@ impl Peer {
             ));
         }
 
-        info!(&self.logger, "negotiated capabilities",
-              "multiprotocol" => format!("{:?}", self.negotiated_capabilities.multiprotocol),
-              "route_refresh" => self.negotiated_capabilities.route_refresh,
-              "four_octet_asn" => format!("{:?}", self.negotiated_capabilities.four_octet_asn),
-              "peer_ip" => self.addr.to_string());
+        info!(multiprotocol = ?self.negotiated_capabilities.multiprotocol,
+              route_refresh = self.negotiated_capabilities.route_refresh,
+              four_octet_asn = ?self.negotiated_capabilities.four_octet_asn,
+              peer_ip = %self.addr,
+              "negotiated capabilities");
 
         // Negotiate hold time: use minimum (RFC 4271).
         let hold_time = local_hold_time.min(peer_hold_time);
@@ -215,7 +215,7 @@ impl Peer {
             self.fsm.timers.stop_hold_timer();
         }
 
-        info!(&self.logger, "timers initialized", "peer_ip" => self.addr.to_string(), "hold_time" => hold_time);
+        info!(peer_ip = %self.addr, hold_time = hold_time, "timers initialized");
 
         // Notify server that handshake is complete
         let _ = self.server_tx.send(ServerOp::PeerHandshakeComplete {
@@ -235,7 +235,7 @@ impl Peer {
         let keepalive_msg = KeepaliveMessage {};
         conn.tx.write_all(&keepalive_msg.serialize()).await?;
         self.statistics.keepalive_sent += 1;
-        debug!(&self.logger, "sent KEEPALIVE message", "peer_ip" => self.addr.to_string());
+        debug!(peer_ip = %self.addr, "sent KEEPALIVE message");
         // RFC 4271: Restart KeepaliveTimer unless negotiated HoldTime is zero
         if self.fsm.timers.hold_time.as_secs() > 0 {
             self.fsm.timers.start_keepalive_timer();
@@ -253,14 +253,14 @@ impl Peer {
         notif_msg: NotificationMessage,
     ) -> Result<(), io::Error> {
         if !self.can_send_notification() {
-            warn!(&self.logger, "skipping NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
+            warn!(peer_ip = %self.addr, error = ?notif_msg.error(), "skipping NOTIFICATION");
             return Ok(());
         }
         // Safe: can_send_notification checks conn.is_some()
         let conn = self.conn.as_mut().unwrap();
         conn.tx.write_all(&notif_msg.serialize()).await?;
         self.statistics.notification_sent += 1;
-        warn!(&self.logger, "sent NOTIFICATION", "peer_ip" => self.addr.to_string(), "error" => format!("{:?}", notif_msg.error()));
+        warn!(peer_ip = %self.addr, error = ?notif_msg.error(), "sent NOTIFICATION");
         Ok(())
     }
 
@@ -319,23 +319,23 @@ impl Peer {
         match message {
             BgpMessage::Open(open_msg) => {
                 self.statistics.open_received += 1;
-                info!(&self.logger, "received OPEN from peer", "peer_ip" => self.addr.to_string(), "asn" => open_msg.asn, "hold_time" => open_msg.hold_time);
+                info!(peer_ip = %self.addr, asn = open_msg.asn, hold_time = open_msg.hold_time, "received OPEN from peer");
             }
             BgpMessage::Update(_) => {
                 self.statistics.update_received += 1;
-                info!(&self.logger, "received UPDATE", "peer_ip" => self.addr.to_string());
+                info!(peer_ip = %self.addr, "received UPDATE");
             }
             BgpMessage::Keepalive(_) => {
                 self.statistics.keepalive_received += 1;
-                debug!(&self.logger, "received KEEPALIVE", "peer_ip" => self.addr.to_string());
+                debug!(peer_ip = %self.addr, "received KEEPALIVE");
             }
             BgpMessage::Notification(notif_msg) => {
                 self.statistics.notification_received += 1;
-                warn!(&self.logger, "received NOTIFICATION", "peer_ip" => self.addr.to_string(), "notification" => format!("{:?}", notif_msg));
+                warn!(peer_ip = %self.addr, notification = ?notif_msg, "received NOTIFICATION");
             }
             BgpMessage::RouteRefresh(msg) => {
                 self.statistics.route_refresh_received += 1;
-                info!(&self.logger, "received ROUTE_REFRESH", "peer_ip" => self.addr.to_string(), "afi" => format!("{:?}", msg.afi), "safi" => format!("{:?}", msg.safi));
+                info!(peer_ip = %self.addr, afi = ?msg.afi, safi = ?msg.safi, "received ROUTE_REFRESH");
             }
         }
     }
@@ -413,8 +413,8 @@ impl Peer {
                         .await?;
                         Ok(None)
                     } else {
-                        warn!(&self.logger, "max prefix exceeded but allow_automatic_stop=false, continuing",
-                              "peer_ip" => self.addr.to_string());
+                        warn!(peer_ip = %self.addr,
+                              "max prefix exceeded but allow_automatic_stop=false, continuing");
                         Ok(None)
                     }
                 }
@@ -435,8 +435,8 @@ impl Peer {
     async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi) {
         // RFC 2918: ROUTE_REFRESH capability must be negotiated
         if !self.negotiated_capabilities.route_refresh {
-            warn!(&self.logger, "ROUTE_REFRESH received but capability not negotiated",
-                  "peer_ip" => self.addr.to_string());
+            warn!(peer_ip = %self.addr,
+                  "ROUTE_REFRESH received but capability not negotiated");
             return;
         }
 
@@ -447,10 +447,10 @@ impl Peer {
             .multiprotocol
             .contains(&requested)
         {
-            warn!(&self.logger, "ROUTE_REFRESH for non-negotiated AFI/SAFI",
-                  "peer_ip" => self.addr.to_string(),
-                  "afi" => format!("{:?}", afi),
-                  "safi" => format!("{:?}", safi));
+            warn!(peer_ip = %self.addr,
+                  afi = ?afi,
+                  safi = ?safi,
+                  "ROUTE_REFRESH for non-negotiated AFI/SAFI");
             return;
         }
 
