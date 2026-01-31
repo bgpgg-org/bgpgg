@@ -14,6 +14,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate version matches tag
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          CARGO_VERSION="v$(grep '^version' Cargo.toml | head -n1 | sed 's/.*"\(.*\)".*/\1/')"
+
+          echo "Git tag: $TAG_VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "ERROR: Version mismatch!"
+            echo "Git tag is $TAG_VERSION but Cargo.toml has version $CARGO_VERSION"
+            echo "Please update Cargo.toml [workspace.package] version to match the tag"
+            exit 1
+          fi
+
+          echo "Versions match"
+
       - name: Setup dependencies
         run: make setup
 
