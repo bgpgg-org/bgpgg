@@ -41,4 +41,3 @@ loadtest: setup
 smoketest:
 	$(MAKE) build-docker version=smoke-test platform=linux/amd64
 	./smoketests/test.sh
-
