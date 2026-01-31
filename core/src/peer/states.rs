@@ -103,6 +103,10 @@ impl Peer {
                             // ROUTE_REFRESH only allowed in Established state
                             // Drop silently
                         }
+                        PeerOp::InitialSyncComplete { .. } => {
+                            // Only relevant in Established state
+                            // Drop silently
+                        }
                         PeerOp::GetNegotiatedCapabilities(response) => {
                             // Return empty capabilities if not in Established state
                             let _ = response.send(PeerCapabilities::default());

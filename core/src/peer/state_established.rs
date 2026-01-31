@@ -279,6 +279,27 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
                         }
+                        PeerOp::InitialSyncComplete { afi_safi } => {
+                            debug!(peer_ip = %peer_ip, %afi_safi, "initial sync complete");
+
+                            if let Some(gr_state) = &mut self.gr_state {
+                                gr_state.initial_sync_complete.insert(afi_safi, true);
+
+                                // Check if all negotiated AFI/SAFIs have completed initial sync
+                                let all_complete = gr_state
+                                    .gr_afi_safis
+                                    .iter()
+                                    .all(|as_| gr_state.initial_sync_complete.get(as_).copied().unwrap_or(false));
+
+                                if all_complete && self.config.graceful_restart.restarting {
+                                    // Send EOR markers for all negotiated AFI/SAFIs
+                                    let afi_safis: Vec<_> = gr_state.gr_afi_safis.iter().copied().collect();
+                                    if let Err(e) = self.send_eor_markers(&afi_safis).await {
+                                        error!(peer_ip = %peer_ip, error = %e, "failed to send EOR markers");
+                                    }
+                                }
+                            }
+                        }
                         PeerOp::ManualStart
                         | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart

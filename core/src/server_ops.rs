@@ -250,6 +250,23 @@ impl BgpServer {
                         peer.export_policies = export_policies;
                         info!(%peer_ip, asn, "peer handshake complete");
                     }
+
+                    // Signal that initial route sync is complete for all negotiated AFI/SAFIs
+                    // Note: Routes were already sent via propagate_routes in PeerStateChanged handler
+                    if let Some(peer) = self.peers.get(&peer_ip) {
+                        let Some(peer_tx) = peer.peer_tx.as_ref() else {
+                            return;
+                        };
+
+                        // Send InitialSyncComplete for all negotiated AFI/SAFIs
+                        if let Some(caps) = &peer.negotiated_capabilities {
+                            for afi_safi in &caps.multiprotocol {
+                                let _ = peer_tx.send(PeerOp::InitialSyncComplete {
+                                    afi_safi: *afi_safi,
+                                });
+                            }
+                        }
+                    }
                 }
             }
             ServerOp::PeerUpdate {
@@ -504,6 +521,13 @@ impl BgpServer {
                 // Propagate withdrawals if any routes were removed
                 if !changed_prefixes.is_empty() {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
+            }
+            ServerOp::InitialSyncComplete { peer_ip, afi_safi } => {
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if let Some(peer_tx) = &peer.peer_tx {
+                        let _ = peer_tx.send(PeerOp::InitialSyncComplete { afi_safi });
+                    }
                 }
             }
             ServerOp::GetBmpStatistics { response } => {

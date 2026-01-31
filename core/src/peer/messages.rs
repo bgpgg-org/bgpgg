@@ -123,7 +123,11 @@ fn create_open_message(
             .map(|afi_safi| (*afi_safi, false))
             .collect();
         optional_params.push(OptionalParam::new_capability(
-            Capability::new_graceful_restart(gr_config.restart_time, false, afi_safi_list),
+            Capability::new_graceful_restart(
+                gr_config.restart_time,
+                gr_config.restarting,
+                afi_safi_list,
+            ),
         ));
     }
 

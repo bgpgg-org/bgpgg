@@ -49,6 +49,9 @@ pub struct GracefulRestartConfig {
     /// Restart time in seconds (default: 120, max: 4095)
     #[serde(default = "default_gr_restart_time")]
     pub restart_time: u16,
+    /// Set to true when bgpgg is restarting to trigger R bit and EOR sending
+    #[serde(default)]
+    pub restarting: bool,
 }
 
 fn default_gr_enabled() -> bool {
@@ -64,6 +67,7 @@ impl Default for GracefulRestartConfig {
         Self {
             enabled: default_gr_enabled(),
             restart_time: default_gr_restart_time(),
+            restarting: false,
         }
     }
 }

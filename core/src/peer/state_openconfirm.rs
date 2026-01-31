@@ -83,12 +83,10 @@ impl Peer {
                     }
                 }
 
-                // RFC 4724: Send End-of-RIB markers after entering Established
-                // This is done after all routes have been sent (which happens via server)
-                // For now, send immediately - routes will be sent via PeerOp::SendUpdate
-                if let Err(e) = self.send_eor_markers().await {
-                    crate::log::error!(peer_ip = %self.addr, error = %e, "failed to send EOR markers");
-                }
+                // RFC 4724: EOR markers should be sent AFTER all routes are sent
+                // On initial connection, we don't send EOR immediately
+                // EOR is only sent after a graceful restart when routes have been re-sent
+                // TODO: Implement EOR sending after route propagation in restart scenarios
             }
 
             (BgpState::Idle, FsmEvent::ConnectRetryTimerExpires)

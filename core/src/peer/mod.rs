@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::BgpMessage;
+use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::multiprotocol::AfiSafi;
@@ -58,6 +58,10 @@ pub struct GracefulRestartState {
     pub eor_received: HashSet<AfiSafi>,
     /// AFI/SAFIs with GR enabled (negotiated intersection)
     pub gr_afi_safis: HashSet<AfiSafi>,
+    /// End-of-RIB markers sent (per AFI/SAFI) - restarting speaker mode
+    pub eor_sent: HashSet<AfiSafi>,
+    /// Track if initial route sync is complete per AFI/SAFI - restarting speaker mode
+    pub initial_sync_complete: HashMap<AfiSafi, bool>,
 }
 
 /// BGP capabilities negotiated between peers
@@ -184,6 +188,10 @@ pub enum PeerOp {
     TcpConnectionAccepted {
         tcp_tx: OwnedWriteHalf,
         tcp_rx: OwnedReadHalf,
+    },
+    /// Server notifies that initial route sync is complete for an AFI/SAFI
+    InitialSyncComplete {
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
     },
 }
 
@@ -472,6 +480,8 @@ impl Peer {
             restart_timer: Some(timer),
             eor_received: HashSet::new(),
             gr_afi_safis,
+            eor_sent: HashSet::new(),
+            initial_sync_complete: HashMap::new(),
         });
 
         info!(peer_ip = %peer_ip, restart_time = restart_time,
@@ -618,27 +628,48 @@ impl Peer {
         }
     }
 
-    /// Send End-of-RIB markers for all negotiated AFI/SAFIs (RFC 4724)
-    async fn send_eor_markers(&mut self) -> Result<(), io::Error> {
-        use crate::bgp::msg::Message;
+    /// Send End-of-RIB markers for specified AFI/SAFIs (RFC 4724)
+    async fn send_eor_markers(&mut self, afi_safis: &[AfiSafi]) -> Result<(), io::Error> {
         use crate::bgp::msg_update::UpdateMessage;
         use crate::bgp::multiprotocol::{Afi, Safi};
+
+        // Only send if we're in restarting speaker mode
+        if !self.config.graceful_restart.restarting {
+            return Ok(());
+        }
 
         let conn = self
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(std::io::ErrorKind::NotConnected, "no TCP connection"))?;
 
-        // Send EOR for each negotiated AFI/SAFI
-        for afi_safi in &self.negotiated_capabilities.multiprotocol {
+        let gr_state = self
+            .gr_state
+            .as_mut()
+            .ok_or_else(|| io::Error::other("no GR state"))?;
+
+        for afi_safi in afi_safis {
+            // Skip if already sent
+            if gr_state.eor_sent.contains(afi_safi) {
+                continue;
+            }
+
+            // Only send for negotiated AFI/SAFIs
+            if !gr_state.gr_afi_safis.contains(afi_safi) {
+                continue;
+            }
+
+            // Create EOR message
             let eor_msg = match (afi_safi.afi, afi_safi.safi) {
                 (Afi::Ipv4, Safi::Unicast) => UpdateMessage::new_eor_ipv4_unicast(),
                 (Afi::Ipv6, Safi::Unicast) => UpdateMessage::new_eor_ipv6_unicast(),
-                _ => continue, // Skip unsupported AFI/SAFI combinations
+                _ => continue, // Skip unsupported AFI/SAFI
             };
 
+            // Send EOR
             conn.tx.write_all(&eor_msg.serialize()).await?;
-            info!(peer_ip = %self.addr, afi_safi = %afi_safi, "sent End-of-RIB marker");
+            gr_state.eor_sent.insert(*afi_safi);
+            info!(peer_ip = %self.addr, %afi_safi, "sent End-of-RIB marker");
         }
 
         Ok(())

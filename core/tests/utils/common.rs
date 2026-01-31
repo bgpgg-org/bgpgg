@@ -113,6 +113,17 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
     }
 }
 
+/// Create SessionConfig with custom graceful restart timer
+pub fn session_config_with_gr_timer(restart_time_secs: u32) -> bgpgg::grpc::proto::SessionConfig {
+    bgpgg::grpc::proto::SessionConfig {
+        graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+            enabled: Some(true),
+            restart_time_secs: Some(restart_time_secs),
+        }),
+        ..Default::default()
+    }
+}
+
 /// Parameters for building a Path in test assertions
 #[derive(Default, Clone)]
 pub struct PathParams {

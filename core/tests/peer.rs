@@ -28,7 +28,60 @@ use tokio::io::AsyncWriteExt;
 #[tokio::test]
 async fn test_peer_down() {
     let hold_timer_secs = 3;
-    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+    let gr_restart_time_secs = 3; // 3-second GR timer for testing
+
+    // Set up servers
+    let [mut server1, mut server2] = [
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            hold_timer_secs as u64,
+            true, // Accept unconfigured peers on server1
+        ))
+        .await,
+        start_test_server(Config::new(
+            65002,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            hold_timer_secs as u64,
+            false, // Server2 only accepts configured peers
+        ))
+        .await,
+    ];
+
+    // Server2 configures server1 as a passive peer with short GR timer
+    // This ensures server2 advertises the short restart time
+    let config2 = bgpgg::grpc::proto::SessionConfig {
+        graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+            enabled: Some(true),
+            restart_time_secs: Some(gr_restart_time_secs),
+        }),
+        passive_mode: Some(true),
+        ..Default::default()
+    };
+    server2
+        .client
+        .add_peer(
+            format!("{}:{}", server1.address, server1.bgp_port),
+            Some(config2),
+        )
+        .await
+        .unwrap();
+
+    // Server1 connects to server2 with short GR timer
+    let config1 = session_config_with_gr_timer(gr_restart_time_secs);
+    server1
+        .client
+        .add_peer(
+            format!("{}:{}", server2.address, server2.bgp_port),
+            Some(config1),
+        )
+        .await
+        .unwrap();
+
+    // Wait for peering to establish
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
 
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
@@ -51,15 +104,24 @@ async fn test_peer_down() {
     )
     .await;
 
-    // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
+    // Kill Server2 to simulate peer going down
     server2.kill();
 
-    // Poll for peer state change (configured peers kept in Idle, not removed)
-    // server1 connected to server2, so from server1's view, server2 is configured
+    // Poll for peer state change to Idle
     poll_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await;
 
-    // Poll for route withdrawal
-    poll_route_withdrawal(&[&server1]).await;
+    // With 3-second GR timer, routes withdrawn after 3 seconds
+    poll_until_with_timeout(
+        || async {
+            let Ok(routes) = server1.client.get_routes().await else {
+                return false;
+            };
+            routes.is_empty()
+        },
+        "Timeout waiting for route withdrawal after GR timer expires",
+        50, // 5 seconds = 3s GR timer + 2s buffer
+    )
+    .await;
 }
 
 #[tokio::test]

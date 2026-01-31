@@ -307,6 +307,11 @@ pub enum ServerOp {
         peer_ip: IpAddr,
         afi_safi: crate::bgp::multiprotocol::AfiSafi,
     },
+    /// Server signals peer that initial route propagation is complete
+    InitialSyncComplete {
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+    },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {
         response: oneshot::Sender<Vec<BmpPeerStats>>,
