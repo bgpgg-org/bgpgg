@@ -14,10 +14,14 @@
 
 pub(crate) const BGP_VERSION: u8 = 4;
 
+/// Graceful Restart capability tuple: (restart_time, restart_state, afi_safi_forwarding_list)
+type GrCapabilityInfo = (u16, bool, Vec<(crate::bgp::multiprotocol::AfiSafi, bool)>);
+
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum BgpCapabiltyCode {
     Multiprotocol = 1,
     RouteRefresh = 2,
+    GracefulRestart = 64,
     FourOctetAsn = 65,
     Unknown,
 }
@@ -27,6 +31,7 @@ impl From<u8> for BgpCapabiltyCode {
         match value {
             1 => BgpCapabiltyCode::Multiprotocol,
             2 => BgpCapabiltyCode::RouteRefresh,
+            64 => BgpCapabiltyCode::GracefulRestart,
             65 => BgpCapabiltyCode::FourOctetAsn,
             _ => BgpCapabiltyCode::Unknown,
         }
@@ -38,6 +43,7 @@ impl BgpCapabiltyCode {
         match self {
             BgpCapabiltyCode::Multiprotocol => 1,
             BgpCapabiltyCode::RouteRefresh => 2,
+            BgpCapabiltyCode::GracefulRestart => 64,
             BgpCapabiltyCode::FourOctetAsn => 65,
             BgpCapabiltyCode::Unknown => 0,
         }
@@ -151,6 +157,82 @@ impl Capability {
         } else {
             None
         }
+    }
+
+    /// Create a Graceful Restart capability (RFC 4724)
+    /// restart_time: seconds (12 bits, max 4095)
+    /// restart_state: R bit - if true, indicates router is restarting
+    /// afi_safi_list: list of (AfiSafi, forwarding_state) tuples
+    ///   forwarding_state: F bit - if true, forwarding state preserved
+    pub(crate) fn new_graceful_restart(
+        restart_time: u16,
+        restart_state: bool,
+        afi_safi_list: Vec<(crate::bgp::multiprotocol::AfiSafi, bool)>,
+    ) -> Self {
+        let mut val = Vec::new();
+
+        // First 2 bytes: Restart Flags (4 bits) + Restart Time (12 bits)
+        // R bit is bit 0 (MSB of first byte)
+        let restart_flags = if restart_state { 0x80 } else { 0x00 };
+        let restart_time_masked = restart_time & 0x0FFF; // 12 bits max
+        let first_byte = restart_flags | ((restart_time_masked >> 8) as u8);
+        let second_byte = (restart_time_masked & 0xFF) as u8;
+        val.push(first_byte);
+        val.push(second_byte);
+
+        // Foreach AFI/SAFI: [AFI(2), SAFI(1), Flags(1)]
+        for (afi_safi, forwarding_state) in afi_safi_list {
+            let afi_bytes = (afi_safi.afi as u16).to_be_bytes();
+            val.push(afi_bytes[0]);
+            val.push(afi_bytes[1]);
+            val.push(afi_safi.safi as u8);
+            // F bit is bit 0 (MSB of flags byte)
+            let flags = if forwarding_state { 0x80 } else { 0x00 };
+            val.push(flags);
+        }
+
+        Capability {
+            code: BgpCapabiltyCode::GracefulRestart,
+            len: val.len() as u8,
+            val,
+        }
+    }
+
+    /// Extract Graceful Restart capability info if this is a GracefulRestart capability
+    /// Returns (restart_time, restart_state, afi_safi_forwarding_list)
+    pub(crate) fn as_graceful_restart(&self) -> Option<GrCapabilityInfo> {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        if !matches!(self.code, BgpCapabiltyCode::GracefulRestart) || self.val.len() < 2 {
+            return None;
+        }
+
+        // Parse restart flags and time (first 2 bytes)
+        let first_byte = self.val[0];
+        let second_byte = self.val[1];
+
+        let restart_state = (first_byte & 0x80) != 0; // R bit
+        let restart_time = (((first_byte & 0x0F) as u16) << 8) | (second_byte as u16);
+
+        // Parse AFI/SAFI tuples (4 bytes each)
+        let mut afi_safi_list = Vec::new();
+        let mut offset = 2;
+        while offset + 4 <= self.val.len() {
+            let afi_bytes = [self.val[offset], self.val[offset + 1]];
+            let afi_val = u16::from_be_bytes(afi_bytes);
+            let safi_val = self.val[offset + 2];
+            let flags = self.val[offset + 3];
+
+            // Try to parse AFI/SAFI, skip if unknown
+            if let (Ok(afi), Ok(safi)) = (Afi::try_from(afi_val), Safi::try_from(safi_val)) {
+                let forwarding_state = (flags & 0x80) != 0; // F bit
+                afi_safi_list.push((AfiSafi::new(afi, safi), forwarding_state));
+            }
+
+            offset += 4;
+        }
+
+        Some((restart_time, restart_state, afi_safi_list))
     }
 }
 

@@ -285,6 +285,7 @@ pub enum ServerOp {
     PeerDisconnected {
         peer_ip: IpAddr,
         reason: PeerDownReason,
+        preserve_routes_with_gr: bool,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
     SetAdminState {
@@ -296,6 +297,15 @@ pub enum ServerOp {
         peer_ip: IpAddr,
         afi: Afi,
         safi: Safi,
+    },
+    /// Graceful Restart timer expired for a peer (RFC 4724)
+    GracefulRestartTimerExpired {
+        peer_ip: IpAddr,
+    },
+    /// Graceful Restart completed for a peer (all EORs received)
+    GracefulRestartComplete {
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
     },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {

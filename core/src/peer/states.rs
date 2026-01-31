@@ -426,6 +426,7 @@ pub(super) mod tests {
             received_open: None,
             negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
+            gr_state: None,
         }
     }
 

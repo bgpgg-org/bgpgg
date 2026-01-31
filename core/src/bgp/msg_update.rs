@@ -536,6 +536,52 @@ pub struct UpdateMessage {
     format: MessageFormat,
 }
 
+impl UpdateMessage {
+    /// Check if this UPDATE is an End-of-RIB marker (RFC 4724)
+    /// EOR is an UPDATE with no withdrawn routes, no path attributes, and no NLRI
+    pub fn is_end_of_rib(&self) -> bool {
+        self.withdrawn_routes.is_empty()
+            && self.path_attributes.is_empty()
+            && self.nlri_list.is_empty()
+    }
+
+    /// Create an End-of-RIB marker for IPv4 Unicast (RFC 4724)
+    pub fn new_eor_ipv4_unicast() -> Self {
+        UpdateMessage {
+            withdrawn_routes_len: 0,
+            withdrawn_routes: Vec::new(),
+            total_path_attributes_len: 0,
+            path_attributes: Vec::new(),
+            nlri_list: Vec::new(),
+            format: MessageFormat {
+                use_4byte_asn: true,
+            },
+        }
+    }
+
+    /// Create an End-of-RIB marker for IPv6 Unicast (RFC 4724)
+    /// Uses MP_UNREACH_NLRI with empty NLRI
+    pub fn new_eor_ipv6_unicast() -> Self {
+        UpdateMessage {
+            withdrawn_routes_len: 0,
+            withdrawn_routes: Vec::new(),
+            total_path_attributes_len: 0,
+            path_attributes: vec![PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    withdrawn_routes: Vec::new(),
+                }),
+            }],
+            nlri_list: Vec::new(),
+            format: MessageFormat {
+                use_4byte_asn: true,
+            },
+        }
+    }
+}
+
 impl Message for UpdateMessage {
     fn kind(&self) -> MessageType {
         MessageType::Update

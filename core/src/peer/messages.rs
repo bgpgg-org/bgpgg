@@ -43,8 +43,11 @@ fn default_local_capabilities() -> Vec<AfiSafi> {
     ]
 }
 
-/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793)
+/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793, RFC 4724)
 fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
+    use super::GracefulRestartInfo;
+    use std::collections::HashMap;
+
     let mut capabilities = PeerCapabilities::default();
 
     for param in &open_msg.optional_params {
@@ -66,6 +69,21 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                         capabilities.four_octet_asn = Some(asn);
                     }
                 }
+                BgpCapabiltyCode::GracefulRestart => {
+                    // RFC 4724: Parse Graceful Restart capability
+                    if let Some((restart_time, restart_state, afi_safi_list)) =
+                        cap.as_graceful_restart()
+                    {
+                        let peer_afi_safis: HashMap<AfiSafi, bool> =
+                            afi_safi_list.into_iter().collect();
+                        capabilities.graceful_restart = Some(GracefulRestartInfo {
+                            peer_restart_time: restart_time,
+                            peer_restart_state: restart_state,
+                            peer_afi_safis,
+                            local_afi_safis: HashSet::new(), // Will be set during negotiation
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -75,12 +93,17 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
 }
 
 /// Create an OPEN message with multiprotocol capabilities
-fn create_open_message(asn: u32, hold_time: u16, router_id: Ipv4Addr) -> OpenMessage {
+fn create_open_message(
+    asn: u32,
+    hold_time: u16,
+    router_id: Ipv4Addr,
+    gr_config: &crate::config::GracefulRestartConfig,
+) -> OpenMessage {
     // Create multiprotocol capabilities
     let local_capabilities = default_local_capabilities();
     let mut optional_params = Vec::new();
 
-    for afi_safi in local_capabilities {
+    for afi_safi in local_capabilities.clone() {
         optional_params.push(OptionalParam::new_capability(
             Capability::new_multiprotocol(&afi_safi),
         ));
@@ -90,6 +113,19 @@ fn create_open_message(asn: u32, hold_time: u16, router_id: Ipv4Addr) -> OpenMes
     optional_params.push(OptionalParam::new_capability(
         Capability::new_route_refresh(),
     ));
+
+    // Add Graceful Restart capability (RFC 4724) if enabled
+    if gr_config.enabled {
+        // Receiving Speaker mode only: R bit = false (we don't set R bit when restarting)
+        // F bit = false for all AFI/SAFIs (no forwarding state preservation)
+        let afi_safi_list: Vec<_> = local_capabilities
+            .iter()
+            .map(|afi_safi| (*afi_safi, false))
+            .collect();
+        optional_params.push(OptionalParam::new_capability(
+            Capability::new_graceful_restart(gr_config.restart_time, false, afi_safi_list),
+        ));
+    }
 
     // Always add Four-Octet ASN capability (RFC 6793)
     optional_params.push(OptionalParam::new_capability(
@@ -123,6 +159,7 @@ impl Peer {
             self.fsm.local_asn(),
             self.fsm.local_hold_time(),
             Ipv4Addr::from(self.fsm.local_bgp_id()),
+            &self.config.graceful_restart,
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -164,10 +201,31 @@ impl Peer {
         // Both must advertise for it to be negotiated
         let negotiated_four_octet_asn = peer_capabilities.four_octet_asn;
 
+        // Negotiate Graceful Restart capability (RFC 4724)
+        // GR is negotiated per-AFI/SAFI: only AFI/SAFIs advertised by both peers have GR enabled
+        let negotiated_gr = if self.config.graceful_restart.enabled {
+            peer_capabilities.graceful_restart.map(|peer_gr_info| {
+                use super::GracefulRestartInfo;
+
+                let local_afi_safis: HashSet<_> =
+                    default_local_capabilities().into_iter().collect();
+
+                GracefulRestartInfo {
+                    peer_restart_time: peer_gr_info.peer_restart_time,
+                    peer_restart_state: peer_gr_info.peer_restart_state,
+                    peer_afi_safis: peer_gr_info.peer_afi_safis,
+                    local_afi_safis,
+                }
+            })
+        } else {
+            None
+        };
+
         self.negotiated_capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
             route_refresh: negotiated_route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
+            graceful_restart: negotiated_gr.clone(),
         };
 
         // RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers is only
@@ -192,9 +250,26 @@ impl Peer {
             ));
         }
 
+        let gr_info = if let Some(gr) = &self.negotiated_capabilities.graceful_restart {
+            // Compute negotiated AFI/SAFIs for logging
+            let peer_set: HashSet<_> = gr.peer_afi_safis.keys().copied().collect();
+            let gr_afi_safis: Vec<_> = gr
+                .local_afi_safis
+                .intersection(&peer_set)
+                .copied()
+                .collect();
+            format!(
+                "enabled (restart_time={}s, afi_safis={:?})",
+                gr.peer_restart_time, gr_afi_safis
+            )
+        } else {
+            "disabled".to_string()
+        };
+
         info!(multiprotocol = ?self.negotiated_capabilities.multiprotocol,
               route_refresh = self.negotiated_capabilities.route_refresh,
               four_octet_asn = ?self.negotiated_capabilities.four_octet_asn,
+              graceful_restart = %gr_info,
               peer_ip = %self.addr,
               "negotiated capabilities");
 
@@ -402,6 +477,13 @@ impl Peer {
 
         // Process UPDATE message content
         if let BgpMessage::Update(update_msg) = message {
+            // RFC 4724: Check for End-of-RIB marker
+            if update_msg.is_end_of_rib() {
+                self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                    .await;
+                return Ok(None);
+            }
+
             match self.handle_update(update_msg) {
                 Ok(delta) => Ok(Some(delta)),
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
@@ -490,7 +572,8 @@ mod tests {
 
     #[test]
     fn test_extract_capabilities() {
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1));
+        let gr_config = crate::config::GracefulRestartConfig::default();
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &gr_config);
         let capabilities = extract_capabilities(&open_msg);
 
         // Check multiprotocol capabilities

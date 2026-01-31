@@ -18,7 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
-use crate::log::{error, info, warn};
+use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
@@ -264,6 +264,22 @@ impl BgpServer {
                 let peer_bgp_id = peer.bgp_id;
 
                 let import_policies = peer.policy_in();
+
+                // Check if peer is in GR restart mode
+                let gr_afi_safis = peer
+                    .negotiated_capabilities
+                    .as_ref()
+                    .and_then(|caps| caps.graceful_restart.as_ref())
+                    .map(|gr_info| {
+                        use std::collections::HashSet;
+                        let peer_set: HashSet<_> = gr_info.peer_afi_safis.keys().copied().collect();
+                        gr_info
+                            .local_afi_safis
+                            .intersection(&peer_set)
+                            .copied()
+                            .collect::<Vec<_>>()
+                    });
+
                 if !import_policies.is_empty() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip,
@@ -281,6 +297,27 @@ impl BgpServer {
                             false // All policies returned Continue -> default reject
                         },
                     );
+
+                    // RFC 4724: Mark announced routes as refreshed if peer is in GR
+                    if let Some(gr_afis) = gr_afi_safis {
+                        for (prefix, _) in &announced {
+                            // Determine AFI/SAFI from prefix
+                            use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+                            let afi_safi = match prefix {
+                                crate::net::IpNetwork::V4(_) => {
+                                    AfiSafi::new(Afi::Ipv4, Safi::Unicast)
+                                }
+                                crate::net::IpNetwork::V6(_) => {
+                                    AfiSafi::new(Afi::Ipv6, Safi::Unicast)
+                                }
+                            };
+                            if gr_afis.contains(&afi_safi) {
+                                self.loc_rib
+                                    .mark_route_refreshed(peer_ip, afi_safi, *prefix);
+                            }
+                        }
+                    }
+
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
@@ -325,16 +362,43 @@ impl BgpServer {
                     peer.negotiated_capabilities = Some(negotiated_capabilities);
                 }
             }
-            ServerOp::PeerDisconnected { peer_ip, reason } => {
+            ServerOp::PeerDisconnected {
+                peer_ip,
+                reason,
+                preserve_routes_with_gr,
+            } => {
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
 
-                // Extract peer info for BMP before potentially removing the peer
-                // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
+                // Extract peer info before potentially removing the peer
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
                     (Some(asn), Some(bgp_id)) => Some((asn, bgp_id, peer_supports_4byte_asn(peer))),
                     _ => None,
+                };
+
+                // Extract GR AFI/SAFIs before potentially removing the peer
+                let gr_afi_safis = if preserve_routes_with_gr {
+                    if let Some(caps) = &peer.negotiated_capabilities {
+                        if let Some(gr_info) = &caps.graceful_restart {
+                            use std::collections::HashSet;
+                            let peer_set: HashSet<_> =
+                                gr_info.peer_afi_safis.keys().copied().collect();
+                            Some(
+                                gr_info
+                                    .local_afi_safis
+                                    .intersection(&peer_set)
+                                    .copied()
+                                    .collect::<Vec<_>>(),
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 };
 
                 if peer.configured {
@@ -351,12 +415,23 @@ impl BgpServer {
                     info!(%peer_ip, total_peers = self.peers.len(), "unconfigured peer removed");
                 }
 
-                // Notify Loc-RIB about disconnection and get affected prefixes
-                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                // RFC 4724: Handle routes based on Graceful Restart state
+                if let Some(afi_safis) = gr_afi_safis {
+                    info!(%peer_ip, ?afi_safis,
+                          "peer disconnected with Graceful Restart - marking routes as stale (Receiving Speaker mode)");
 
-                // Propagate withdrawals to other peers
-                if !changed_prefixes.is_empty() {
-                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    // Mark routes stale for each GR-enabled AFI/SAFI
+                    for afi_safi in afi_safis {
+                        let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+                        debug!(%peer_ip, %afi_safi, count, "marked routes as stale");
+                    }
+                    // No withdrawals are propagated (RFC 4724 Section 4.1)
+                } else {
+                    // No GR: remove routes and propagate withdrawals
+                    let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                    if !changed_prefixes.is_empty() {
+                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
                 }
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
@@ -377,6 +452,59 @@ impl BgpServer {
             }
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
+            }
+            ServerOp::GracefulRestartTimerExpired { peer_ip } => {
+                info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
+
+                // Get the GR AFI/SAFIs from peer's negotiated capabilities
+                let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
+                    if let Some(caps) = &peer.negotiated_capabilities {
+                        if let Some(gr_info) = &caps.graceful_restart {
+                            use std::collections::HashSet;
+                            let peer_set: HashSet<_> =
+                                gr_info.peer_afi_safis.keys().copied().collect();
+                            gr_info
+                                .local_afi_safis
+                                .intersection(&peer_set)
+                                .copied()
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // Remove stale routes for all GR-enabled AFI/SAFIs
+                let mut all_changed_prefixes = Vec::new();
+                for afi_safi in gr_afi_safis {
+                    let changed = self
+                        .loc_rib
+                        .remove_stale_routes_from_peer(peer_ip, afi_safi);
+                    all_changed_prefixes.extend(changed);
+                }
+
+                // Propagate withdrawals if any routes were removed
+                if !all_changed_prefixes.is_empty() {
+                    self.propagate_routes(all_changed_prefixes, Some(peer_ip))
+                        .await;
+                }
+            }
+            ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
+                info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
+
+                // Remove stale routes for this specific AFI/SAFI
+                let changed_prefixes = self
+                    .loc_rib
+                    .remove_stale_routes_from_peer(peer_ip, afi_safi);
+
+                // Propagate withdrawals if any routes were removed
+                if !changed_prefixes.is_empty() {
+                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
             }
             ServerOp::GetBmpStatistics { response } => {
                 self.handle_get_bmp_statistics(response).await;

@@ -246,6 +246,7 @@ mod tests {
                 multiprotocol: negotiated.into_iter().collect(),
                 route_refresh: false,
                 four_octet_asn: None,
+                graceful_restart: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 

@@ -23,15 +23,42 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::Route;
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::io::Error;
+use std::io::{self, Error};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// Graceful Restart information negotiated between peers (RFC 4724)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GracefulRestartInfo {
+    /// Restart time advertised by peer (seconds)
+    pub peer_restart_time: u16,
+    /// R bit from peer - indicates peer is restarting
+    pub peer_restart_state: bool,
+    /// Per-AFI/SAFI forwarding state from peer (F bit)
+    pub peer_afi_safis: HashMap<AfiSafi, bool>,
+    /// AFI/SAFIs we advertised in our GR capability
+    pub local_afi_safis: HashSet<AfiSafi>,
+}
+
+/// Runtime Graceful Restart state for a peer (RFC 4724)
+#[derive(Debug)]
+pub struct GracefulRestartState {
+    /// Per-AFI/SAFI restart state (true = in restart for this AFI/SAFI)
+    pub in_restart: HashMap<AfiSafi, bool>,
+    /// Restart timer task handle
+    pub restart_timer: Option<JoinHandle<()>>,
+    /// End-of-RIB markers received (per AFI/SAFI)
+    pub eor_received: HashSet<AfiSafi>,
+    /// AFI/SAFIs with GR enabled (negotiated intersection)
+    pub gr_afi_safis: HashSet<AfiSafi>,
+}
 
 /// BGP capabilities negotiated between peers
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,6 +70,8 @@ pub struct PeerCapabilities {
     /// Four-Octet ASN capability (RFC 6793)
     /// Contains the peer's 4-byte ASN if advertised
     pub four_octet_asn: Option<u32>,
+    /// Graceful Restart capability (RFC 4724)
+    pub graceful_restart: Option<GracefulRestartInfo>,
 }
 
 impl PeerCapabilities {
@@ -277,6 +306,8 @@ pub struct Peer {
     negotiated_capabilities: PeerCapabilities,
     /// AFI/SAFI pairs disabled due to errors (RFC 4760 Section 7)
     disabled_afi_safi: HashSet<crate::bgp::multiprotocol::AfiSafi>,
+    /// Graceful Restart runtime state (RFC 4724)
+    gr_state: Option<GracefulRestartState>,
 }
 
 impl Peer {
@@ -331,6 +362,7 @@ impl Peer {
             received_open: None,
             negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
+            gr_state: None,
         }
     }
 
@@ -367,22 +399,111 @@ impl Peer {
         }
     }
 
+    /// Check if routes should be preserved with Graceful Restart (RFC 4724)
+    /// Returns true if GR is enabled and peer advertised a restart time > 0
+    fn should_preserve_routes_with_gr(&self) -> bool {
+        // Only preserve routes if we're in Established state and have GR negotiated
+        if self.fsm.state() != BgpState::Established {
+            return false;
+        }
+
+        if let Some(gr_info) = &self.negotiated_capabilities.graceful_restart {
+            // RFC 4724: Receiving Speaker mode
+            // Check if peer advertised restart_time > 0 and has AFI/SAFIs with GR
+            if gr_info.peer_restart_time > 0 {
+                let peer_set: HashSet<_> = gr_info.peer_afi_safis.keys().copied().collect();
+                let gr_afi_safis: HashSet<_> = gr_info
+                    .local_afi_safis
+                    .intersection(&peer_set)
+                    .copied()
+                    .collect();
+                return !gr_afi_safis.is_empty();
+            }
+        }
+        false
+    }
+
+    /// Start Graceful Restart timer (RFC 4724)
+    fn start_gr_restart_timer(&mut self) {
+        let Some(gr_info) = &self.negotiated_capabilities.graceful_restart else {
+            return;
+        };
+
+        let restart_time = gr_info.peer_restart_time;
+        if restart_time == 0 {
+            return;
+        }
+
+        // Compute negotiated AFI/SAFIs for this GR session
+        let peer_set: HashSet<_> = gr_info.peer_afi_safis.keys().copied().collect();
+        let gr_afi_safis: HashSet<_> = gr_info
+            .local_afi_safis
+            .intersection(&peer_set)
+            .copied()
+            .collect();
+
+        if gr_afi_safis.is_empty() {
+            return;
+        }
+
+        // Cancel existing timer if any
+        if let Some(state) = &mut self.gr_state {
+            if let Some(timer) = state.restart_timer.take() {
+                timer.abort();
+            }
+        }
+
+        // Spawn new restart timer
+        let peer_ip = self.addr;
+        let server_tx = self.server_tx.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(restart_time as u64)).await;
+            let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired { peer_ip });
+        });
+
+        // Initialize or update GR state
+        let mut in_restart = HashMap::new();
+        for afi_safi in &gr_afi_safis {
+            in_restart.insert(*afi_safi, true);
+        }
+
+        self.gr_state = Some(GracefulRestartState {
+            in_restart,
+            restart_timer: Some(timer),
+            eor_received: HashSet::new(),
+            gr_afi_safis,
+        });
+
+        info!(peer_ip = %peer_ip, restart_time = restart_time,
+              "started Graceful Restart timer (Receiving Speaker mode)");
+    }
+
     /// Disconnect TCP and transition FSM.
     fn disconnect(&mut self, apply_damping: bool, reason: PeerDownReason) {
         let had_connection = self.conn.is_some();
+        let preserve_routes_with_gr = self.should_preserve_routes_with_gr();
+
         self.conn = None;
         self.collision_conn = None;
         self.established_at = None;
         self.fsm.timers.stop_hold_timer();
         self.fsm.timers.stop_keepalive_timer();
         self.fsm.timers.stop_delay_open_timer();
+
         if had_connection {
             if apply_damping {
                 self.consecutive_down_count += 1;
             }
+
+            // Start GR timer if applicable
+            if preserve_routes_with_gr {
+                self.start_gr_restart_timer();
+            }
+
             let _ = self.server_tx.send(ServerOp::PeerDisconnected {
                 peer_ip: self.addr,
                 reason,
+                preserve_routes_with_gr,
             });
         }
     }
@@ -456,6 +577,71 @@ impl Peer {
     /// Get current BGP state
     pub fn state(&self) -> BgpState {
         self.fsm.state()
+    }
+
+    /// Handle End-of-RIB marker received (RFC 4724)
+    pub(super) async fn handle_eor_received(&mut self, afi_safi: AfiSafi) {
+        let Some(gr_state) = &mut self.gr_state else {
+            debug!(peer_ip = %self.addr, %afi_safi, "EOR received but no GR state");
+            return;
+        };
+
+        if !gr_state.gr_afi_safis.contains(&afi_safi) {
+            debug!(peer_ip = %self.addr, %afi_safi, "EOR received for non-GR AFI/SAFI");
+            return;
+        }
+
+        if gr_state.eor_received.insert(afi_safi) {
+            info!(peer_ip = %self.addr, %afi_safi, "End-of-RIB received");
+
+            // Mark this AFI/SAFI as no longer in restart
+            gr_state.in_restart.insert(afi_safi, false);
+
+            // Cancel restart timer if all expected EORs received
+            let all_eors_received = gr_state
+                .gr_afi_safis
+                .iter()
+                .all(|as_| gr_state.eor_received.contains(as_));
+
+            if all_eors_received {
+                info!(peer_ip = %self.addr, "all EORs received - Graceful Restart complete");
+                if let Some(timer) = gr_state.restart_timer.take() {
+                    timer.abort();
+                }
+            }
+
+            // Notify server to remove stale routes for this AFI/SAFI
+            let _ = self.server_tx.send(ServerOp::GracefulRestartComplete {
+                peer_ip: self.addr,
+                afi_safi,
+            });
+        }
+    }
+
+    /// Send End-of-RIB markers for all negotiated AFI/SAFIs (RFC 4724)
+    async fn send_eor_markers(&mut self) -> Result<(), io::Error> {
+        use crate::bgp::msg::Message;
+        use crate::bgp::msg_update::UpdateMessage;
+        use crate::bgp::multiprotocol::{Afi, Safi};
+
+        let conn = self
+            .conn
+            .as_mut()
+            .ok_or_else(|| io::Error::new(std::io::ErrorKind::NotConnected, "no TCP connection"))?;
+
+        // Send EOR for each negotiated AFI/SAFI
+        for afi_safi in &self.negotiated_capabilities.multiprotocol {
+            let eor_msg = match (afi_safi.afi, afi_safi.safi) {
+                (Afi::Ipv4, Safi::Unicast) => UpdateMessage::new_eor_ipv4_unicast(),
+                (Afi::Ipv6, Safi::Unicast) => UpdateMessage::new_eor_ipv6_unicast(),
+                _ => continue, // Skip unsupported AFI/SAFI combinations
+            };
+
+            conn.tx.write_all(&eor_msg.serialize()).await?;
+            info!(peer_ip = %self.addr, afi_safi = %afi_safi, "sent End-of-RIB marker");
+        }
+
+        Ok(())
     }
 
     /// Check if NOTIFICATION can be sent (RFC 4271 8.2.1.5).
@@ -612,6 +798,7 @@ pub mod test_helpers {
             received_open: None,
             negotiated_capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
+            gr_state: None,
         }
     }
 }

@@ -280,6 +280,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
+        graceful_restart: defaults.graceful_restart,
     }
 }
 
