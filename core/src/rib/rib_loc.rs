@@ -16,7 +16,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::{Path, Route, RouteSource};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -32,6 +32,12 @@ pub struct LocRib {
     // Per-AFI/SAFI tables
     ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
     ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
+
+    /// Track stale routes during Graceful Restart (RFC 4724)
+    /// Key: (peer_ip, afi_safi), Value: set of stale prefixes
+    /// Routes are marked stale when peer disconnects with GR enabled
+    /// Routes are unmarked when refreshed during GR, or removed after EOR/timer expiry
+    stale_routes: HashMap<(IpAddr, crate::bgp::multiprotocol::AfiSafi), HashSet<IpNetwork>>,
 }
 
 // Helper functions to avoid code duplication
@@ -225,6 +231,7 @@ impl LocRib {
         LocRib {
             ipv4_unicast: HashMap::new(),
             ipv6_unicast: HashMap::new(),
+            stale_routes: HashMap::new(),
         }
     }
 
@@ -343,6 +350,107 @@ impl LocRib {
                 .first()
                 .map(|path| (route.prefix, Arc::clone(path)))
         })
+    }
+
+    /// Mark all routes from a peer for a specific AFI/SAFI as stale (RFC 4724 Graceful Restart)
+    /// Returns the count of routes marked as stale
+    pub fn mark_peer_routes_stale(
+        &mut self,
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+    ) -> usize {
+        use crate::bgp::multiprotocol::{Afi, Safi};
+
+        let prefixes: Vec<IpNetwork> = self
+            .get_prefixes_from_peer(peer_ip)
+            .into_iter()
+            .filter(|prefix| {
+                matches!(
+                    (afi_safi.afi, afi_safi.safi, prefix),
+                    (Afi::Ipv4, Safi::Unicast, IpNetwork::V4(_))
+                        | (Afi::Ipv6, Safi::Unicast, IpNetwork::V6(_))
+                )
+            })
+            .collect();
+
+        let count = prefixes.len();
+        if count > 0 {
+            self.stale_routes
+                .entry((peer_ip, afi_safi))
+                .or_default()
+                .extend(prefixes);
+            info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = count,
+                  "marked routes as stale for Graceful Restart");
+        }
+        count
+    }
+
+    /// Check if a specific route is marked as stale
+    pub fn is_route_stale(
+        &self,
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+        prefix: IpNetwork,
+    ) -> bool {
+        self.stale_routes
+            .get(&(peer_ip, afi_safi))
+            .map(|set| set.contains(&prefix))
+            .unwrap_or(false)
+    }
+
+    /// Mark a route as refreshed (remove from stale set) during Graceful Restart
+    pub fn mark_peer_routes_refreshed(&mut self, peer_ip: IpAddr, prefix: IpNetwork) {
+        let afi_safi = prefix.afi_safi();
+        if let Some(stale_set) = self.stale_routes.get_mut(&(peer_ip, afi_safi)) {
+            if stale_set.remove(&prefix) {
+                debug!(peer_ip = %peer_ip, prefix = ?prefix, "route refreshed during GR");
+            }
+        }
+    }
+
+    /// Remove all stale routes from a peer for a specific AFI/SAFI
+    /// Returns prefixes where the best path changed
+    pub fn remove_peer_routes_stale(
+        &mut self,
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+    ) -> Vec<IpNetwork> {
+        let stale_prefixes = self
+            .stale_routes
+            .remove(&(peer_ip, afi_safi))
+            .unwrap_or_default();
+
+        if stale_prefixes.is_empty() {
+            return Vec::new();
+        }
+
+        info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = stale_prefixes.len(),
+              "removing stale routes after GR timer expiry/EOR");
+
+        let mut changed_prefixes = Vec::new();
+
+        for prefix in stale_prefixes {
+            // Snapshot old best path
+            let old_best = self.get_best_path(&prefix).map(Arc::clone);
+
+            // Remove path from peer
+            let removed = self.remove_peer_path(prefix, peer_ip);
+
+            if removed {
+                // Check if best path changed
+                let new_best = self.get_best_path(&prefix);
+                if old_best.as_ref() != new_best {
+                    changed_prefixes.push(prefix);
+                }
+            }
+        }
+
+        changed_prefixes
+    }
+
+    /// Check if a peer has any stale routes (is in GR restart mode)
+    pub fn has_stale_routes_for_peer(&self, peer_ip: IpAddr) -> bool {
+        self.stale_routes.keys().any(|(ip, _)| *ip == peer_ip)
     }
 }
 

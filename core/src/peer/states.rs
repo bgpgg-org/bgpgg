@@ -48,7 +48,7 @@ impl Peer {
                     match result {
                         Some(Ok(bytes)) => {
                             // Parse bytes using negotiated capabilities
-                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
                             let message_type = bytes[18]; // Type is in header byte 18
                             let body = bytes[19..].to_vec(); // Body starts after header
 
@@ -101,6 +101,10 @@ impl Peer {
                         }
                         PeerOp::SendRouteRefresh { .. } => {
                             // ROUTE_REFRESH only allowed in Established state
+                            // Drop silently
+                        }
+                        PeerOp::LocalRibSent { .. } => {
+                            // Only relevant in Established state
                             // Drop silently
                         }
                         PeerOp::GetNegotiatedCapabilities(response) => {
@@ -156,15 +160,46 @@ impl Peer {
                             // Ignored when connected
                         }
                         PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
-                            // RFC 4271 6.8: Store second connection for collision detection
-                            if self.collision_conn.is_none() {
-                                info!(peer_ip = %peer_ip, "collision: storing second connection");
-                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                            // RFC 4724 Section 5: If GR active, restart connection with new TCP
+                            let peer_supports_gr = self
+                                .capabilities
+                                .graceful_restart
+                                .as_ref()
+                                .map(|gr| !gr.afi_safi_list.is_empty())
+                                .unwrap_or(false);
+
+                            if peer_supports_gr {
+                                // RFC 4724: Drop established connection, retain routes, go to Connect
+                                info!(peer_ip = %peer_ip, "second connection with GR - restarting to Connect");
+
+                                // Disconnect current connection with route preservation
+                                self.disconnect(false, PeerDownReason::LocalNoNotification(
+                                    FsmEvent::TcpConnectionConfirmed
+                                ));
+
+                                // Set new connection as primary
+                                self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                                self.conn_type = ConnectionType::Incoming;
+
+                                // RFC 4724: Set ConnectRetryCounter to zero
+                                self.fsm.reset_connect_retry_counter();
+
+                                // RFC 4724: Start ConnectRetryTimer and transition to Connect
+                                self.fsm.timers.start_connect_retry();
+                                self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+                                self.notify_state_change();
+                                return false; // Exit Established state loop
                             } else {
-                                // Already have collision_conn - shouldn't happen, drop it
-                                debug!(peer_ip = %peer_ip, "collision: dropping third connection");
-                                drop(tcp_tx);
-                                drop(tcp_rx);
+                                // RFC 4271 6.8: Store second connection for collision detection
+                                if self.collision_conn.is_none() {
+                                    info!(peer_ip = %peer_ip, "collision: storing second connection");
+                                    self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                                } else {
+                                    // Already have collision_conn - shouldn't happen, drop it
+                                    debug!(peer_ip = %peer_ip, "collision: dropping third connection");
+                                    drop(tcp_tx);
+                                    drop(tcp_rx);
+                                }
                             }
                         }
                     }
@@ -424,8 +459,9 @@ pub(super) mod tests {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
-            negotiated_capabilities: PeerCapabilities::default(),
+            capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
+            gr_state: None,
         }
     }
 

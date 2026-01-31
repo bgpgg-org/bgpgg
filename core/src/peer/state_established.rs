@@ -135,7 +135,7 @@ impl Peer {
                     match result {
                         Some(Ok(bytes)) => {
                             // Parse bytes using negotiated 4-byte ASN capability
-                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
                             match Self::parse_bgp_message(&bytes, use_4byte_asn) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
@@ -208,7 +208,7 @@ impl Peer {
                         }
                         PeerOp::SendRouteRefresh { afi, safi } => {
                             // RFC 2918: Only send if capability was negotiated
-                            if !self.negotiated_capabilities.route_refresh {
+                            if !self.capabilities.route_refresh {
                                 warn!(peer_ip = %peer_ip,
                                       "cannot send ROUTE_REFRESH: capability not negotiated");
                                 continue;
@@ -216,7 +216,7 @@ impl Peer {
 
                             // Validate that the specific AFI/SAFI was negotiated
                             let afi_safi = AfiSafi::new(afi, safi);
-                            if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
+                            if !self.capabilities.supports_afi_safi(&afi_safi) {
                                 warn!(peer_ip = %peer_ip,
                                       afi = ?afi,
                                       safi = ?safi,
@@ -242,7 +242,7 @@ impl Peer {
                             }
                         }
                         PeerOp::GetNegotiatedCapabilities(response) => {
-                            let _ = response.send(self.negotiated_capabilities.clone());
+                            let _ = response.send(self.capabilities.clone());
                         }
                         PeerOp::HardReset => {
                             info!(peer_ip = %peer_ip, "hard reset requested");
@@ -278,6 +278,27 @@ impl Peer {
                             info!(peer_ip = %peer_ip, "ManualStop received");
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
+                        }
+                        PeerOp::LocalRibSent { afi_safi } => {
+                            debug!(peer_ip = %peer_ip, %afi_safi, "loc-rib sent");
+
+                            if let Some(gr_state) = &mut self.gr_state {
+                                gr_state.loc_rib_received.insert(afi_safi, true);
+
+                                // Check if all negotiated AFI/SAFIs have received loc-rib
+                                let all_complete = gr_state
+                                    .afi_safis
+                                    .iter()
+                                    .all(|as_| gr_state.loc_rib_received.get(as_).copied().unwrap_or(false));
+
+                                if all_complete {
+                                    // Send EOR markers for all negotiated AFI/SAFIs
+                                    let afi_safis: Vec<_> = gr_state.afi_safis.iter().copied().collect();
+                                    if let Err(e) = self.send_eor_markers(&afi_safis).await {
+                                        error!(peer_ip = %peer_ip, error = %e, "failed to send EOR markers");
+                                    }
+                                }
+                            }
                         }
                         PeerOp::ManualStart
                         | PeerOp::ManualStartPassive

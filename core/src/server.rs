@@ -285,6 +285,7 @@ pub enum ServerOp {
     PeerDisconnected {
         peer_ip: IpAddr,
         reason: PeerDownReason,
+        gr_afi_safis: Vec<crate::bgp::multiprotocol::AfiSafi>,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
     SetAdminState {
@@ -296,6 +297,20 @@ pub enum ServerOp {
         peer_ip: IpAddr,
         afi: Afi,
         safi: Safi,
+    },
+    /// Graceful Restart timer expired for a peer (RFC 4724)
+    GracefulRestartTimerExpired {
+        peer_ip: IpAddr,
+    },
+    /// Graceful Restart completed for a peer (all EORs received)
+    GracefulRestartComplete {
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+    },
+    /// Server signals peer that loc-rib has been sent
+    LocalRibSent {
+        peer_ip: IpAddr,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
     },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {
@@ -379,8 +394,8 @@ pub struct PeerInfo {
     pub config: PeerConfig,
     /// Connection info (Some when Established, None otherwise)
     pub conn_info: Option<ConnectionInfo>,
-    /// Negotiated capabilities (available when Established)
-    pub negotiated_capabilities: Option<PeerCapabilities>,
+    /// Peer capabilities (available when Established)
+    pub capabilities: Option<PeerCapabilities>,
 }
 
 impl PeerInfo {
@@ -400,7 +415,7 @@ impl PeerInfo {
             peer_tx,
             config,
             conn_info: None,
-            negotiated_capabilities: None,
+            capabilities: None,
         }
     }
 
@@ -843,7 +858,7 @@ impl BgpServer {
             let export_policies = entry.policy_out();
             if !export_policies.is_empty() {
                 let peer_supports_4byte_asn = entry
-                    .negotiated_capabilities
+                    .capabilities
                     .as_ref()
                     .map(|caps| caps.supports_four_octet_asn())
                     .unwrap_or(false);

@@ -35,15 +35,66 @@ use tokio::io::AsyncWriteExt;
 
 use super::{Peer, SessionType};
 
-/// Default local capabilities to advertise
-fn default_local_capabilities() -> Vec<AfiSafi> {
+/// Default AFI/SAFIs to advertise via multiprotocol capability
+fn default_afi_safis() -> Vec<AfiSafi> {
     vec![
         AfiSafi::new(Afi::Ipv4, Safi::Unicast),
         AfiSafi::new(Afi::Ipv6, Safi::Unicast),
     ]
 }
 
-/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793)
+/// Negotiate multiprotocol capabilities (intersection of local and peer)
+fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSet<AfiSafi> {
+    let local_set: HashSet<_> = local.iter().copied().collect();
+    local_set.intersection(peer).copied().collect()
+}
+
+/// Build complete list of optional parameters for OPEN message
+fn build_optional_params(
+    asn: u32,
+    gr_config: &crate::config::GracefulRestartConfig,
+) -> Vec<OptionalParam> {
+    let afi_safis = default_afi_safis();
+    let mut optional_params = Vec::new();
+
+    // Add multiprotocol capabilities (RFC 4760)
+    for afi_safi in &afi_safis {
+        optional_params.push(OptionalParam::new_capability(
+            Capability::new_multiprotocol(afi_safi),
+        ));
+    }
+
+    // Add Route Refresh capability (RFC 2918)
+    optional_params.push(OptionalParam::new_capability(
+        Capability::new_route_refresh(),
+    ));
+
+    // Add Graceful Restart capability (RFC 4724) if enabled
+    if gr_config.enabled {
+        // Receiving Speaker mode: R bit = false (we don't preserve forwarding state)
+        // F bit = false for all AFI/SAFIs (no forwarding state preservation)
+        let afi_safi_list: Vec<_> = afi_safis
+            .iter()
+            .map(|afi_safi| (*afi_safi, false))
+            .collect();
+        optional_params.push(OptionalParam::new_capability(
+            Capability::new_graceful_restart(
+                gr_config.restart_time,
+                false, // R bit: we don't preserve forwarding state across restarts
+                afi_safi_list,
+            ),
+        ));
+    }
+
+    // Always add Four-Octet ASN capability (RFC 6793)
+    optional_params.push(OptionalParam::new_capability(
+        Capability::new_four_octet_asn(asn),
+    ));
+
+    optional_params
+}
+
+/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793, RFC 4724)
 fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
     let mut capabilities = PeerCapabilities::default();
 
@@ -66,6 +117,10 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                         capabilities.four_octet_asn = Some(asn);
                     }
                 }
+                BgpCapabiltyCode::GracefulRestart => {
+                    // RFC 4724: Parse Graceful Restart capability
+                    capabilities.graceful_restart = cap.as_graceful_restart();
+                }
                 _ => {}
             }
         }
@@ -74,27 +129,14 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
     capabilities
 }
 
-/// Create an OPEN message with multiprotocol capabilities
-fn create_open_message(asn: u32, hold_time: u16, router_id: Ipv4Addr) -> OpenMessage {
-    // Create multiprotocol capabilities
-    let local_capabilities = default_local_capabilities();
-    let mut optional_params = Vec::new();
-
-    for afi_safi in local_capabilities {
-        optional_params.push(OptionalParam::new_capability(
-            Capability::new_multiprotocol(&afi_safi),
-        ));
-    }
-
-    // Add Route Refresh capability (RFC 2918)
-    optional_params.push(OptionalParam::new_capability(
-        Capability::new_route_refresh(),
-    ));
-
-    // Always add Four-Octet ASN capability (RFC 6793)
-    optional_params.push(OptionalParam::new_capability(
-        Capability::new_four_octet_asn(asn),
-    ));
+/// Create an OPEN message with all capabilities
+fn create_open_message(
+    asn: u32,
+    hold_time: u16,
+    router_id: Ipv4Addr,
+    gr_config: &crate::config::GracefulRestartConfig,
+) -> OpenMessage {
+    let optional_params = build_optional_params(asn, gr_config);
 
     // Calculate total optional params length
     let optional_params_len = optional_params
@@ -123,6 +165,7 @@ impl Peer {
             self.fsm.local_asn(),
             self.fsm.local_hold_time(),
             Ipv4Addr::from(self.fsm.local_bgp_id()),
+            &self.config.graceful_restart,
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -149,12 +192,9 @@ impl Peer {
         });
 
         // Negotiate multiprotocol capabilities (intersection of local and peer)
-        let local_capabilities = default_local_capabilities();
-        let local_set: HashSet<_> = local_capabilities.into_iter().collect();
-        let negotiated_multiprotocol = local_set
-            .intersection(&peer_capabilities.multiprotocol)
-            .copied()
-            .collect();
+        let local_afi_safis = default_afi_safis();
+        let negotiated_multiprotocol =
+            negotiate_multiprotocol(&local_afi_safis, &peer_capabilities.multiprotocol);
 
         // Negotiate Route Refresh capability (RFC 2918)
         // We always advertise it, so it's negotiated if the peer also advertises it
@@ -164,11 +204,17 @@ impl Peer {
         // Both must advertise for it to be negotiated
         let negotiated_four_octet_asn = peer_capabilities.four_octet_asn;
 
-        self.negotiated_capabilities = PeerCapabilities {
+        self.capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
             route_refresh: negotiated_route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
+            graceful_restart: peer_capabilities.graceful_restart,
         };
+
+        // RFC 4724: Update FSM with GR status
+        // GR is active if peer advertised it (received, not what we sent)
+        let gr_active = self.capabilities.graceful_restart.is_some();
+        self.fsm.set_graceful_restart_negotiated(gr_active);
 
         // RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers is only
         // possible if the NEW speaker has a two-octet AS number
@@ -192,11 +238,12 @@ impl Peer {
             ));
         }
 
-        info!(multiprotocol = ?self.negotiated_capabilities.multiprotocol,
-              route_refresh = self.negotiated_capabilities.route_refresh,
-              four_octet_asn = ?self.negotiated_capabilities.four_octet_asn,
+        info!(multiprotocol = ?self.capabilities.multiprotocol,
+              route_refresh = self.capabilities.route_refresh,
+              four_octet_asn = ?self.capabilities.four_octet_asn,
+              graceful_restart = ?self.capabilities.graceful_restart,
               peer_ip = %self.addr,
-              "negotiated capabilities");
+              "peer capabilities");
 
         // Negotiate hold time: use minimum (RFC 4271).
         let hold_time = local_hold_time.min(peer_hold_time);
@@ -402,6 +449,13 @@ impl Peer {
 
         // Process UPDATE message content
         if let BgpMessage::Update(update_msg) = message {
+            // RFC 4724: Check for End-of-RIB marker
+            if update_msg.is_eor() {
+                self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                    .await;
+                return Ok(None);
+            }
+
             match self.handle_update(update_msg) {
                 Ok(delta) => Ok(Some(delta)),
                 Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
@@ -434,7 +488,7 @@ impl Peer {
     /// Handle received ROUTE_REFRESH message
     async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi) {
         // RFC 2918: ROUTE_REFRESH capability must be negotiated
-        if !self.negotiated_capabilities.route_refresh {
+        if !self.capabilities.route_refresh {
             warn!(peer_ip = %self.addr,
                   "ROUTE_REFRESH received but capability not negotiated");
             return;
@@ -442,11 +496,7 @@ impl Peer {
 
         // Validate against negotiated multiprotocol capabilities
         let requested = AfiSafi::new(afi, safi);
-        if !self
-            .negotiated_capabilities
-            .multiprotocol
-            .contains(&requested)
-        {
+        if !self.capabilities.multiprotocol.contains(&requested) {
             warn!(peer_ip = %self.addr,
                   afi = ?afi,
                   safi = ?safi,
@@ -490,7 +540,8 @@ mod tests {
 
     #[test]
     fn test_extract_capabilities() {
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1));
+        let gr_config = crate::config::GracefulRestartConfig::default();
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &gr_config);
         let capabilities = extract_capabilities(&open_msg);
 
         // Check multiprotocol capabilities

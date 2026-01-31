@@ -78,7 +78,7 @@ impl Peer {
                             remote_port: remote_addr.port(),
                             sent_open: sent_open.clone(),
                             received_open: received_open.clone(),
-                            negotiated_capabilities: self.negotiated_capabilities.clone(),
+                            negotiated_capabilities: self.capabilities.clone(),
                         });
                     }
                 }

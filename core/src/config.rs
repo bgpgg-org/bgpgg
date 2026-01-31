@@ -40,6 +40,34 @@ fn default_max_prefix_action() -> MaxPrefixAction {
     MaxPrefixAction::Terminate
 }
 
+/// Graceful Restart configuration (RFC 4724)
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct GracefulRestartConfig {
+    /// Enable Graceful Restart (default: true)
+    #[serde(default = "default_gr_enabled")]
+    pub enabled: bool,
+    /// Restart time in seconds (default: 120, max: 4095)
+    #[serde(default = "default_gr_restart_time")]
+    pub restart_time: u16,
+}
+
+fn default_gr_enabled() -> bool {
+    true
+}
+
+fn default_gr_restart_time() -> u16 {
+    120
+}
+
+impl Default for GracefulRestartConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_gr_enabled(),
+            restart_time: default_gr_restart_time(),
+        }
+    }
+}
+
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
@@ -79,6 +107,9 @@ pub struct PeerConfig {
     /// List of export policy names to apply (evaluated in order)
     #[serde(default, rename = "export-policy")]
     pub export_policy: Vec<String>,
+    /// Graceful Restart configuration (RFC 4724)
+    #[serde(default, rename = "graceful-restart")]
+    pub graceful_restart: GracefulRestartConfig,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -124,6 +155,7 @@ impl Default for PeerConfig {
             min_route_advertisement_interval_secs: None,
             import_policy: Vec::new(),
             export_policy: Vec::new(),
+            graceful_restart: GracefulRestartConfig::default(),
         }
     }
 }

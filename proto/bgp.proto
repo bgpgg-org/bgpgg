@@ -54,6 +54,12 @@ message MaxPrefixSetting {
     MaxPrefixAction action = 2;
 }
 
+// Graceful Restart configuration (RFC 4724)
+message GracefulRestartConfig {
+    optional bool enabled = 1;
+    optional uint32 restart_time_secs = 2;  // Max 4095 per RFC 4724
+}
+
 // Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
 message SessionConfig {
     optional uint64 idle_hold_time_secs = 1;      // Auto-reconnect delay. Unset disables (default: 30s)
@@ -65,6 +71,7 @@ message SessionConfig {
     optional bool send_notification_without_open = 7;  // Allow NOTIFICATION before OPEN (default: false)
     optional bool collision_detect_established_state = 8;  // Process collisions in Established (default: false)
     optional uint64 min_route_advertisement_interval_secs = 9;  // MRAI timer (RFC 4271 9.2.1.1, default: 0)
+    optional GracefulRestartConfig graceful_restart = 10;  // Graceful Restart settings
 }
 
 // Add peer request/response

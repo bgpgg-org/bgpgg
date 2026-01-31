@@ -18,7 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
-use crate::log::{error, info, warn};
+use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
@@ -206,24 +206,31 @@ impl BgpServer {
 
                 // When peer becomes Established, send BMP PeerUp and propagate all routes
                 if state == BgpState::Established {
-                    if let Some(peer) = self.peers.get(&peer_ip) {
-                        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-                            (peer.asn, peer.bgp_id, &peer.conn_info)
-                        {
-                            let use_4byte_asn = peer_supports_4byte_asn(peer);
-                            self.broadcast_bmp(BmpOp::PeerUp {
-                                peer_ip,
-                                peer_as: asn,
-                                peer_bgp_id: bgp_id,
-                                local_address: conn_info.local_address,
-                                local_port: conn_info.local_port,
-                                remote_port: conn_info.remote_port,
-                                sent_open: conn_info.sent_open.clone(),
-                                received_open: conn_info.received_open.clone(),
-                                use_4byte_asn,
-                            });
-                        }
+                    let Some(peer) = self.peers.get(&peer_ip) else {
+                        return;
+                    };
+
+                    // Send BMP PeerUp
+                    if let (Some(asn), Some(bgp_id), Some(conn_info)) =
+                        (peer.asn, peer.bgp_id, &peer.conn_info)
+                    {
+                        let use_4byte_asn = peer_supports_4byte_asn(peer);
+                        self.broadcast_bmp(BmpOp::PeerUp {
+                            peer_ip,
+                            peer_as: asn,
+                            peer_bgp_id: bgp_id,
+                            local_address: conn_info.local_address,
+                            local_port: conn_info.local_port,
+                            remote_port: conn_info.remote_port,
+                            sent_open: conn_info.sent_open.clone(),
+                            received_open: conn_info.received_open.clone(),
+                            use_4byte_asn,
+                        });
                     }
+
+                    // Extract capabilities and peer_tx before propagate_routes
+                    let capabilities = peer.capabilities.clone();
+                    let peer_tx = peer.peer_tx.clone();
 
                     // Propagate all routes from loc-rib to newly established peer
                     let all_prefixes: Vec<_> = self
@@ -234,6 +241,17 @@ impl BgpServer {
 
                     if !all_prefixes.is_empty() {
                         self.propagate_routes(all_prefixes, None).await;
+                    }
+
+                    // Signal that loc-rib has been sent for all negotiated AFI/SAFIs
+                    if let Some(peer_tx) = peer_tx {
+                        if let Some(caps) = capabilities {
+                            for afi_safi in &caps.multiprotocol {
+                                let _ = peer_tx.send(PeerOp::LocalRibSent {
+                                    afi_safi: *afi_safi,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -264,6 +282,7 @@ impl BgpServer {
                 let peer_bgp_id = peer.bgp_id;
 
                 let import_policies = peer.policy_in();
+
                 if !import_policies.is_empty() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip,
@@ -281,6 +300,14 @@ impl BgpServer {
                             false // All policies returned Continue -> default reject
                         },
                     );
+
+                    // RFC 4724: Mark announced routes as refreshed if peer has stale routes
+                    if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
+                        for (prefix, _) in &announced {
+                            self.loc_rib.mark_peer_routes_refreshed(peer_ip, *prefix);
+                        }
+                    }
+
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
@@ -322,16 +349,19 @@ impl BgpServer {
                         local_port,
                         remote_port,
                     });
-                    peer.negotiated_capabilities = Some(negotiated_capabilities);
+                    peer.capabilities = Some(negotiated_capabilities);
                 }
             }
-            ServerOp::PeerDisconnected { peer_ip, reason } => {
+            ServerOp::PeerDisconnected {
+                peer_ip,
+                reason,
+                gr_afi_safis,
+            } => {
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
 
-                // Extract peer info for BMP before potentially removing the peer
-                // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
+                // Extract peer info before potentially removing the peer
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
                     (Some(asn), Some(bgp_id)) => Some((asn, bgp_id, peer_supports_4byte_asn(peer))),
                     _ => None,
@@ -351,12 +381,23 @@ impl BgpServer {
                     info!(%peer_ip, total_peers = self.peers.len(), "unconfigured peer removed");
                 }
 
-                // Notify Loc-RIB about disconnection and get affected prefixes
-                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                // RFC 4724: Handle routes based on Graceful Restart state
+                if !gr_afi_safis.is_empty() {
+                    info!(%peer_ip, ?gr_afi_safis,
+                          "peer disconnected with Graceful Restart - marking routes as stale (Receiving Speaker mode)");
 
-                // Propagate withdrawals to other peers
-                if !changed_prefixes.is_empty() {
-                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    // Mark routes stale for each GR-enabled AFI/SAFI
+                    for afi_safi in gr_afi_safis {
+                        let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+                        debug!(%peer_ip, %afi_safi, count, "marked routes as stale");
+                    }
+                    // No withdrawals are propagated (RFC 4724 Section 4.1)
+                } else {
+                    // No GR: remove routes and propagate withdrawals
+                    let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                    if !changed_prefixes.is_empty() {
+                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
                 }
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
@@ -377,6 +418,51 @@ impl BgpServer {
             }
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
+            }
+            ServerOp::GracefulRestartTimerExpired { peer_ip } => {
+                info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
+
+                // Get the GR AFI/SAFIs from peer's capabilities
+                let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
+                    peer.capabilities
+                        .as_ref()
+                        .and_then(|caps| caps.graceful_restart.as_ref())
+                        .map(|gr_cap| gr_cap.afi_safis())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Remove stale routes for all GR-enabled AFI/SAFIs
+                let mut all_changed_prefixes = Vec::new();
+                for afi_safi in gr_afi_safis {
+                    let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                    all_changed_prefixes.extend(changed);
+                }
+
+                // Propagate withdrawals if any routes were removed
+                if !all_changed_prefixes.is_empty() {
+                    self.propagate_routes(all_changed_prefixes, Some(peer_ip))
+                        .await;
+                }
+            }
+            ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
+                info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
+
+                // Remove stale routes for this specific AFI/SAFI
+                let changed_prefixes = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+
+                // Propagate withdrawals if any routes were removed
+                if !changed_prefixes.is_empty() {
+                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
+            }
+            ServerOp::LocalRibSent { peer_ip, afi_safi } => {
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if let Some(peer_tx) = &peer.peer_tx {
+                        let _ = peer_tx.send(PeerOp::LocalRibSent { afi_safi });
+                    }
+                }
             }
             ServerOp::GetBmpStatistics { response } => {
                 self.handle_get_bmp_statistics(response).await;
@@ -738,7 +824,7 @@ impl BgpServer {
 
         if let Some(peer_tx) = &peer_info.peer_tx {
             let peer_supports_4byte_asn = peer_info
-                .negotiated_capabilities
+                .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
@@ -1725,7 +1811,7 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 /// Determine if peer supports 4-byte ASN for BMP encoding
 fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
     peer_info
-        .negotiated_capabilities
+        .capabilities
         .as_ref()
         .map(|caps| caps.supports_four_octet_asn())
         .unwrap_or(true) // Default to true if not negotiated (BMP is newer protocol)
@@ -1864,7 +1950,7 @@ impl BgpServer {
 
         if let Some(peer_tx) = &peer_info.peer_tx {
             let peer_supports_4byte_asn = peer_info
-                .negotiated_capabilities
+                .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);

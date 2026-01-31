@@ -38,7 +38,7 @@ impl Peer {
         }
 
         // Check if AFI/SAFI was negotiated
-        if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
+        if !self.capabilities.supports_afi_safi(&afi_safi) {
             warn!(afi_safi = %afi_safi, peer = %self.addr, "received UPDATE for non-negotiated AFI/SAFI, disabling");
 
             // RFC 4760 Section 7: Delete all routes for this AFI/SAFI
@@ -117,7 +117,7 @@ impl Peer {
 
         // RFC 6793 Section 4.1: NEW speakers MUST NOT send AS4_PATH/AS4_AGGREGATOR
         // MUST discard these attributes if received from another NEW speaker
-        let peer_supports_4byte_asn = self.negotiated_capabilities.four_octet_asn.is_some();
+        let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
         if peer_supports_4byte_asn {
             let has_as4_path = update_msg.as4_path().is_some();
             let has_as4_aggregator = update_msg.as4_aggregator().is_some();
@@ -181,7 +181,7 @@ impl Peer {
             self.addr,
         );
 
-        let peer_supports_4byte_asn = self.negotiated_capabilities.four_octet_asn.is_some();
+        let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
 
         let Some(path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn) else {
             if !update_msg.nlri_list().is_empty() {
@@ -242,10 +242,11 @@ mod tests {
 
         for (negotiated, disabled, test_afi_safi, expected_valid, expect_disabled_after) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
-            peer.negotiated_capabilities = PeerCapabilities {
+            peer.capabilities = PeerCapabilities {
                 multiprotocol: negotiated.into_iter().collect(),
                 route_refresh: false,
                 four_octet_asn: None,
+                graceful_restart: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 
