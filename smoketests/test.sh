@@ -21,32 +21,51 @@ timeout 30s bash -c 'until [ "$(docker inspect --format="{{.State.Health.Status}
 
 echo "Polling for BGP peering (60 seconds)..."
 for i in $(seq 1 60); do
-    if docker exec bgpgg-smoke-peer1 bgpgg --addr http://127.0.0.1:50051 peer list 2>/dev/null | grep -q Established; then
+    if docker exec bgpgg-smoke-peer1 bgpgg peer list 2>/dev/null | grep -q Established; then
         echo "Peering established"
         break
     fi
     sleep 1
 done
 
-if ! docker exec bgpgg-smoke-peer1 bgpgg --addr http://127.0.0.1:50051 peer list 2>/dev/null | grep -q Established; then
+if ! docker exec bgpgg-smoke-peer1 bgpgg peer list 2>/dev/null | grep -q Established; then
     echo "Peering failed to establish"
-    docker exec bgpgg-smoke-peer1 bgpgg --addr http://127.0.0.1:50051 peer list || true
+    docker exec bgpgg-smoke-peer1 bgpgg peer list || true
     exit 1
 fi
 
-echo "Announcing route 10.99.0.0/24 from peer1..."
-docker exec bgpgg-smoke-peer1 bgpgg --addr http://127.0.0.1:50051 global rib add 10.99.0.0/24 --nexthop 192.168.1.1
+echo "Announcing routes 10.99.0.0/24 and 10.99.1.0/24 from peer1..."
+docker exec bgpgg-smoke-peer1 bgpgg global rib add 10.99.0.0/24 --nexthop 192.168.1.1
+docker exec bgpgg-smoke-peer1 bgpgg global rib add 10.99.1.0/24 --nexthop 192.168.1.1
 
 echo "Polling for route propagation to peer2 (10 seconds)..."
 for i in $(seq 1 10); do
-    if docker exec bgpgg-smoke-peer2 bgpgg --addr http://127.0.0.1:50051 global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
-        echo "Route propagated"
+    if docker exec bgpgg-smoke-peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
+        echo "Routes propagated"
+        break
+    fi
+    sleep 1
+done
+
+if ! docker exec bgpgg-smoke-peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
+    echo "Route did not propagate"
+    docker exec bgpgg-smoke-peer2 bgpgg global rib show || true
+    exit 1
+fi
+
+echo "Withdrawing route 10.99.0.0/24 from peer1..."
+docker exec bgpgg-smoke-peer1 bgpgg global rib del 10.99.0.0/24
+
+echo "Polling for route withdrawal on peer2 (10 seconds)..."
+for i in $(seq 1 10); do
+    if ! docker exec bgpgg-smoke-peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
+        echo "Route withdrawn"
         echo "Smoke tests passed"
         exit 0
     fi
     sleep 1
 done
 
-echo "Route did not propagate"
-docker exec bgpgg-smoke-peer2 bgpgg --addr http://127.0.0.1:50051 global rib show || true
+echo "Route withdrawal failed"
+docker exec bgpgg-smoke-peer2 bgpgg global rib show || true
 exit 1
