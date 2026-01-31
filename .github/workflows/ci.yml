@@ -22,5 +22,8 @@ jobs:
     - name: Run tests
       run: make test
 
+    - name: Run smoke tests
+      run: make smoketest
+
     - name: Run load tests
       run: make loadtest

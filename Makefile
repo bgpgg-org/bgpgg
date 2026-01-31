@@ -1,6 +1,7 @@
-.PHONY: all build clean run test fmt setup loadtest lint build-docker
+.PHONY: all build clean run test fmt setup loadtest lint build-docker smoketest
 
-all: test
+all:
+	cargo build --release
 
 setup:
 	./script/setup-protoc.sh
@@ -36,4 +37,8 @@ loadtest: setup
 	@echo "Building bgpggd and running load tests..."
 	cargo build --bin bgpggd
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
+
+smoketest:
+	$(MAKE) build-docker version=smoke-test platform=linux/amd64
+	./smoketests/test.sh
 
