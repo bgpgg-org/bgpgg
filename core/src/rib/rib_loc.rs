@@ -452,6 +452,20 @@ impl LocRib {
     pub fn has_stale_routes_for_peer(&self, peer_ip: IpAddr) -> bool {
         self.stale_routes.keys().any(|(ip, _)| *ip == peer_ip)
     }
+
+    /// Get all AFI/SAFIs that have stale routes for a peer
+    pub fn stale_afi_safis(&self, peer_ip: IpAddr) -> Vec<crate::bgp::multiprotocol::AfiSafi> {
+        self.stale_routes
+            .keys()
+            .filter_map(|(ip, afi_safi)| {
+                if *ip == peer_ip {
+                    Some(*afi_safi)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

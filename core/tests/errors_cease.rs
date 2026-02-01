@@ -18,7 +18,9 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
-use bgpgg::config::{Config, PeerConfig};
+use bgpgg::config::Config;
+#[allow(hidden_glob_reexports)]
+use bgpgg::config::PeerConfig;
 use bgpgg::grpc::proto::{
     AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };

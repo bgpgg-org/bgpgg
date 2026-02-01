@@ -30,6 +30,24 @@ impl GracefulRestartCapability {
             .map(|(afi_safi, _f_bit)| *afi_safi)
             .collect()
     }
+
+    /// Check if forwarding state was preserved for a specific AFI/SAFI (RFC 4724 F-bit)
+    /// Returns None if AFI/SAFI is not in the capability
+    pub fn forwarding_preserved(
+        &self,
+        afi_safi: crate::bgp::multiprotocol::AfiSafi,
+    ) -> Option<bool> {
+        self.afi_safi_list
+            .iter()
+            .find(|(as_, _)| *as_ == afi_safi)
+            .map(|(_, f_bit)| *f_bit)
+    }
+
+    /// Check if stale routes for this AFI/SAFI should be cleared immediately (RFC 4724)
+    /// Returns true if AFI/SAFI is not in the capability or F-bit is 0
+    pub fn should_clear_stale(&self, afi_safi: crate::bgp::multiprotocol::AfiSafi) -> bool {
+        self.forwarding_preserved(afi_safi) != Some(true)
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

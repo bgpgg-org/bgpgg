@@ -97,6 +97,13 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
     peer.state == state as i32
 }
 
+/// Configuration for peer setup helpers
+#[derive(Default, Clone)]
+pub struct PeerConfig {
+    pub hold_timer_secs: Option<u16>,
+    pub gr_restart_time_secs: Option<u32>,
+}
+
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
 pub fn as_sequence(asns: Vec<u32>) -> AsPathSegment {
     AsPathSegment {
@@ -291,30 +298,34 @@ pub async fn start_test_server(config: Config) -> TestServer {
 /// Server1 (AS65001) <-----> Server2 (AS65001)
 ///
 /// # Arguments
-/// * `hold_timer_secs` - BGP hold timer in seconds (defaults to 3 seconds if None)
+/// * `config` - Peer configuration (hold timer, GR, etc). Defaults to hold_timer=90s if not specified.
 ///
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
-pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServer, TestServer) {
-    let hold = hold_timer_secs.unwrap_or(90) as u64;
-    let [server1, server2] = chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            hold,
-            true,
-        ))
-        .await,
-    ])
+pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer, TestServer) {
+    let cfg = config.unwrap_or_default();
+    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+    let [server1, server2] = chain_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65002,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                hold,
+                true,
+            ))
+            .await,
+        ],
+        cfg,
+    )
     .await;
 
     (server1, server2)
@@ -334,35 +345,39 @@ pub async fn setup_two_peered_servers(hold_timer_secs: Option<u16>) -> (TestServ
 /// Returns (server1, server2, server3) TestServer instances for each server.
 /// All servers will have 2 peers each in Established state when this function returns.
 pub async fn setup_three_meshed_servers(
-    hold_timer_secs: Option<u16>,
+    config: Option<PeerConfig>,
 ) -> (TestServer, TestServer, TestServer) {
-    let hold = hold_timer_secs.unwrap_or(90) as u64;
-    let [server1, server2, server3] = mesh_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65003,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            hold,
-            true,
-        ))
-        .await,
-    ])
+    let cfg = config.unwrap_or_default();
+    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+    let [server1, server2, server3] = mesh_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65002,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65003,
+                "127.0.0.3:0",
+                Ipv4Addr::new(3, 3, 3, 3),
+                hold,
+                true,
+            ))
+            .await,
+        ],
+        cfg,
+    )
     .await;
 
     (server1, server2, server3)
@@ -385,43 +400,47 @@ pub async fn setup_three_meshed_servers(
 /// Returns (server1, server2, server3, server4) TestServer instances for each server.
 /// All servers will have 3 peers each in Established state when this function returns.
 pub async fn setup_four_meshed_servers(
-    hold_timer_secs: Option<u16>,
+    config: Option<PeerConfig>,
 ) -> (TestServer, TestServer, TestServer, TestServer) {
-    let hold = hold_timer_secs.unwrap_or(90) as u64;
-    let [server1, server2, server3, server4] = mesh_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65003,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            hold,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65004,
-            "127.0.0.4:0",
-            Ipv4Addr::new(4, 4, 4, 4),
-            hold,
-            true,
-        ))
-        .await,
-    ])
+    let cfg = config.unwrap_or_default();
+    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+    let [server1, server2, server3, server4] = mesh_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65002,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65003,
+                "127.0.0.3:0",
+                Ipv4Addr::new(3, 3, 3, 3),
+                hold,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65004,
+                "127.0.0.4:0",
+                Ipv4Addr::new(4, 4, 4, 4),
+                hold,
+                true,
+            ))
+            .await,
+        ],
+        cfg,
+    )
     .await;
 
     (server1, server2, server3, server4)
@@ -998,7 +1017,10 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
 ///     start_test_server(65002, ...).await,
 /// ]).await;
 /// ```
-pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [TestServer; N] {
+pub async fn chain_servers<const N: usize>(
+    mut servers: [TestServer; N],
+    config: PeerConfig,
+) -> [TestServer; N] {
     // Connect each server to the next one: s0 -> s1 -> s2 -> ...
     for i in 0..servers.len() - 1 {
         let next_port = servers[i + 1].bgp_port;
@@ -1009,9 +1031,23 @@ pub async fn chain_servers<const N: usize>(mut servers: [TestServer; N]) -> [Tes
             std::net::IpAddr::V6(addr) => format!("[{}]:{}", addr, next_port),
         };
 
+        let session_config = if config.gr_restart_time_secs.is_some() {
+            Some(bgpgg::grpc::proto::SessionConfig {
+                graceful_restart: config.gr_restart_time_secs.map(|secs| {
+                    bgpgg::grpc::proto::GracefulRestartConfig {
+                        enabled: Some(true),
+                        restart_time_secs: Some(secs),
+                    }
+                }),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
         servers[i]
             .client
-            .add_peer(peer_addr, None)
+            .add_peer(peer_addr, session_config)
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
     }
@@ -1086,7 +1122,7 @@ pub async fn create_asn_chain<const N: usize>(
         Ok(arr) => arr,
         Err(_) => panic!("Failed to convert Vec to array"),
     };
-    chain_servers(servers_array).await
+    chain_servers(servers_array, PeerConfig::default()).await
 }
 
 /// Announce route from source and verify it propagates to destinations
@@ -1190,9 +1226,26 @@ pub async fn announce_and_verify_route(
 /// ]).await;
 /// // All three servers are now connected to each other
 /// ```
-pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [TestServer; N] {
+pub async fn mesh_servers<const N: usize>(
+    mut servers: [TestServer; N],
+    config: PeerConfig,
+) -> [TestServer; N] {
     // Create full mesh: each server connects to all others with higher index
     // This avoids duplicate connections while creating a full mesh
+    let session_config = if config.gr_restart_time_secs.is_some() {
+        Some(bgpgg::grpc::proto::SessionConfig {
+            graceful_restart: config.gr_restart_time_secs.map(|secs| {
+                bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(secs),
+                }
+            }),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     for i in 0..servers.len() {
         for j in (i + 1)..servers.len() {
             let peer_port = servers[j].bgp_port;
@@ -1200,7 +1253,7 @@ pub async fn mesh_servers<const N: usize>(mut servers: [TestServer; N]) -> [Test
 
             servers[i]
                 .client
-                .add_peer(format!("{}:{}", peer_address, peer_port), None)
+                .add_peer(format!("{}:{}", peer_address, peer_port), session_config)
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", j, i));
         }
@@ -1465,6 +1518,43 @@ impl FakePeer {
             .write_all(&open.serialize())
             .await
             .unwrap();
+    }
+
+    /// Send an OPEN message with Graceful Restart capability
+    pub async fn send_open_with_gr(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        hold_time: u16,
+        gr_time: u16,
+        restart_flag: bool,
+    ) {
+        self.send_open_with_gr_fbit(asn, router_id, hold_time, gr_time, restart_flag, true)
+            .await;
+    }
+
+    /// Send an OPEN message with Graceful Restart capability and configurable F-bit
+    pub async fn send_open_with_gr_fbit(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        hold_time: u16,
+        gr_time: u16,
+        restart_flag: bool,
+        forwarding_flag: bool,
+    ) {
+        let gr_cap = build_gr_capability_with_fbit(gr_time, restart_flag, forwarding_flag);
+        let mp_cap = build_multiprotocol_capability_ipv4_unicast();
+        let open = build_raw_open(
+            asn as u16,
+            hold_time,
+            u32::from(router_id),
+            RawOpenOptions {
+                capabilities: Some(vec![mp_cap, gr_cap]),
+                ..Default::default()
+            },
+        );
+        self.send_raw(&open).await;
     }
 
     /// Read and discard an OPEN message
@@ -1821,4 +1911,49 @@ pub fn build_raw_notification(
         MessageType::Notification.as_u8(),
         &body,
     )
+}
+
+/// Build GR capability bytes for OPEN message
+/// RFC 4724: Restart Flags (4 bits) + Restart Time (12 bits) + AFI/SAFI tuples
+pub fn build_gr_capability(restart_time_secs: u16, restart_flag: bool) -> Vec<u8> {
+    build_gr_capability_with_fbit(restart_time_secs, restart_flag, true)
+}
+
+/// Build GR capability bytes with configurable F-bit (forwarding state)
+/// restart_flag: R-bit - indicates speaker is restarting
+/// forwarding_flag: F-bit - indicates forwarding state was preserved
+pub fn build_gr_capability_with_fbit(
+    restart_time_secs: u16,
+    restart_flag: bool,
+    forwarding_flag: bool,
+) -> Vec<u8> {
+    let mut cap = vec![64u8]; // Capability code 64 = Graceful Restart
+    cap.push(6); // Length: 2 (flags+time) + 4 (one AFI/SAFI tuple)
+
+    // Restart Flags (high 4 bits) + Restart Time (low 12 bits)
+    let flags_and_time = if restart_flag {
+        0x8000 | (restart_time_secs & 0x0FFF) // R flag = bit 15
+    } else {
+        restart_time_secs & 0x0FFF
+    };
+    cap.extend_from_slice(&flags_and_time.to_be_bytes());
+
+    // AFI/SAFI tuple: IPv4 Unicast
+    cap.push(0); // AFI high byte
+    cap.push(1); // AFI low byte (IPv4)
+    cap.push(1); // SAFI (Unicast)
+    cap.push(if forwarding_flag { 0x80 } else { 0x00 }); // F-bit
+
+    cap
+}
+
+/// Build Multiprotocol Extensions capability (RFC 4760) for IPv4 Unicast
+pub fn build_multiprotocol_capability_ipv4_unicast() -> Vec<u8> {
+    vec![
+        1, // Capability code 1 = Multiprotocol Extensions
+        4, // Length: 4 bytes
+        0, 1, // AFI = 1 (IPv4)
+        0, // Reserved
+        1, // SAFI = 1 (Unicast)
+    ]
 }

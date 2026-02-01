@@ -232,6 +232,34 @@ impl BgpServer {
                     let capabilities = peer.capabilities.clone();
                     let peer_tx = peer.peer_tx.clone();
 
+                    // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
+                    // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
+                    if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
+                        let gr_cap = capabilities
+                            .as_ref()
+                            .and_then(|c| c.graceful_restart.as_ref());
+                        let afi_safis_to_clear: Vec<_> = match gr_cap {
+                            Some(cap) => self
+                                .loc_rib
+                                .stale_afi_safis(peer_ip)
+                                .into_iter()
+                                .filter(|afi_safi| cap.should_clear_stale(*afi_safi))
+                                .collect(),
+                            None => self.loc_rib.stale_afi_safis(peer_ip),
+                        };
+
+                        let mut all_changed = Vec::new();
+                        for afi_safi in afi_safis_to_clear {
+                            info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
+                            let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                            all_changed.extend(changed);
+                        }
+
+                        if !all_changed.is_empty() {
+                            self.propagate_routes(all_changed, Some(peer_ip)).await;
+                        }
+                    }
+
                     // Propagate all routes from loc-rib to newly established peer
                     let all_prefixes: Vec<_> = self
                         .loc_rib
@@ -367,18 +395,20 @@ impl BgpServer {
                     _ => None,
                 };
 
-                if peer.configured {
-                    // Configured peer: update state, Peer task handles reconnection internally
+                let has_gr = !gr_afi_safis.is_empty();
+
+                if peer.configured || has_gr {
+                    // Configured OR unconfigured with GR: keep in Idle state
                     peer.state = BgpState::Idle;
                     peer.conn_info = None;
-                    info!(%peer_ip, "peer session ended");
+                    info!(%peer_ip, has_gr, configured=peer.configured, "peer session ended");
                 } else {
-                    // Unconfigured peer: stop task and remove entirely
+                    // Unconfigured without GR: remove immediately
                     if let Some(peer_tx) = peer.peer_tx.take() {
                         let _ = peer_tx.send(PeerOp::ManualStop);
                     }
                     self.peers.remove(&peer_ip);
-                    info!(%peer_ip, total_peers = self.peers.len(), "unconfigured peer removed");
+                    info!(%peer_ip, "unconfigured peer removed");
                 }
 
                 // RFC 4724: Handle routes based on Graceful Restart state
@@ -445,6 +475,17 @@ impl BgpServer {
                     self.propagate_routes(all_changed_prefixes, Some(peer_ip))
                         .await;
                 }
+
+                // Remove unconfigured peer after GR expiry
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if !peer.configured {
+                        info!(%peer_ip, "removing unconfigured peer after GR expiry");
+                        if let Some(peer_tx) = &peer.peer_tx {
+                            let _ = peer_tx.send(PeerOp::ManualStop);
+                        }
+                        self.peers.remove(&peer_ip);
+                    }
+                }
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
@@ -455,6 +496,17 @@ impl BgpServer {
                 // Propagate withdrawals if any routes were removed
                 if !changed_prefixes.is_empty() {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
+
+                // Remove unconfigured peer after GR complete (if still disconnected)
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if !peer.configured && peer.state == BgpState::Idle {
+                        info!(%peer_ip, "removing unconfigured peer after GR complete");
+                        if let Some(peer_tx) = &peer.peer_tx {
+                            let _ = peer_tx.send(PeerOp::ManualStop);
+                        }
+                        self.peers.remove(&peer_ip);
+                    }
                 }
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
