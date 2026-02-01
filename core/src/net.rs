@@ -53,6 +53,15 @@ impl IpNetwork {
             _ => false, // IPv4 vs IPv6 mismatch
         }
     }
+
+    /// Get the AFI/SAFI for this network (assumes Unicast)
+    pub fn afi_safi(&self) -> crate::bgp::multiprotocol::AfiSafi {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+        match self {
+            IpNetwork::V4(_) => AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            IpNetwork::V6(_) => AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+        }
+    }
 }
 
 impl std::fmt::Display for IpNetwork {

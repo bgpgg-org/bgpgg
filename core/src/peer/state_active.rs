@@ -15,8 +15,8 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::log::{debug, error};
 use crate::types::PeerDownReason;
-use crate::{debug, error};
 use std::time::Duration;
 
 const INITIAL_HOLD_TIME: Duration = Duration::from_secs(240);
@@ -31,7 +31,7 @@ impl Peer {
 
             tokio::select! {
                 _ = tokio::time::sleep(retry_time) => {
-                    debug!(&self.logger, "ConnectRetryTimer expired in Active", "peer_ip" => self.addr.to_string());
+                    debug!(peer_ip = %self.addr, "ConnectRetryTimer expired in Active");
                     self.try_process_event(&FsmEvent::ConnectRetryTimerExpires).await;
                 }
                 op = self.peer_rx.recv() => {
@@ -61,9 +61,9 @@ impl Peer {
             }
             _ = timer_interval.tick() => {
                 if self.fsm.timers.delay_open_timer_expired() {
-                    debug!(&self.logger, "DelayOpen timer expired", "peer_ip" => self.addr.to_string());
+                    debug!(peer_ip = %self.addr, "DelayOpen timer expired");
                     if let Err(e) = self.process_event(&FsmEvent::DelayOpenTimerExpires).await {
-                        error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+                        error!(peer_ip = %self.addr, error = %e, "failed to send OPEN");
                         self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::DelayOpenTimerExpires));
                     }
                 }
@@ -74,7 +74,7 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        debug!(&self.logger, "closing duplicate incoming connection", "peer_ip" => self.addr.to_string());
+                        debug!(peer_ip = %self.addr, "closing duplicate incoming connection");
                         drop(tcp_tx);
                         drop(tcp_rx);
                     }

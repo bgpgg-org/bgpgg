@@ -18,6 +18,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
+use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
@@ -36,7 +37,6 @@ use crate::server::{
     GetPeerResponse, GetPeersResponse, MgmtOp, PeerInfo, ResetType, ServerOp,
 };
 use crate::types::PeerDownReason;
-use crate::{error, info, warn};
 use regex::Regex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -201,27 +201,62 @@ impl BgpServer {
             ServerOp::PeerStateChanged { peer_ip, state } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.state = state;
-                    info!(&self.logger, "peer state changed", "peer_ip" => &peer_ip, "state" => format!("{:?}", state));
+                    info!(%peer_ip, ?state, "peer state changed");
                 }
 
                 // When peer becomes Established, send BMP PeerUp and propagate all routes
                 if state == BgpState::Established {
-                    if let Some(peer) = self.peers.get(&peer_ip) {
-                        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-                            (peer.asn, peer.bgp_id, &peer.conn_info)
-                        {
-                            let use_4byte_asn = peer_supports_4byte_asn(peer);
-                            self.broadcast_bmp(BmpOp::PeerUp {
-                                peer_ip,
-                                peer_as: asn,
-                                peer_bgp_id: bgp_id,
-                                local_address: conn_info.local_address,
-                                local_port: conn_info.local_port,
-                                remote_port: conn_info.remote_port,
-                                sent_open: conn_info.sent_open.clone(),
-                                received_open: conn_info.received_open.clone(),
-                                use_4byte_asn,
-                            });
+                    let Some(peer) = self.peers.get(&peer_ip) else {
+                        return;
+                    };
+
+                    // Send BMP PeerUp
+                    if let (Some(asn), Some(bgp_id), Some(conn_info)) =
+                        (peer.asn, peer.bgp_id, &peer.conn_info)
+                    {
+                        let use_4byte_asn = peer_supports_4byte_asn(peer);
+                        self.broadcast_bmp(BmpOp::PeerUp {
+                            peer_ip,
+                            peer_as: asn,
+                            peer_bgp_id: bgp_id,
+                            local_address: conn_info.local_address,
+                            local_port: conn_info.local_port,
+                            remote_port: conn_info.remote_port,
+                            sent_open: conn_info.sent_open.clone(),
+                            received_open: conn_info.received_open.clone(),
+                            use_4byte_asn,
+                        });
+                    }
+
+                    // Extract capabilities and peer_tx before propagate_routes
+                    let capabilities = peer.capabilities.clone();
+                    let peer_tx = peer.peer_tx.clone();
+
+                    // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
+                    // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
+                    if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
+                        let gr_cap = capabilities
+                            .as_ref()
+                            .and_then(|c| c.graceful_restart.as_ref());
+                        let afi_safis_to_clear: Vec<_> = match gr_cap {
+                            Some(cap) => self
+                                .loc_rib
+                                .stale_afi_safis(peer_ip)
+                                .into_iter()
+                                .filter(|afi_safi| cap.should_clear_stale(*afi_safi))
+                                .collect(),
+                            None => self.loc_rib.stale_afi_safis(peer_ip),
+                        };
+
+                        let mut all_changed = Vec::new();
+                        for afi_safi in afi_safis_to_clear {
+                            info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
+                            let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                            all_changed.extend(changed);
+                        }
+
+                        if !all_changed.is_empty() {
+                            self.propagate_routes(all_changed, Some(peer_ip)).await;
                         }
                     }
 
@@ -234,6 +269,17 @@ impl BgpServer {
 
                     if !all_prefixes.is_empty() {
                         self.propagate_routes(all_prefixes, None).await;
+                    }
+
+                    // Signal that loc-rib has been sent for all negotiated AFI/SAFIs
+                    if let Some(peer_tx) = peer_tx {
+                        if let Some(caps) = capabilities {
+                            for afi_safi in &caps.multiprotocol {
+                                let _ = peer_tx.send(PeerOp::LocalRibSent {
+                                    afi_safi: *afi_safi,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -248,7 +294,7 @@ impl BgpServer {
                         peer.asn = Some(asn);
                         peer.import_policies = import_policies;
                         peer.export_policies = export_policies;
-                        info!(&self.logger, "peer handshake complete", "peer_ip" => &peer_ip, "asn" => asn);
+                        info!(%peer_ip, asn, "peer handshake complete");
                     }
                 }
             }
@@ -264,6 +310,7 @@ impl BgpServer {
                 let peer_bgp_id = peer.bgp_id;
 
                 let import_policies = peer.policy_in();
+
                 if !import_policies.is_empty() {
                     let changed_prefixes = self.loc_rib.update_from_peer(
                         peer_ip,
@@ -281,7 +328,15 @@ impl BgpServer {
                             false // All policies returned Continue -> default reject
                         },
                     );
-                    info!(&self.logger, "UPDATE processing complete", "peer_ip" => &peer_ip);
+
+                    // RFC 4724: Mark announced routes as refreshed if peer has stale routes
+                    if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
+                        for (prefix, _) in &announced {
+                            self.loc_rib.mark_peer_routes_refreshed(peer_ip, *prefix);
+                        }
+                    }
+
+                    info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
                     if !changed_prefixes.is_empty() {
@@ -295,7 +350,7 @@ impl BgpServer {
                         );
                     }
                 } else {
-                    error!(&self.logger, "received UPDATE before handshake complete", "peer_ip" => &peer_ip);
+                    error!(%peer_ip, "received UPDATE before handshake complete");
                 }
             }
             ServerOp::OpenReceived {
@@ -322,41 +377,57 @@ impl BgpServer {
                         local_port,
                         remote_port,
                     });
-                    peer.negotiated_capabilities = Some(negotiated_capabilities);
+                    peer.capabilities = Some(negotiated_capabilities);
                 }
             }
-            ServerOp::PeerDisconnected { peer_ip, reason } => {
+            ServerOp::PeerDisconnected {
+                peer_ip,
+                reason,
+                gr_afi_safis,
+            } => {
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
 
-                // Extract peer info for BMP before potentially removing the peer
-                // Only send BMP PeerDown if session reached ESTABLISHED (has both AS and BGP ID)
+                // Extract peer info before potentially removing the peer
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
                     (Some(asn), Some(bgp_id)) => Some((asn, bgp_id, peer_supports_4byte_asn(peer))),
                     _ => None,
                 };
 
-                if peer.configured {
-                    // Configured peer: update state, Peer task handles reconnection internally
+                let has_gr = !gr_afi_safis.is_empty();
+
+                if peer.configured || has_gr {
+                    // Configured OR unconfigured with GR: keep in Idle state
                     peer.state = BgpState::Idle;
                     peer.conn_info = None;
-                    info!(&self.logger, "peer session ended", "peer_ip" => &peer_ip);
+                    info!(%peer_ip, has_gr, configured=peer.configured, "peer session ended");
                 } else {
-                    // Unconfigured peer: stop task and remove entirely
+                    // Unconfigured without GR: remove immediately
                     if let Some(peer_tx) = peer.peer_tx.take() {
                         let _ = peer_tx.send(PeerOp::ManualStop);
                     }
                     self.peers.remove(&peer_ip);
-                    info!(&self.logger, "unconfigured peer removed", "peer_ip" => &peer_ip, "total_peers" => self.peers.len());
+                    info!(%peer_ip, "unconfigured peer removed");
                 }
 
-                // Notify Loc-RIB about disconnection and get affected prefixes
-                let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                // RFC 4724: Handle routes based on Graceful Restart state
+                if !gr_afi_safis.is_empty() {
+                    info!(%peer_ip, ?gr_afi_safis,
+                          "peer disconnected with Graceful Restart - marking routes as stale (Receiving Speaker mode)");
 
-                // Propagate withdrawals to other peers
-                if !changed_prefixes.is_empty() {
-                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    // Mark routes stale for each GR-enabled AFI/SAFI
+                    for afi_safi in gr_afi_safis {
+                        let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+                        debug!(%peer_ip, %afi_safi, count, "marked routes as stale");
+                    }
+                    // No withdrawals are propagated (RFC 4724 Section 4.1)
+                } else {
+                    // No GR: remove routes and propagate withdrawals
+                    let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+                    if !changed_prefixes.is_empty() {
+                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    }
                 }
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
@@ -377,6 +448,73 @@ impl BgpServer {
             }
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
+            }
+            ServerOp::GracefulRestartTimerExpired { peer_ip } => {
+                info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
+
+                // Get the GR AFI/SAFIs from peer's capabilities
+                let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
+                    peer.capabilities
+                        .as_ref()
+                        .and_then(|caps| caps.graceful_restart.as_ref())
+                        .map(|gr_cap| gr_cap.afi_safis())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Remove stale routes for all GR-enabled AFI/SAFIs
+                let mut all_changed_prefixes = Vec::new();
+                for afi_safi in gr_afi_safis {
+                    let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                    all_changed_prefixes.extend(changed);
+                }
+
+                // Propagate withdrawals if any routes were removed
+                if !all_changed_prefixes.is_empty() {
+                    self.propagate_routes(all_changed_prefixes, Some(peer_ip))
+                        .await;
+                }
+
+                // Remove unconfigured peer after GR expiry
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if !peer.configured {
+                        info!(%peer_ip, "removing unconfigured peer after GR expiry");
+                        if let Some(peer_tx) = &peer.peer_tx {
+                            let _ = peer_tx.send(PeerOp::ManualStop);
+                        }
+                        self.peers.remove(&peer_ip);
+                    }
+                }
+            }
+            ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
+                info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
+
+                // Remove stale routes for this specific AFI/SAFI
+                let changed_prefixes = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+
+                // Propagate withdrawals if any routes were removed
+                if !changed_prefixes.is_empty() {
+                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                }
+
+                // Remove unconfigured peer after GR complete (if still disconnected)
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if !peer.configured && peer.state == BgpState::Idle {
+                        info!(%peer_ip, "removing unconfigured peer after GR complete");
+                        if let Some(peer_tx) = &peer.peer_tx {
+                            let _ = peer_tx.send(PeerOp::ManualStop);
+                        }
+                        self.peers.remove(&peer_ip);
+                    }
+                }
+            }
+            ServerOp::LocalRibSent { peer_ip, afi_safi } => {
+                if let Some(peer) = self.peers.get(&peer_ip) {
+                    if let Some(peer_tx) = &peer.peer_tx {
+                        let _ = peer_tx.send(PeerOp::LocalRibSent { afi_safi });
+                    }
+                }
             }
             ServerOp::GetBmpStatistics { response } => {
                 self.handle_get_bmp_statistics(response).await;
@@ -399,7 +537,7 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
-        info!(&self.logger, "adding peer via request", "peer_addr" => &addr);
+        info!(peer_addr = %addr, "adding peer via request");
 
         // Parse peer address
         let peer_addr = match addr.parse::<SocketAddr>() {
@@ -433,7 +571,7 @@ impl BgpServer {
             let _ = peer_tx.send(PeerOp::ManualStart);
         }
 
-        info!(&self.logger, "peer added", "peer_ip" => peer_ip.to_string(), "passive" => config.passive_mode, "total_peers" => self.peers.len());
+        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
         let _ = response.send(Ok(()));
     }
 
@@ -442,7 +580,7 @@ impl BgpServer {
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "removing peer via request", "peer_ip" => &addr);
+        info!(peer_ip = %addr, "removing peer via request");
 
         // Parse the address to get IpAddr
         let peer_ip: IpAddr = match addr.parse() {
@@ -651,7 +789,7 @@ impl BgpServer {
             return;
         }
 
-        info!(&self.logger, "hard reset initiated", "peer_ip" => peer_ip.to_string());
+        info!(%peer_ip, "hard reset initiated");
         let _ = response.send(Ok(()));
     }
 
@@ -714,7 +852,7 @@ impl BgpServer {
 
     fn resend_routes_to_peer(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         let Some(peer_info) = self.peers.get(&peer_ip) else {
-            warn!(&self.logger, "SOFT_OUT for unknown peer", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "SOFT_OUT for unknown peer");
             return;
         };
 
@@ -730,7 +868,7 @@ impl BgpServer {
             return;
         }
         if safi != Safi::Unicast {
-            warn!(&self.logger, "unsupported SAFI", "safi" => format!("{:?}", safi));
+            warn!(?safi, "unsupported SAFI");
             return;
         }
 
@@ -738,7 +876,7 @@ impl BgpServer {
 
         if let Some(peer_tx) = &peer_info.peer_tx {
             let peer_supports_4byte_asn = peer_info
-                .negotiated_capabilities
+                .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
@@ -760,7 +898,6 @@ impl BgpServer {
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -780,7 +917,6 @@ impl BgpServer {
                                 IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -799,15 +935,11 @@ impl BgpServer {
                     IpAddr::V4(self.config.router_id),
                     export_policies,
                     peer_supports_4byte_asn,
-                    &self.logger,
                 );
                 total_sent += chunk.len();
             }
 
-            info!(&self.logger, "completed SOFT_OUT reset",
-                  "peer_ip" => peer_ip.to_string(),
-                  "afi" => format!("{:?}", afi),
-                  "total_routes" => total_sent);
+            info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
         }
     }
 
@@ -826,7 +958,7 @@ impl BgpServer {
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "adding route via request", "prefix" => format!("{:?}", prefix), "next_hop" => format!("{:?}", next_hop));
+        info!(?prefix, ?next_hop, "adding route via request");
 
         // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
         self.loc_rib.add_local_route(
@@ -853,7 +985,7 @@ impl BgpServer {
         prefix: IpNetwork,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(&self.logger, "removing route via request", "prefix" => format!("{:?}", prefix));
+        info!(?prefix, "removing route via request");
 
         // Remove local route from Loc-RIB
         let removed = self.loc_rib.remove_local_route(prefix);
@@ -1058,7 +1190,6 @@ impl BgpServer {
             peer_asn,
             IpAddr::V4(self.config.router_id),
             export_policies,
-            &self.logger,
         );
 
         // Group by prefix for Route struct
@@ -1126,7 +1257,7 @@ impl BgpServer {
         let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
         self.bmp_tasks.insert(addr, task_info);
 
-        info!(&self.logger, "BMP task added", "addr" => &addr.to_string());
+        info!(%addr, "BMP task added");
 
         // Send initial state to new BMP destination
         let established_peers = self.get_established_peers();
@@ -1145,7 +1276,7 @@ impl BgpServer {
     ) {
         if let Some(task_info) = self.bmp_tasks.remove(&addr) {
             drop(task_info.task_tx); // Channel drop triggers graceful shutdown
-            info!(&self.logger, "BMP task removed", "addr" => &addr.to_string());
+            info!(%addr, "BMP task removed");
             let _ = response.send(Ok(()));
         } else {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
@@ -1732,7 +1863,7 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 /// Determine if peer supports 4-byte ASN for BMP encoding
 fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
     peer_info
-        .negotiated_capabilities
+        .capabilities
         .as_ref()
         .map(|caps| caps.supports_four_octet_asn())
         .unwrap_or(true) // Default to true if not negotiated (BMP is newer protocol)
@@ -1834,54 +1965,44 @@ async fn send_initial_bmp_state_to_task(
 
 impl BgpServer {
     async fn handle_route_refresh(&mut self, peer_ip: std::net::IpAddr, afi: Afi, safi: Safi) {
-        info!(&self.logger, "processing ROUTE_REFRESH",
-              "peer_ip" => peer_ip.to_string(),
-              "afi" => format!("{:?}", afi),
-              "safi" => format!("{:?}", safi));
+        info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
 
         // Get peer info
         let Some(peer_info) = self.peers.get(&peer_ip) else {
-            warn!(&self.logger, "ROUTE_REFRESH from unknown peer", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "ROUTE_REFRESH from unknown peer");
             return;
         };
 
         // Only process if peer is Established
         if peer_info.state != BgpState::Established {
-            warn!(&self.logger, "ROUTE_REFRESH from non-Established peer",
-                  "peer_ip" => peer_ip.to_string(),
-                  "state" => format!("{:?}", peer_info.state));
+            warn!(%peer_ip, state = ?peer_info.state, "ROUTE_REFRESH from non-Established peer");
             return;
         }
 
         let Some(peer_asn) = peer_info.asn else {
-            warn!(&self.logger, "ROUTE_REFRESH before ASN known", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "ROUTE_REFRESH before ASN known");
             return;
         };
 
         let export_policies = &peer_info.export_policies;
         if export_policies.is_empty() {
-            warn!(&self.logger, "export policies not initialized", "peer_ip" => peer_ip.to_string());
+            warn!(%peer_ip, "export policies not initialized");
             return;
         }
 
         // Only Unicast SAFI is supported currently
         if safi != Safi::Unicast {
-            warn!(&self.logger, "unsupported SAFI requested",
-                  "safi" => format!("{:?}", safi));
+            warn!(?safi, "unsupported SAFI requested");
             return;
         }
 
         const CHUNK_SIZE: usize = 10_000;
 
-        info!(&self.logger, "processing ROUTE_REFRESH with chunking",
-              "peer_ip" => peer_ip.to_string(),
-              "afi" => format!("{:?}", afi),
-              "safi" => format!("{:?}", safi),
-              "chunk_size" => CHUNK_SIZE);
+        info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
 
         if let Some(peer_tx) = &peer_info.peer_tx {
             let peer_supports_4byte_asn = peer_info
-                .negotiated_capabilities
+                .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
@@ -1906,7 +2027,6 @@ impl BgpServer {
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1927,7 +2047,6 @@ impl BgpServer {
                                 std::net::IpAddr::V4(self.config.router_id),
                                 export_policies,
                                 peer_supports_4byte_asn,
-                                &self.logger,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1947,14 +2066,11 @@ impl BgpServer {
                     std::net::IpAddr::V4(self.config.router_id),
                     export_policies,
                     peer_supports_4byte_asn,
-                    &self.logger,
                 );
                 total_sent += chunk.len();
             }
 
-            info!(&self.logger, "completed ROUTE_REFRESH",
-                  "peer_ip" => peer_ip.to_string(),
-                  "total_routes" => total_sent);
+            info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
         }
     }
 }

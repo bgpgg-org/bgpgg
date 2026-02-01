@@ -17,9 +17,9 @@ use super::PeerCapabilities;
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::log::{debug, error, info};
 use crate::server::{AdminState, ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
-use crate::{debug, error, info};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -48,21 +48,21 @@ impl Peer {
                     match result {
                         Some(Ok(bytes)) => {
                             // Parse bytes using negotiated capabilities
-                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
                             let message_type = bytes[18]; // Type is in header byte 18
                             let body = bytes[19..].to_vec(); // Body starts after header
 
                             match crate::bgp::msg::BgpMessage::from_bytes(message_type, body, use_4byte_asn) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                        error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                        error!(peer_ip = %peer_ip, error = %e, "error processing message");
                                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                         return false;
                                     }
                                 }
                                 Err(e) => {
                                     // Parse error - convert to NOTIFICATION if possible
-                                    error!(&self.logger, "error parsing message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                                    error!(peer_ip = %peer_ip, error = ?e, "error parsing message");
                                     if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                         let _ = self.send_notification(notif.clone()).await;
                                         self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -75,7 +75,7 @@ impl Peer {
                         }
                         Some(Err(e)) => {
                             // Header validation error from read task
-                            error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                            error!(peer_ip = %peer_ip, error = ?e, "error reading message");
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
                                 self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -86,7 +86,7 @@ impl Peer {
                         }
                         None => {
                             // Read task exited without error - connection failure
-                            error!(&self.logger, "read task exited unexpectedly", "peer_ip" => peer_ip.to_string());
+                            error!(peer_ip = %peer_ip, "read task exited unexpectedly");
                             self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
@@ -103,6 +103,10 @@ impl Peer {
                             // ROUTE_REFRESH only allowed in Established state
                             // Drop silently
                         }
+                        PeerOp::LocalRibSent { .. } => {
+                            // Only relevant in Established state
+                            // Drop silently
+                        }
                         PeerOp::GetNegotiatedCapabilities(response) => {
                             // Return empty capabilities if not in Established state
                             let _ = response.send(PeerCapabilities::default());
@@ -115,7 +119,7 @@ impl Peer {
                             let _ = response.send(routes);
                         }
                         PeerOp::HardReset => {
-                            info!(&self.logger, "hard reset requested", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "hard reset requested");
 
                             // Send CEASE/ADMINISTRATIVE_RESET notification
                             let notif = NotificationMessage::new(
@@ -125,8 +129,8 @@ impl Peer {
 
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&notif.serialize()).await {
-                                    error!(&self.logger, "failed to send hard reset notification",
-                                          "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                    error!(peer_ip = %peer_ip, error = %e,
+                                          "failed to send hard reset notification");
                                 } else {
                                     self.statistics.notification_sent += 1;
                                 }
@@ -139,13 +143,13 @@ impl Peer {
                             return false;
                         }
                         PeerOp::Shutdown(subcode) => {
-                            info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "shutdown requested");
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
                         PeerOp::ManualStop => {
-                            info!(&self.logger, "ManualStop received", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "ManualStop received");
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
                         }
@@ -156,15 +160,46 @@ impl Peer {
                             // Ignored when connected
                         }
                         PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
-                            // RFC 4271 6.8: Store second connection for collision detection
-                            if self.collision_conn.is_none() {
-                                info!(&self.logger, "collision: storing second connection", "peer_ip" => peer_ip.to_string());
-                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                            // RFC 4724 Section 5: If GR active, restart connection with new TCP
+                            let peer_supports_gr = self
+                                .capabilities
+                                .graceful_restart
+                                .as_ref()
+                                .map(|gr| !gr.afi_safi_list.is_empty())
+                                .unwrap_or(false);
+
+                            if peer_supports_gr {
+                                // RFC 4724: Drop established connection, retain routes, go to Connect
+                                info!(peer_ip = %peer_ip, "second connection with GR - restarting to Connect");
+
+                                // Disconnect current connection with route preservation
+                                self.disconnect(false, PeerDownReason::LocalNoNotification(
+                                    FsmEvent::TcpConnectionConfirmed
+                                ));
+
+                                // Set new connection as primary
+                                self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                                self.conn_type = ConnectionType::Incoming;
+
+                                // RFC 4724: Set ConnectRetryCounter to zero
+                                self.fsm.reset_connect_retry_counter();
+
+                                // RFC 4724: Start ConnectRetryTimer and transition to Connect
+                                self.fsm.timers.start_connect_retry();
+                                self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+                                self.notify_state_change();
+                                return false; // Exit Established state loop
                             } else {
-                                // Already have collision_conn - shouldn't happen, drop it
-                                debug!(&self.logger, "collision: dropping third connection", "peer_ip" => peer_ip.to_string());
-                                drop(tcp_tx);
-                                drop(tcp_rx);
+                                // RFC 4271 6.8: Store second connection for collision detection
+                                if self.collision_conn.is_none() {
+                                    info!(peer_ip = %peer_ip, "collision: storing second connection");
+                                    self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                                } else {
+                                    // Already have collision_conn - shouldn't happen, drop it
+                                    debug!(peer_ip = %peer_ip, "collision: dropping third connection");
+                                    drop(tcp_tx);
+                                    drop(tcp_rx);
+                                }
                             }
                         }
                     }
@@ -173,7 +208,7 @@ impl Peer {
                 _ = timer_interval.tick() => {
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
-                        error!(&self.logger, "hold timer expired", "peer_ip" => peer_ip.to_string());
+                        error!(peer_ip = %peer_ip, "hold timer expired");
                         self.try_process_event(&FsmEvent::HoldTimerExpires).await;
                         return false;
                     }
@@ -181,7 +216,7 @@ impl Peer {
                     // Keepalive timer check
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
-                            error!(&self.logger, "failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(peer_ip = %peer_ip, error = %e, "failed to send keepalive");
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
@@ -200,10 +235,10 @@ impl Peer {
     /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
     pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
         let event = if notif.is_version_error() {
-            debug!(&self.logger, "NOTIFICATION with version error received", "peer_ip" => self.addr.to_string());
+            debug!(peer_ip = %self.addr, "NOTIFICATION with version error received");
             FsmEvent::NotifMsgVerErr(notif.clone())
         } else {
-            debug!(&self.logger, "NOTIFICATION received", "peer_ip" => self.addr.to_string());
+            debug!(peer_ip = %self.addr, "NOTIFICATION received");
             FsmEvent::NotifMsg(notif.clone())
         };
         self.try_process_event(&event).await;
@@ -215,14 +250,14 @@ impl Peer {
         tcp_tx: OwnedWriteHalf,
         tcp_rx: OwnedReadHalf,
     ) {
-        debug!(&self.logger, "TcpConnectionAccepted", "peer_ip" => self.addr.to_string());
+        debug!(peer_ip = %self.addr, "TcpConnectionAccepted");
         self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
         self.conn_type = ConnectionType::Incoming;
         self.fsm.timers.stop_connect_retry();
         if self.config.delay_open_time_secs.is_some() {
             self.fsm.timers.start_delay_open_timer();
         } else if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-            error!(&self.logger, "failed to send OPEN", "peer_ip" => self.addr.to_string(), "error" => e.to_string());
+            error!(peer_ip = %self.addr, error = %e, "failed to send OPEN");
             self.disconnect(
                 true,
                 PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed),
@@ -262,10 +297,10 @@ impl Peer {
     /// Process FSM event and log any errors.
     pub(super) async fn try_process_event(&mut self, event: &FsmEvent) {
         if let Err(e) = self.process_event(event).await {
-            error!(&self.logger, "failed to process event",
-                "peer_ip" => self.addr.to_string(),
-                "event" => format!("{:?}", event),
-                "error" => e.to_string());
+            error!(peer_ip = %self.addr,
+                event = ?event,
+                error = %e,
+                "failed to process event");
         }
     }
 
@@ -367,13 +402,11 @@ pub(super) mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
-    use crate::log::Logger;
     use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use std::collections::HashSet;
     use std::net::SocketAddr;
-    use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
@@ -426,9 +459,9 @@ pub(super) mod tests {
             pending_updates: Vec::new(),
             sent_open: None,
             received_open: None,
-            logger: Arc::new(Logger::default()),
-            negotiated_capabilities: PeerCapabilities::default(),
+            capabilities: PeerCapabilities::default(),
             disabled_afi_safi: HashSet::new(),
+            gr_state: None,
         }
     }
 

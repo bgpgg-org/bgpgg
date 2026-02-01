@@ -259,6 +259,18 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         },
     });
 
+    let graceful_restart = if let Some(gr) = cfg.graceful_restart {
+        crate::config::GracefulRestartConfig {
+            enabled: gr.enabled.unwrap_or(defaults.graceful_restart.enabled),
+            restart_time: gr
+                .restart_time_secs
+                .unwrap_or(defaults.graceful_restart.restart_time as u32)
+                as u16,
+        }
+    } else {
+        defaults.graceful_restart
+    };
+
     PeerConfig {
         address: String::new(),
         idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
@@ -280,6 +292,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
+        graceful_restart,
     }
 }
 

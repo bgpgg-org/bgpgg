@@ -18,13 +18,12 @@ use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{NextHopAddr, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
-use crate::log::Logger;
+use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::{Path, RouteSource};
-use crate::{debug, error, info, warn};
 
 #[cfg(test)]
 use crate::policy::Policy;
@@ -198,7 +197,6 @@ pub fn send_withdrawals_to_peer(
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
     to_withdraw: &[IpNetwork],
     peer_supports_4byte_asn: bool,
-    logger: &Arc<Logger>,
 ) {
     if to_withdraw.is_empty() {
         return;
@@ -212,9 +210,9 @@ pub fn send_withdrawals_to_peer(
     );
     let serialized = withdraw_msg.serialize();
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
-        error!(logger, "failed to send WITHDRAW to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+        error!(%peer_addr, error = %e, "failed to send WITHDRAW to peer");
     } else {
-        info!(logger, "propagated withdrawals to peer", "count" => to_withdraw.len(), "peer_ip" => peer_addr.to_string());
+        info!(count = to_withdraw.len(), %peer_addr, "propagated withdrawals to peer");
     }
 }
 
@@ -257,7 +255,6 @@ fn build_ebgp_next_hop(
     path: &Path,
     local_next_hop: IpAddr,
     prefix: &IpNetwork,
-    logger: &Logger,
 ) -> Option<NextHopAddr> {
     if address_families_match(&path.next_hop, local_next_hop) {
         // Same address family - rewrite to local interface
@@ -268,11 +265,8 @@ fn build_ebgp_next_hop(
     } else {
         // Cross-family without explicit next hop - can't advertise
         warn!(
-            logger,
-            format!(
-                "Filtering cross-family route {} without explicit next hop",
-                prefix
-            )
+            %prefix,
+            "filtering cross-family route without explicit next hop"
         );
         None
     }
@@ -282,7 +276,6 @@ fn build_ibgp_next_hop(
     path: &Path,
     local_next_hop: IpAddr,
     prefix: &IpNetwork,
-    logger: &Logger,
 ) -> Option<NextHopAddr> {
     if !path.source.is_local() {
         // Learned route - preserve next hop
@@ -299,11 +292,8 @@ fn build_ibgp_next_hop(
     } else {
         // Cross-family without explicit next hop - can't advertise
         warn!(
-            logger,
-            format!(
-                "Filtering cross-family route {} without explicit next hop",
-                prefix
-            )
+            %prefix,
+            "filtering cross-family route without explicit next hop"
         );
         None
     }
@@ -318,12 +308,11 @@ fn build_export_next_hop(
     local_asn: u32,
     peer_asn: u32,
     prefix: &IpNetwork,
-    logger: &Logger,
 ) -> Option<NextHopAddr> {
     if local_asn != peer_asn {
-        build_ebgp_next_hop(path, local_next_hop, prefix, logger)
+        build_ebgp_next_hop(path, local_next_hop, prefix)
     } else {
-        build_ibgp_next_hop(path, local_next_hop, prefix, logger)
+        build_ibgp_next_hop(path, local_next_hop, prefix)
     }
 }
 
@@ -335,7 +324,6 @@ pub fn compute_routes_for_peer(
     peer_asn: u32,
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
-    logger: &Arc<Logger>,
 ) -> Vec<(IpNetwork, Path)> {
     // Apply well-known community filtering BEFORE export policy
     // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
@@ -375,14 +363,8 @@ pub fn compute_routes_for_peer(
             path_mut.as_path = build_export_as_path(&path_mut, local_asn, peer_asn);
 
             // Build next hop - may return None for cross-family routes without explicit next hop
-            path_mut.next_hop = build_export_next_hop(
-                &path_mut,
-                local_next_hop,
-                local_asn,
-                peer_asn,
-                prefix,
-                logger,
-            )?;
+            path_mut.next_hop =
+                build_export_next_hop(&path_mut, local_next_hop, local_asn, peer_asn, prefix)?;
 
             path_mut.local_pref = build_export_local_pref(&path_mut, local_asn, peer_asn);
             path_mut.med = build_export_med(&path_mut, local_asn, peer_asn);
@@ -404,7 +386,6 @@ pub fn send_announcements_to_peer(
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
     peer_supports_4byte_asn: bool,
-    logger: &Arc<Logger>,
 ) {
     if to_announce.is_empty() {
         return;
@@ -417,7 +398,6 @@ pub fn send_announcements_to_peer(
         peer_asn,
         local_next_hop,
         export_policies,
-        logger,
     );
 
     if filtered.is_empty() {
@@ -450,12 +430,7 @@ pub fn send_announcements_to_peer(
             .cloned()
             .collect();
 
-        debug!(logger, "exporting route",
-            "peer_ip" => peer_addr.to_string(),
-            "path_local_pref" => format!("{:?}", batch.path.local_pref),
-            "export_local_pref" => format!("{:?}", local_pref),
-            "path_med" => format!("{:?}", batch.path.med),
-            "export_med" => format!("{:?}", med));
+        debug!(%peer_addr, path_local_pref = ?batch.path.local_pref, export_local_pref = ?local_pref, path_med = ?batch.path.med, export_med = ?med, "exporting route");
 
         // Filter extended communities for eBGP (remove non-transitive)
         let extended_communities =
@@ -483,18 +458,14 @@ pub fn send_announcements_to_peer(
         // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            warn!(logger, "UPDATE message exceeds maximum size, not advertising",
-                "peer_ip" => peer_addr.to_string(),
-                "prefix_count" => batch.prefixes.len(),
-                "size" => serialized.len(),
-                "max_size" => MAX_MESSAGE_SIZE);
+            warn!(%peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
             continue;
         }
 
         if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
-            error!(logger, "failed to send UPDATE to peer", "peer_ip" => peer_addr.to_string(), "error" => e.to_string());
+            error!(%peer_addr, error = %e, "failed to send UPDATE to peer");
         } else {
-            info!(logger, "propagated routes to peer", "count" => batch.prefixes.len(), "peer_ip" => peer_addr.to_string());
+            info!(count = batch.prefixes.len(), %peer_addr, "propagated routes to peer");
         }
     }
 }
@@ -764,7 +735,6 @@ mod tests {
         let local_asn = 65000;
         let peer_asn_ebgp = 65001;
         let peer_asn_ibgp = 65000;
-        let logger = Arc::new(Logger::new(crate::log::LogLevel::Warn));
         let prefix = "10.0.0.0/24".parse().unwrap();
 
         let local_path = make_path(
@@ -796,7 +766,6 @@ mod tests {
                 local_asn,
                 peer_asn_ibgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(router_id))
         );
@@ -809,7 +778,6 @@ mod tests {
                 local_asn,
                 peer_asn_ibgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
         );
@@ -822,7 +790,6 @@ mod tests {
                 local_asn,
                 peer_asn_ibgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)))
         );
@@ -835,7 +802,6 @@ mod tests {
                 local_asn,
                 peer_asn_ebgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(router_id))
         );
@@ -848,7 +814,6 @@ mod tests {
                 local_asn,
                 peer_asn_ebgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(router_id))
         );
@@ -861,7 +826,6 @@ mod tests {
                 local_asn,
                 peer_asn_ebgp,
                 &prefix,
-                &logger
             ),
             Some(NextHopAddr::Ipv4(router_id))
         );
@@ -972,7 +936,6 @@ mod tests {
         let routes = vec![(prefix, Arc::new(path))];
 
         // Send announcements - should skip due to size
-        let logger = Arc::new(Logger::default());
         let policies = vec![policy];
         send_announcements_to_peer(
             peer_addr,
@@ -983,7 +946,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             &policies,
             false,
-            &logger,
         );
 
         // Verify no message was sent

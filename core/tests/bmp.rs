@@ -42,7 +42,11 @@ async fn test_add_bmp_server_sends_initiation() {
 
 #[tokio::test]
 async fn test_add_bmp_server_with_existing_peers() {
-    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(90)).await;
+    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(PeerConfig {
+        hold_timer_secs: Some(90),
+        ..Default::default()
+    }))
+    .await;
 
     // Announce routes from peer1
     announce_route(
@@ -215,7 +219,11 @@ async fn test_peer_up_down() {
 #[tokio::test]
 async fn test_route_monitoring_on_updates() {
     let mut bmp_server = FakeBmpServer::new().await;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(90)).await;
+    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+        hold_timer_secs: Some(90),
+        ..Default::default()
+    }))
+    .await;
 
     setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
 

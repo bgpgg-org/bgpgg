@@ -18,8 +18,8 @@ use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_route_refresh::RouteRefreshMessage;
 use crate::bgp::multiprotocol::AfiSafi;
+use crate::log::{debug, error, info, warn};
 use crate::types::PeerDownReason;
-use crate::{debug, error, info, warn};
 use std::mem;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -79,8 +79,8 @@ impl Peer {
                         && self.consecutive_down_count > 0
                     {
                         self.consecutive_down_count = 0;
-                        debug!(&self.logger, "reset damping counter after stable connection",
-                            "peer_ip" => self.addr.to_string());
+                        debug!(peer_ip = %self.addr,
+                            "reset damping counter after stable connection");
                     }
                 }
             }
@@ -135,18 +135,18 @@ impl Peer {
                     match result {
                         Some(Ok(bytes)) => {
                             // Parse bytes using negotiated 4-byte ASN capability
-                            let use_4byte_asn = self.negotiated_capabilities.supports_four_octet_asn();
+                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
                             match Self::parse_bgp_message(&bytes, use_4byte_asn) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
-                                        error!(&self.logger, "error processing message", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                        error!(peer_ip = %peer_ip, error = %e, "error processing message");
                                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                         return false;
                                     }
                                 }
                                 Err(e) => {
                                     // Parse error - convert to NOTIFICATION if possible
-                                    error!(&self.logger, "error parsing message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                                    error!(peer_ip = %peer_ip, error = ?e, "error parsing message");
                                     if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                         let _ = self.send_notification(notif.clone()).await;
                                         self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -159,7 +159,7 @@ impl Peer {
                         }
                         Some(Err(e)) => {
                             // Header validation error from read task
-                            error!(&self.logger, "error reading message", "peer_ip" => peer_ip.to_string(), "error" => format!("{:?}", e));
+                            error!(peer_ip = %peer_ip, error = ?e, "error reading message");
                             if let Some(notif) = NotificationMessage::from_parser_error(&e) {
                                 let _ = self.send_notification(notif.clone()).await;
                                 self.disconnect(true, PeerDownReason::LocalNotification(notif));
@@ -170,7 +170,7 @@ impl Peer {
                         }
                         None => {
                             // Read task exited without error - connection failure
-                            error!(&self.logger, "read task exited unexpectedly", "peer_ip" => peer_ip.to_string());
+                            error!(peer_ip = %peer_ip, "read task exited unexpectedly");
                             self.disconnect(true, PeerDownReason::RemoteNoNotification);
                             return false;
                         }
@@ -187,7 +187,7 @@ impl Peer {
                             if can_send {
                                 // Send immediately
                                 if let Err(e) = self.send_update(update_bytes).await {
-                                    error!(&self.logger, "failed to send UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                    error!(peer_ip = %peer_ip, error = %e, "failed to send UPDATE");
                                     self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                                     return false;
                                 }
@@ -208,44 +208,44 @@ impl Peer {
                         }
                         PeerOp::SendRouteRefresh { afi, safi } => {
                             // RFC 2918: Only send if capability was negotiated
-                            if !self.negotiated_capabilities.route_refresh {
-                                warn!(&self.logger, "cannot send ROUTE_REFRESH: capability not negotiated",
-                                      "peer_ip" => peer_ip.to_string());
+                            if !self.capabilities.route_refresh {
+                                warn!(peer_ip = %peer_ip,
+                                      "cannot send ROUTE_REFRESH: capability not negotiated");
                                 continue;
                             }
 
                             // Validate that the specific AFI/SAFI was negotiated
                             let afi_safi = AfiSafi::new(afi, safi);
-                            if !self.negotiated_capabilities.supports_afi_safi(&afi_safi) {
-                                warn!(&self.logger, "cannot send ROUTE_REFRESH: AFI/SAFI not negotiated",
-                                      "peer_ip" => peer_ip.to_string(),
-                                      "afi" => format!("{:?}", afi),
-                                      "safi" => format!("{:?}", safi));
+                            if !self.capabilities.supports_afi_safi(&afi_safi) {
+                                warn!(peer_ip = %peer_ip,
+                                      afi = ?afi,
+                                      safi = ?safi,
+                                      "cannot send ROUTE_REFRESH: AFI/SAFI not negotiated");
                                 continue;
                             }
 
                             let refresh_msg = RouteRefreshMessage::new(afi, safi);
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
-                                    error!(&self.logger, "failed to send ROUTE_REFRESH",
-                                           "peer_ip" => peer_ip.to_string(),
-                                           "afi" => format!("{:?}", afi),
-                                           "safi" => format!("{:?}", safi),
-                                           "error" => e.to_string());
+                                    error!(peer_ip = %peer_ip,
+                                           afi = ?afi,
+                                           safi = ?safi,
+                                           error = %e,
+                                           "failed to send ROUTE_REFRESH");
                                 } else {
                                     self.statistics.route_refresh_sent += 1;
-                                    info!(&self.logger, "sent ROUTE_REFRESH",
-                                          "peer_ip" => peer_ip.to_string(),
-                                          "afi" => format!("{:?}", afi),
-                                          "safi" => format!("{:?}", safi));
+                                    info!(peer_ip = %peer_ip,
+                                          afi = ?afi,
+                                          safi = ?safi,
+                                          "sent ROUTE_REFRESH");
                                 }
                             }
                         }
                         PeerOp::GetNegotiatedCapabilities(response) => {
-                            let _ = response.send(self.negotiated_capabilities.clone());
+                            let _ = response.send(self.capabilities.clone());
                         }
                         PeerOp::HardReset => {
-                            info!(&self.logger, "hard reset requested", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "hard reset requested");
 
                             // Send CEASE/ADMINISTRATIVE_RESET notification
                             let notif = NotificationMessage::new(
@@ -255,8 +255,8 @@ impl Peer {
 
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&notif.serialize()).await {
-                                    error!(&self.logger, "failed to send hard reset notification",
-                                          "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                                    error!(peer_ip = %peer_ip, error = %e,
+                                          "failed to send hard reset notification");
                                 } else {
                                     self.statistics.notification_sent += 1;
                                 }
@@ -269,15 +269,36 @@ impl Peer {
                             return false;
                         }
                         PeerOp::Shutdown(subcode) => {
-                            info!(&self.logger, "shutdown requested", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "shutdown requested");
                             let notif = NotificationMessage::new(BgpError::Cease(subcode), Vec::new());
                             let _ = self.send_notification(notif).await;
                             return true;
                         }
                         PeerOp::ManualStop => {
-                            info!(&self.logger, "ManualStop received", "peer_ip" => peer_ip.to_string());
+                            info!(peer_ip = %peer_ip, "ManualStop received");
                             self.try_process_event(&FsmEvent::ManualStop).await;
                             return false;
+                        }
+                        PeerOp::LocalRibSent { afi_safi } => {
+                            debug!(peer_ip = %peer_ip, %afi_safi, "loc-rib sent");
+
+                            if let Some(gr_state) = &mut self.gr_state {
+                                gr_state.loc_rib_received.insert(afi_safi, true);
+
+                                // Check if all negotiated AFI/SAFIs have received loc-rib
+                                let all_complete = gr_state
+                                    .afi_safis
+                                    .iter()
+                                    .all(|as_| gr_state.loc_rib_received.get(as_).copied().unwrap_or(false));
+
+                                if all_complete {
+                                    // Send EOR markers for all negotiated AFI/SAFIs
+                                    let afi_safis: Vec<_> = gr_state.afi_safis.iter().copied().collect();
+                                    if let Err(e) = self.send_eor_markers(&afi_safis).await {
+                                        error!(peer_ip = %peer_ip, error = %e, "failed to send EOR markers");
+                                    }
+                                }
+                            }
                         }
                         PeerOp::ManualStart
                         | PeerOp::ManualStartPassive
@@ -292,7 +313,7 @@ impl Peer {
                 _ = timer_interval.tick() => {
                     // Hold timer check
                     if self.fsm.timers.hold_timer_expired() {
-                        error!(&self.logger, "hold timer expired", "peer_ip" => peer_ip.to_string());
+                        error!(peer_ip = %peer_ip, "hold timer expired");
                         self.try_process_event(&FsmEvent::HoldTimerExpires).await;
                         return false;
                     }
@@ -300,7 +321,7 @@ impl Peer {
                     // Keepalive timer check
                     if self.fsm.timers.keepalive_timer_expired() {
                         if let Err(e) = self.process_event(&FsmEvent::KeepaliveTimerExpires).await {
-                            error!(&self.logger, "failed to send keepalive", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(peer_ip = %peer_ip, error = %e, "failed to send keepalive");
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::KeepaliveTimerExpires));
                             return false;
                         }
@@ -312,7 +333,7 @@ impl Peer {
                     let updates = mem::take(&mut self.pending_updates);
                     for update in updates {
                         if let Err(e) = self.send_update(update).await {
-                            error!(&self.logger, "failed to send queued UPDATE", "peer_ip" => peer_ip.to_string(), "error" => e.to_string());
+                            error!(peer_ip = %peer_ip, error = %e, "failed to send queued UPDATE");
                             self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::BgpUpdateReceived));
                             return false;
                         }

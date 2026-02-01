@@ -523,6 +523,64 @@ impl UpdateMessage {
             format: MessageFormat { use_4byte_asn },
         })
     }
+
+    /// Check if this UPDATE is an End-of-RIB marker (RFC 4724)
+    /// - IPv4 Unicast: empty UPDATE (no withdrawn, no path attributes, no NLRI)
+    /// - Other AFI/SAFI: Only MP_UNREACH_NLRI with empty withdrawn routes
+    pub fn is_eor(&self) -> bool {
+        // Must have no traditional withdrawn routes or NLRI
+        if !self.withdrawn_routes.is_empty() || !self.nlri_list.is_empty() {
+            return false;
+        }
+
+        // Case 1: IPv4 Unicast EOR - completely empty
+        if self.path_attributes.is_empty() {
+            return true;
+        }
+
+        // Case 2: Other AFI/SAFI EOR - single MP_UNREACH_NLRI with empty withdrawn routes
+        if self.path_attributes.len() == 1 {
+            if let PathAttrValue::MpUnreachNlri(ref mp_unreach) = self.path_attributes[0].value {
+                return mp_unreach.withdrawn_routes.is_empty();
+            }
+        }
+
+        false
+    }
+
+    /// Create an End-of-RIB marker (RFC 4724)
+    /// For IPv4 Unicast: empty UPDATE message
+    /// For all other AFI/SAFI: UPDATE with MP_UNREACH_NLRI with empty withdrawn routes
+    pub fn new_eor(afi: Afi, safi: Safi, format: MessageFormat) -> Self {
+        if matches!((afi, safi), (Afi::Ipv4, Safi::Unicast)) {
+            // IPv4 Unicast: empty UPDATE
+            UpdateMessage {
+                withdrawn_routes_len: 0,
+                withdrawn_routes: Vec::new(),
+                total_path_attributes_len: 0,
+                path_attributes: Vec::new(),
+                nlri_list: Vec::new(),
+                format,
+            }
+        } else {
+            // All other AFI/SAFI: MP_UNREACH_NLRI with empty withdrawn routes
+            UpdateMessage {
+                withdrawn_routes_len: 0,
+                withdrawn_routes: Vec::new(),
+                total_path_attributes_len: 0,
+                path_attributes: vec![PathAttribute {
+                    flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                    value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                        afi,
+                        safi,
+                        withdrawn_routes: Vec::new(),
+                    }),
+                }],
+                nlri_list: Vec::new(),
+                format,
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -2013,5 +2071,124 @@ mod tests {
         assert_eq!(msg.local_pref(), Some(100));
         assert_eq!(msg.med(), Some(50));
         assert_eq!(msg.communities(), Some(vec![65001]));
+    }
+
+    #[test]
+    fn test_is_eor() {
+        let format = MessageFormat {
+            use_4byte_asn: true,
+        };
+
+        let cases = vec![
+            (
+                "empty UPDATE",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![],
+                    nlri_list: vec![],
+                    format,
+                },
+                true,
+            ),
+            (
+                "MP_UNREACH_NLRI with empty withdrawn",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![PathAttribute {
+                        flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                        value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::Ipv6,
+                            safi: Safi::Unicast,
+                            withdrawn_routes: vec![],
+                        }),
+                    }],
+                    nlri_list: vec![],
+                    format,
+                },
+                true,
+            ),
+            (
+                "has NLRI",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![],
+                    nlri_list: vec![IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    })],
+                    format,
+                },
+                false,
+            ),
+        ];
+
+        for (desc, msg, expected) in cases {
+            assert_eq!(msg.is_eor(), expected, "{}", desc);
+        }
+    }
+
+    #[test]
+    fn test_new_eor() {
+        let cases = vec![
+            (
+                "IPv4 Unicast - empty UPDATE",
+                Afi::Ipv4,
+                Safi::Unicast,
+                true,
+            ),
+            (
+                "IPv6 Unicast - MP_UNREACH_NLRI",
+                Afi::Ipv6,
+                Safi::Unicast,
+                true,
+            ),
+            (
+                "IPv4 Multicast - MP_UNREACH_NLRI",
+                Afi::Ipv4,
+                Safi::Multicast,
+                false,
+            ),
+        ];
+
+        for (desc, afi, safi, use_4byte_asn) in cases {
+            let format = MessageFormat { use_4byte_asn };
+            let eor = UpdateMessage::new_eor(afi, safi, format);
+
+            // All EOR markers should be recognized as EOR
+            assert!(eor.is_eor(), "{}: should be EOR marker", desc);
+
+            // All should have empty withdrawn and NLRI
+            assert_eq!(eor.withdrawn_routes, vec![], "{}", desc);
+            assert_eq!(eor.nlri_list, vec![], "{}", desc);
+
+            // Check format
+            assert_eq!(eor.use_4byte_asn(), use_4byte_asn, "{}", desc);
+
+            // IPv4 Unicast should have no attributes
+            if matches!((afi, safi), (Afi::Ipv4, Safi::Unicast)) {
+                assert_eq!(eor.path_attributes, vec![], "{}", desc);
+            } else {
+                // Others should have exactly one MP_UNREACH_NLRI attribute
+                assert_eq!(eor.path_attributes.len(), 1, "{}", desc);
+
+                let attr = &eor.path_attributes[0];
+                assert_eq!(attr.flags, PathAttrFlag(PathAttrFlag::OPTIONAL), "{}", desc);
+
+                match &attr.value {
+                    PathAttrValue::MpUnreachNlri(mp_unreach) => {
+                        assert_eq!(mp_unreach.afi, afi, "{}", desc);
+                        assert_eq!(mp_unreach.safi, safi, "{}", desc);
+                        assert_eq!(mp_unreach.withdrawn_routes, vec![], "{}", desc);
+                    }
+                    _ => panic!("{}: expected MP_UNREACH_NLRI", desc),
+                }
+            }
+        }
     }
 }

@@ -21,8 +21,7 @@ use super::msg_route_monitoring::RouteMonitoringMessage;
 use super::msg_statistics::{StatType, StatisticsReportMessage, StatisticsTlv};
 use super::msg_termination::{TerminationMessage, TerminationReason};
 use super::utils::PeerDistinguisher;
-use crate::info;
-use crate::log::Logger;
+use crate::log::info;
 use crate::server::{BmpOp, ServerOp};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,7 +44,6 @@ pub struct BmpTask {
     // Batching state
     batch: Vec<BmpMessage>,
     last_flush: Instant,
-    logger: Arc<Logger>,
 }
 
 impl BmpTask {
@@ -55,7 +53,6 @@ impl BmpTask {
         rx: mpsc::UnboundedReceiver<Arc<BmpOp>>,
         server_tx: mpsc::UnboundedSender<ServerOp>,
         statistics_timeout: Option<u64>,
-        logger: Arc<Logger>,
     ) -> Self {
         Self {
             addr,
@@ -65,12 +62,11 @@ impl BmpTask {
             statistics_timeout,
             batch: Vec::new(),
             last_flush: Instant::now(),
-            logger,
         }
     }
 
     pub async fn run(mut self, sys_name: String, sys_descr: String) {
-        info!(&self.logger, "BMP task starting", "addr" => &self.addr.to_string());
+        info!(addr = %self.addr, "BMP task starting");
 
         // Send Initiation message
         let initiation = BmpMessage::Initiation(InitiationMessage::new(&sys_name, &sys_descr, &[]));
@@ -91,7 +87,7 @@ impl BmpTask {
         ));
         self.destination.send(&termination).await;
 
-        info!(&self.logger, "BMP task exiting", "addr" => &self.addr.to_string());
+        info!(addr = %self.addr, "BMP task exiting");
     }
 
     async fn event_loop(&mut self) {
@@ -143,7 +139,7 @@ impl BmpTask {
             return;
         }
 
-        info!(&self.logger, "BMP: Flushing batch", "addr" => &self.addr.to_string(), "count" => self.batch.len());
+        info!(addr = %self.addr, count = self.batch.len(), "BMP: Flushing batch");
         self.destination.send_batch(&self.batch).await;
         self.batch.clear();
         self.last_flush = Instant::now();
@@ -162,7 +158,7 @@ impl BmpTask {
                 received_open,
                 use_4byte_asn,
             } => {
-                info!(&self.logger, "BMP: Peer Up", "peer_ip" => peer_ip);
+                info!(peer_ip = %peer_ip, "BMP: Peer Up");
                 Some(BmpMessage::PeerUp(PeerUpMessage::new(
                     PeerDistinguisher::Global,
                     *peer_ip,
@@ -186,7 +182,7 @@ impl BmpTask {
                 reason,
                 use_4byte_asn,
             } => {
-                info!(&self.logger, "BMP: Peer Down", "peer_ip" => peer_ip);
+                info!(peer_ip = %peer_ip, "BMP: Peer Down");
                 Some(BmpMessage::PeerDown(PeerDownMessage::new(
                     PeerDistinguisher::Global,
                     *peer_ip,

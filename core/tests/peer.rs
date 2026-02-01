@@ -28,7 +28,60 @@ use tokio::io::AsyncWriteExt;
 #[tokio::test]
 async fn test_peer_down() {
     let hold_timer_secs = 3;
-    let (server1, mut server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+    let gr_restart_time_secs = 3; // 3-second GR timer for testing
+
+    // Set up servers
+    let [mut server1, mut server2] = [
+        start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            hold_timer_secs as u64,
+            true, // Accept unconfigured peers on server1
+        ))
+        .await,
+        start_test_server(Config::new(
+            65002,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            hold_timer_secs as u64,
+            false, // Server2 only accepts configured peers
+        ))
+        .await,
+    ];
+
+    // Server2 configures server1 as a passive peer with short GR timer
+    // This ensures server2 advertises the short restart time
+    let config2 = bgpgg::grpc::proto::SessionConfig {
+        graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+            enabled: Some(true),
+            restart_time_secs: Some(gr_restart_time_secs),
+        }),
+        passive_mode: Some(true),
+        ..Default::default()
+    };
+    server2
+        .client
+        .add_peer(
+            format!("{}:{}", server1.address, server1.bgp_port),
+            Some(config2),
+        )
+        .await
+        .unwrap();
+
+    // Server1 connects to server2 with short GR timer
+    let config1 = session_config_with_gr_timer(gr_restart_time_secs);
+    server1
+        .client
+        .add_peer(
+            format!("{}:{}", server2.address, server2.bgp_port),
+            Some(config1),
+        )
+        .await
+        .unwrap();
+
+    // Wait for peering to establish
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
 
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
@@ -51,22 +104,34 @@ async fn test_peer_down() {
     )
     .await;
 
-    // Kill Server2 to simulate peer going down (drops runtime, killing ALL tasks)
+    // Kill Server2 to simulate peer going down
     server2.kill();
 
-    // Poll for peer state change (configured peers kept in Idle, not removed)
-    // server1 connected to server2, so from server1's view, server2 is configured
+    // Poll for peer state change to Idle
     poll_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await;
 
-    // Poll for route withdrawal
-    poll_route_withdrawal(&[&server1]).await;
+    // With 3-second GR timer, routes withdrawn after 3 seconds
+    poll_until_with_timeout(
+        || async {
+            let Ok(routes) = server1.client.get_routes().await else {
+                return false;
+            };
+            routes.is_empty()
+        },
+        "Timeout waiting for route withdrawal after GR timer expires",
+        50, // 5 seconds = 3s GR timer + 2s buffer
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_peer_down_four_node_mesh() {
-    let hold_timer_secs = 3;
     let (mut server1, server2, server3, mut server4) =
-        setup_four_meshed_servers(Some(hold_timer_secs)).await;
+        setup_four_meshed_servers(Some(PeerConfig {
+            hold_timer_secs: Some(3),
+            ..Default::default()
+        }))
+        .await;
 
     // Server1 announces a route to all peers
     let server1_addr = server1.address.to_string();
@@ -166,8 +231,11 @@ async fn test_peer_down_four_node_mesh() {
 
 #[tokio::test]
 async fn test_peer_up() {
-    let hold_timer_secs = 3;
-    let (server1, server2) = setup_two_peered_servers(Some(hold_timer_secs)).await;
+    let (server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+        hold_timer_secs: Some(3),
+        ..Default::default()
+    }))
+    .await;
 
     // Poll until OPEN exchanged and at least one keepalive cycle completed
     let expected = ExpectedStats {
@@ -195,9 +263,11 @@ async fn test_peer_up() {
 
 #[tokio::test]
 async fn test_peer_up_four_node_mesh() {
-    let hold_timer_secs = 3;
-    let (server1, server2, server3, server4) =
-        setup_four_meshed_servers(Some(hold_timer_secs)).await;
+    let (server1, server2, server3, server4) = setup_four_meshed_servers(Some(PeerConfig {
+        hold_timer_secs: Some(3),
+        ..Default::default()
+    }))
+    .await;
 
     // Poll until multiple keepalive cycles completed (proves connection stays up)
     let expected = ExpectedStats {
@@ -1271,6 +1341,537 @@ async fn test_hard_reset_peer_not_found() {
         "Error message should mention peer not found: {}",
         err_msg
     );
+}
+
+#[tokio::test]
+async fn test_graceful_restart() {
+    struct TestCase {
+        name: &'static str,
+        peer_configured: bool,
+        gr_enabled: bool,
+        expect_routes_retained: bool,
+        expect_peer_removed_after_gr: bool,
+    }
+
+    let test_cases = vec![
+        TestCase {
+            name: "configured peer with GR",
+            peer_configured: true,
+            gr_enabled: true,
+            expect_routes_retained: true,
+            expect_peer_removed_after_gr: false, // Configured peers stay
+        },
+        TestCase {
+            name: "unconfigured peer with GR",
+            peer_configured: false,
+            gr_enabled: true,
+            expect_routes_retained: true,
+            expect_peer_removed_after_gr: true, // Unconfigured peers removed after GR
+        },
+        TestCase {
+            name: "unconfigured peer without GR",
+            peer_configured: false,
+            gr_enabled: false,
+            expect_routes_retained: false,
+            expect_peer_removed_after_gr: true, // Removed immediately
+        },
+        TestCase {
+            name: "configured peer without GR",
+            peer_configured: true,
+            gr_enabled: false,
+            expect_routes_retained: false,
+            expect_peer_removed_after_gr: false, // Configured peers stay
+        },
+    ];
+
+    for tc in test_cases {
+        let gr_restart_time_secs = 3;
+
+        // Create two servers with short hold timer for faster disconnect detection
+        // server1 always accepts unconfigured peers
+        // server2 accepts unconfigured only when we want to test unconfigured peer behavior
+        let mut server1 = start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            3, // Short hold timer for fast disconnect detection
+            true,
+        ))
+        .await;
+
+        let mut server2 = start_test_server(Config::new(
+            65002,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            3,                   // Short hold timer for fast disconnect detection
+            !tc.peer_configured, // Accept unconfigured peers only when testing unconfigured behavior
+        ))
+        .await;
+
+        // Configure server2 FIRST (before server1 connects)
+        // Server2 conditionally adds server1 based on peer_configured
+        if tc.peer_configured {
+            let s2_session_config = if tc.gr_enabled {
+                Some(SessionConfig {
+                    graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                        enabled: Some(true),
+                        restart_time_secs: Some(gr_restart_time_secs),
+                    }),
+                    passive_mode: Some(true),
+                    ..Default::default()
+                })
+            } else {
+                Some(SessionConfig {
+                    passive_mode: Some(true),
+                    ..Default::default()
+                })
+            };
+
+            server2
+                .client
+                .add_peer(
+                    format!("{}:{}", server1.address, server1.bgp_port),
+                    s2_session_config,
+                )
+                .await
+                .unwrap();
+        }
+
+        let s1_session_config = if tc.gr_enabled {
+            Some(session_config_with_gr_timer(gr_restart_time_secs))
+        } else {
+            // Disable GR
+            Some(SessionConfig {
+                graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(false),
+                    restart_time_secs: None,
+                }),
+                ..Default::default()
+            })
+        };
+
+        server1
+            .client
+            .add_peer(
+                format!("{}:{}", server2.address, server2.bgp_port),
+                s1_session_config,
+            )
+            .await
+            .unwrap();
+
+        poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+        // Announce route from server1 and verify it propagates to server2
+        let s1_addr = server1.address.to_string();
+        announce_and_verify_route(
+            &mut server1,
+            &[&server2],
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+            PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: s1_addr.clone(),
+                peer_address: s1_addr,
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Kill server1
+        server1.kill();
+
+        if tc.expect_routes_retained {
+            // For GR: peer goes to Idle but stays in HashMap
+            poll_peers(
+                &server2,
+                vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
+            )
+            .await;
+
+            // Routes should be retained during GR timer
+            poll_while(
+                || async {
+                    let Ok(routes) = server2.client.get_routes().await else {
+                        return false;
+                    };
+                    routes.len() == 1
+                },
+                std::time::Duration::from_secs(1),
+                &format!("{}: routes should be retained during GR timer", tc.name),
+            )
+            .await;
+
+            // After GR timer, routes withdrawn
+            poll_until_with_timeout(
+                || async {
+                    let Ok(routes) = server2.client.get_routes().await else {
+                        return false;
+                    };
+                    routes.is_empty()
+                },
+                &format!(
+                    "{}: timeout waiting for route withdrawal after GR timer",
+                    tc.name
+                ),
+                50, // 5s = 3s GR timer + 2s buffer
+            )
+            .await;
+
+            // Check if peer is removed after GR timer
+            if tc.expect_peer_removed_after_gr {
+                poll_peers_with_timeout(&server2, vec![], 10).await;
+            } else {
+                // Peer should still exist in Idle state
+                poll_peers(
+                    &server2,
+                    vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
+                )
+                .await;
+            }
+        } else {
+            // No GR: Wait for peer to detect disconnect and routes to be withdrawn
+            if tc.expect_peer_removed_after_gr {
+                // Unconfigured peer should be removed
+                poll_peers_with_timeout(&server2, vec![], 40).await;
+            } else {
+                // Configured peer goes to Idle
+                poll_peers_with_timeout(
+                    &server2,
+                    vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
+                    40,
+                )
+                .await;
+            }
+
+            // Routes should be withdrawn immediately
+            poll_route_withdrawal(&[&server2]).await;
+        }
+
+        server2.kill();
+    }
+}
+
+/// Test BGP Graceful Restart reconnect scenario (RFC 4724)
+///
+/// Flow:
+/// 1. Server peers with FakePeer (GR enabled, 5s timer, idle_hold=0 for fast reconnect)
+/// 2. FakePeer announces route 10.0.0.0/24
+/// 3. FakePeer drops TCP (simulates restart)
+/// 4. Server retains route during GR timer, goes Idle, then reconnects
+/// 5. FakePeer re-handshakes with R=1 (restart in progress)
+/// 6. Route still retained after reconnect
+#[tokio::test]
+async fn test_graceful_restart_reconnect() {
+    let gr_restart_time_secs = 5u32;
+
+    // Create FakePeer listener (ephemeral port)
+    let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
+    let peer_addr = format!("127.0.0.1:{}", peer.port());
+
+    // Start server
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90, // Hold timer (longer than GR timer)
+        false,
+    ))
+    .await;
+
+    // Add peer with GR enabled and idle_hold_time=0 for immediate reconnect
+    server
+        .client
+        .add_peer(
+            peer_addr,
+            Some(SessionConfig {
+                graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(gr_restart_time_secs),
+                }),
+                idle_hold_time_secs: Some(0), // Reconnect immediately after TCP drop
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Accept server's connection
+    peer.accept().await;
+
+    // Read server's OPEN
+    peer.read_open().await;
+
+    // Send OPEN with GR + Multiprotocol capabilities (no R flag - normal operation)
+    // Multiprotocol capability is needed for EOR to be sent after reconnect
+    peer.send_open_with_gr(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        gr_restart_time_secs as u16,
+        false,
+    )
+    .await;
+    peer.asn = 65002;
+
+    // Exchange KEEPALIVEs -> Established
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+
+    // FakePeer announces route 10.0.0.0/24
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_2byte(vec![65002]),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+        ],
+        &[24, 10, 0, 0], // 10.0.0.0/24
+        None,
+    );
+    peer.send_raw(&update).await;
+
+    // Verify route in RIB
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+        },
+        "route should be in RIB",
+    )
+    .await;
+
+    // Drop TCP without NOTIFICATION -> triggers GR
+    drop(peer.stream.take());
+
+    // Peer goes to Idle (GR active, route retained)
+    poll_peers(&server, vec![peer.to_peer(BgpState::Idle, true)]).await;
+
+    // Route retained during GR timer (verify for 2s)
+    poll_while(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+        },
+        std::time::Duration::from_secs(2),
+        "route should be retained during GR timer",
+    )
+    .await;
+
+    // Server reconnects (idle_hold=0 -> immediate reconnect)
+    peer.accept().await;
+
+    // Read server's OPEN
+    peer.read_open().await;
+
+    // Send OPEN with GR + Multiprotocol capabilities and R flag (restart in progress)
+    peer.send_open_with_gr(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        gr_restart_time_secs as u16,
+        true,
+    )
+    .await;
+
+    // Exchange KEEPALIVEs -> Established
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+
+    // RFC 4724 Section 4.2: Receiving Speaker sends full table to Restarting Speaker
+    //
+    // The server sends the retained route (10.0.0.0/24) back to the peer, since the peer
+    // indicated R=1 (restart in progress) and thus is assumed to have lost its state.
+    let route_update = peer.read_update().await;
+    assert_eq!(
+        route_update.nlri_list().len(),
+        1,
+        "Server should send retained route to restarting peer"
+    );
+    assert_eq!(
+        route_update.nlri_list()[0].to_string(),
+        "10.0.0.0/24",
+        "Server should send 10.0.0.0/24 route"
+    );
+
+    // Server should send End-of-RIB marker after initial update (RFC 4724)
+    // Use short timeout - EOR should come quickly after route update
+    use tokio::time::{timeout, Duration};
+    let eor_result = timeout(Duration::from_secs(2), peer.read_update()).await;
+    assert!(
+        eor_result.is_ok(),
+        "Server should send End-of-RIB marker after route update"
+    );
+    assert!(
+        eor_result.unwrap().is_eor(),
+        "Expected End-of-RIB marker (empty UPDATE)"
+    );
+
+    // Route still retained after reconnect
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+        },
+        "route should still be in RIB after reconnect",
+    )
+    .await;
+}
+
+/// RFC 4724 Section 4.2: When peer reconnects with F=0 (forwarding state not preserved),
+/// the Receiving Speaker MUST immediately remove all stale routes.
+///
+/// Flow:
+/// 1. Server peers with FakePeer (GR enabled with F=1)
+/// 2. FakePeer announces route 10.0.0.0/24
+/// 3. FakePeer drops TCP (routes marked stale)
+/// 4. FakePeer reconnects with F=0 (forwarding state lost)
+/// 5. Stale routes should be immediately cleared (no waiting for EOR)
+#[tokio::test]
+async fn test_graceful_restart_fbit_zero_clears_stale() {
+    let gr_restart_time_secs = 30u32; // Long timer - we should NOT wait for it
+
+    // Create FakePeer listener
+    let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
+    let peer_addr = format!("127.0.0.1:{}", peer.port());
+
+    // Start server
+    let mut server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+        false,
+    ))
+    .await;
+
+    // Add peer with GR enabled
+    server
+        .client
+        .add_peer(
+            peer_addr,
+            Some(SessionConfig {
+                graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(gr_restart_time_secs),
+                }),
+                idle_hold_time_secs: Some(0), // Reconnect immediately
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Accept server's connection
+    peer.accept().await;
+    peer.read_open().await;
+
+    // Send OPEN with GR (F=1 - forwarding preserved)
+    peer.send_open_with_gr_fbit(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        gr_restart_time_secs as u16,
+        false, // R=0 (not restarting)
+        true,  // F=1 (forwarding preserved)
+    )
+    .await;
+    peer.asn = 65002;
+
+    // Exchange KEEPALIVEs -> Established
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+
+    // FakePeer announces route 10.0.0.0/24
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_2byte(vec![65002]),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+        ],
+        &[24, 10, 0, 0], // 10.0.0.0/24
+        None,
+    );
+    peer.send_raw(&update).await;
+
+    // Verify route in RIB
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+        },
+        "route should be in RIB",
+    )
+    .await;
+
+    // Drop TCP without NOTIFICATION -> triggers GR, routes marked stale
+    drop(peer.stream.take());
+    poll_peers(&server, vec![peer.to_peer(BgpState::Idle, true)]).await;
+
+    // Route still retained (GR timer hasn't expired)
+    let routes = server.client.get_routes().await.unwrap();
+    assert_eq!(routes.len(), 1, "route should be retained during GR");
+
+    // Server reconnects
+    peer.accept().await;
+    peer.read_open().await;
+
+    // Send OPEN with GR but F=0 (forwarding state LOST)
+    peer.send_open_with_gr_fbit(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+        gr_restart_time_secs as u16,
+        true,  // R=1 (restarting)
+        false, // F=0 (forwarding NOT preserved)
+    )
+    .await;
+
+    // Exchange KEEPALIVEs -> Established
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+
+    // RFC 4724: With F=0, stale routes should be immediately cleared
+    // We should NOT need to wait for EOR - routes should already be gone
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.is_empty())
+        },
+        "stale routes should be immediately cleared when F=0",
+    )
+    .await;
 }
 
 /// RFC 6793: Test peering establishment between peers with large ASNs

@@ -288,6 +288,9 @@ pub struct Fsm {
     /// Passive mode: if true, wait for incoming connections (Active state)
     /// if false, initiate connections (Connect state)
     passive_mode: bool,
+
+    /// RFC 4724: True if Graceful Restart was negotiated with peer
+    graceful_restart_negotiated: bool,
 }
 
 impl Fsm {
@@ -309,6 +312,7 @@ impl Fsm {
             local_bgp_id,
             local_addr,
             passive_mode,
+            graceful_restart_negotiated: false,
         }
     }
 
@@ -331,6 +335,7 @@ impl Fsm {
             local_bgp_id,
             local_addr,
             passive_mode,
+            graceful_restart_negotiated: false,
         }
     }
 
@@ -367,6 +372,11 @@ impl Fsm {
     /// Increment ConnectRetryCounter (RFC 4271 8.2.2)
     pub fn increment_connect_retry_counter(&mut self) {
         self.connect_retry_counter += 1;
+    }
+
+    /// Set graceful restart negotiated flag (RFC 4724)
+    pub fn set_graceful_restart_negotiated(&mut self, negotiated: bool) {
+        self.graceful_restart_negotiated = negotiated;
     }
 
     /// Handle an event and return new state.
@@ -504,6 +514,14 @@ impl Fsm {
             (BgpState::Established, FsmEvent::HoldTimerExpires) => BgpState::Idle,
             // RFC 4271 8.2.2: Event 11 (KeepaliveTimerExpires) -> send KEEPALIVE, stay Established
             (BgpState::Established, FsmEvent::KeepaliveTimerExpires) => BgpState::Established,
+            // RFC 4724: Event 17 (TcpConnectionConfirmed) with GR negotiated -> Connect
+            (BgpState::Established, FsmEvent::TcpConnectionConfirmed) => {
+                if self.graceful_restart_negotiated {
+                    BgpState::Connect
+                } else {
+                    BgpState::Established
+                }
+            }
             // RFC 4271 8.2.2: TcpConnectionFails -> Idle
             (BgpState::Established, FsmEvent::TcpConnectionFails) => BgpState::Idle,
             // RFC 4271 8.2.2: Event 26 (KeepaliveMsg) -> reset HoldTimer, stay Established
@@ -1099,5 +1117,44 @@ mod tests {
                 expected_code
             );
         }
+    }
+
+    #[test]
+    fn test_graceful_restart_tcp_connection_in_established() {
+        // RFC 4724: Second TCP connection in Established with GR negotiated -> Connect
+        let mut fsm = Fsm::with_state(
+            BgpState::Established,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
+
+        // Test 1: GR negotiated - should transition to Connect
+        fsm.set_graceful_restart_negotiated(true);
+        let new_state = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+        assert_eq!(
+            new_state,
+            BgpState::Connect,
+            "Established + TcpConnectionConfirmed with GR should -> Connect"
+        );
+
+        // Test 2: GR not negotiated - should stay in Established (for collision detection)
+        let mut fsm = Fsm::with_state(
+            BgpState::Established,
+            65000,
+            180,
+            0x01010101,
+            TEST_LOCAL_ADDR,
+            false,
+        );
+        fsm.set_graceful_restart_negotiated(false);
+        let new_state = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
+        assert_eq!(
+            new_state,
+            BgpState::Established,
+            "Established + TcpConnectionConfirmed without GR should -> Established"
+        );
     }
 }

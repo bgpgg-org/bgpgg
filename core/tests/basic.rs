@@ -272,32 +272,35 @@ async fn test_ibgp_split_horizon() {
     // Linear topology: A--B--C (all same ASN for iBGP)
     // Tests that routes learned via iBGP are not advertised to other iBGP peers
     // iBGP: all same ASN
-    let [mut server1, server2, server3] = chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await,
-    ])
+    let [mut server1, server2, server3] = chain_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                90,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                90,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.3:0",
+                Ipv4Addr::new(3, 3, 3, 3),
+                90,
+                true,
+            ))
+            .await,
+        ],
+        PeerConfig::default(),
+    )
     .await;
 
     // Server1 announces a route
@@ -361,32 +364,35 @@ async fn test_as_loop_prevention() {
     // Topology: AS1_A -> AS2 -> AS1_B (different speakers in AS1)
     // Test that when AS1_A announces a route, it propagates to AS2,
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
-    let [mut server1_a, server2, server1_b] = chain_servers([
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await,
-        start_test_server(Config::new(
-            65001,
-            "127.0.0.3:0",
-            Ipv4Addr::new(3, 3, 3, 3),
-            90,
-            true,
-        ))
-        .await, // Same AS as server1_a
-    ])
+    let [mut server1_a, server2, server1_b] = chain_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                90,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65002,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                90,
+                true,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.3:0",
+                Ipv4Addr::new(3, 3, 3, 3),
+                90,
+                true,
+            ))
+            .await, // Same AS as server1_a
+        ],
+        PeerConfig::default(),
+    )
     .await;
 
     // Server1_A announces a route to server2
@@ -574,7 +580,7 @@ async fn test_ipv6_nexthop_rewrite() {
     ))
     .await;
 
-    let [server1, mut server2] = chain_servers([server1, server2]).await;
+    let [server1, mut server2] = chain_servers([server1, server2], PeerConfig::default()).await;
 
     // Server2 announces IPv6 route with explicit next-hop
     let server2_addr = server2.address.to_string();
