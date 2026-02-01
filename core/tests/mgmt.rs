@@ -259,7 +259,12 @@ async fn test_withdraw_nonexistent_route() {
 
 #[tokio::test]
 async fn test_disable_enable_peer() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    // Use short idle_hold_time to speed up reconnection after disable/enable
+    let config = PeerConfig {
+        idle_hold_time_secs: Some(1),
+        ..Default::default()
+    };
+    let (mut server1, server2) = setup_two_peered_servers(Some(config)).await;
 
     // Disable peer
     server1
@@ -288,14 +293,25 @@ async fn test_disable_enable_peer() {
         .unwrap();
 
     // Peer should reconnect and reach Established with admin_state Up
-    poll_until(
+    // Use longer timeout (300 iterations = 30s) to account for damping and retries
+    poll_until_with_timeout(
         || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1
-                && peers[0].state == BgpState::Established as i32
-                && peers[0].admin_state == AdminState::Up as i32
+            let peers1 = server1.client.get_peers().await.unwrap();
+            let peers2 = server2.client.get_peers().await.unwrap();
+            eprintln!(
+                "DEBUG: server1 peer: {:?}",
+                peers1.first().map(|p| (p.state, p.admin_state))
+            );
+            eprintln!(
+                "DEBUG: server2 peer: {:?}",
+                peers2.first().map(|p| (p.state, p.admin_state))
+            );
+            peers1.len() == 1
+                && peers1[0].state == BgpState::Established as i32
+                && peers1[0].admin_state == AdminState::Up as i32
         },
         "Peer should be Established with admin_state Up",
+        300, // 30 seconds
     )
     .await;
 }

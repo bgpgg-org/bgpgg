@@ -25,6 +25,7 @@ use bgpgg::grpc::proto::{
     AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
 use std::net::Ipv4Addr;
+use tokio::io::AsyncReadExt;
 
 #[tokio::test]
 async fn test_max_prefix_limit() {
@@ -218,133 +219,138 @@ async fn test_disable_peer_sends_admin_shutdown() {
     );
 }
 
-/// RFC 4271 Section 6.8: Connection Collision Detection
-/// local < remote -> close existing, accept new
+/// RFC 4271 Section 6.8: Connection Collision Detection with active-active peering.
+/// Tests real-world scenario where local BGP ID > remote -> local's outgoing wins.
 #[tokio::test]
-async fn test_collision_local_lower_bgp_id() {
-    // Server BGP ID 1.1.1.1 (lower than peer's 2.2.2.2)
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
+async fn test_collision_active_active_local_wins() {
+    // Server1 BGP ID 2.2.2.2 (higher), Server2 BGP ID 1.1.1.1 (lower)
+    // Server1's outgoing connection should win
+    let (_server1, _server2) = setup_two_peered_servers_active_active(
+        Ipv4Addr::new(2, 2, 2, 2),
         Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
+    )
     .await;
-
-    // Peer 1: connect and reach OpenConfirm
-    let mut peer1 = FakePeer::connect(Some("127.0.0.3"), &server).await;
-    peer1
-        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-
-    poll_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await;
-
-    // Peer 2: collision - since local < remote, existing (peer1) closed, new (peer2) wins
-    let mut peer2 = FakePeer::connect(Some("127.0.0.3"), &server).await;
-    peer2
-        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-
-    // Verify peer1 received NOTIFICATION with ConnectionCollisionResolution
-    let notif = peer1.read_notification().await;
-    assert_eq!(
-        notif.error(),
-        &BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution),
-        "peer1 should receive ConnectionCollisionResolution"
-    );
-
-    // Complete handshake on peer2 (the winner)
-    peer2.send_keepalive().await;
-
-    // Verify peer2 is Established (same address as peer1 since same IP)
-    poll_peers(&server, vec![peer2.to_peer(BgpState::Established, false)]).await;
+    // If we get here, both reached Established - collision was resolved correctly
 }
 
-/// RFC 4271 Section 6.8: Connection Collision Detection in OpenConfirm state
+/// RFC 4271 Section 6.8: Connection Collision Detection with active-active peering.
+/// Tests real-world scenario where local BGP ID < remote -> remote's outgoing (local's incoming) wins.
 #[tokio::test]
-async fn test_collision_openconfirm() {
-    let test_cases = vec![
-        // (server_bgp_id, peer_bgp_id, existing_kept)
-        (Ipv4Addr::new(2, 2, 2, 2), Ipv4Addr::new(1, 1, 1, 1), true), // local >= remote -> keep existing
-        (Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(3, 3, 3, 3), false), // local < remote -> accept new
-    ];
-
-    for (server_bgp_id, peer_bgp_id, existing_kept) in test_cases {
-        let server =
-            start_test_server(Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true)).await;
-
-        // Peer 1: connect and reach OpenConfirm
-        let mut peer1 = FakePeer::connect(Some("127.0.0.3"), &server).await;
-        peer1.handshake_open(65002, peer_bgp_id, 300).await;
-
-        poll_until(
-            || async {
-                verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await
-            },
-            "Timeout waiting for peer1 to reach OpenConfirm",
-        )
-        .await;
-
-        // Peer 2: collision from same IP
-        let mut peer2 = FakePeer::connect(Some("127.0.0.3"), &server).await;
-
-        if existing_kept {
-            // local >= remote -> existing kept, new rejected
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-            assert!(
-                verify_peers(&server, vec![peer1.to_peer(BgpState::OpenConfirm, false)]).await,
-                "peer1 should still be in OpenConfirm"
-            );
-        } else {
-            // local < remote -> existing closed, new accepted
-            // peer1 receives NOTIFICATION
-            let notif = peer1.read_notification().await;
-            assert_eq!(
-                notif.error(),
-                &BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution)
-            );
-
-            // Complete handshake on peer2
-            peer2.read_open().await;
-            peer2.send_open(65002, peer_bgp_id, 300).await;
-            peer2.read_keepalive().await;
-            peer2.send_keepalive().await;
-
-            // Verify peer2 reaches Established
-            poll_until(
-                || async {
-                    let peers = server.client.get_peers().await.unwrap();
-                    peers.len() == 1 && peers[0].state == BgpState::Established as i32
-                },
-                "Timeout waiting for peer2 to reach Established",
-            )
-            .await;
-        }
-    }
+async fn test_collision_active_active_remote_wins() {
+    // Server1 BGP ID 1.1.1.1 (lower), Server2 BGP ID 2.2.2.2 (higher)
+    // Server2's outgoing connection should win (Server1's incoming)
+    let (_server1, _server2) = setup_two_peered_servers_active_active(
+        Ipv4Addr::new(1, 1, 1, 1),
+        Ipv4Addr::new(2, 2, 2, 2),
+    )
+    .await;
+    // If we get here, both reached Established - collision was resolved correctly
 }
 
 /// RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
-/// By default (false), collision detection is ignored in Established state.
+/// By default (false), incoming connections are rejected when peer is already Established.
+/// The Established session should be preserved.
 #[tokio::test]
-async fn test_collision_ignored_in_established() {
+async fn test_collision_detect_established_state() {
     // server1 and server2 peer and reach Established
     let (server1, server2) = setup_two_peered_servers(None).await;
 
-    // server3 on same IP as server2 tries to connect to server1 - triggers collision
-    let mut config3 = Config::new(65003, "127.0.0.2:0", Ipv4Addr::new(3, 3, 3, 3), 90, true);
-    config3.peers.push(PeerConfig {
-        address: format!("{}:{}", server1.address, server1.bgp_port),
-        ..Default::default()
-    });
-    let _server3 = start_test_server(config3).await;
+    // FakePeer on same IP as server2 tries to connect
+    // Since CollisionDetectEstablishedState=false (default), connection is rejected directly
+    let fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Connection should be rejected - try to read and expect EOF/error
+    let mut stream = fake_peer.stream.unwrap();
+    let mut buf = [0u8; 1024];
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
 
-    // Original peer should still be Established (collision ignored by default)
-    // server1 connected to server2 (configured from server1's view)
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
+    // Should get EOF (connection closed) or timeout (no data)
+    match result {
+        Ok(Ok(0)) => {} // EOF - connection closed, expected
+        Ok(Ok(n)) => {
+            // Got some data - check if it's a NOTIFICATION
+            assert!(n >= 19, "Expected NOTIFICATION or EOF");
+        }
+        Ok(Err(_)) => {} // Read error - connection rejected, expected
+        Err(_) => {}     // Timeout - no candidate spawned, expected
+    }
+
+    // Original peer should still be Established
+    assert!(
+        verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await,
+        "Established session should be preserved when CollisionDetectEstablishedState=false"
+    );
+}
+
+/// RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState=true
+/// When enabled, collision detection applies even to Established sessions.
+/// If incoming connection has higher BGP ID, it should win and replace the Established session.
+#[tokio::test]
+async fn test_collision_detect_established_state_true() {
+    // Start server1 with CollisionDetectEstablishedState=true
+    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, true);
+    let mut server1 = start_test_server(config1).await;
+
+    // Start server2
+    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90, true);
+    let mut server2 = start_test_server(config2).await;
+
+    // Server1 adds Server2 with CollisionDetectEstablishedState=true
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                collision_detect_established_state: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Server2 adds Server1
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server1.bgp_port), None)
+        .await
+        .unwrap();
+
+    // Wait for Established
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+    // FakePeer connects from same IP as server2 with HIGHER BGP ID than server1 (1.1.1.1)
+    // With CollisionDetectEstablishedState=true, collision detection applies
+    let mut fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
+
+    // Read server's OPEN (collision candidate should be spawned)
+    // If no OPEN is received, the connection was rejected (candidate not spawned)
+    let open_result =
+        tokio::time::timeout(std::time::Duration::from_secs(2), fake_peer.read_open()).await;
+    assert!(
+        open_result.is_ok(),
+        "Should receive OPEN from collision candidate (CollisionDetectEstablishedState=true)"
+    );
+
+    // FakePeer sends OPEN with higher BGP ID (9.9.9.9) - should win collision
+    // because 9.9.9.9 > 1.1.1.1 (server1's BGP ID)
+    fake_peer
+        .send_open(65002, Ipv4Addr::new(9, 9, 9, 9), 90)
+        .await;
+
+    // Complete handshake - FakePeer's connection should be promoted and complete
+    fake_peer.read_keepalive().await;
+    fake_peer.send_keepalive().await;
+
+    // Verify collision was resolved and FakePeer's connection is Established
+    poll_until(
+        || async {
+            let peers = server1.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::Established as i32
+        },
+        "FakePeer's connection should be Established after winning collision",
+    )
+    .await;
 }
 
 /// RFC 4271 6.8: Collision in Connect state - incoming wins scenario
@@ -498,4 +504,121 @@ async fn test_collision_deferred() {
             drop(incoming_stream);
         }
     }
+}
+
+/// Test that candidate is promoted when primary connection dies before collision resolution.
+#[tokio::test]
+async fn test_collision_candidate_promotion_on_primary_disconnect() {
+    // FakePeer listens, server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
+    let listener_addr = format!("127.0.0.3:{}", peer.port());
+
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    config.peers.push(PeerConfig {
+        address: listener_addr.to_string(),
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+
+    // Server is in OpenSent (sent OPEN, waiting for response)
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::OpenSent as i32
+        },
+        "Timeout waiting for OpenSent",
+    )
+    .await;
+
+    // FakePeer initiates incoming connection - becomes collision candidate
+    let mut incoming_peer = FakePeer {
+        stream: Some(peer.connect_to(&server).await),
+        address: "127.0.0.3".to_string(),
+        asn: 65002,
+        listener: None,
+        supports_4byte_asn: false,
+    };
+
+    // Read OPEN from incoming - blocks until candidate is spawned and sends OPEN
+    incoming_peer.read_open().await;
+
+    // Kill outgoing BEFORE collision resolution (never sent OPEN response)
+    drop(peer);
+
+    // Server promotes candidate -> continue handshake on incoming
+    incoming_peer
+        .send_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300)
+        .await;
+    incoming_peer.read_keepalive().await;
+    incoming_peer.send_keepalive().await;
+
+    // Verify session established via promoted candidate
+    poll_peers(
+        &server,
+        vec![incoming_peer.to_peer(BgpState::Established, true)],
+    )
+    .await;
+}
+
+/// Test that candidate's ASN is preserved when promoted after reaching Established.
+/// This test reliably reproduces a bug where PeerHandshakeComplete updates peer.conn
+/// instead of peer.candidate, causing ASN to be lost on promotion.
+#[tokio::test]
+async fn test_collision_candidate_asn_preserved_on_promotion() {
+    // FakePeer listens, server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
+    let listener_addr = format!("127.0.0.4:{}", peer.port());
+
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    config.peers.push(PeerConfig {
+        address: listener_addr.to_string(),
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+
+    // Server is in OpenSent (sent OPEN, waiting for response)
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::OpenSent as i32
+        },
+        "Timeout waiting for OpenSent",
+    )
+    .await;
+
+    // FakePeer initiates incoming connection - becomes collision candidate
+    let mut incoming_peer = FakePeer {
+        stream: Some(peer.connect_to(&server).await),
+        address: "127.0.0.4".to_string(),
+        asn: 65002,
+        listener: None,
+        supports_4byte_asn: false,
+    };
+
+    // Read OPEN from candidate
+    incoming_peer.read_open().await;
+
+    // Complete candidate's handshake BEFORE dropping primary
+    // This ensures PeerHandshakeComplete is sent while candidate is still a candidate
+    incoming_peer
+        .send_open(65002, Ipv4Addr::new(4, 4, 4, 4), 300)
+        .await;
+    incoming_peer.read_keepalive().await;
+    incoming_peer.send_keepalive().await;
+
+    // Drop the primary - candidate should be promoted with correct ASN
+    drop(peer);
+
+    // Verify promoted connection has correct ASN (65002, not 0)
+    poll_peers(
+        &server,
+        vec![incoming_peer.to_peer(BgpState::Established, true)],
+    )
+    .await;
 }

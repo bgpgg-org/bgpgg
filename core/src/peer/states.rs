@@ -159,6 +159,12 @@ impl Peer {
                         | PeerOp::AutomaticStartPassive => {
                             // Ignored when connected
                         }
+                        PeerOp::UpdateConfig { config: new_config, port, local_addr } => {
+                            // Update config and connection params (when upgrading unconfigured to configured)
+                            self.config = new_config;
+                            self.port = port;
+                            self.local_addr = local_addr;
+                        }
                         PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
                             // RFC 4724 Section 5: If GR active, restart connection with new TCP
                             let peer_supports_gr = self
@@ -190,17 +196,23 @@ impl Peer {
                                 self.notify_state_change();
                                 return false; // Exit Established state loop
                             } else {
-                                // RFC 4271 6.8: Store second connection for collision detection
-                                if self.collision_conn.is_none() {
-                                    info!(peer_ip = %peer_ip, "collision: storing second connection");
-                                    self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                                } else {
-                                    // Already have collision_conn - shouldn't happen, drop it
-                                    debug!(peer_ip = %peer_ip, "collision: dropping third connection");
-                                    drop(tcp_tx);
-                                    drop(tcp_rx);
-                                }
+                                // With server-level collision detection, this shouldn't happen
+                                // as server spawns collision candidates separately
+                                debug!(peer_ip = %peer_ip, "unexpected TcpConnectionAccepted in OpenSent/OpenConfirm");
+                                drop(tcp_tx);
+                                drop(tcp_rx);
                             }
+                        }
+                        PeerOp::CollisionLost => {
+                            // Server detected collision, this connection lost
+                            info!(peer_ip = %peer_ip, "collision lost, sending NOTIFICATION and closing");
+                            let notif = NotificationMessage::new(
+                                BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution),
+                                vec![],
+                            );
+                            let _ = self.send_notification(notif.clone()).await;
+                            self.disconnect(true, PeerDownReason::LocalNotification(notif));
+                            return true; // Signal shutdown
                         }
                     }
                 }
@@ -440,7 +452,6 @@ pub(super) mod tests {
             port: addr.port(),
             fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
-            collision_conn: None,
             asn: Some(65001),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
