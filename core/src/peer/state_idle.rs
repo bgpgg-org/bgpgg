@@ -18,6 +18,8 @@ use crate::log::debug;
 use std::time::Duration;
 use tokio::time::Instant;
 
+const INITIAL_HOLD_TIME: Duration = Duration::from_secs(240);
+
 impl Peer {
     /// Handle Idle state - wait for ManualStart or AutomaticStart.
     /// Returns true if shutdown requested.
@@ -65,10 +67,16 @@ impl Peer {
                             let _ = response.send(routes);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                            debug!(peer_ip = %self.addr, "connection refused in Idle state");
-                            drop(tcp_tx);
-                            drop(tcp_rx);
+                            if auto_reconnect {
+                                // Accept incoming - we were about to connect anyway
+                                self.accept_connection(tcp_tx, tcp_rx).await;
+                                return false;
+                            } else {
+                                // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                                debug!(peer_ip = %self.addr, "connection refused in Idle state");
+                                drop(tcp_tx);
+                                drop(tcp_rx);
+                            }
                         }
                         Some(_) => {}
                         None => return true,
@@ -118,10 +126,16 @@ impl Peer {
                             let _ = response.send(routes);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // RFC 4271 8.2.2: In Idle state, refuse incoming connections
-                            debug!(peer_ip = %self.addr, "connection refused in Idle state");
-                            drop(tcp_tx);
-                            drop(tcp_rx);
+                            if auto_reconnect {
+                                // Accept incoming - we were about to connect anyway
+                                self.accept_connection(tcp_tx, tcp_rx).await;
+                                return false;
+                            } else {
+                                // RFC 4271 8.2.2: In Idle state, refuse incoming connections
+                                debug!(peer_ip = %self.addr, "connection refused in Idle state");
+                                drop(tcp_tx);
+                                drop(tcp_rx);
+                            }
                         }
                         Some(_) => {}
                         None => return true,
@@ -148,6 +162,13 @@ impl Peer {
             BgpState::Connect | BgpState::Active => {
                 self.fsm.reset_connect_retry_counter();
                 self.fsm.timers.start_connect_retry();
+            }
+            // Idle -> OpenSent: incoming connection accepted with auto_reconnect
+            BgpState::OpenSent => {
+                self.fsm.reset_connect_retry_counter();
+                self.fsm.timers.set_initial_hold_time(INITIAL_HOLD_TIME);
+                self.fsm.timers.start_hold_timer();
+                self.send_open().await?;
             }
             _ => {}
         }

@@ -158,8 +158,7 @@ async fn test_peer_down_four_node_mesh() {
     server4.kill();
 
     // Poll for all servers to detect Server4 is down (configured peers stay in Idle)
-    // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: all sides call add_peer, so configured=true for all
     poll_until(
         || async {
             verify_peers(
@@ -174,7 +173,7 @@ async fn test_peer_down_four_node_mesh() {
                 && verify_peers(
                     &server2,
                     vec![
-                        server1.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, true),
                         server3.to_peer(BgpState::Established, true),
                         server4.to_peer(BgpState::Idle, true),
                     ],
@@ -183,8 +182,8 @@ async fn test_peer_down_four_node_mesh() {
                 && verify_peers(
                     &server3,
                     vec![
-                        server1.to_peer(BgpState::Established, false),
-                        server2.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, true),
+                        server2.to_peer(BgpState::Established, true),
                         server4.to_peer(BgpState::Idle, true),
                     ],
                 )
@@ -249,16 +248,9 @@ async fn test_peer_up() {
     poll_peer_stats(&server2, &server1.address.to_string(), expected).await;
 
     // Verify both peers are still in Established state
-    // chain_servers: server1 connected to server2
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: both sides call add_peer, so configured=true on both
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(
-        verify_peers(
-            &server2,
-            vec![server1.to_peer(BgpState::Established, false)],
-        )
-        .await
-    );
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
 }
 
 #[tokio::test]
@@ -289,8 +281,7 @@ async fn test_peer_up_four_node_mesh() {
     poll_peer_stats(&server4, &server3.address.to_string(), expected).await;
 
     // Verify all peers are still in Established state
-    // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: all sides call add_peer, so configured=true for all
     assert!(
         verify_peers(
             &server1,
@@ -306,7 +297,7 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
                 server3.to_peer(BgpState::Established, true),
                 server4.to_peer(BgpState::Established, true),
             ],
@@ -317,8 +308,8 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, false),
-                server2.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established, true),
                 server4.to_peer(BgpState::Established, true),
             ],
         )
@@ -328,9 +319,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                server1.to_peer(BgpState::Established, false),
-                server2.to_peer(BgpState::Established, false),
-                server3.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established, true),
+                server3.to_peer(BgpState::Established, true),
             ],
         )
         .await
@@ -1654,25 +1645,25 @@ async fn test_graceful_restart_reconnect() {
     // Drop TCP without NOTIFICATION -> triggers GR
     drop(peer.stream.take());
 
-    // Peer goes to Idle (GR active, route retained)
-    poll_peers(&server, vec![peer.to_peer(BgpState::Idle, true)]).await;
-
-    // Route retained during GR timer (verify for 2s)
-    poll_while(
+    // With idle_hold=0, peer reconnects immediately - just verify it's no longer Established
+    poll_until(
         || async {
-            server
-                .client
-                .get_routes()
-                .await
-                .ok()
-                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+            server.client.get_peers().await.ok().is_some_and(|peers| {
+                peers.len() == 1 && peers[0].state != BgpState::Established.into()
+            })
         },
-        std::time::Duration::from_secs(2),
-        "route should be retained during GR timer",
+        "peer should disconnect",
     )
     .await;
 
-    // Server reconnects (idle_hold=0 -> immediate reconnect)
+    // Route retained during GR timer (verify briefly - peer reconnects fast with idle_hold=0)
+    let routes = server.client.get_routes().await.unwrap();
+    assert!(
+        routes.len() == 1 && routes[0].prefix == "10.0.0.0/24",
+        "route should be retained during GR"
+    );
+
+    // Accept the reconnected connection (server already initiated TCP)
     peer.accept().await;
 
     // Read server's OPEN
@@ -1832,7 +1823,18 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
 
     // Drop TCP without NOTIFICATION -> triggers GR, routes marked stale
     drop(peer.stream.take());
-    poll_peers(&server, vec![peer.to_peer(BgpState::Idle, true)]).await;
+    // Wait for disconnect (don't assert specific state - with idle_hold_time=0, Idle is transient)
+    poll_until(
+        || async {
+            server.client.get_peers().await.ok().is_some_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.state != BgpState::Established as i32)
+            })
+        },
+        "peer should disconnect",
+    )
+    .await;
 
     // Route still retained (GR timer hasn't expired)
     let routes = server.client.get_routes().await.unwrap();
