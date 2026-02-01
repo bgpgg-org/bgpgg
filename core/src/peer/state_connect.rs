@@ -17,6 +17,7 @@ use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::log::{debug, error, info};
 use crate::net::create_and_bind_tcp_socket;
+use crate::server::ConnectionType;
 use crate::types::PeerDownReason;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -91,13 +92,19 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // RFC 4271 6.8: Store second connection for collision detection
-                            // Outgoing attempt is in progress, defer collision resolution
-                            if self.collision_conn.is_none() {
-                                info!(peer_ip = %self.addr, "collision: storing second connection (Connect state)");
-                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                            // This happens for collision candidates spawned by server
+                            if self.conn.is_none() {
+                                info!(peer_ip = %self.addr, "accepting incoming connection in Connect state");
+                                self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
+                                self.conn_type = ConnectionType::Incoming;
+                                // Transition to OpenSent and send OPEN
+                                if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
+                                    error!(peer_ip = %self.addr, error = %e, "failed to process TcpConnectionConfirmed");
+                                    self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed));
+                                }
                             } else {
-                                debug!(peer_ip = %self.addr, "collision: dropping third connection");
+                                // Already have a connection, drop this one
+                                debug!(peer_ip = %self.addr, "dropping duplicate connection in Connect state");
                                 drop(tcp_tx);
                                 drop(tcp_rx);
                             }
@@ -138,15 +145,11 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        // RFC 4271 6.8: Store second connection for collision detection
-                        if self.collision_conn.is_none() {
-                            info!(peer_ip = %self.addr, "collision: storing second connection (Connect DelayOpen)");
-                            self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                        } else {
-                            debug!(peer_ip = %self.addr, "collision: dropping third connection");
-                            drop(tcp_tx);
-                            drop(tcp_rx);
-                        }
+                        // This happens for collision candidates spawned by server
+                        // In DelayOpen, we already have a connection, so drop this one
+                        debug!(peer_ip = %self.addr, "dropping connection in Connect DelayOpen state");
+                        drop(tcp_tx);
+                        drop(tcp_rx);
                     }
                     _ => {}
                 }

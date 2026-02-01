@@ -24,8 +24,9 @@ use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
 use super::PeerCapabilities;
 
 /// BGP FSM states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BgpState {
+    #[default]
     Idle,
     Connect,
     Active,
@@ -401,6 +402,8 @@ impl Fsm {
                     BgpState::Connect
                 }
             }
+            // Event 17: TcpConnectionConfirmed in Idle (when accepting incoming with auto_reconnect)
+            (BgpState::Idle, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
 
             // ===== Connect State =====
             (BgpState::Connect, FsmEvent::ManualStop) => BgpState::Idle,

@@ -361,8 +361,9 @@ impl LocRib {
     ) -> usize {
         use crate::bgp::multiprotocol::{Afi, Safi};
 
-        let prefixes: Vec<IpNetwork> = self
-            .get_prefixes_from_peer(peer_ip)
+        let all_prefixes = self.get_prefixes_from_peer(peer_ip);
+
+        let prefixes: Vec<IpNetwork> = all_prefixes
             .into_iter()
             .filter(|prefix| {
                 matches!(
@@ -419,7 +420,6 @@ impl LocRib {
             .stale_routes
             .remove(&(peer_ip, afi_safi))
             .unwrap_or_default();
-
         if stale_prefixes.is_empty() {
             return Vec::new();
         }
