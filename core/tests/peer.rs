@@ -158,8 +158,7 @@ async fn test_peer_down_four_node_mesh() {
     server4.kill();
 
     // Poll for all servers to detect Server4 is down (configured peers stay in Idle)
-    // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: all sides call add_peer, so configured=true for all
     poll_until(
         || async {
             verify_peers(
@@ -174,7 +173,7 @@ async fn test_peer_down_four_node_mesh() {
                 && verify_peers(
                     &server2,
                     vec![
-                        server1.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, true),
                         server3.to_peer(BgpState::Established, true),
                         server4.to_peer(BgpState::Idle, true),
                     ],
@@ -183,8 +182,8 @@ async fn test_peer_down_four_node_mesh() {
                 && verify_peers(
                     &server3,
                     vec![
-                        server1.to_peer(BgpState::Established, false),
-                        server2.to_peer(BgpState::Established, false),
+                        server1.to_peer(BgpState::Established, true),
+                        server2.to_peer(BgpState::Established, true),
                         server4.to_peer(BgpState::Idle, true),
                     ],
                 )
@@ -249,16 +248,9 @@ async fn test_peer_up() {
     poll_peer_stats(&server2, &server1.address.to_string(), expected).await;
 
     // Verify both peers are still in Established state
-    // chain_servers: server1 connected to server2
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: both sides call add_peer, so configured=true on both
     assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(
-        verify_peers(
-            &server2,
-            vec![server1.to_peer(BgpState::Established, false)],
-        )
-        .await
-    );
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
 }
 
 #[tokio::test]
@@ -289,8 +281,7 @@ async fn test_peer_up_four_node_mesh() {
     poll_peer_stats(&server4, &server3.address.to_string(), expected).await;
 
     // Verify all peers are still in Established state
-    // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true; from acceptor's view: configured=false
+    // Active-active peering: all sides call add_peer, so configured=true for all
     assert!(
         verify_peers(
             &server1,
@@ -306,7 +297,7 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
                 server3.to_peer(BgpState::Established, true),
                 server4.to_peer(BgpState::Established, true),
             ],
@@ -317,8 +308,8 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, false),
-                server2.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established, true),
                 server4.to_peer(BgpState::Established, true),
             ],
         )
@@ -328,9 +319,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                server1.to_peer(BgpState::Established, false),
-                server2.to_peer(BgpState::Established, false),
-                server3.to_peer(BgpState::Established, false),
+                server1.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established, true),
+                server3.to_peer(BgpState::Established, true),
             ],
         )
         .await

@@ -551,8 +551,27 @@ impl BgpServer {
         let peer_ip = peer_addr.ip();
 
         // Check if peer already exists
-        if self.peers.contains_key(&peer_ip) {
-            let _ = response.send(Err(format!("peer {} already exists", peer_ip)));
+        if let Some(existing) = self.peers.get_mut(&peer_ip) {
+            if existing.configured {
+                // Already configured - reject duplicate
+                let _ = response.send(Err(format!("peer {} already exists", peer_ip)));
+                return;
+            }
+            // Upgrade unconfigured peer to configured (active-active peering)
+            existing.configured = true;
+            existing.config = config.clone();
+            // Send config to peer task so it uses the new settings
+            if let Some(peer_tx) = &existing.peer_tx {
+                // Use the bind IP with port 0 for ephemeral binding
+                let local_addr = SocketAddr::new(bind_addr.ip(), 0);
+                let _ = peer_tx.send(PeerOp::UpdateConfig {
+                    config,
+                    port: peer_addr.port(),
+                    local_addr,
+                });
+            }
+            info!(%peer_ip, "upgraded unconfigured peer to configured");
+            let _ = response.send(Ok(()));
             return;
         }
 
