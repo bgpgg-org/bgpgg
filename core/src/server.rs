@@ -377,6 +377,14 @@ pub struct ConnectionInfo {
     pub remote_port: u16,
 }
 
+/// Collision candidate - a second connection for the same peer IP.
+/// Used for RFC 4271 6.8 collision detection at the server level.
+pub(crate) struct CollisionCandidate {
+    pub conn_type: ConnectionType,
+    pub peer_tx: mpsc::UnboundedSender<PeerOp>,
+    pub bgp_id: Option<u32>,
+}
+
 /// Peer configuration and state stored in server's HashMap.
 /// The peer IP is the HashMap key.
 pub struct PeerInfo {
@@ -448,6 +456,9 @@ pub struct BgpServer {
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
+    /// Track collision candidates (second connection to same IP)
+    /// At most ONE collision candidate per peer IP (RFC 4271 6.8)
+    pub(crate) collision_candidates: HashMap<IpAddr, CollisionCandidate>,
 }
 
 impl BgpServer {
@@ -478,6 +489,7 @@ impl BgpServer {
             op_tx,
             op_rx,
             bmp_tasks: HashMap::new(),
+            collision_candidates: HashMap::new(),
         })
     }
 
@@ -523,57 +535,6 @@ impl BgpServer {
     fn should_accept_peer(&self, peer_ip: IpAddr) -> bool {
         let is_configured = self.peers.contains_key(&peer_ip);
         is_configured || self.config.accept_unconfigured_peers
-    }
-
-    /// Resolve connection collision per RFC 4271 6.8.
-    /// Returns true if new connection should be rejected. Closes existing connection if it loses.
-    pub(crate) fn resolve_collision(&mut self, peer_ip: IpAddr, conn_type: ConnectionType) -> bool {
-        let Some(peer) = self.peers.get(&peer_ip) else {
-            return false; // No existing peer, accept
-        };
-        // Only check collision if peer has an active TCP connection (OpenSent or later)
-        if matches!(
-            peer.state,
-            BgpState::Idle | BgpState::Connect | BgpState::Active
-        ) {
-            return false; // No active connection, accept
-        }
-
-        // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
-        if peer.state == BgpState::Established && !peer.config.collision_detect_established_state {
-            info!(%peer_ip, "collision: ignoring in Established state");
-            return true; // Reject new connection
-        }
-
-        // RFC 4271 6.8: If BGP ID unknown, accept connection
-        // Peer task will resolve collision after OPEN messages are exchanged
-        if peer.bgp_id.is_none() {
-            return false; // Accept - defer to peer task
-        }
-
-        // RFC 4271 6.8: Compare BGP Identifiers
-        // local < remote: close local-initiated, keep remote-initiated
-        // local >= remote: close remote-initiated, keep local-initiated
-        let dominated = match conn_type {
-            ConnectionType::Incoming => self.local_bgp_id >= peer.bgp_id.unwrap(),
-            ConnectionType::Outgoing => self.local_bgp_id < peer.bgp_id.unwrap(),
-        };
-
-        if dominated {
-            info!(%peer_ip, "collision: rejecting new connection");
-            return true; // Reject new connection
-        }
-
-        // We win: close existing connection, accept new
-        info!(%peer_ip, "collision: closing existing");
-        if let Some(peer) = self.peers.get_mut(&peer_ip) {
-            if let Some(tx) = peer.peer_tx.take() {
-                let _ = tx.send(PeerOp::Shutdown(
-                    CeaseSubcode::ConnectionCollisionResolution,
-                ));
-            }
-        }
-        false // Accept new connection
     }
 
     pub async fn run(mut self) -> Result<(), ServerError> {
@@ -699,24 +660,38 @@ impl BgpServer {
             return;
         }
 
-        // RFC 4271 6.8: Collision detection will be handled when OPENs are received
-        if self.resolve_collision(peer_ip, ConnectionType::Incoming) {
-            return;
-        }
-
+        // RFC 4271 6.8: Collision detection handled at OpenConfirm via check_collision()
         self.accept_incoming_connection(stream, peer_ip);
         info!(%peer_ip, state = "Idle", total_peers = self.peers.len(), "peer added");
     }
 
     /// Accept an incoming TCP connection and create/update peer entry.
+    /// RFC 4271 6.8: If peer already has an active task, spawn as collision candidate.
     pub(crate) fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
         // Check if peer exists and has an active task
         let (config, existed) = match self.peers.get(&peer_ip) {
             Some(existing) => {
-                if let Some(peer_tx) = &existing.peer_tx {
-                    // Send connection to existing peer task
-                    let (tcp_rx, tcp_tx) = stream.into_split();
-                    let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
+                if existing.peer_tx.is_some() {
+                    // Already have a collision candidate? Reject third connection.
+                    if self.collision_candidates.contains_key(&peer_ip) {
+                        info!(%peer_ip, "rejecting third connection");
+                        return;
+                    }
+
+                    // Spawn as collision candidate instead of sending to existing task
+                    let candidate_config = existing.config.clone();
+                    if let Some(tx) = self.spawn_peer_from_stream(stream, peer_ip, candidate_config)
+                    {
+                        self.collision_candidates.insert(
+                            peer_ip,
+                            CollisionCandidate {
+                                conn_type: ConnectionType::Incoming,
+                                peer_tx: tx,
+                                bgp_id: None,
+                            },
+                        );
+                        info!(%peer_ip, "spawned collision candidate (incoming)");
+                    }
                     return;
                 }
                 (existing.config.clone(), true)
@@ -903,7 +878,9 @@ mod tests {
             180,
             accept_unconfigured_peers,
         );
-        BgpServer::new(config).expect("valid config")
+        let mut server = BgpServer::new(config).expect("valid config");
+        server.collision_candidates = HashMap::new();
+        server
     }
 
     #[test]

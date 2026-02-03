@@ -385,6 +385,11 @@ impl BgpServer {
                 reason,
                 gr_afi_safis,
             } => {
+                // Clean up any collision candidate for this peer
+                if self.collision_candidates.remove(&peer_ip).is_some() {
+                    debug!(%peer_ip, "removed collision candidate on disconnect");
+                }
+
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
@@ -522,11 +527,98 @@ impl BgpServer {
         }
     }
 
-    /// Handle OPEN message received - store BGP ID (RFC 4271 6.8)
-    /// Collision detection is now handled by the peer task
-    fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, _conn_type: ConnectionType) {
-        if let Some(peer) = self.peers.get_mut(&peer_ip) {
-            peer.bgp_id = Some(bgp_id);
+    /// Handle OPEN message received - store BGP ID and check collision (RFC 4271 6.8)
+    fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, conn_type: ConnectionType) {
+        // Determine if this is from primary or collision candidate
+        let is_from_candidate = self
+            .collision_candidates
+            .get(&peer_ip)
+            .map(|c| c.conn_type == conn_type)
+            .unwrap_or(false);
+
+        if is_from_candidate {
+            // Update collision candidate's BGP ID
+            if let Some(candidate) = self.collision_candidates.get_mut(&peer_ip) {
+                candidate.bgp_id = Some(bgp_id);
+            }
+        } else {
+            // Update primary peer's BGP ID
+            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                peer.bgp_id = Some(bgp_id);
+            }
+        }
+
+        // Check for collision
+        self.check_collision(peer_ip);
+    }
+
+    /// Check and resolve connection collision per RFC 4271 6.8.
+    /// Called when OPEN is received, triggering collision detection at OpenConfirm.
+    fn check_collision(&mut self, peer_ip: IpAddr) {
+        // Need both primary and candidate to have BGP ID (both received OPEN)
+        let Some(primary) = self.peers.get(&peer_ip) else {
+            return;
+        };
+        let Some(_primary_bgp_id) = primary.bgp_id else {
+            return;
+        };
+        let Some(primary_tx) = primary.peer_tx.clone() else {
+            return;
+        };
+        let primary_state = primary.state;
+        let collision_detect_established = primary.config.collision_detect_established_state;
+
+        let Some(candidate) = self.collision_candidates.get(&peer_ip) else {
+            return;
+        };
+        let Some(candidate_bgp_id) = candidate.bgp_id else {
+            return;
+        };
+
+        // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
+        // If primary is Established and option is false, ignore collision
+        if primary_state == BgpState::Established && !collision_detect_established {
+            info!(%peer_ip, "collision ignored: primary is Established and CollisionDetectEstablishedState=false");
+            // Close the collision candidate
+            let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
+            self.collision_candidates.remove(&peer_ip);
+            return;
+        }
+
+        // Both have BGP IDs - resolve collision per RFC 4271 6.8
+        // Connection initiated by speaker with HIGHER BGP ID wins
+        // candidate.conn_type tells us who initiated the candidate connection
+        let local_bgp_id = u32::from(self.config.router_id);
+        let candidate_wins = if candidate.conn_type == ConnectionType::Incoming {
+            // Candidate is incoming = remote initiated it
+            // Remote wins if remote_bgp_id > local_bgp_id
+            candidate_bgp_id > local_bgp_id
+        } else {
+            // Candidate is outgoing = we initiated it
+            // We win if local_bgp_id > remote_bgp_id
+            local_bgp_id > candidate_bgp_id
+        };
+
+        info!(%peer_ip, local_bgp_id, candidate_bgp_id,
+              candidate_type = ?candidate.conn_type, candidate_wins,
+              "resolving collision");
+
+        if candidate_wins {
+            // Primary loses - tell it to close, promote candidate
+            let _ = primary_tx.send(PeerOp::CollisionLost);
+
+            // Promote candidate to primary
+            let candidate = self.collision_candidates.remove(&peer_ip).unwrap();
+            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                peer.peer_tx = Some(candidate.peer_tx);
+                peer.bgp_id = candidate.bgp_id;
+            }
+            info!(%peer_ip, "collision: candidate promoted to primary");
+        } else {
+            // Candidate loses - tell it to close
+            let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
+            self.collision_candidates.remove(&peer_ip);
+            info!(%peer_ip, "collision: candidate closed");
         }
     }
 
