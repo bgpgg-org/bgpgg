@@ -1,6 +1,6 @@
 .PHONY: all build clean run test fmt setup loadtest lint build-docker smoketest
 
-all:
+all: setup
 	cargo build --release
 
 setup:
