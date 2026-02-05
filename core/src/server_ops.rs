@@ -198,7 +198,22 @@ impl BgpServer {
 
     pub(crate) async fn handle_server_op(&mut self, op: ServerOp) {
         match op {
-            ServerOp::PeerStateChanged { peer_ip, state } => {
+            ServerOp::PeerStateChanged {
+                peer_ip,
+                state,
+                conn_type,
+            } => {
+                // Ignore state changes from collision candidates - only track primary's state
+                let is_from_candidate = self
+                    .collision_candidates
+                    .get(&peer_ip)
+                    .map(|c| c.conn_type == conn_type)
+                    .unwrap_or(false);
+
+                if is_from_candidate {
+                    return;
+                }
+
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
                     peer.state = state;
                     info!(%peer_ip, ?state, "peer state changed");
@@ -384,15 +399,39 @@ impl BgpServer {
                 peer_ip,
                 reason,
                 gr_afi_safis,
+                conn_type,
             } => {
-                // Clean up any collision candidate for this peer
+                // Check if this disconnect is from a collision candidate
+                let is_from_candidate = self
+                    .collision_candidates
+                    .get(&peer_ip)
+                    .map(|c| c.conn_type == conn_type)
+                    .unwrap_or(false);
+
+                if is_from_candidate {
+                    // Collision candidate disconnected - just remove it, don't touch primary
+                    self.collision_candidates.remove(&peer_ip);
+                    debug!(%peer_ip, "collision candidate disconnected");
+                    return;
+                }
+
+                // Clean up any collision candidate for this peer (primary disconnected)
                 if self.collision_candidates.remove(&peer_ip).is_some() {
-                    debug!(%peer_ip, "removed collision candidate on disconnect");
+                    debug!(%peer_ip, "removed collision candidate on primary disconnect");
                 }
 
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
                 };
+
+                // Ignore stale disconnect from old connection after collision promotion
+                if let Some(current_conn_type) = peer.conn_type {
+                    if current_conn_type != conn_type {
+                        debug!(%peer_ip, ?conn_type, ?current_conn_type,
+                               "ignoring stale disconnect from old connection");
+                        return;
+                    }
+                }
 
                 // Extract peer info before potentially removing the peer
                 let bmp_peer_info = match (peer.asn, peer.bgp_id) {
@@ -579,9 +618,8 @@ impl BgpServer {
         // If primary is Established and option is false, ignore collision
         if primary_state == BgpState::Established && !collision_detect_established {
             info!(%peer_ip, "collision ignored: primary is Established and CollisionDetectEstablishedState=false");
-            // Close the collision candidate
+            // Close the collision candidate (don't remove - let PeerDisconnected handler do it)
             let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
-            self.collision_candidates.remove(&peer_ip);
             return;
         }
 
@@ -612,12 +650,12 @@ impl BgpServer {
             if let Some(peer) = self.peers.get_mut(&peer_ip) {
                 peer.peer_tx = Some(candidate.peer_tx);
                 peer.bgp_id = candidate.bgp_id;
+                peer.conn_type = Some(candidate.conn_type);
             }
             info!(%peer_ip, "collision: candidate promoted to primary");
         } else {
-            // Candidate loses - tell it to close
+            // Candidate loses - tell it to close (don't remove - let PeerDisconnected handler do it)
             let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
-            self.collision_candidates.remove(&peer_ip);
             info!(%peer_ip, "collision: candidate closed");
         }
     }
@@ -668,11 +706,11 @@ impl BgpServer {
         }
 
         // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr);
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, ConnectionType::Outgoing);
 
         self.peers.insert(
             peer_ip,
-            PeerInfo::new(true, config.clone(), Some(peer_tx.clone())),
+            PeerInfo::new(true, config.clone(), Some(peer_tx.clone()), Some(ConnectionType::Outgoing)),
         );
 
         // RFC 4271: ManualStart for admin-added peers

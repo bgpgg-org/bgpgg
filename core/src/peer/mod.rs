@@ -336,6 +336,7 @@ impl Peer {
         local_addr: SocketAddr,
         config: PeerConfig,
         connect_retry_secs: u64,
+        conn_type: ConnectionType,
     ) -> Self {
         let local_ip = local_addr.ip();
         Peer {
@@ -365,7 +366,7 @@ impl Peer {
             local_addr,
             connect_retry_secs,
             consecutive_down_count: 0,
-            conn_type: ConnectionType::Outgoing,
+            conn_type,
             manually_stopped: false,
             established_at: None,
             sent_open: None,
@@ -517,6 +518,7 @@ impl Peer {
                 peer_ip: self.addr,
                 reason,
                 gr_afi_safis,
+                conn_type: self.conn_type,
             });
         }
     }
@@ -540,6 +542,7 @@ impl Peer {
         let _ = self.server_tx.send(ServerOp::PeerStateChanged {
             peer_ip: self.addr,
             state: self.fsm.state(),
+            conn_type: self.conn_type,
         });
     }
 
