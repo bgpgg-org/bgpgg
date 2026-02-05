@@ -361,8 +361,11 @@ impl LocRib {
     ) -> usize {
         use crate::bgp::multiprotocol::{Afi, Safi};
 
-        let prefixes: Vec<IpNetwork> = self
-            .get_prefixes_from_peer(peer_ip)
+        eprintln!("[DEBUG] mark_peer_routes_stale: peer={}, afi_safi={:?}", peer_ip, afi_safi);
+        let all_prefixes = self.get_prefixes_from_peer(peer_ip);
+        eprintln!("[DEBUG] all prefixes from peer: {:?}", all_prefixes);
+
+        let prefixes: Vec<IpNetwork> = all_prefixes
             .into_iter()
             .filter(|prefix| {
                 matches!(
@@ -374,6 +377,7 @@ impl LocRib {
             .collect();
 
         let count = prefixes.len();
+        eprintln!("[DEBUG] filtered prefixes: {:?}, count: {}", prefixes, count);
         if count > 0 {
             self.stale_routes
                 .entry((peer_ip, afi_safi))
@@ -415,11 +419,14 @@ impl LocRib {
         peer_ip: IpAddr,
         afi_safi: crate::bgp::multiprotocol::AfiSafi,
     ) -> Vec<IpNetwork> {
+        eprintln!("[DEBUG] remove_peer_routes_stale: peer={}, afi_safi={:?}", peer_ip, afi_safi);
+        eprintln!("[DEBUG] stale_routes keys: {:?}", self.stale_routes.keys().collect::<Vec<_>>());
         let stale_prefixes = self
             .stale_routes
             .remove(&(peer_ip, afi_safi))
             .unwrap_or_default();
 
+        eprintln!("[DEBUG] stale_prefixes for {:?}: {:?}", afi_safi, stale_prefixes);
         if stale_prefixes.is_empty() {
             return Vec::new();
         }

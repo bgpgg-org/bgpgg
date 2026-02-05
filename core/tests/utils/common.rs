@@ -340,8 +340,10 @@ pub async fn setup_two_peered_servers_active_active(
     server2_bgp_id: Ipv4Addr,
 ) -> (TestServer, TestServer) {
     // Start servers first to get their ports
-    let mut server1 = start_test_server(Config::new(65001, "127.0.0.1:0", server1_bgp_id, 90, true)).await;
-    let mut server2 = start_test_server(Config::new(65002, "127.0.0.2:0", server2_bgp_id, 90, true)).await;
+    let mut server1 =
+        start_test_server(Config::new(65001, "127.0.0.1:0", server1_bgp_id, 90, true)).await;
+    let mut server2 =
+        start_test_server(Config::new(65002, "127.0.0.2:0", server2_bgp_id, 90, true)).await;
 
     let server2_addr = format!("{}:{}", server2.address, server2.bgp_port);
     let server1_addr = format!("{}:{}", server1.address, server1.bgp_port);
@@ -360,23 +362,11 @@ pub async fn setup_two_peered_servers_active_active(
         .unwrap();
 
     // Server2 adds Server1 (no delay_open - will send OPEN immediately)
-    server2
-        .client
-        .add_peer(server1_addr, None)
-        .await
-        .unwrap();
+    server2.client.add_peer(server1_addr, None).await.unwrap();
 
     // Wait for both to reach Established
-    poll_peers(
-        &server1,
-        vec![server2.to_peer(BgpState::Established, true)],
-    )
-    .await;
-    poll_peers(
-        &server2,
-        vec![server1.to_peer(BgpState::Established, true)],
-    )
-    .await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await;
 
     (server1, server2)
 }

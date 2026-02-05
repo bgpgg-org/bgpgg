@@ -203,19 +203,23 @@ impl BgpServer {
                 state,
                 conn_type,
             } => {
-                // Ignore state changes from collision candidates - only track primary's state
+                // Check if this is from a collision candidate
                 let is_from_candidate = self
                     .collision_candidates
                     .get(&peer_ip)
-                    .map(|c| c.conn_type == conn_type)
+                    .map(|c| c.conn_type == Some(conn_type))
                     .unwrap_or(false);
 
                 if is_from_candidate {
+                    // Update collision candidate's state
+                    if let Some(candidate) = self.collision_candidates.get_mut(&peer_ip) {
+                        candidate.state = state;
+                    }
                     return;
                 }
 
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.state = state;
+                    peer.conn.state = state;
                     info!(%peer_ip, ?state, "peer state changed");
                 }
 
@@ -227,7 +231,7 @@ impl BgpServer {
 
                     // Send BMP PeerUp
                     if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-                        (peer.asn, peer.bgp_id, &peer.conn_info)
+                        (peer.conn.asn, peer.conn.bgp_id, &peer.conn.conn_info)
                     {
                         let use_4byte_asn = peer_supports_4byte_asn(peer);
                         self.broadcast_bmp(BmpOp::PeerUp {
@@ -244,8 +248,8 @@ impl BgpServer {
                     }
 
                     // Extract capabilities and peer_tx before propagate_routes
-                    let capabilities = peer.capabilities.clone();
-                    let peer_tx = peer.peer_tx.clone();
+                    let capabilities = peer.conn.capabilities.clone();
+                    let peer_tx = peer.conn.peer_tx.clone();
 
                     // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
                     // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
@@ -306,7 +310,7 @@ impl BgpServer {
                     let export_policies = self.resolve_export_policies(&peer_config, asn);
 
                     if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                        peer.asn = Some(asn);
+                        peer.conn.asn = Some(asn);
                         peer.import_policies = import_policies;
                         peer.export_policies = export_policies;
                         info!(%peer_ip, asn, "peer handshake complete");
@@ -321,8 +325,8 @@ impl BgpServer {
                 let peer = self.peers.get(&peer_ip).expect("peer should exist");
 
                 // Extract peer info before mutable operations
-                let peer_asn = peer.asn;
-                let peer_bgp_id = peer.bgp_id;
+                let peer_asn = peer.conn.asn;
+                let peer_bgp_id = peer.conn.bgp_id;
 
                 let import_policies = peer.policy_in();
 
@@ -385,14 +389,14 @@ impl BgpServer {
                 negotiated_capabilities,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.conn_info = Some(ConnectionInfo {
+                    peer.conn.conn_info = Some(ConnectionInfo {
                         sent_open,
                         received_open,
                         local_address,
                         local_port,
                         remote_port,
                     });
-                    peer.capabilities = Some(negotiated_capabilities);
+                    peer.conn.capabilities = Some(negotiated_capabilities);
                 }
             }
             ServerOp::PeerDisconnected {
@@ -401,16 +405,19 @@ impl BgpServer {
                 gr_afi_safis,
                 conn_type,
             } => {
+                eprintln!("[DEBUG] PeerDisconnected received: peer={}, gr_afi_safis={:?}, conn_type={:?}", peer_ip, gr_afi_safis, conn_type);
+
                 // Check if this disconnect is from a collision candidate
                 let is_from_candidate = self
                     .collision_candidates
                     .get(&peer_ip)
-                    .map(|c| c.conn_type == conn_type)
+                    .map(|c| c.conn_type == Some(conn_type))
                     .unwrap_or(false);
 
                 if is_from_candidate {
                     // Collision candidate disconnected - just remove it, don't touch primary
                     self.collision_candidates.remove(&peer_ip);
+                    eprintln!("[DEBUG] returning early: is_from_candidate");
                     debug!(%peer_ip, "collision candidate disconnected");
                     return;
                 }
@@ -421,12 +428,14 @@ impl BgpServer {
                 }
 
                 let Some(peer) = self.peers.get_mut(&peer_ip) else {
+                    eprintln!("[DEBUG] returning early: peer not found");
                     return;
                 };
 
                 // Ignore stale disconnect from old connection after collision promotion
-                if let Some(current_conn_type) = peer.conn_type {
+                if let Some(current_conn_type) = peer.conn.conn_type {
                     if current_conn_type != conn_type {
+                        eprintln!("[DEBUG] returning early: stale disconnect, current={:?}, received={:?}", current_conn_type, conn_type);
                         debug!(%peer_ip, ?conn_type, ?current_conn_type,
                                "ignoring stale disconnect from old connection");
                         return;
@@ -434,7 +443,7 @@ impl BgpServer {
                 }
 
                 // Extract peer info before potentially removing the peer
-                let bmp_peer_info = match (peer.asn, peer.bgp_id) {
+                let bmp_peer_info = match (peer.conn.asn, peer.conn.bgp_id) {
                     (Some(asn), Some(bgp_id)) => Some((asn, bgp_id, peer_supports_4byte_asn(peer))),
                     _ => None,
                 };
@@ -443,12 +452,12 @@ impl BgpServer {
 
                 if peer.configured || has_gr {
                     // Configured OR unconfigured with GR: keep in Idle state
-                    peer.state = BgpState::Idle;
-                    peer.conn_info = None;
+                    peer.conn.state = BgpState::Idle;
+                    peer.conn.conn_info = None;
                     info!(%peer_ip, has_gr, configured=peer.configured, "peer session ended");
                 } else {
                     // Unconfigured without GR: remove immediately
-                    if let Some(peer_tx) = peer.peer_tx.take() {
+                    if let Some(peer_tx) = peer.conn.peer_tx.take() {
                         let _ = peer_tx.send(PeerOp::ManualStop);
                     }
                     self.peers.remove(&peer_ip);
@@ -456,6 +465,7 @@ impl BgpServer {
                 }
 
                 // RFC 4724: Handle routes based on Graceful Restart state
+                eprintln!("[DEBUG] PeerDisconnected: peer={}, gr_afi_safis={:?}", peer_ip, gr_afi_safis);
                 if !gr_afi_safis.is_empty() {
                     info!(%peer_ip, ?gr_afi_safis,
                           "peer disconnected with Graceful Restart - marking routes as stale (Receiving Speaker mode)");
@@ -463,6 +473,7 @@ impl BgpServer {
                     // Mark routes stale for each GR-enabled AFI/SAFI
                     for afi_safi in gr_afi_safis {
                         let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+                        eprintln!("[DEBUG] marked {} routes as stale for {:?}", count, afi_safi);
                         debug!(%peer_ip, %afi_safi, count, "marked routes as stale");
                     }
                     // No withdrawals are propagated (RFC 4724 Section 4.1)
@@ -495,17 +506,29 @@ impl BgpServer {
             }
             ServerOp::GracefulRestartTimerExpired { peer_ip } => {
                 info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
+                eprintln!("[DEBUG] GracefulRestartTimerExpired for {}", peer_ip);
 
                 // Get the GR AFI/SAFIs from peer's capabilities
                 let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
-                    peer.capabilities
+                    let caps = peer.conn.capabilities.as_ref();
+                    eprintln!("[DEBUG] peer found, capabilities present: {}", caps.is_some());
+                    if let Some(caps) = caps {
+                        eprintln!("[DEBUG] graceful_restart present: {}", caps.graceful_restart.is_some());
+                        if let Some(gr) = &caps.graceful_restart {
+                            eprintln!("[DEBUG] GR afi_safis: {:?}", gr.afi_safis());
+                        }
+                    }
+                    peer.conn
+                        .capabilities
                         .as_ref()
                         .and_then(|caps| caps.graceful_restart.as_ref())
                         .map(|gr_cap| gr_cap.afi_safis())
                         .unwrap_or_default()
                 } else {
+                    eprintln!("[DEBUG] peer not found!");
                     Vec::new()
                 };
+                eprintln!("[DEBUG] gr_afi_safis: {:?}", gr_afi_safis);
 
                 // Remove stale routes for all GR-enabled AFI/SAFIs
                 let mut all_changed_prefixes = Vec::new();
@@ -524,7 +547,7 @@ impl BgpServer {
                 if let Some(peer) = self.peers.get(&peer_ip) {
                     if !peer.configured {
                         info!(%peer_ip, "removing unconfigured peer after GR expiry");
-                        if let Some(peer_tx) = &peer.peer_tx {
+                        if let Some(peer_tx) = &peer.conn.peer_tx {
                             let _ = peer_tx.send(PeerOp::ManualStop);
                         }
                         self.peers.remove(&peer_ip);
@@ -544,9 +567,9 @@ impl BgpServer {
 
                 // Remove unconfigured peer after GR complete (if still disconnected)
                 if let Some(peer) = self.peers.get(&peer_ip) {
-                    if !peer.configured && peer.state == BgpState::Idle {
+                    if !peer.configured && peer.conn.state == BgpState::Idle {
                         info!(%peer_ip, "removing unconfigured peer after GR complete");
-                        if let Some(peer_tx) = &peer.peer_tx {
+                        if let Some(peer_tx) = &peer.conn.peer_tx {
                             let _ = peer_tx.send(PeerOp::ManualStop);
                         }
                         self.peers.remove(&peer_ip);
@@ -555,7 +578,7 @@ impl BgpServer {
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
                 if let Some(peer) = self.peers.get(&peer_ip) {
-                    if let Some(peer_tx) = &peer.peer_tx {
+                    if let Some(peer_tx) = &peer.conn.peer_tx {
                         let _ = peer_tx.send(PeerOp::LocalRibSent { afi_safi });
                     }
                 }
@@ -572,7 +595,7 @@ impl BgpServer {
         let is_from_candidate = self
             .collision_candidates
             .get(&peer_ip)
-            .map(|c| c.conn_type == conn_type)
+            .map(|c| c.conn_type == Some(conn_type))
             .unwrap_or(false);
 
         if is_from_candidate {
@@ -583,7 +606,7 @@ impl BgpServer {
         } else {
             // Update primary peer's BGP ID
             if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.bgp_id = Some(bgp_id);
+                peer.conn.bgp_id = Some(bgp_id);
             }
         }
 
@@ -598,13 +621,13 @@ impl BgpServer {
         let Some(primary) = self.peers.get(&peer_ip) else {
             return;
         };
-        let Some(_primary_bgp_id) = primary.bgp_id else {
+        let Some(_primary_bgp_id) = primary.conn.bgp_id else {
             return;
         };
-        let Some(primary_tx) = primary.peer_tx.clone() else {
+        let Some(primary_tx) = primary.conn.peer_tx.clone() else {
             return;
         };
-        let primary_state = primary.state;
+        let primary_state = primary.conn.state;
         let collision_detect_established = primary.config.collision_detect_established_state;
 
         let Some(candidate) = self.collision_candidates.get(&peer_ip) else {
@@ -613,13 +636,18 @@ impl BgpServer {
         let Some(candidate_bgp_id) = candidate.bgp_id else {
             return;
         };
+        let Some(candidate_conn_type) = candidate.conn_type else {
+            return;
+        };
 
         // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
         // If primary is Established and option is false, ignore collision
         if primary_state == BgpState::Established && !collision_detect_established {
             info!(%peer_ip, "collision ignored: primary is Established and CollisionDetectEstablishedState=false");
             // Close the collision candidate (don't remove - let PeerDisconnected handler do it)
-            let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
+            if let Some(peer_tx) = &candidate.peer_tx {
+                let _ = peer_tx.send(PeerOp::CollisionLost);
+            }
             return;
         }
 
@@ -627,7 +655,7 @@ impl BgpServer {
         // Connection initiated by speaker with HIGHER BGP ID wins
         // candidate.conn_type tells us who initiated the candidate connection
         let local_bgp_id = u32::from(self.config.router_id);
-        let candidate_wins = if candidate.conn_type == ConnectionType::Incoming {
+        let candidate_wins = if candidate_conn_type == ConnectionType::Incoming {
             // Candidate is incoming = remote initiated it
             // Remote wins if remote_bgp_id > local_bgp_id
             candidate_bgp_id > local_bgp_id
@@ -638,24 +666,24 @@ impl BgpServer {
         };
 
         info!(%peer_ip, local_bgp_id, candidate_bgp_id,
-              candidate_type = ?candidate.conn_type, candidate_wins,
+              candidate_type = ?candidate_conn_type, candidate_wins,
               "resolving collision");
 
         if candidate_wins {
             // Primary loses - tell it to close, promote candidate
             let _ = primary_tx.send(PeerOp::CollisionLost);
 
-            // Promote candidate to primary
+            // Promote candidate to primary - swap entire ConnectionState
             let candidate = self.collision_candidates.remove(&peer_ip).unwrap();
             if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.peer_tx = Some(candidate.peer_tx);
-                peer.bgp_id = candidate.bgp_id;
-                peer.conn_type = Some(candidate.conn_type);
+                peer.conn = candidate;
             }
             info!(%peer_ip, "collision: candidate promoted to primary");
         } else {
             // Candidate loses - tell it to close (don't remove - let PeerDisconnected handler do it)
-            let _ = candidate.peer_tx.send(PeerOp::CollisionLost);
+            if let Some(peer_tx) = &candidate.peer_tx {
+                let _ = peer_tx.send(PeerOp::CollisionLost);
+            }
             info!(%peer_ip, "collision: candidate closed");
         }
     }
@@ -691,7 +719,7 @@ impl BgpServer {
             existing.configured = true;
             existing.config = config.clone();
             // Send config to peer task so it uses the new settings
-            if let Some(peer_tx) = &existing.peer_tx {
+            if let Some(peer_tx) = &existing.conn.peer_tx {
                 // Use the bind IP with port 0 for ephemeral binding
                 let local_addr = SocketAddr::new(bind_addr.ip(), 0);
                 let _ = peer_tx.send(PeerOp::UpdateConfig {
@@ -706,11 +734,18 @@ impl BgpServer {
         }
 
         // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, ConnectionType::Outgoing);
+        // Passive mode peers only accept incoming connections
+        let conn_type = if config.passive_mode {
+            ConnectionType::Incoming
+        } else {
+            ConnectionType::Outgoing
+        };
+
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
 
         self.peers.insert(
             peer_ip,
-            PeerInfo::new(true, config.clone(), Some(peer_tx.clone()), Some(ConnectionType::Outgoing)),
+            PeerInfo::new(true, config.clone(), Some(peer_tx.clone()), Some(conn_type)),
         );
 
         // RFC 4271: ManualStart for admin-added peers
@@ -742,7 +777,7 @@ impl BgpServer {
 
         // Send graceful shutdown notification if peer_tx is active
         if let Some(entry) = self.peers.get(&peer_ip) {
-            if let Some(peer_tx) = &entry.peer_tx {
+            if let Some(peer_tx) = &entry.conn.peer_tx {
                 let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
             }
         } else {
@@ -752,7 +787,7 @@ impl BgpServer {
 
         // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
         if let Some(entry) = self.peers.get(&peer_ip) {
-            if let (Some(asn), Some(bgp_id)) = (entry.asn, entry.bgp_id) {
+            if let (Some(asn), Some(bgp_id)) = (entry.conn.asn, entry.conn.bgp_id) {
                 let use_4byte_asn = peer_supports_4byte_asn(entry);
                 self.broadcast_bmp(BmpOp::PeerDown {
                     peer_ip,
@@ -797,7 +832,7 @@ impl BgpServer {
         entry.admin_state = AdminState::Down;
 
         // Stop active session if exists
-        if let Some(peer_tx) = &entry.peer_tx {
+        if let Some(peer_tx) = &entry.conn.peer_tx {
             let _ = peer_tx.send(PeerOp::ManualStop);
         }
 
@@ -821,7 +856,7 @@ impl BgpServer {
         entry.admin_state = AdminState::Up;
 
         // RFC 4271: ManualStart for admin-enabled peers
-        if let Some(peer_tx) = &entry.peer_tx {
+        if let Some(peer_tx) = &entry.conn.peer_tx {
             if entry.config.passive_mode {
                 let _ = peer_tx.send(PeerOp::ManualStartPassive);
             } else {
@@ -856,10 +891,10 @@ impl BgpServer {
         };
 
         // Only allow soft reset on Established peers
-        if entry.state != BgpState::Established {
+        if entry.conn.state != BgpState::Established {
             let _ = response.send(Err(format!(
                 "peer {} not in Established state (current: {:?})",
-                addr, entry.state
+                addr, entry.conn.state
             )));
             return;
         }
@@ -924,7 +959,7 @@ impl BgpServer {
             return;
         };
 
-        let Some(peer_tx) = &peer.peer_tx else {
+        let Some(peer_tx) = &peer.conn.peer_tx else {
             let _ = response.send(Err(format!("peer {} has no active task", peer_ip)));
             return;
         };
@@ -948,6 +983,7 @@ impl BgpServer {
         peer_info: &PeerInfo,
     ) -> Result<Vec<AfiSafi>, String> {
         let peer_tx = peer_info
+            .conn
             .peer_tx
             .as_ref()
             .ok_or_else(|| "peer task not available".to_string())?;
@@ -974,7 +1010,11 @@ impl BgpServer {
         afi_safis: &[AfiSafi],
         response: Option<oneshot::Sender<Result<(), String>>>,
     ) {
-        if let Some(peer_tx) = self.peers.get(&peer_ip).and_then(|p| p.peer_tx.as_ref()) {
+        if let Some(peer_tx) = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.conn.peer_tx.as_ref())
+        {
             for afi_safi in afi_safis {
                 let _ = peer_tx.send(PeerOp::SendRouteRefresh {
                     afi: afi_safi.afi,
@@ -1005,11 +1045,11 @@ impl BgpServer {
             return;
         };
 
-        if peer_info.state != BgpState::Established {
+        if peer_info.conn.state != BgpState::Established {
             return;
         }
 
-        let Some(peer_asn) = peer_info.asn else {
+        let Some(peer_asn) = peer_info.conn.asn else {
             return;
         };
         let export_policies = &peer_info.export_policies;
@@ -1023,8 +1063,9 @@ impl BgpServer {
 
         const CHUNK_SIZE: usize = 10_000;
 
-        if let Some(peer_tx) = &peer_info.peer_tx {
+        if let Some(peer_tx) = &peer_info.conn.peer_tx {
             let peer_supports_4byte_asn = peer_info
+                .conn
                 .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())
@@ -1156,8 +1197,8 @@ impl BgpServer {
             .iter()
             .map(|(addr, entry)| GetPeersResponse {
                 address: addr.to_string(),
-                asn: entry.asn,
-                state: entry.state,
+                asn: entry.conn.asn,
+                state: entry.conn.state,
                 admin_state: entry.admin_state,
                 configured: entry.configured,
                 import_policies: entry
@@ -1199,8 +1240,8 @@ impl BgpServer {
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
-            asn: entry.asn,
-            state: entry.state,
+            asn: entry.conn.asn,
+            state: entry.conn.state,
             admin_state: entry.admin_state,
             configured: entry.configured,
             import_policies: entry
@@ -1281,6 +1322,7 @@ impl BgpServer {
             .ok_or(format!("peer {} not found", peer_addr))?;
 
         let peer_tx = peer_info
+            .conn
             .peer_tx
             .as_ref()
             .ok_or("peer task not running".to_string())?;
@@ -1305,7 +1347,7 @@ impl BgpServer {
             .get(&peer_addr)
             .ok_or(format!("peer {} not found", peer_addr))?;
 
-        let peer_asn = peer_info.asn.ok_or("peer ASN not set".to_string())?;
+        let peer_asn = peer_info.conn.asn.ok_or("peer ASN not set".to_string())?;
 
         let export_policies = &peer_info.export_policies;
         if export_policies.is_empty() {
@@ -1323,7 +1365,7 @@ impl BgpServer {
                 };
 
                 // Apply EXACT same check as propagation
-                if !should_propagate_to_peer(peer_addr, peer_info.state, originating_peer) {
+                if !should_propagate_to_peer(peer_addr, peer_info.conn.state, originating_peer) {
                     continue;
                 }
 
@@ -1362,8 +1404,8 @@ impl BgpServer {
         for (addr, entry) in self.peers.iter() {
             let peer = GetPeersResponse {
                 address: addr.to_string(),
-                asn: entry.asn,
-                state: entry.state,
+                asn: entry.conn.asn,
+                state: entry.conn.state,
                 admin_state: entry.admin_state,
                 configured: entry.configured,
                 import_policies: entry
@@ -1388,7 +1430,7 @@ impl BgpServer {
     fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
         self.peers
             .iter()
-            .filter(|(_, peer_info)| peer_info.state == BgpState::Established)
+            .filter(|(_, peer_info)| peer_info.conn.state == BgpState::Established)
             .map(|(peer_ip, peer_info)| (*peer_ip, peer_info))
             .collect()
     }
@@ -1497,13 +1539,13 @@ impl BgpServer {
         let mut stats = Vec::new();
 
         for (peer_ip, peer_info) in self.get_established_peers() {
-            let Some(peer_tx) = &peer_info.peer_tx else {
+            let Some(peer_tx) = &peer_info.conn.peer_tx else {
                 continue;
             };
-            let Some(asn) = peer_info.asn else {
+            let Some(asn) = peer_info.conn.asn else {
                 continue;
             };
-            let Some(bgp_id) = peer_info.bgp_id else {
+            let Some(bgp_id) = peer_info.conn.bgp_id else {
                 continue;
             };
 
@@ -2012,6 +2054,7 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 /// Determine if peer supports 4-byte ASN for BMP encoding
 fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
     peer_info
+        .conn
         .capabilities
         .as_ref()
         .map(|caps| caps.supports_four_octet_asn())
@@ -2072,9 +2115,11 @@ async fn send_initial_bmp_state_to_task(
 ) {
     // Send all PeerUp messages first
     for (peer_ip, peer_info) in &established_peers {
-        if let (Some(asn), Some(bgp_id), Some(conn_info)) =
-            (peer_info.asn, peer_info.bgp_id, &peer_info.conn_info)
-        {
+        if let (Some(asn), Some(bgp_id), Some(conn_info)) = (
+            peer_info.conn.asn,
+            peer_info.conn.bgp_id,
+            &peer_info.conn.conn_info,
+        ) {
             let use_4byte_asn = peer_supports_4byte_asn(peer_info);
             let _ = task_tx.send(Arc::new(BmpOp::PeerUp {
                 peer_ip: *peer_ip,
@@ -2092,9 +2137,11 @@ async fn send_initial_bmp_state_to_task(
 
     // Then send all RouteMonitoring messages
     for (peer_ip, peer_info) in established_peers {
-        if let (Some(asn), Some(bgp_id), Some(peer_tx)) =
-            (peer_info.asn, peer_info.bgp_id, &peer_info.peer_tx)
-        {
+        if let (Some(asn), Some(bgp_id), Some(peer_tx)) = (
+            peer_info.conn.asn,
+            peer_info.conn.bgp_id,
+            &peer_info.conn.peer_tx,
+        ) {
             if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
                 let use_4byte_asn = peer_supports_4byte_asn(peer_info);
                 let updates = routes_to_update_messages(&routes, use_4byte_asn);
@@ -2123,12 +2170,12 @@ impl BgpServer {
         };
 
         // Only process if peer is Established
-        if peer_info.state != BgpState::Established {
-            warn!(%peer_ip, state = ?peer_info.state, "ROUTE_REFRESH from non-Established peer");
+        if peer_info.conn.state != BgpState::Established {
+            warn!(%peer_ip, state = ?peer_info.conn.state, "ROUTE_REFRESH from non-Established peer");
             return;
         }
 
-        let Some(peer_asn) = peer_info.asn else {
+        let Some(peer_asn) = peer_info.conn.asn else {
             warn!(%peer_ip, "ROUTE_REFRESH before ASN known");
             return;
         };
@@ -2149,8 +2196,9 @@ impl BgpServer {
 
         info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
 
-        if let Some(peer_tx) = &peer_info.peer_tx {
+        if let Some(peer_tx) = &peer_info.conn.peer_tx {
             let peer_supports_4byte_asn = peer_info
+                .conn
                 .capabilities
                 .as_ref()
                 .map(|caps| caps.supports_four_octet_asn())

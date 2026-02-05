@@ -24,8 +24,9 @@ use crate::bgp::msg_notification::{CeaseSubcode, NotificationMessage};
 use super::PeerCapabilities;
 
 /// BGP FSM states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BgpState {
+    #[default]
     Idle,
     Connect,
     Active,
