@@ -204,16 +204,27 @@ impl BgpServer {
                 conn_type,
             } => {
                 // Update state for matching connection (primary or candidate)
-                if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    if let Some(conn) = peer.conn_by_type_mut(conn_type) {
-                        conn.state = state;
-                        // Only log for primary connection state changes
-                        if peer.conn.conn_type == Some(conn_type) {
-                            info!(%peer_ip, ?state, "peer state changed");
-                        }
-                    }
-                } else {
+                let Some(peer) = self.peers.get_mut(&peer_ip) else {
                     return;
+                };
+
+                // Check if this is from the candidate (not primary conn)
+                let is_from_candidate =
+                    peer.candidate.as_ref().map(|c| c.conn_type) == Some(Some(conn_type));
+
+                if is_from_candidate {
+                    // Update candidate's state and return early
+                    // (don't do Established handling for candidates)
+                    if let Some(candidate) = &mut peer.candidate {
+                        candidate.state = state;
+                    }
+                    return;
+                }
+
+                // Update primary conn state
+                if peer.conn.conn_type == Some(conn_type) {
+                    peer.conn.state = state;
+                    info!(%peer_ip, ?state, "peer state changed");
                 }
 
                 // When peer becomes Established, send BMP PeerUp and propagate all routes

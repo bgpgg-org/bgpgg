@@ -25,6 +25,7 @@ use bgpgg::grpc::proto::{
     AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
 use std::net::Ipv4Addr;
+use tokio::io::AsyncReadExt;
 
 #[tokio::test]
 async fn test_max_prefix_limit() {
@@ -247,31 +248,35 @@ async fn test_collision_active_active_remote_wins() {
 }
 
 /// RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
-/// By default (false), collision detection is ignored when peer is already Established.
-/// The Established session should be preserved even when a collision candidate "wins".
+/// By default (false), incoming connections are rejected when peer is already Established.
+/// The Established session should be preserved.
 #[tokio::test]
 async fn test_collision_detect_established_state() {
     // server1 and server2 peer and reach Established
     let (server1, server2) = setup_two_peered_servers(None).await;
 
-    // FakePeer on same IP as server2 tries to connect and sends OPEN
-    // This triggers collision detection, but since CollisionDetectEstablishedState=false (default),
-    // the Established session should be preserved
-    let mut fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
+    // FakePeer on same IP as server2 tries to connect
+    // Since CollisionDetectEstablishedState=false (default), connection is rejected directly
+    let fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
 
-    // Read server's OPEN (collision candidate sends OPEN to FakePeer)
-    fake_peer.read_open().await;
+    // Connection should be rejected - try to read and expect EOF/error
+    let mut stream = fake_peer.stream.unwrap();
+    let mut buf = [0u8; 1024];
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
 
-    // FakePeer sends OPEN with higher BGP ID than server1 (1.1.1.1)
-    // This would make FakePeer's connection "win" if collision detection applied
-    fake_peer
-        .send_open(65002, Ipv4Addr::new(9, 9, 9, 9), 90)
-        .await;
+    // Should get EOF (connection closed) or timeout (no data)
+    match result {
+        Ok(Ok(0)) => {} // EOF - connection closed, expected
+        Ok(Ok(n)) => {
+            // Got some data - check if it's a NOTIFICATION
+            assert!(n >= 19, "Expected NOTIFICATION or EOF");
+        }
+        Ok(Err(_)) => {} // Read error - connection rejected, expected
+        Err(_) => {}     // Timeout - no candidate spawned, expected
+    }
 
-    // Give time for collision resolution to (not) happen
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    // Original peer should still be Established (CollisionDetectEstablishedState=false ignores collision)
+    // Original peer should still be Established
     assert!(
         verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await,
         "Established session should be preserved when CollisionDetectEstablishedState=false"

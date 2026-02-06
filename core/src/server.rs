@@ -712,35 +712,46 @@ impl BgpServer {
                         return;
                     }
 
-                    // Non-passive: spawn collision candidate only if outgoing and no candidate yet
-                    let is_collision = existing.conn.conn_type == Some(ConnectionType::Outgoing)
-                        && existing.candidate.is_none();
-
-                    if is_collision {
-                        let candidate_config = existing.config.clone();
-                        if let Some(tx) =
-                            self.spawn_peer_from_stream(stream, peer_ip, candidate_config)
-                        {
-                            // Insert candidate into PeerInfo (need mutable access)
-                            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                                peer.candidate = Some(ConnectionState::new(
-                                    Some(tx),
-                                    Some(ConnectionType::Incoming),
-                                ));
-                            }
-                            info!(%peer_ip, "spawned collision candidate (incoming)");
-                        }
-                    } else {
-                        // Reject: duplicate incoming OR third connection
-                        info!(%peer_ip, "rejecting connection");
+                    // Already have a collision candidate - reject third connection
+                    if existing.candidate.is_some() {
+                        info!(%peer_ip, "rejecting third connection");
                         let notif = NotificationMessage::new(
                             BgpError::Cease(CeaseSubcode::ConnectionRejected),
                             vec![],
                         );
-                        // Need async write - spawn a task to send notification
                         tokio::spawn(async move {
                             let _ = stream.try_write(&notif.serialize());
                         });
+                        return;
+                    }
+
+                    // RFC 4271 8.1.1 Option 5: If conn is Established and
+                    // CollisionDetectEstablishedState=false (default), reject directly
+                    if existing.conn.state == BgpState::Established
+                        && !existing.config.collision_detect_established_state
+                    {
+                        info!(%peer_ip, "rejecting: Established and CollisionDetectEstablishedState=false");
+                        let notif = NotificationMessage::new(
+                            BgpError::Cease(CeaseSubcode::ConnectionRejected),
+                            vec![],
+                        );
+                        tokio::spawn(async move {
+                            let _ = stream.try_write(&notif.serialize());
+                        });
+                        return;
+                    }
+
+                    // Spawn collision candidate - let check_collision() decide winner
+                    let candidate_config = existing.config.clone();
+                    if let Some(tx) = self.spawn_peer_from_stream(stream, peer_ip, candidate_config)
+                    {
+                        if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                            peer.candidate = Some(ConnectionState::new(
+                                Some(tx),
+                                Some(ConnectionType::Incoming),
+                            ));
+                        }
+                        info!(%peer_ip, "spawned collision candidate (incoming)");
                     }
                     return;
                 }
