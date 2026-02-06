@@ -283,6 +283,75 @@ async fn test_collision_detect_established_state() {
     );
 }
 
+/// RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState=true
+/// When enabled, collision detection applies even to Established sessions.
+/// If incoming connection has higher BGP ID, it should win and replace the Established session.
+#[tokio::test]
+async fn test_collision_detect_established_state_true() {
+    // Start server1 with CollisionDetectEstablishedState=true
+    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, true);
+    let mut server1 = start_test_server(config1).await;
+
+    // Start server2
+    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90, true);
+    let mut server2 = start_test_server(config2).await;
+
+    // Server1 adds Server2 with CollisionDetectEstablishedState=true
+    server1
+        .client
+        .add_peer(
+            format!("127.0.0.2:{}", server2.bgp_port),
+            Some(SessionConfig {
+                collision_detect_established_state: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Server2 adds Server1
+    server2
+        .client
+        .add_peer(format!("127.0.0.1:{}", server1.bgp_port), None)
+        .await
+        .unwrap();
+
+    // Wait for Established
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+
+    // FakePeer connects from same IP as server2 with HIGHER BGP ID than server1 (1.1.1.1)
+    // With CollisionDetectEstablishedState=true, collision detection applies
+    let mut fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
+
+    // Read server's OPEN (collision candidate should be spawned)
+    // If no OPEN is received, the connection was rejected (candidate not spawned)
+    let open_result =
+        tokio::time::timeout(std::time::Duration::from_secs(2), fake_peer.read_open()).await;
+    assert!(
+        open_result.is_ok(),
+        "Should receive OPEN from collision candidate (CollisionDetectEstablishedState=true)"
+    );
+
+    // FakePeer sends OPEN with higher BGP ID (9.9.9.9) - should win collision
+    // because 9.9.9.9 > 1.1.1.1 (server1's BGP ID)
+    fake_peer
+        .send_open(65002, Ipv4Addr::new(9, 9, 9, 9), 90)
+        .await;
+
+    // Complete handshake - FakePeer's connection should be promoted and complete
+    fake_peer.read_keepalive().await;
+    fake_peer.send_keepalive().await;
+
+    // Verify collision was resolved and FakePeer's connection is Established
+    let peers = server1.client.get_peers().await.unwrap();
+    assert_eq!(peers.len(), 1, "Should have exactly one peer");
+    assert_eq!(
+        peers[0].state,
+        BgpState::Established as i32,
+        "FakePeer's connection should be Established after winning collision"
+    );
+}
+
 /// RFC 4271 6.8: Collision in Connect state - incoming wins scenario
 /// Without the fix, incoming connection would be dropped and session would fail.
 #[tokio::test]
