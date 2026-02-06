@@ -203,24 +203,17 @@ impl BgpServer {
                 state,
                 conn_type,
             } => {
-                // Check if this is from a collision candidate
-                let is_from_candidate = self
-                    .collision_candidates
-                    .get(&peer_ip)
-                    .map(|c| c.conn_type == Some(conn_type))
-                    .unwrap_or(false);
-
-                if is_from_candidate {
-                    // Update collision candidate's state
-                    if let Some(candidate) = self.collision_candidates.get_mut(&peer_ip) {
-                        candidate.state = state;
-                    }
-                    return;
-                }
-
+                // Update state for matching connection (primary or candidate)
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.conn.state = state;
-                    info!(%peer_ip, ?state, "peer state changed");
+                    if let Some(conn) = peer.conn_by_type_mut(conn_type) {
+                        conn.state = state;
+                        // Only log for primary connection state changes
+                        if peer.conn.conn_type == Some(conn_type) {
+                            info!(%peer_ip, ?state, "peer state changed");
+                        }
+                    }
+                } else {
+                    return;
                 }
 
                 // When peer becomes Established, send BMP PeerUp and propagate all routes
@@ -405,42 +398,37 @@ impl BgpServer {
                 gr_afi_safis,
                 conn_type,
             } => {
-                eprintln!("[DEBUG] PeerDisconnected received: peer={}, gr_afi_safis={:?}, conn_type={:?}", peer_ip, gr_afi_safis, conn_type);
+                let Some(peer) = self.peers.get_mut(&peer_ip) else {
+                    return;
+                };
 
-                // Check if this disconnect is from a collision candidate
-                let is_from_candidate = self
-                    .collision_candidates
-                    .get(&peer_ip)
-                    .map(|c| c.conn_type == Some(conn_type))
-                    .unwrap_or(false);
+                // Check which connection disconnected by matching conn_type
+                let is_conn = peer.conn.conn_type == Some(conn_type);
+                let is_candidate =
+                    peer.candidate.as_ref().map(|c| c.conn_type) == Some(Some(conn_type));
 
-                if is_from_candidate {
-                    // Collision candidate disconnected - just remove it, don't touch primary
-                    self.collision_candidates.remove(&peer_ip);
-                    eprintln!("[DEBUG] returning early: is_from_candidate");
+                if is_candidate {
+                    // Candidate died - just clear it
+                    peer.candidate = None;
                     debug!(%peer_ip, "collision candidate disconnected");
                     return;
                 }
 
-                // Clean up any collision candidate for this peer (primary disconnected)
-                if self.collision_candidates.remove(&peer_ip).is_some() {
-                    debug!(%peer_ip, "removed collision candidate on primary disconnect");
-                }
-
-                let Some(peer) = self.peers.get_mut(&peer_ip) else {
-                    eprintln!("[DEBUG] returning early: peer not found");
+                if !is_conn {
+                    // Neither conn nor candidate - stale disconnect from old connection
+                    debug!(%peer_ip, ?conn_type, current_conn_type = ?peer.conn.conn_type,
+                           "ignoring stale disconnect from old connection");
                     return;
-                };
-
-                // Ignore stale disconnect from old connection after collision promotion
-                if let Some(current_conn_type) = peer.conn.conn_type {
-                    if current_conn_type != conn_type {
-                        eprintln!("[DEBUG] returning early: stale disconnect, current={:?}, received={:?}", current_conn_type, conn_type);
-                        debug!(%peer_ip, ?conn_type, ?current_conn_type,
-                               "ignoring stale disconnect from old connection");
-                        return;
-                    }
                 }
+
+                // Primary (conn) died - promote candidate if exists
+                if let Some(candidate) = peer.candidate.take() {
+                    peer.conn = candidate;
+                    debug!(%peer_ip, "promoted collision candidate to conn");
+                    return;
+                }
+
+                // No candidate to promote - handle normal disconnect
 
                 // Extract peer info before potentially removing the peer
                 let bmp_peer_info = match (peer.conn.asn, peer.conn.bgp_id) {
@@ -465,7 +453,6 @@ impl BgpServer {
                 }
 
                 // RFC 4724: Handle routes based on Graceful Restart state
-                eprintln!("[DEBUG] PeerDisconnected: peer={}, gr_afi_safis={:?}", peer_ip, gr_afi_safis);
                 if !gr_afi_safis.is_empty() {
                     info!(%peer_ip, ?gr_afi_safis,
                           "peer disconnected with Graceful Restart - marking routes as stale (Receiving Speaker mode)");
@@ -473,7 +460,6 @@ impl BgpServer {
                     // Mark routes stale for each GR-enabled AFI/SAFI
                     for afi_safi in gr_afi_safis {
                         let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
-                        eprintln!("[DEBUG] marked {} routes as stale for {:?}", count, afi_safi);
                         debug!(%peer_ip, %afi_safi, count, "marked routes as stale");
                     }
                     // No withdrawals are propagated (RFC 4724 Section 4.1)
@@ -506,18 +492,9 @@ impl BgpServer {
             }
             ServerOp::GracefulRestartTimerExpired { peer_ip } => {
                 info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
-                eprintln!("[DEBUG] GracefulRestartTimerExpired for {}", peer_ip);
 
                 // Get the GR AFI/SAFIs from peer's capabilities
                 let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
-                    let caps = peer.conn.capabilities.as_ref();
-                    eprintln!("[DEBUG] peer found, capabilities present: {}", caps.is_some());
-                    if let Some(caps) = caps {
-                        eprintln!("[DEBUG] graceful_restart present: {}", caps.graceful_restart.is_some());
-                        if let Some(gr) = &caps.graceful_restart {
-                            eprintln!("[DEBUG] GR afi_safis: {:?}", gr.afi_safis());
-                        }
-                    }
                     peer.conn
                         .capabilities
                         .as_ref()
@@ -525,10 +502,8 @@ impl BgpServer {
                         .map(|gr_cap| gr_cap.afi_safis())
                         .unwrap_or_default()
                 } else {
-                    eprintln!("[DEBUG] peer not found!");
                     Vec::new()
                 };
-                eprintln!("[DEBUG] gr_afi_safis: {:?}", gr_afi_safis);
 
                 // Remove stale routes for all GR-enabled AFI/SAFIs
                 let mut all_changed_prefixes = Vec::new();
@@ -591,22 +566,10 @@ impl BgpServer {
 
     /// Handle OPEN message received - store BGP ID and check collision (RFC 4271 6.8)
     fn handle_open_received(&mut self, peer_ip: IpAddr, bgp_id: u32, conn_type: ConnectionType) {
-        // Determine if this is from primary or collision candidate
-        let is_from_candidate = self
-            .collision_candidates
-            .get(&peer_ip)
-            .map(|c| c.conn_type == Some(conn_type))
-            .unwrap_or(false);
-
-        if is_from_candidate {
-            // Update collision candidate's BGP ID
-            if let Some(candidate) = self.collision_candidates.get_mut(&peer_ip) {
-                candidate.bgp_id = Some(bgp_id);
-            }
-        } else {
-            // Update primary peer's BGP ID
-            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.conn.bgp_id = Some(bgp_id);
+        // Update BGP ID for matching connection (primary or candidate)
+        if let Some(peer) = self.peers.get_mut(&peer_ip) {
+            if let Some(conn) = peer.conn_by_type_mut(conn_type) {
+                conn.bgp_id = Some(bgp_id);
             }
         }
 
@@ -617,20 +580,15 @@ impl BgpServer {
     /// Check and resolve connection collision per RFC 4271 6.8.
     /// Called when OPEN is received, triggering collision detection at OpenConfirm.
     fn check_collision(&mut self, peer_ip: IpAddr) {
-        // Need both primary and candidate to have BGP ID (both received OPEN)
-        let Some(primary) = self.peers.get(&peer_ip) else {
+        let Some(peer) = self.peers.get_mut(&peer_ip) else {
             return;
         };
-        let Some(_primary_bgp_id) = primary.conn.bgp_id else {
+        let Some(candidate) = &peer.candidate else {
             return;
         };
-        let Some(primary_tx) = primary.conn.peer_tx.clone() else {
-            return;
-        };
-        let primary_state = primary.conn.state;
-        let collision_detect_established = primary.config.collision_detect_established_state;
 
-        let Some(candidate) = self.collision_candidates.get(&peer_ip) else {
+        // Both must have BGP IDs (both received OPEN)
+        let Some(conn_bgp_id) = peer.conn.bgp_id else {
             return;
         };
         let Some(candidate_bgp_id) = candidate.bgp_id else {
@@ -641,49 +599,52 @@ impl BgpServer {
         };
 
         // RFC 4271 8.1.1 Option 5: CollisionDetectEstablishedState
-        // If primary is Established and option is false, ignore collision
-        if primary_state == BgpState::Established && !collision_detect_established {
-            info!(%peer_ip, "collision ignored: primary is Established and CollisionDetectEstablishedState=false");
-            // Close the collision candidate (don't remove - let PeerDisconnected handler do it)
+        // If conn is Established and option is false, close candidate
+        if peer.conn.state == BgpState::Established
+            && !peer.config.collision_detect_established_state
+        {
+            info!(%peer_ip, "collision ignored: conn is Established and CollisionDetectEstablishedState=false");
+            // Close the collision candidate
             if let Some(peer_tx) = &candidate.peer_tx {
                 let _ = peer_tx.send(PeerOp::CollisionLost);
             }
+            peer.candidate = None;
             return;
         }
 
-        // Both have BGP IDs - resolve collision per RFC 4271 6.8
+        // Determine winner (RFC 4271 6.8)
         // Connection initiated by speaker with HIGHER BGP ID wins
-        // candidate.conn_type tells us who initiated the candidate connection
         let local_bgp_id = u32::from(self.config.router_id);
-        let candidate_wins = if candidate_conn_type == ConnectionType::Incoming {
-            // Candidate is incoming = remote initiated it
-            // Remote wins if remote_bgp_id > local_bgp_id
-            candidate_bgp_id > local_bgp_id
-        } else {
-            // Candidate is outgoing = we initiated it
-            // We win if local_bgp_id > remote_bgp_id
-            local_bgp_id > candidate_bgp_id
+        let candidate_wins = match candidate_conn_type {
+            ConnectionType::Incoming => {
+                // Candidate is incoming = remote initiated it
+                // Remote wins if remote_bgp_id > local_bgp_id
+                candidate_bgp_id > local_bgp_id
+            }
+            ConnectionType::Outgoing => {
+                // Candidate is outgoing = we initiated it
+                // We win if local_bgp_id > remote_bgp_id
+                local_bgp_id > conn_bgp_id
+            }
         };
 
-        info!(%peer_ip, local_bgp_id, candidate_bgp_id,
+        info!(%peer_ip, local_bgp_id, conn_bgp_id, candidate_bgp_id,
               candidate_type = ?candidate_conn_type, candidate_wins,
               "resolving collision");
 
         if candidate_wins {
-            // Primary loses - tell it to close, promote candidate
-            let _ = primary_tx.send(PeerOp::CollisionLost);
-
-            // Promote candidate to primary - swap entire ConnectionState
-            let candidate = self.collision_candidates.remove(&peer_ip).unwrap();
-            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.conn = candidate;
+            // Tell conn to close, promote candidate
+            if let Some(tx) = &peer.conn.peer_tx {
+                let _ = tx.send(PeerOp::CollisionLost);
             }
-            info!(%peer_ip, "collision: candidate promoted to primary");
+            peer.conn = peer.candidate.take().unwrap();
+            info!(%peer_ip, "collision: candidate promoted to conn");
         } else {
-            // Candidate loses - tell it to close (don't remove - let PeerDisconnected handler do it)
-            if let Some(peer_tx) = &candidate.peer_tx {
-                let _ = peer_tx.send(PeerOp::CollisionLost);
+            // Tell candidate to close
+            if let Some(tx) = &candidate.peer_tx {
+                let _ = tx.send(PeerOp::CollisionLost);
             }
+            peer.candidate = None;
             info!(%peer_ip, "collision: candidate closed");
         }
     }

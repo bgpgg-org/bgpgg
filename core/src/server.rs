@@ -421,6 +421,8 @@ pub struct PeerInfo {
     pub config: PeerConfig,
     /// Connection state (swappable on collision promotion)
     pub conn: ConnectionState,
+    /// Collision candidate (only during collision window)
+    pub candidate: Option<ConnectionState>,
 }
 
 impl PeerInfo {
@@ -437,6 +439,18 @@ impl PeerInfo {
             export_policies: Vec::new(),
             config,
             conn: ConnectionState::new(peer_tx, conn_type),
+            candidate: None,
+        }
+    }
+
+    /// Get mutable reference to connection by conn_type
+    pub fn conn_by_type_mut(&mut self, conn_type: ConnectionType) -> Option<&mut ConnectionState> {
+        if self.conn.conn_type == Some(conn_type) {
+            Some(&mut self.conn)
+        } else if self.candidate.as_ref().map(|c| c.conn_type) == Some(Some(conn_type)) {
+            self.candidate.as_mut()
+        } else {
+            None
         }
     }
 
@@ -469,9 +483,6 @@ pub struct BgpServer {
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
-    /// Track collision candidates (second connection to same IP)
-    /// At most ONE collision candidate per peer IP (RFC 4271 6.8)
-    pub(crate) collision_candidates: HashMap<IpAddr, ConnectionState>,
 }
 
 impl BgpServer {
@@ -502,7 +513,6 @@ impl BgpServer {
             op_tx,
             op_rx,
             bmp_tasks: HashMap::new(),
-            collision_candidates: HashMap::new(),
         })
     }
 
@@ -702,20 +712,35 @@ impl BgpServer {
                         return;
                     }
 
-                    // Non-passive: spawn collision candidate (outgoing will happen)
-                    if self.collision_candidates.contains_key(&peer_ip) {
-                        info!(%peer_ip, "rejecting third connection");
-                        return;
-                    }
+                    // Non-passive: spawn collision candidate only if outgoing and no candidate yet
+                    let is_collision = existing.conn.conn_type == Some(ConnectionType::Outgoing)
+                        && existing.candidate.is_none();
 
-                    let candidate_config = existing.config.clone();
-                    if let Some(tx) = self.spawn_peer_from_stream(stream, peer_ip, candidate_config)
-                    {
-                        self.collision_candidates.insert(
-                            peer_ip,
-                            ConnectionState::new(Some(tx), Some(ConnectionType::Incoming)),
+                    if is_collision {
+                        let candidate_config = existing.config.clone();
+                        if let Some(tx) =
+                            self.spawn_peer_from_stream(stream, peer_ip, candidate_config)
+                        {
+                            // Insert candidate into PeerInfo (need mutable access)
+                            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                                peer.candidate = Some(ConnectionState::new(
+                                    Some(tx),
+                                    Some(ConnectionType::Incoming),
+                                ));
+                            }
+                            info!(%peer_ip, "spawned collision candidate (incoming)");
+                        }
+                    } else {
+                        // Reject: duplicate incoming OR third connection
+                        info!(%peer_ip, "rejecting connection");
+                        let notif = NotificationMessage::new(
+                            BgpError::Cease(CeaseSubcode::ConnectionRejected),
+                            vec![],
                         );
-                        info!(%peer_ip, "spawned collision candidate (incoming)");
+                        // Need async write - spawn a task to send notification
+                        tokio::spawn(async move {
+                            let _ = stream.try_write(&notif.serialize());
+                        });
                     }
                     return;
                 }
@@ -913,9 +938,7 @@ mod tests {
             180,
             accept_unconfigured_peers,
         );
-        let mut server = BgpServer::new(config).expect("valid config");
-        server.collision_candidates = HashMap::new();
-        server
+        BgpServer::new(config).expect("valid config")
     }
 
     #[test]

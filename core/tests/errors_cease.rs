@@ -430,3 +430,60 @@ async fn test_collision_deferred() {
         }
     }
 }
+
+/// Test that candidate is promoted when primary connection dies before collision resolution.
+#[tokio::test]
+async fn test_collision_candidate_promotion_on_primary_disconnect() {
+    // FakePeer listens, server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
+    let listener_addr = format!("127.0.0.3:{}", peer.port());
+
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    config.peers.push(PeerConfig {
+        address: listener_addr.to_string(),
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+
+    // Server is in OpenSent (sent OPEN, waiting for response)
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::OpenSent as i32
+        },
+        "Timeout waiting for OpenSent",
+    )
+    .await;
+
+    // FakePeer initiates incoming connection - becomes collision candidate
+    let mut incoming_peer = FakePeer {
+        stream: Some(peer.connect_to(&server).await),
+        address: "127.0.0.3".to_string(),
+        asn: 65002,
+        listener: None,
+        supports_4byte_asn: false,
+    };
+
+    // Read OPEN from incoming - blocks until candidate is spawned and sends OPEN
+    incoming_peer.read_open().await;
+
+    // Kill outgoing BEFORE collision resolution (never sent OPEN response)
+    drop(peer);
+
+    // Server promotes candidate -> continue handshake on incoming
+    incoming_peer
+        .send_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300)
+        .await;
+    incoming_peer.read_keepalive().await;
+    incoming_peer.send_keepalive().await;
+
+    // Verify session established via promoted candidate
+    poll_peers(
+        &server,
+        vec![incoming_peer.to_peer(BgpState::Established, true)],
+    )
+    .await;
+}
