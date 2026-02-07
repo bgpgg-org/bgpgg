@@ -800,72 +800,89 @@ impl BgpServer {
                 }
 
                 // Spawn incoming connection - let check_collision() decide winner
+                // Create channel and set up slot BEFORE spawning to avoid race
                 let incoming_config = existing.config.clone();
-                if let Some(tx) = self.spawn_peer_from_stream(stream, peer_ip, incoming_config) {
-                    if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                        peer.incoming = Some(ConnectionState::new(Some(tx)));
-                    }
-                    info!(%peer_ip, "spawned incoming connection");
+                let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+                if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                    peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
                 }
+                self.spawn_incoming_with_stream(
+                    peer_rx,
+                    &peer_tx,
+                    stream,
+                    peer_ip,
+                    incoming_config,
+                );
+                info!(%peer_ip, "spawned incoming connection");
                 return;
             }
             None => (PeerConfig::default(), false),
         };
 
-        let Some(peer_tx) = self.spawn_peer_from_stream(stream, peer_ip, config.clone()) else {
-            return;
-        };
+        // Create channel and set up slot BEFORE spawning to avoid race
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
         if existed {
             let existing = self.peers.get_mut(&peer_ip).unwrap();
-            existing.incoming = Some(ConnectionState::new(Some(peer_tx)));
+            existing.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
         } else {
             // New unconfigured peer - create with incoming slot
-            let mut entry = PeerInfo::new(false, config, None, None);
-            entry.incoming = Some(ConnectionState::new(Some(peer_tx)));
+            let mut entry = PeerInfo::new(false, config.clone(), None, None);
+            entry.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
             self.peers.insert(peer_ip, entry);
         }
+
+        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, config);
     }
 
-    /// Create a peer from a connected stream and spawn a task.
-    /// Returns None if AllowAutomaticStart is false (RFC 4271 8.1.1).
-    pub(crate) fn spawn_peer_from_stream(
+    /// Spawn incoming peer task with pre-created channel.
+    ///
+    /// Caller must set up the incoming slot with peer_tx BEFORE calling this,
+    /// to avoid race where task sends PeerStateChanged before slot exists.
+    fn spawn_incoming_with_stream(
         &self,
+        peer_rx: mpsc::UnboundedReceiver<PeerOp>,
+        peer_tx: &mpsc::UnboundedSender<PeerOp>,
         stream: TcpStream,
         peer_ip: IpAddr,
         config: PeerConfig,
-    ) -> Option<mpsc::UnboundedSender<PeerOp>> {
-        // RFC 4271 8.1.1: AllowAutomaticStart must be true for automatic events
-        if !config.allow_automatic_start() {
-            info!(%peer_ip, "rejecting incoming: AllowAutomaticStart is false");
-            return None;
-        }
-
+    ) {
         let local_addr = stream
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::new(self.local_addr, 0));
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
-        let peer_tx = self.spawn_peer(
-            SocketAddr::new(peer_ip, 0),
-            config.clone(),
+        let peer = Peer::new(
+            peer_ip,
+            0,
+            peer_rx,
+            self.op_tx.clone(),
+            self.config.asn,
+            self.config.hold_time_secs as u16,
+            self.local_bgp_id,
             local_addr,
+            config.clone(),
+            self.config.connect_retry_secs,
             ConnectionType::Incoming,
         );
 
-        // RFC 4271 8.2.2: Send appropriate start event based on PassiveTcpEstablishment
-        if config.passive_mode {
-            // Event 5: AutomaticStartPassive -> Active
-            let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
-        } else {
-            // Event 3: AutomaticStart -> Connect
-            let _ = peer_tx.send(PeerOp::AutomaticStart);
+        tokio::spawn(async move {
+            peer.run().await;
+        });
+
+        // RFC 4271 8.2.2: Send start event only if AllowAutomaticStart is true
+        // If false, FSM stays in Idle and will refuse the connection per RFC 4271 8.2.2
+        if config.allow_automatic_start() {
+            if config.passive_mode {
+                let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
+            } else {
+                let _ = peer_tx.send(PeerOp::AutomaticStart);
+            }
         }
 
+        // Always send TCP connection - let FSM decide what to do with it
         let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
-
-        Some(peer_tx)
     }
 
     /// Spawn a BMP task for a destination
