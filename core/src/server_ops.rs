@@ -306,18 +306,24 @@ impl BgpServer {
                     }
                 }
             }
-            ServerOp::PeerHandshakeComplete { peer_ip, asn } => {
-                // Update ASN and initialize policies
+            ServerOp::PeerHandshakeComplete {
+                peer_ip,
+                asn,
+                conn_type,
+            } => {
+                // Update ASN on the correct connection (primary or candidate)
                 // Clone config for immutable access, then mutate peer
                 if let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) {
                     let import_policies = self.resolve_import_policies(&peer_config);
                     let export_policies = self.resolve_export_policies(&peer_config, asn);
 
                     if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                        peer.conn.asn = Some(asn);
+                        if let Some(conn) = peer.conn_by_type_mut(conn_type) {
+                            conn.asn = Some(asn);
+                        }
                         peer.import_policies = import_policies;
                         peer.export_policies = export_policies;
-                        info!(%peer_ip, asn, "peer handshake complete");
+                        info!(%peer_ip, asn, ?conn_type, "peer handshake complete");
                     }
                 }
             }
@@ -391,16 +397,19 @@ impl BgpServer {
                 sent_open,
                 received_open,
                 negotiated_capabilities,
+                conn_type,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.conn.conn_info = Some(ConnectionInfo {
-                        sent_open,
-                        received_open,
-                        local_address,
-                        local_port,
-                        remote_port,
-                    });
-                    peer.conn.capabilities = Some(negotiated_capabilities);
+                    if let Some(conn) = peer.conn_by_type_mut(conn_type) {
+                        conn.conn_info = Some(ConnectionInfo {
+                            sent_open,
+                            received_open,
+                            local_address,
+                            local_port,
+                            remote_port,
+                        });
+                        conn.capabilities = Some(negotiated_capabilities);
+                    }
                 }
             }
             ServerOp::PeerDisconnected {

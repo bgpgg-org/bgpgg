@@ -268,6 +268,7 @@ impl Peer {
         let _ = self.server_tx.send(ServerOp::PeerHandshakeComplete {
             peer_ip: self.addr,
             asn: peer_asn,
+            conn_type: self.conn_type,
         });
 
         Ok(())

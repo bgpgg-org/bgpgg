@@ -561,3 +561,63 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
     )
     .await;
 }
+
+/// Test that candidate's ASN is preserved when promoted after reaching Established.
+/// This test reliably reproduces a bug where PeerHandshakeComplete updates peer.conn
+/// instead of peer.candidate, causing ASN to be lost on promotion.
+#[tokio::test]
+async fn test_collision_candidate_asn_preserved_on_promotion() {
+    // FakePeer listens, server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
+    let listener_addr = format!("127.0.0.4:{}", peer.port());
+
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    config.peers.push(PeerConfig {
+        address: listener_addr.to_string(),
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+
+    // Server is in OpenSent (sent OPEN, waiting for response)
+    poll_until(
+        || async {
+            let peers = server.client.get_peers().await.unwrap();
+            peers.len() == 1 && peers[0].state == BgpState::OpenSent as i32
+        },
+        "Timeout waiting for OpenSent",
+    )
+    .await;
+
+    // FakePeer initiates incoming connection - becomes collision candidate
+    let mut incoming_peer = FakePeer {
+        stream: Some(peer.connect_to(&server).await),
+        address: "127.0.0.4".to_string(),
+        asn: 65002,
+        listener: None,
+        supports_4byte_asn: false,
+    };
+
+    // Read OPEN from candidate
+    incoming_peer.read_open().await;
+
+    // Complete candidate's handshake BEFORE dropping primary
+    // This ensures PeerHandshakeComplete is sent while candidate is still a candidate
+    incoming_peer
+        .send_open(65002, Ipv4Addr::new(4, 4, 4, 4), 300)
+        .await;
+    incoming_peer.read_keepalive().await;
+    incoming_peer.send_keepalive().await;
+
+    // Drop the primary - candidate should be promoted with correct ASN
+    drop(peer);
+
+    // Verify promoted connection has correct ASN (65002, not 0)
+    poll_peers(
+        &server,
+        vec![incoming_peer.to_peer(BgpState::Established, true)],
+    )
+    .await;
+}

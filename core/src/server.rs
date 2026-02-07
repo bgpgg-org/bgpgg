@@ -261,6 +261,7 @@ pub enum ServerOp {
     PeerHandshakeComplete {
         peer_ip: IpAddr,
         asn: u32,
+        conn_type: ConnectionType,
     },
     /// Sent when peer receives OPEN message, for collision detection (RFC 4271 Section 6.8)
     OpenReceived {
@@ -277,6 +278,7 @@ pub enum ServerOp {
         sent_open: OpenMessage,
         received_open: OpenMessage,
         negotiated_capabilities: PeerCapabilities,
+        conn_type: ConnectionType,
     },
     PeerUpdate {
         peer_ip: IpAddr,
@@ -290,10 +292,7 @@ pub enum ServerOp {
         conn_type: ConnectionType,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
-    SetAdminState {
-        peer_ip: IpAddr,
-        state: AdminState,
-    },
+    SetAdminState { peer_ip: IpAddr, state: AdminState },
     /// Route Refresh request from peer
     RouteRefresh {
         peer_ip: IpAddr,
@@ -301,9 +300,7 @@ pub enum ServerOp {
         safi: Safi,
     },
     /// Graceful Restart timer expired for a peer (RFC 4724)
-    GracefulRestartTimerExpired {
-        peer_ip: IpAddr,
-    },
+    GracefulRestartTimerExpired { peer_ip: IpAddr },
     /// Graceful Restart completed for a peer (all EORs received)
     GracefulRestartComplete {
         peer_ip: IpAddr,
