@@ -26,14 +26,13 @@ use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_invalid_marker() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
@@ -70,14 +69,13 @@ async fn test_bad_message_length() {
     ];
 
     for (name, length) in test_cases {
-        let server = start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-            true,
-        ))
-        .await;
+        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+        config.peers.push(bgpgg::config::PeerConfig {
+            address: "127.0.0.1:179".to_string(),
+            passive_mode: true,
+            ..Default::default()
+        });
+        let server = start_test_server(config).await;
         let mut peer = FakePeer::connect(None, &server).await;
         peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
             .await;
@@ -110,14 +108,13 @@ async fn test_bad_message_length() {
 
 #[tokio::test]
 async fn test_keepalive_wrong_length() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
@@ -139,14 +136,13 @@ async fn test_keepalive_wrong_length() {
 
 #[tokio::test]
 async fn test_notification_length_too_small() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
@@ -168,14 +164,13 @@ async fn test_notification_length_too_small() {
 
 #[tokio::test]
 async fn test_invalid_message_type() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
@@ -206,7 +201,7 @@ async fn test_invalid_message_type() {
 #[tokio::test]
 async fn test_send_notification_without_open() {
     for flag in [true, false] {
-        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
             address: "127.0.0.1:179".to_string(),
             passive_mode: true,

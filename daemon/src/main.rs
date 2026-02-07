@@ -46,10 +46,6 @@ struct Args {
     /// gRPC listen address
     #[arg(long)]
     grpc_listen_addr: Option<String>,
-
-    /// Accept connections from unconfigured peers
-    #[arg(long)]
-    accept_unconfigured_peers: bool,
 }
 
 fn get_env_or<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -78,12 +74,6 @@ fn apply_overrides(config: &mut Config, args: &Args) {
         config.grpc_listen_addr = addr.clone();
     } else if let Ok(addr) = env::var("BGPGG_GRPC_LISTEN_ADDR") {
         config.grpc_listen_addr = addr;
-    }
-
-    if args.accept_unconfigured_peers {
-        config.accept_unconfigured_peers = true;
-    } else if let Ok(val) = env::var("BGPGG_ACCEPT_UNCONFIGURED_PEERS") {
-        config.accept_unconfigured_peers = val == "true" || val == "1";
     }
 
     if let Ok(val) = env::var("BGPGG_LOG_LEVEL") {

@@ -14,6 +14,18 @@
 
 //! Common test utilities for BGP server testing
 
+use tracing_subscriber::EnvFilter;
+
+/// Initialize tracing for tests. Call at the start of each test.
+/// Uses RUST_LOG env var (e.g., RUST_LOG=debug).
+/// Safe to call multiple times - only first call takes effect.
+pub fn init_test_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
@@ -62,11 +74,16 @@ impl Drop for TestServer {
 }
 
 impl TestServer {
-    /// Converts a TestServer to a Peer struct for use in test assertions
+    /// Converts a TestServer to a Peer struct for use in test assertions.
+    /// ASN is only known after OPEN exchange, so it's 0 for non-Established states.
     pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
         Peer {
             address: self.address.to_string(),
-            asn: self.asn,
+            asn: if state == BgpState::Established {
+                self.asn
+            } else {
+                0
+            },
             state: state.into(),
             admin_state: AdminState::Up.into(),
             configured,
@@ -103,6 +120,7 @@ pub struct PeerConfig {
     pub hold_timer_secs: Option<u16>,
     pub gr_restart_time_secs: Option<u32>,
     pub idle_hold_time_secs: Option<u64>,
+    pub min_route_advertisement_interval_secs: Option<u64>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -188,7 +206,6 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
         &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
         90,
-        true,
     );
     config.sys_name = Some(format!("test-bgpgg-{}", ip));
     config.sys_descr = Some("test bgpgg router".to_string());
@@ -196,8 +213,13 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-pub async fn start_test_server(config: Config) -> TestServer {
+pub async fn start_test_server(mut config: Config) -> TestServer {
     use tokio::net::TcpListener;
+
+    init_test_logging();
+
+    // Use fast connect retry for tests (default 30s is too slow)
+    config.connect_retry_secs = 1;
 
     let router_id = config.router_id;
     let asn = config.asn;
@@ -294,6 +316,21 @@ pub async fn start_test_server(config: Config) -> TestServer {
     }
 }
 
+/// Start a test server with a default passive peer configured for FakePeer connections.
+///
+/// This is a convenience function for tests that use FakePeer to connect to a single server.
+/// It pre-configures a passive peer at 127.0.0.1:179 so FakePeer can connect without
+/// additional setup.
+pub async fn start_test_server_for_fake_peer(config: Config) -> TestServer {
+    let mut config = config;
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    start_test_server(config).await
+}
+
 /// Sets up two BGP servers with peering established
 ///
 /// Server1 (AS65001) <-----> Server2 (AS65001)
@@ -313,7 +350,6 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -321,52 +357,12 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
         ],
         cfg,
     )
     .await;
-
-    (server1, server2)
-}
-
-/// Sets up two BGP servers for collision testing with specific BGP IDs.
-/// Server1 uses delay_open to ensure collision scenario is reliably triggered.
-/// Both servers actively connect to each other (active-active peering).
-pub async fn setup_two_peered_servers_active_active(
-    server1_bgp_id: Ipv4Addr,
-    server2_bgp_id: Ipv4Addr,
-) -> (TestServer, TestServer) {
-    // Start servers first to get their ports
-    let mut server1 =
-        start_test_server(Config::new(65001, "127.0.0.1:0", server1_bgp_id, 90, true)).await;
-    let mut server2 =
-        start_test_server(Config::new(65002, "127.0.0.2:0", server2_bgp_id, 90, true)).await;
-
-    let server2_addr = format!("{}:{}", server2.address, server2.bgp_port);
-    let server1_addr = format!("{}:{}", server1.address, server1.bgp_port);
-
-    // Server1 adds Server2 with delay_open to ensure collision overlap
-    server1
-        .client
-        .add_peer(
-            server2_addr,
-            Some(bgpgg::grpc::proto::SessionConfig {
-                delay_open_time_secs: Some(60),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Server2 adds Server1 (no delay_open - will send OPEN immediately)
-    server2.client.add_peer(server1_addr, None).await.unwrap();
-
-    // Wait for both to reach Established
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
-    poll_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await;
 
     (server1, server2)
 }
@@ -396,7 +392,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -404,7 +399,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -412,7 +406,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
-                true,
             ))
             .await,
         ],
@@ -451,7 +444,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -459,7 +451,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -467,7 +458,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -475,7 +465,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.4:0",
                 Ipv4Addr::new(4, 4, 4, 4),
                 hold,
-                true,
             ))
             .await,
         ],
@@ -569,12 +558,21 @@ pub async fn poll_peer_stats(server: &TestServer, peer_addr: &str, expected: Exp
     poll_until(
         || async {
             let Ok((_, stats)) = server.client.get_peer(peer_addr.to_string()).await else {
+                eprintln!("poll_peer_stats: get_peer failed");
                 return false;
             };
             let Some(s) = stats else {
+                eprintln!("poll_peer_stats: stats is None");
                 return false;
             };
-            expected.is_met_by(&s)
+            if !expected.is_met_by(&s) {
+                eprintln!(
+                    "poll_peer_stats: notification_sent={} (expecting >= {:?})",
+                    s.notification_sent, expected.min_notification_sent
+                );
+                return false;
+            }
+            true
         },
         "Timeout waiting for peer statistics",
     )
@@ -820,21 +818,24 @@ pub async fn chain_servers<const N: usize>(
     mut servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
-    let session_config =
-        if config.gr_restart_time_secs.is_some() || config.idle_hold_time_secs.is_some() {
-            Some(bgpgg::grpc::proto::SessionConfig {
-                graceful_restart: config.gr_restart_time_secs.map(|secs| {
-                    bgpgg::grpc::proto::GracefulRestartConfig {
-                        enabled: Some(true),
-                        restart_time_secs: Some(secs),
-                    }
-                }),
-                idle_hold_time_secs: config.idle_hold_time_secs,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+    let session_config = if config.gr_restart_time_secs.is_some()
+        || config.idle_hold_time_secs.is_some()
+        || config.min_route_advertisement_interval_secs.is_some()
+    {
+        Some(bgpgg::grpc::proto::SessionConfig {
+            graceful_restart: config.gr_restart_time_secs.map(|secs| {
+                bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(secs),
+                }
+            }),
+            idle_hold_time_secs: config.idle_hold_time_secs,
+            min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
 
     // Active-active: both sides call add_peer() on each other
     // Chain: s0 <-> s1 <-> s2 <-> ...
@@ -926,7 +927,6 @@ pub async fn create_asn_chain<const N: usize>(
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
                 hold,
-                true,
             ))
             .await,
         );
@@ -1043,21 +1043,24 @@ pub async fn mesh_servers<const N: usize>(
     mut servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
-    let session_config =
-        if config.gr_restart_time_secs.is_some() || config.idle_hold_time_secs.is_some() {
-            Some(bgpgg::grpc::proto::SessionConfig {
-                graceful_restart: config.gr_restart_time_secs.map(|secs| {
-                    bgpgg::grpc::proto::GracefulRestartConfig {
-                        enabled: Some(true),
-                        restart_time_secs: Some(secs),
-                    }
-                }),
-                idle_hold_time_secs: config.idle_hold_time_secs,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+    let session_config = if config.gr_restart_time_secs.is_some()
+        || config.idle_hold_time_secs.is_some()
+        || config.min_route_advertisement_interval_secs.is_some()
+    {
+        Some(bgpgg::grpc::proto::SessionConfig {
+            graceful_restart: config.gr_restart_time_secs.map(|secs| {
+                bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(secs),
+                }
+            }),
+            idle_hold_time_secs: config.idle_hold_time_secs,
+            min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
 
     // Active-active: both sides call add_peer() on each other
     for i in 0..servers.len() {
@@ -1119,7 +1122,17 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     peers.sort_by(|a, b| a.address.cmp(&b.address));
     expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
 
-    peers == expected_peers
+    if peers != expected_peers {
+        eprintln!("verify_peers mismatch:");
+        for (i, (actual, expected)) in peers.iter().zip(expected_peers.iter()).enumerate() {
+            if actual != expected {
+                eprintln!("  peer {}: actual={:?} expected={:?}", i, actual, expected);
+            }
+        }
+        return false;
+    }
+
+    true
 }
 
 /// Poll until server has expected peers

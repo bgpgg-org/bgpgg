@@ -409,7 +409,7 @@ impl ConnectionState {
 /// stale conn_type bugs when an unconfigured peer is upgraded to configured.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    /// true if explicitly configured, false if accepted via accept_unconfigured_peers
+    /// true if explicitly configured via add_peer()
     pub configured: bool,
     pub import_policies: Vec<Arc<Policy>>,
     pub export_policies: Vec<Arc<Policy>>,
@@ -601,10 +601,9 @@ impl BgpServer {
         policies
     }
 
-    /// Check if a peer should be accepted.
+    /// Check if a peer should be accepted (must be pre-configured).
     fn should_accept_peer(&self, peer_ip: IpAddr) -> bool {
-        let is_configured = self.peers.contains_key(&peer_ip);
-        is_configured || self.config.accept_unconfigured_peers
+        self.peers.contains_key(&peer_ip)
     }
 
     pub async fn run(mut self) -> Result<(), ServerError> {
@@ -750,89 +749,64 @@ impl BgpServer {
         info!(%peer_ip, state = "Idle", total_peers = self.peers.len(), "peer added");
     }
 
-    /// Accept an incoming TCP connection and create/update peer entry.
+    /// Accept an incoming TCP connection for a configured peer.
     /// RFC 4271 6.8: If peer already has an active outgoing connection, this becomes
     /// a collision candidate in the incoming slot.
+    /// Caller must ensure peer is pre-configured (via should_accept_peer check).
     pub(crate) fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
-        // Check if peer exists and has an active task
-        let (config, existed) = match self.peers.get(&peer_ip) {
-            Some(existing) => {
-                // Passive mode with existing task: send connection to existing task
-                if existing.config.passive_mode {
-                    if let Some(conn) = existing.active() {
-                        if let Some(peer_tx) = &conn.peer_tx {
-                            let (tcp_rx, tcp_tx) = stream.into_split();
-                            let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
-                            info!(%peer_ip, "sent incoming connection to passive peer");
-                            return;
-                        }
-                    }
-                }
-
-                // Already have an incoming connection - reject third connection
-                if existing.incoming.is_some() {
-                    info!(%peer_ip, "rejecting: incoming slot already occupied");
-                    let notif = NotificationMessage::new(
-                        BgpError::Cease(CeaseSubcode::ConnectionRejected),
-                        vec![],
-                    );
-                    tokio::spawn(async move {
-                        let _ = stream.try_write(&notif.serialize());
-                    });
-                    return;
-                }
-
-                // Check if outgoing is Established with collision_detect_established_state=false
-                if let Some(out) = &existing.outgoing {
-                    if out.state == BgpState::Established
-                        && !existing.config.collision_detect_established_state
-                    {
-                        info!(%peer_ip, "rejecting: outgoing Established and CollisionDetectEstablishedState=false");
-                        let notif = NotificationMessage::new(
-                            BgpError::Cease(CeaseSubcode::ConnectionRejected),
-                            vec![],
-                        );
-                        tokio::spawn(async move {
-                            let _ = stream.try_write(&notif.serialize());
-                        });
-                        return;
-                    }
-                }
-
-                // Spawn incoming connection - let check_collision() decide winner
-                // Create channel and set up slot BEFORE spawning to avoid race
-                let incoming_config = existing.config.clone();
-                let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-                if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                    peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-                }
-                self.spawn_incoming_with_stream(
-                    peer_rx,
-                    &peer_tx,
-                    stream,
-                    peer_ip,
-                    incoming_config,
-                );
-                info!(%peer_ip, "spawned incoming connection");
-                return;
-            }
-            None => (PeerConfig::default(), false),
+        let Some(existing) = self.peers.get(&peer_ip) else {
+            // This should not happen - should_accept_peer should have rejected
+            error!(%peer_ip, "accept_incoming_connection called for unconfigured peer");
+            return;
         };
 
-        // Create channel and set up slot BEFORE spawning to avoid race
-        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-
-        if existed {
-            let existing = self.peers.get_mut(&peer_ip).unwrap();
-            existing.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-        } else {
-            // New unconfigured peer - create with incoming slot
-            let mut entry = PeerInfo::new(false, config.clone(), None, None);
-            entry.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-            self.peers.insert(peer_ip, entry);
+        // Passive mode with existing task: send connection to existing task
+        if existing.config.passive_mode {
+            if let Some(conn) = existing.active() {
+                if let Some(peer_tx) = &conn.peer_tx {
+                    let (tcp_rx, tcp_tx) = stream.into_split();
+                    let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
+                    info!(%peer_ip, "sent incoming connection to passive peer");
+                    return;
+                }
+            }
         }
 
-        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, config);
+        // Already have an incoming connection - reject third connection
+        if existing.incoming.is_some() {
+            info!(%peer_ip, "rejecting: incoming slot already occupied");
+            let notif =
+                NotificationMessage::new(BgpError::Cease(CeaseSubcode::ConnectionRejected), vec![]);
+            tokio::spawn(async move {
+                let _ = stream.try_write(&notif.serialize());
+            });
+            return;
+        }
+
+        // Reject if outgoing is already Established
+        if let Some(out) = &existing.outgoing {
+            if out.state == BgpState::Established {
+                info!(%peer_ip, "rejecting: outgoing already Established");
+                let notif = NotificationMessage::new(
+                    BgpError::Cease(CeaseSubcode::ConnectionRejected),
+                    vec![],
+                );
+                tokio::spawn(async move {
+                    let _ = stream.try_write(&notif.serialize());
+                });
+                return;
+            }
+        }
+
+        // Spawn incoming connection - let check_collision() decide winner
+        // Create channel and set up slot BEFORE spawning to avoid race
+        let incoming_config = existing.config.clone();
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+        if let Some(peer) = self.peers.get_mut(&peer_ip) {
+            peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
+        }
+        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, incoming_config);
+        info!(%peer_ip, "spawned incoming connection");
     }
 
     /// Spawn incoming peer task with pre-created channel.
@@ -1011,14 +985,8 @@ mod tests {
         PeerInfo::new(true, PeerConfig::default(), None, None)
     }
 
-    fn make_server(accept_unconfigured_peers: bool) -> BgpServer {
-        let config = Config::new(
-            65000,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            180,
-            accept_unconfigured_peers,
-        );
+    fn make_server() -> BgpServer {
+        let config = Config::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
         BgpServer::new(config).expect("valid config")
     }
 
@@ -1026,16 +994,12 @@ mod tests {
     fn test_should_accept_peer() {
         let peer_ip: IpAddr = "10.0.0.1".parse().unwrap();
 
-        // Unconfigured peer with accept_unconfigured_peers=false -> reject
-        let server = make_server(false);
+        // Unconfigured peer -> reject
+        let server = make_server();
         assert!(!server.should_accept_peer(peer_ip));
 
-        // Unconfigured peer with accept_unconfigured_peers=true -> accept
-        let server = make_server(true);
-        assert!(server.should_accept_peer(peer_ip));
-
-        // Configured peer -> accept regardless of accept_unconfigured_peers
-        let mut server = make_server(false);
+        // Configured peer -> accept
+        let mut server = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
     }

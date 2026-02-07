@@ -41,7 +41,7 @@ use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     extended_community::{Community, TwoOctetAsSpecific},
-    AsPathSegment, BgpState, ExtendedCommunity, Origin, Route, UnknownAttribute,
+    AsPathSegment, BgpState, ExtendedCommunity, Origin, Route, SessionConfig, UnknownAttribute,
 };
 use std::net::Ipv4Addr;
 
@@ -765,6 +765,19 @@ async fn test_unknown_optional_attribute_handling(
     //                            iBGP            eBGP
     let [server2, server3] = &mut create_asn_chain([65002, 65003], Some(300)).await;
 
+    // Add passive peer for FakePeer connection
+    server2
+        .client
+        .add_peer(
+            "127.0.0.1:179".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
     let mut server1 = FakePeer::connect(None, server2).await;
     server1
         .handshake_open(65002, std::net::Ipv4Addr::new(1, 1, 1, 1), 300)
@@ -831,7 +844,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
     let mut server2 = start_test_server(Config::new(
@@ -839,7 +851,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
     let mut server3 = start_test_server(Config::new(
@@ -847,22 +858,24 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
         90,
-        true,
     ))
     .await;
-    let server4 = start_test_server(Config::new(
+    let mut server4 = start_test_server(Config::new(
         65004,
         "127.0.0.4:0",
         Ipv4Addr::new(4, 4, 4, 4),
         90,
-        true,
     ))
     .await;
 
     // Connect S1, S2, S3 to S4 (star topology)
+    // Active-active peering - both sides call add_peer()
     server1.add_peer(&server4).await;
+    server4.add_peer(&server1).await;
     server2.add_peer(&server4).await;
+    server4.add_peer(&server2).await;
     server3.add_peer(&server4).await;
+    server4.add_peer(&server3).await;
 
     // Wait for all peers to establish
     poll_until(
@@ -870,9 +883,9 @@ async fn test_med_comparison_restricted_to_same_as() {
             verify_peers(
                 &server4,
                 vec![
-                    server1.to_peer(BgpState::Established, false),
-                    server2.to_peer(BgpState::Established, false),
-                    server3.to_peer(BgpState::Established, false),
+                    server1.to_peer(BgpState::Established, true),
+                    server2.to_peer(BgpState::Established, true),
+                    server3.to_peer(BgpState::Established, true),
                 ],
             )
             .await
@@ -1291,14 +1304,16 @@ async fn test_mixed_asn_propagation() {
 /// - To NEW speakers: native 4-byte encoding, no AS4_* attributes
 #[tokio::test]
 async fn test_four_octet_asn_propagation() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    // Add passive peers for all FakePeer connections
+    for addr in ["127.0.0.1:179", "127.0.0.2:179", "127.0.0.3:179"] {
+        config.peers.push(bgpgg::config::PeerConfig {
+            address: addr.to_string(),
+            passive_mode: true,
+            ..Default::default()
+        });
+    }
+    let server = start_test_server(config).await;
 
     let mut old_speaker = FakePeer::connect_and_handshake(
         None,
@@ -1399,14 +1414,15 @@ async fn test_four_octet_asn_propagation() {
 /// RFC 6793: Test server ignores malformed AS4_PATH (longer than AS_PATH)
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_path() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    for addr in ["127.0.0.1:179", "127.0.0.2:179"] {
+        config.peers.push(bgpgg::config::PeerConfig {
+            address: addr.to_string(),
+            passive_mode: true,
+            ..Default::default()
+        });
+    }
+    let server = start_test_server(config).await;
 
     let mut fake_peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
@@ -1478,14 +1494,15 @@ async fn test_four_octet_asn_malformed_as4_path() {
 /// RFC 6793: Test server ignores malformed AS4_AGGREGATOR (invalid length)
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_aggregator() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    for addr in ["127.0.0.1:179", "127.0.0.2:179"] {
+        config.peers.push(bgpgg::config::PeerConfig {
+            address: addr.to_string(),
+            passive_mode: true,
+            ..Default::default()
+        });
+    }
+    let server = start_test_server(config).await;
 
     let mut fake_peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)

@@ -37,7 +37,6 @@ async fn test_peer_down() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             hold_timer_secs as u64,
-            true, // Accept unconfigured peers on server1
         ))
         .await,
         start_test_server(Config::new(
@@ -45,7 +44,6 @@ async fn test_peer_down() {
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
             hold_timer_secs as u64,
-            false, // Server2 only accepts configured peers
         ))
         .await,
     ];
@@ -339,7 +337,6 @@ async fn test_peer_crash_and_recover() {
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
@@ -348,7 +345,6 @@ async fn test_peer_crash_and_recover() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
@@ -408,7 +404,6 @@ async fn test_peer_crash_and_recover() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
@@ -443,7 +438,6 @@ async fn test_auto_reconnect() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         3,
-        true,
     ))
     .await;
     let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
@@ -476,7 +470,7 @@ async fn test_auto_reconnect() {
         &server,
         vec![Peer {
             address: peer.address.to_string(),
-            asn: 65002, // Preserved from previous session
+            asn: 0, // Cleared on disconnect, re-learned on next OPEN
             state: BgpState::OpenSent as i32,
             admin_state: AdminState::Up.into(),
             configured: true,
@@ -506,7 +500,6 @@ async fn test_idle_hold_time_delay() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         3,
-        true,
     ))
     .await;
     let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
@@ -576,7 +569,6 @@ async fn test_allow_automatic_start_false() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         3,
-        true,
     ))
     .await;
     let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
@@ -625,7 +617,6 @@ async fn test_damp_peer_oscillations() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         3,
-        true,
     ))
     .await;
     let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
@@ -674,48 +665,6 @@ async fn test_damp_peer_oscillations() {
     .await;
 }
 
-#[tokio::test]
-async fn test_unconfigured_peer_removed_on_disconnect() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-        true,
-    ))
-    .await;
-
-    // FakePeer connects to the server - this is an unconfigured peer
-    let mut fake_peer = FakePeer::connect(None, &server).await;
-    fake_peer
-        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
-        .await;
-    fake_peer.handshake_keepalive().await;
-
-    // Verify peer is established (fake_peer connects without AddPeer, so configured=false)
-    poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![fake_peer.to_peer(BgpState::Established, false)],
-            )
-            .await
-        },
-        "Timeout waiting for FakePeer to establish",
-    )
-    .await;
-
-    // Drop FakePeer to disconnect - unconfigured peer should be removed entirely
-    drop(fake_peer);
-
-    // Verify peer is removed (not in Idle, but completely gone)
-    poll_until(
-        || async { verify_peers(&server, vec![]).await },
-        "Timeout waiting for unconfigured peer removal",
-    )
-    .await;
-}
-
 /// Test PassiveTcpEstablishment - server waits for remote to connect (RFC 4271 8.1.1)
 #[tokio::test]
 async fn test_passive_mode() {
@@ -724,17 +673,18 @@ async fn test_passive_mode() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
     // Add peer with passive_mode=true
+    // idle_hold_time_secs enables allow_automatic_start which triggers AutomaticStartPassive
     server
         .client
         .add_peer(
             "127.0.0.2:179".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
+                idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
         )
@@ -779,7 +729,6 @@ async fn test_delay_open() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        false,
     ))
     .await;
 
@@ -835,42 +784,11 @@ async fn test_mrai_rate_limiting() {
     ];
 
     for (mrai_secs, num_routes) in test_cases {
-        let mut server1 = start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            90,
-            true,
-        ))
-        .await;
-        let server2 = start_test_server(Config::new(
-            65002,
-            "127.0.0.2:0",
-            Ipv4Addr::new(2, 2, 2, 2),
-            90,
-            true,
-        ))
-        .await;
-
-        server1
-            .client
-            .add_peer(
-                format!("{}:{}", server2.address, server2.bgp_port),
-                Some(SessionConfig {
-                    min_route_advertisement_interval_secs: Some(mrai_secs),
-                    ..Default::default()
-                }),
-            )
-            .await
-            .unwrap();
-
-        poll_until(
-            || async {
-                let peers = server1.client.get_peers().await.unwrap();
-                peers.len() == 1 && peers[0].state == BgpState::Established as i32
-            },
-            "Timeout waiting for Established",
-        )
+        // Set MRAI on the peer config - controls how fast server1 can send updates to server2
+        let (mut server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+            min_route_advertisement_interval_secs: Some(mrai_secs),
+            ..Default::default()
+        }))
         .await;
 
         let start_time = std::time::Instant::now();
@@ -942,23 +860,33 @@ async fn test_ipv6_peering() {
         "[::1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
-    let server2 = start_test_server(Config::new(
+    let mut server2 = start_test_server(Config::new(
         65002,
         "[::1]:0",
         Ipv4Addr::new(2, 2, 2, 2),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
-    // Peer over IPv6
+    // Peer over IPv6 (both sides must add peer)
     server1
         .client
         .add_peer(format!("[::1]:{}", server2.bgp_port), None)
+        .await
+        .unwrap();
+
+    server2
+        .client
+        .add_peer(
+            format!("[::1]:{}", server1.bgp_port),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
 
@@ -966,11 +894,7 @@ async fn test_ipv6_peering() {
     poll_until(
         || async {
             verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Established, false)],
-                )
-                .await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
         },
         "Timeout waiting for IPv6 transport peering to establish",
     )
@@ -1136,33 +1060,11 @@ async fn test_reset_peer_soft() {
 
 #[tokio::test]
 async fn test_hard_reset_established() {
-    // Use short idle_hold_time (1s) to avoid long waits in test
-    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, true);
-    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90, true);
-
-    let mut server1 = start_test_server(config1).await;
-    let server2 = start_test_server(config2).await;
-
-    // Server1 adds server2 as a configured peer with 1s idle_hold_time
-    server1
-        .client
-        .add_peer(
-            format!("{}:{}", server2.address, server2.bgp_port),
-            Some(SessionConfig {
-                idle_hold_time_secs: Some(1),
-                passive_mode: Some(false),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for peering to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
-    poll_peers(
-        &server2,
-        vec![server1.to_peer(BgpState::Established, false)],
-    )
+    // Use setup with short idle_hold_time for faster reconnect
+    let (mut server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+        idle_hold_time_secs: Some(1),
+        ..Default::default()
+    }))
     .await;
 
     // Server1 announces a route to server2
@@ -1193,13 +1095,13 @@ async fn test_hard_reset_established() {
     )])
     .await;
 
-    // Get initial stats
-    let (_, s1_initial_stats) = server1
+    // Get initial stats from server2 (the receiver of the notification)
+    let (_, s2_initial_stats) = server2
         .client
-        .get_peer(server2.address.to_string())
+        .get_peer(server1.address.to_string())
         .await
         .unwrap();
-    let s1_initial_notification_sent = s1_initial_stats.unwrap().notification_sent;
+    let s2_initial_notification_received = s2_initial_stats.unwrap().notification_received;
 
     // Execute hard reset on server1's peer (server2)
     server1
@@ -1208,12 +1110,12 @@ async fn test_hard_reset_established() {
         .await
         .unwrap();
 
-    // Verify notification was sent
+    // Verify notification was received by server2
     poll_peer_stats(
-        &server1,
-        &server2.address.to_string(),
+        &server2,
+        &server1.address.to_string(),
         ExpectedStats {
-            min_notification_sent: Some(s1_initial_notification_sent + 1),
+            min_notification_received: Some(s2_initial_notification_received + 1),
             ..Default::default()
         },
     )
@@ -1222,19 +1124,10 @@ async fn test_hard_reset_established() {
     // Verify route was withdrawn from server2
     poll_route_withdrawal(&[&server2]).await;
 
-    // Verify configured peer (server2 from server1's perspective) reconnects
-    // Note: server1 adds server2 as configured, but server2 accepts server1 as unconfigured.
-    // After hard reset:
-    // - server1's peer task for server2 stays alive (configured) and reconnects after 1s
-    // - server2's peer task for server1 is removed (unconfigured)
+    // Verify configured peers reconnect on both sides
+    // Both sides have each other configured, so both stay as configured=true after reconnect
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
-
-    // Server2 should have a new unconfigured peer connection from server1
-    poll_peers(
-        &server2,
-        vec![server1.to_peer(BgpState::Established, false)],
-    )
-    .await;
+    poll_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await;
 
     // Verify route is automatically re-advertised after reconnection
     poll_route_propagation(&[(
@@ -1263,7 +1156,6 @@ async fn test_hard_reset_non_established_error() {
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
         30,
-        true,
     ))
     .await;
 
@@ -1311,7 +1203,6 @@ async fn test_hard_reset_peer_not_found() {
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
         30,
-        true,
     ))
     .await;
 
@@ -1338,40 +1229,20 @@ async fn test_hard_reset_peer_not_found() {
 async fn test_graceful_restart() {
     struct TestCase {
         name: &'static str,
-        peer_configured: bool,
         gr_enabled: bool,
         expect_routes_retained: bool,
-        expect_peer_removed_after_gr: bool,
     }
 
     let test_cases = vec![
         TestCase {
             name: "configured peer with GR",
-            peer_configured: true,
             gr_enabled: true,
             expect_routes_retained: true,
-            expect_peer_removed_after_gr: false, // Configured peers stay
-        },
-        TestCase {
-            name: "unconfigured peer with GR",
-            peer_configured: false,
-            gr_enabled: true,
-            expect_routes_retained: true,
-            expect_peer_removed_after_gr: true, // Unconfigured peers removed after GR
-        },
-        TestCase {
-            name: "unconfigured peer without GR",
-            peer_configured: false,
-            gr_enabled: false,
-            expect_routes_retained: false,
-            expect_peer_removed_after_gr: true, // Removed immediately
         },
         TestCase {
             name: "configured peer without GR",
-            peer_configured: true,
             gr_enabled: false,
             expect_routes_retained: false,
-            expect_peer_removed_after_gr: false, // Configured peers stay
         },
     ];
 
@@ -1379,14 +1250,11 @@ async fn test_graceful_restart() {
         let gr_restart_time_secs = 3;
 
         // Create two servers with short hold timer for faster disconnect detection
-        // server1 always accepts unconfigured peers
-        // server2 accepts unconfigured only when we want to test unconfigured peer behavior
         let mut server1 = start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             3, // Short hold timer for fast disconnect detection
-            true,
         ))
         .await;
 
@@ -1394,39 +1262,35 @@ async fn test_graceful_restart() {
             65002,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
-            3,                   // Short hold timer for fast disconnect detection
-            !tc.peer_configured, // Accept unconfigured peers only when testing unconfigured behavior
+            3, // Short hold timer for fast disconnect detection
         ))
         .await;
 
-        // Configure server2 FIRST (before server1 connects)
-        // Server2 conditionally adds server1 based on peer_configured
-        if tc.peer_configured {
-            let s2_session_config = if tc.gr_enabled {
-                Some(SessionConfig {
-                    graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
-                        enabled: Some(true),
-                        restart_time_secs: Some(gr_restart_time_secs),
-                    }),
-                    passive_mode: Some(true),
-                    ..Default::default()
-                })
-            } else {
-                Some(SessionConfig {
-                    passive_mode: Some(true),
-                    ..Default::default()
-                })
-            };
+        // Configure server2 as a passive peer
+        let s2_session_config = if tc.gr_enabled {
+            Some(SessionConfig {
+                graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(gr_restart_time_secs),
+                }),
+                passive_mode: Some(true),
+                ..Default::default()
+            })
+        } else {
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            })
+        };
 
-            server2
-                .client
-                .add_peer(
-                    format!("{}:{}", server1.address, server1.bgp_port),
-                    s2_session_config,
-                )
-                .await
-                .unwrap();
-        }
+        server2
+            .client
+            .add_peer(
+                format!("{}:{}", server1.address, server1.bgp_port),
+                s2_session_config,
+            )
+            .await
+            .unwrap();
 
         let s1_session_config = if tc.gr_enabled {
             Some(session_config_with_gr_timer(gr_restart_time_secs))
@@ -1478,11 +1342,7 @@ async fn test_graceful_restart() {
 
         if tc.expect_routes_retained {
             // For GR: peer goes to Idle but stays in HashMap
-            poll_peers(
-                &server2,
-                vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
-            )
-            .await;
+            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle, true)]).await;
 
             // Routes should be retained during GR timer
             poll_while(
@@ -1513,31 +1373,13 @@ async fn test_graceful_restart() {
             )
             .await;
 
-            // Check if peer is removed after GR timer
-            if tc.expect_peer_removed_after_gr {
-                poll_peers_with_timeout(&server2, vec![], 10).await;
-            } else {
-                // Peer should still exist in Idle state
-                poll_peers(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
-                )
-                .await;
-            }
+            // Peer should still exist in Idle state (configured peers stay)
+            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle, true)]).await;
         } else {
             // No GR: Wait for peer to detect disconnect and routes to be withdrawn
-            if tc.expect_peer_removed_after_gr {
-                // Unconfigured peer should be removed
-                poll_peers_with_timeout(&server2, vec![], 40).await;
-            } else {
-                // Configured peer goes to Idle
-                poll_peers_with_timeout(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Idle, tc.peer_configured)],
-                    40,
-                )
+            // Configured peer goes to Idle
+            poll_peers_with_timeout(&server2, vec![server1.to_peer(BgpState::Idle, true)], 40)
                 .await;
-            }
 
             // Routes should be withdrawn immediately
             poll_route_withdrawal(&[&server2]).await;
@@ -1570,7 +1412,6 @@ async fn test_graceful_restart_reconnect() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90, // Hold timer (longer than GR timer)
-        false,
     ))
     .await;
 
@@ -1649,7 +1490,7 @@ async fn test_graceful_restart_reconnect() {
     poll_until(
         || async {
             server.client.get_peers().await.ok().is_some_and(|peers| {
-                peers.len() == 1 && peers[0].state != BgpState::Established.into()
+                peers.len() == 1 && peers[0].state != BgpState::Established as i32
             })
         },
         "peer should disconnect",
@@ -1752,7 +1593,6 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        false,
     ))
     .await;
 
@@ -1894,14 +1734,26 @@ async fn test_large_asn_peering() {
 async fn test_large_asn_requires_4byte_capability() {
     // Create server with large ASN (> 65535)
     let large_asn = 4200000001;
-    let server = start_test_server(Config::new(
+    let mut server = start_test_server(Config::new(
         large_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
+
+    // Add peer as passive so we can connect to it
+    server
+        .client
+        .add_peer(
+            "127.0.0.1:179".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     // OLD speaker connects (FakePeer will send OPEN without capability 65)
     let mut peer = FakePeer::connect(None, &server).await;

@@ -314,22 +314,8 @@ impl Peer {
                             // Ignored when connected
                         }
                         PeerOp::CollisionLost => {
-                            // Server detected collision, this connection lost
-                            // In Established state, RFC 4271 8.1.1 Option 5 CollisionDetectEstablishedState
-                            // determines behavior - by default we stay established and ignore collision
-                            if self.config.collision_detect_established_state {
-                                info!(peer_ip = %peer_ip, "collision lost in Established, closing");
-                                let notif = NotificationMessage::new(
-                                    BgpError::Cease(CeaseSubcode::ConnectionCollisionResolution),
-                                    vec![],
-                                );
-                                let _ = self.send_notification(notif.clone()).await;
-                                self.disconnect(true, PeerDownReason::LocalNotification(notif));
-                                return true; // Signal shutdown
-                            } else {
-                                debug!(peer_ip = %peer_ip,
-                                    "collision lost ignored in Established (CollisionDetectEstablishedState=false)");
-                            }
+                            // Collision detection doesn't apply in Established state
+                            debug!(peer_ip = %peer_ip, "collision lost ignored in Established state");
                         }
                     }
                 }
