@@ -238,7 +238,7 @@ async fn test_manually_stopped_no_auto_reconnect() {
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let mut server2 = start_test_server(Config::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -253,6 +253,18 @@ async fn test_manually_stopped_no_auto_reconnect() {
             format!("{}:{}", server2.address, server2.bgp_port),
             Some(SessionConfig {
                 idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    // Server2 needs to have server1 as a passive peer
+    server2
+        .client
+        .add_peer(
+            format!("{}:{}", server1.address, server1.bgp_port),
+            Some(SessionConfig {
+                passive_mode: Some(true),
                 ..Default::default()
             }),
         )

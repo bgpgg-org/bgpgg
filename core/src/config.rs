@@ -93,10 +93,6 @@ pub struct PeerConfig {
     /// Default false: OPEN must be sent before NOTIFICATION.
     #[serde(default)]
     pub send_notification_without_open: bool,
-    /// CollisionDetectEstablishedState - process collisions in Established state (RFC 4271 8.1.1).
-    /// Default false: collision detection is ignored when peer is in Established state.
-    #[serde(default)]
-    pub collision_detect_established_state: bool,
     /// MinRouteAdvertisementIntervalTimer - minimum seconds between route advertisements (RFC 4271 9.2.1.1).
     /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
     #[serde(default)]
@@ -151,7 +147,6 @@ impl Default for PeerConfig {
             delay_open_time_secs: None,
             max_prefix: None,
             send_notification_without_open: false,
-            collision_detect_established_state: false,
             min_route_advertisement_interval_secs: None,
             import_policy: Vec::new(),
             export_policy: Vec::new(),

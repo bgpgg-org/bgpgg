@@ -783,12 +783,10 @@ impl BgpServer {
             return;
         }
 
-        // Check if outgoing is Established with collision_detect_established_state=false
+        // Reject if outgoing is already Established
         if let Some(out) = &existing.outgoing {
-            if out.state == BgpState::Established
-                && !existing.config.collision_detect_established_state
-            {
-                info!(%peer_ip, "rejecting: outgoing Established and CollisionDetectEstablishedState=false");
+            if out.state == BgpState::Established {
+                info!(%peer_ip, "rejecting: outgoing already Established");
                 let notif = NotificationMessage::new(
                     BgpError::Cease(CeaseSubcode::ConnectionRejected),
                     vec![],

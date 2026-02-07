@@ -293,6 +293,21 @@ pub async fn start_test_server(config: Config) -> TestServer {
     }
 }
 
+/// Start a test server with a default passive peer configured for FakePeer connections.
+///
+/// This is a convenience function for tests that use FakePeer to connect to a single server.
+/// It pre-configures a passive peer at 127.0.0.1:179 so FakePeer can connect without
+/// additional setup.
+pub async fn start_test_server_for_fake_peer(config: Config) -> TestServer {
+    let mut config = config;
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1:179".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    start_test_server(config).await
+}
+
 /// Sets up two BGP servers with peering established
 ///
 /// Server1 (AS65001) <-----> Server2 (AS65001)

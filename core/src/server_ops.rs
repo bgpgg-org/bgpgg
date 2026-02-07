@@ -551,8 +551,8 @@ impl BgpServer {
             return;
         };
 
-        // RFC 4271 8.1.1 Option 5: If outgoing is Established and option is false, close incoming
-        if out.state == BgpState::Established && !peer.config.collision_detect_established_state {
+        // If one connection is already Established, close the other
+        if out.state == BgpState::Established {
             info!(%peer_ip, "collision: closing incoming, outgoing is Established");
             if let Some(tx) = &inc.peer_tx {
                 let _ = tx.send(PeerOp::CollisionLost);
@@ -560,8 +560,7 @@ impl BgpServer {
             peer.incoming = None;
             return;
         }
-        // And vice versa
-        if inc.state == BgpState::Established && !peer.config.collision_detect_established_state {
+        if inc.state == BgpState::Established {
             info!(%peer_ip, "collision: closing outgoing, incoming is Established");
             if let Some(tx) = &out.peer_tx {
                 let _ = tx.send(PeerOp::CollisionLost);
