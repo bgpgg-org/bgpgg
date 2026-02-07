@@ -188,7 +188,6 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
         &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
         90,
-        true,
     );
     config.sys_name = Some(format!("test-bgpgg-{}", ip));
     config.sys_descr = Some("test bgpgg router".to_string());
@@ -313,7 +312,6 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -321,7 +319,6 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
         ],
@@ -341,9 +338,9 @@ pub async fn setup_two_peered_servers_active_active(
 ) -> (TestServer, TestServer) {
     // Start servers first to get their ports
     let mut server1 =
-        start_test_server(Config::new(65001, "127.0.0.1:0", server1_bgp_id, 90, true)).await;
+        start_test_server(Config::new(65001, "127.0.0.1:0", server1_bgp_id, 90)).await;
     let mut server2 =
-        start_test_server(Config::new(65002, "127.0.0.2:0", server2_bgp_id, 90, true)).await;
+        start_test_server(Config::new(65002, "127.0.0.2:0", server2_bgp_id, 90)).await;
 
     let server2_addr = format!("{}:{}", server2.address, server2.bgp_port);
     let server1_addr = format!("{}:{}", server1.address, server1.bgp_port);
@@ -396,7 +393,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -404,7 +400,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -412,7 +407,6 @@ pub async fn setup_three_meshed_servers(
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
-                true,
             ))
             .await,
         ],
@@ -451,7 +445,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -459,7 +452,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -467,7 +459,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -475,7 +466,6 @@ pub async fn setup_four_meshed_servers(
                 "127.0.0.4:0",
                 Ipv4Addr::new(4, 4, 4, 4),
                 hold,
-                true,
             ))
             .await,
         ],
@@ -926,7 +916,6 @@ pub async fn create_asn_chain<const N: usize>(
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
                 hold,
-                true,
             ))
             .await,
         );

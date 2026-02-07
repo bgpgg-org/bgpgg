@@ -51,7 +51,6 @@ async fn test_max_prefix_limit() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
 
@@ -61,9 +60,11 @@ async fn test_max_prefix_limit() {
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
             300,
-            true,
         ))
         .await;
+
+        // Server1 adds Server2 (so it accepts the connection)
+        server1.add_peer(&server2).await;
 
         // Server2 connects to Server1 with max_prefix limit of 2
         server2
@@ -166,15 +167,28 @@ async fn test_remove_peer_sends_cease_notification() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
+
+    // Add passive peer so FakePeer connection is accepted
+    server
+        .client
+        .add_peer(
+            "127.0.0.1:179".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
     peer.handshake_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 
     server
         .client
@@ -196,15 +210,28 @@ async fn test_disable_peer_sends_admin_shutdown() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
+
+    // Add passive peer so FakePeer connection is accepted
+    server
+        .client
+        .add_peer(
+            "127.0.0.1:179".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
     let mut peer = FakePeer::connect(None, &server).await;
     peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
         .await;
     peer.handshake_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, false)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
 
     server
         .client
@@ -289,11 +316,11 @@ async fn test_collision_detect_established_state() {
 #[tokio::test]
 async fn test_collision_detect_established_state_true() {
     // Start server1 with CollisionDetectEstablishedState=true
-    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, true);
+    let config1 = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     let mut server1 = start_test_server(config1).await;
 
     // Start server2
-    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90, true);
+    let config2 = Config::new(65002, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90);
     let mut server2 = start_test_server(config2).await;
 
     // Server1 adds Server2 with CollisionDetectEstablishedState=true
@@ -361,7 +388,7 @@ async fn test_collision_connect_state() {
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
     let listener_addr = format!("127.0.0.3:{}", peer.port());
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: listener_addr.to_string(),
         delay_open_time_secs: Some(2), // DelayOpen keeps peer in Connect state long enough
@@ -429,7 +456,7 @@ async fn test_collision_deferred() {
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
         let listener_addr = format!("127.0.0.3:{}", peer.port());
 
-        let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300, true);
+        let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300);
         config.peers.push(PeerConfig {
             address: listener_addr.to_string(),
             ..Default::default()
@@ -513,7 +540,7 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
     let listener_addr = format!("127.0.0.3:{}", peer.port());
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: listener_addr.to_string(),
         ..Default::default()
@@ -572,7 +599,7 @@ async fn test_collision_candidate_asn_preserved_on_promotion() {
     let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
     let listener_addr = format!("127.0.0.4:{}", peer.port());
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, true);
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: listener_addr.to_string(),
         ..Default::default()

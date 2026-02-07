@@ -240,7 +240,6 @@ async fn test_add_defined_sets() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             90,
-            true,
         ))
         .await;
 
@@ -265,7 +264,6 @@ async fn test_add_duplicate_set_fails() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -294,7 +292,6 @@ async fn test_list_defined_sets() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -339,7 +336,6 @@ async fn test_remove_defined_set() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -379,7 +375,6 @@ async fn test_add_policy() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -432,7 +427,6 @@ async fn test_add_policy_missing_defined_set() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -461,7 +455,6 @@ async fn test_list_policies() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -538,7 +531,6 @@ async fn test_remove_policy() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -683,7 +675,6 @@ async fn test_reject_policy_name_starting_with_underscore() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 

@@ -831,7 +831,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
     let mut server2 = start_test_server(Config::new(
@@ -839,7 +838,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
     let mut server3 = start_test_server(Config::new(
@@ -847,7 +845,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
         90,
-        true,
     ))
     .await;
     let server4 = start_test_server(Config::new(
@@ -855,7 +852,6 @@ async fn test_med_comparison_restricted_to_same_as() {
         "127.0.0.4:0",
         Ipv4Addr::new(4, 4, 4, 4),
         90,
-        true,
     ))
     .await;
 
@@ -1296,7 +1292,6 @@ async fn test_four_octet_asn_propagation() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
 
@@ -1404,7 +1399,6 @@ async fn test_four_octet_asn_malformed_as4_path() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
 
@@ -1483,7 +1477,6 @@ async fn test_four_octet_asn_malformed_as4_aggregator() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
 

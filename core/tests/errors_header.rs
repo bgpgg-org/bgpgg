@@ -31,7 +31,6 @@ async fn test_invalid_marker() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -75,7 +74,6 @@ async fn test_bad_message_length() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -115,7 +113,6 @@ async fn test_keepalive_wrong_length() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -144,7 +141,6 @@ async fn test_notification_length_too_small() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -173,7 +169,6 @@ async fn test_invalid_message_type() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -206,7 +201,7 @@ async fn test_invalid_message_type() {
 #[tokio::test]
 async fn test_send_notification_without_open() {
     for flag in [true, false] {
-        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
             address: "127.0.0.1:179".to_string(),
             passive_mode: true,

@@ -16,7 +16,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{BgpState, Origin, Route};
+use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -271,7 +271,6 @@ async fn test_ibgp_split_horizon() {
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -279,7 +278,6 @@ async fn test_ibgp_split_horizon() {
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -287,7 +285,6 @@ async fn test_ibgp_split_horizon() {
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 90,
-                true,
             ))
             .await,
         ],
@@ -357,7 +354,6 @@ async fn test_as_loop_prevention() {
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -365,7 +361,6 @@ async fn test_as_loop_prevention() {
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
-                true,
             ))
             .await,
             start_test_server(Config::new(
@@ -373,7 +368,6 @@ async fn test_as_loop_prevention() {
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 90,
-                true,
             ))
             .await, // Same AS as server1_a
         ],
@@ -547,7 +541,6 @@ async fn test_ipv6_nexthop_rewrite() {
         "[::ffff:127.0.0.1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -556,7 +549,6 @@ async fn test_ipv6_nexthop_rewrite() {
         "[::ffff:127.0.0.2]:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
 
@@ -601,9 +593,21 @@ async fn test_route_advertised_when_peer_becomes_established() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
+
+    // Add a passive peer so FakePeer connection is accepted
+    server
+        .client
+        .add_peer(
+            "127.0.0.1:179".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     // FakePeer connects and completes OPEN handshake (reaches OpenConfirm)
     let mut fake_peer = FakePeer::connect(None, &server).await;

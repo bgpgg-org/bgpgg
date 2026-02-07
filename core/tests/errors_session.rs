@@ -30,7 +30,6 @@ async fn test_hold_timer_expiry() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
-        true,
     ))
     .await;
 
@@ -71,7 +70,6 @@ async fn test_fsm_error_update_in_openconfirm() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
 

@@ -28,7 +28,6 @@ async fn test_add_peer_failure() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -62,7 +61,6 @@ async fn test_add_peer_success() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
     let server2 = start_test_server(Config::new(
@@ -70,7 +68,6 @@ async fn test_add_peer_success() {
         "127.0.0.1:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
 
@@ -100,7 +97,6 @@ async fn test_remove_peer_not_found() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -132,7 +128,6 @@ async fn test_get_peers_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -158,7 +153,6 @@ async fn test_get_peer_not_found() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -194,7 +188,6 @@ async fn test_get_routes_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -209,7 +202,6 @@ async fn test_announce_withdraw_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -244,7 +236,6 @@ async fn test_withdraw_nonexistent_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -323,7 +314,6 @@ async fn test_add_bmp_server() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -355,7 +345,6 @@ async fn test_remove_bmp_server() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -385,7 +374,6 @@ async fn test_get_bmp_servers_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -400,7 +388,6 @@ async fn test_add_route_stream() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -466,7 +453,6 @@ async fn test_add_route_stream_with_invalid_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -666,7 +652,6 @@ async fn test_get_server_info() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -715,7 +700,6 @@ async fn test_extended_community_roundtrip() {
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
         90,
-        true,
     ))
     .await;
 
@@ -794,7 +778,6 @@ async fn test_add_route_with_invalid_prefix_length() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 

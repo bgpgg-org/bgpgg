@@ -30,7 +30,6 @@ async fn test_open_unsupported_version() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -69,7 +68,6 @@ async fn test_open_unacceptable_hold_time() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -112,7 +110,6 @@ async fn test_open_bad_bgp_identifier() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;

@@ -52,7 +52,6 @@ async fn test_update_missing_well_known_attribute() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -93,7 +92,6 @@ async fn test_update_malformed_attribute_list() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -137,7 +135,6 @@ async fn test_update_attribute_flags_error_origin() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -174,7 +171,6 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -258,7 +254,6 @@ async fn test_update_attribute_length_error() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -294,7 +289,6 @@ async fn test_update_unrecognized_well_known_attribute() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -323,7 +317,6 @@ async fn test_update_invalid_origin_attribute() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -373,7 +366,6 @@ async fn test_update_invalid_next_hop_attribute() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -436,7 +428,6 @@ async fn test_next_hop_is_local_address_rejected() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -512,7 +503,6 @@ async fn test_update_malformed_as_path() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -569,7 +559,6 @@ async fn test_update_optional_attribute_error() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
         let mut peer = FakePeer::connect(None, &server).await;
@@ -613,7 +602,6 @@ async fn test_update_duplicate_attribute() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -640,7 +628,6 @@ async fn test_update_no_nlri_valid() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;
@@ -687,7 +674,6 @@ async fn test_update_multicast_nlri_ignored() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         300,
-        true,
     ))
     .await;
     let mut peer = FakePeer::connect(None, &server).await;

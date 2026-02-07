@@ -42,7 +42,9 @@ pub struct ExpectedPeerUp {
     pub peer_addr: IpAddr,
     pub peer_as: u32,
     pub peer_bgp_id: u32,
-    pub peer_port: u16,
+    /// Expected remote port. If None, port is not checked (useful for active-active peering
+    /// where the connection direction is non-deterministic).
+    pub peer_port: Option<u16>,
 }
 
 /// Expected Statistics message (without timestamps)
@@ -651,7 +653,9 @@ fn validate_bmp_peer_up_msg(actual: &PeerUpMessage, expected: &ExpectedPeerUp) -
         && actual.peer_header.peer_address == expected.peer_addr
         && actual.peer_header.peer_as == expected.peer_as
         && actual.peer_header.peer_bgp_id == expected.peer_bgp_id
-        && actual.remote_port == expected.peer_port
+        && expected
+            .peer_port
+            .is_none_or(|port| actual.remote_port == port)
 }
 
 /// Assert that a PeerUpMessage matches expected values (ignoring timestamp and local_port)
@@ -659,7 +663,22 @@ fn validate_bmp_peer_up_msg(actual: &PeerUpMessage, expected: &ExpectedPeerUp) -
 /// Note: local_port is not checked because it's an ephemeral port when the connection
 /// is initiated (not the listening port).
 pub fn assert_bmp_peer_up_msg(actual: &PeerUpMessage, expected: &ExpectedPeerUp) {
-    assert!(validate_bmp_peer_up_msg(actual, expected));
+    assert!(
+        validate_bmp_peer_up_msg(actual, expected),
+        "PeerUpMessage mismatch:\n\
+        actual: local={} peer={} as={} bgp_id={} port={}\n\
+        expected: local={} peer={} as={} bgp_id={} port={:?}",
+        actual.local_address,
+        actual.peer_header.peer_address,
+        actual.peer_header.peer_as,
+        actual.peer_header.peer_bgp_id,
+        actual.remote_port,
+        expected.local_addr,
+        expected.peer_addr,
+        expected.peer_as,
+        expected.peer_bgp_id,
+        expected.peer_port
+    );
 }
 
 fn validate_bmp_route_monitoring_msg(

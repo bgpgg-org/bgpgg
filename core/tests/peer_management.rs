@@ -236,7 +236,6 @@ async fn test_manually_stopped_no_auto_reconnect() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
     let server2 = start_test_server(Config::new(
@@ -244,7 +243,6 @@ async fn test_manually_stopped_no_auto_reconnect() {
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
 
@@ -292,8 +290,8 @@ async fn test_manually_stopped_no_auto_reconnect() {
 
 #[tokio::test]
 async fn test_reject_unconfigured_peer() {
-    // Server with accept_unconfigured_peers=false, 127.0.0.2 is configured
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, false);
+    // Server with 127.0.0.2 as configured passive peer
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     config.peers.push(bgpgg::config::PeerConfig {
         address: "127.0.0.2:179".to_string(),
         passive_mode: true,
@@ -343,7 +341,6 @@ async fn test_manual_stop() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
 
