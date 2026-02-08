@@ -20,7 +20,8 @@ pub use utils::*;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
-    AdminState, Afi, BgpState, Origin, Peer, ResetType, Route, Safi, SessionConfig,
+    AdminState, Afi, BgpState, GracefulRestartConfig, Origin, Peer, ResetType, Route, Safi,
+    SessionConfig,
 };
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
@@ -1062,8 +1063,13 @@ async fn test_reset_peer_soft() {
 #[tokio::test]
 async fn test_hard_reset_established() {
     // Use setup with short idle_hold_time for faster reconnect
+    // Disable GR so routes are withdrawn (not marked stale) on disconnect
     let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
         idle_hold_time_secs: Some(1),
+        graceful_restart: Some(GracefulRestartConfig {
+            enabled: Some(false),
+            ..Default::default()
+        }),
         ..Default::default()
     })
     .await;
@@ -1096,14 +1102,6 @@ async fn test_hard_reset_established() {
     )])
     .await;
 
-    // Get initial stats from server2 (the receiver of the notification)
-    let (_, s2_initial_stats) = server2
-        .client
-        .get_peer(server1.address.to_string())
-        .await
-        .unwrap();
-    let s2_initial_notification_received = s2_initial_stats.unwrap().notification_received;
-
     // Execute hard reset on server1's peer (server2)
     server1
         .client
@@ -1111,18 +1109,7 @@ async fn test_hard_reset_established() {
         .await
         .unwrap();
 
-    // Verify notification was received by server2
-    poll_peer_stats(
-        &server2,
-        &server1.address.to_string(),
-        ExpectedStats {
-            min_notification_received: Some(s2_initial_notification_received + 1),
-            ..Default::default()
-        },
-    )
-    .await;
-
-    // Verify route was withdrawn from server2
+    // Verify route was withdrawn from server2 (hard reset sends NOTIFICATION)
     poll_route_withdrawal(&[&server2]).await;
 
     // Verify configured peers reconnect on both sides

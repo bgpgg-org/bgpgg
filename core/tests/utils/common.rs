@@ -126,7 +126,7 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
 #[derive(Default, Clone)]
 pub struct PeerConfig {
     pub hold_timer_secs: Option<u16>,
-    pub gr_restart_time_secs: Option<u32>,
+    pub graceful_restart: Option<GracefulRestartConfig>,
     pub idle_hold_time_secs: Option<u64>,
     pub min_route_advertisement_interval_secs: Option<u64>,
 }
@@ -828,12 +828,7 @@ pub async fn chain_servers<const N: usize>(
     config: PeerConfig,
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
-        graceful_restart: config
-            .gr_restart_time_secs
-            .map(|secs| GracefulRestartConfig {
-                enabled: Some(true),
-                restart_time_secs: Some(secs),
-            }),
+        graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         ..Default::default()
@@ -1039,12 +1034,7 @@ pub async fn mesh_servers<const N: usize>(
     config: PeerConfig,
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
-        graceful_restart: config
-            .gr_restart_time_secs
-            .map(|secs| GracefulRestartConfig {
-                enabled: Some(true),
-                restart_time_secs: Some(secs),
-            }),
+        graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         ..Default::default()

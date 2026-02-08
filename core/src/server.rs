@@ -439,22 +439,11 @@ impl PeerInfo {
     }
 
     /// Get the established connection (only one can be Established)
-    pub fn established(&self) -> Option<&ConnectionState> {
+    pub fn established_conn(&self) -> Option<&ConnectionState> {
         [self.outgoing.as_ref(), self.incoming.as_ref()]
             .into_iter()
             .flatten()
             .find(|c| c.state == BgpState::Established)
-    }
-
-    /// Get mutable reference to the established connection
-    pub fn established_mut(&mut self) -> Option<&mut ConnectionState> {
-        if self.outgoing.as_ref().map(|c| c.state) == Some(BgpState::Established) {
-            self.outgoing.as_mut()
-        } else if self.incoming.as_ref().map(|c| c.state) == Some(BgpState::Established) {
-            self.incoming.as_mut()
-        } else {
-            None
-        }
     }
 
     /// Get reference to slot by connection type
@@ -473,15 +462,42 @@ impl PeerInfo {
         }
     }
 
-    /// Get the current connection (established if any, otherwise any existing connection)
-    pub fn current(&self) -> Option<&ConnectionState> {
-        self.established()
-            .or(self.outgoing.as_ref())
-            .or(self.incoming.as_ref())
+    /// Get connection state for API responses.
+    /// Returns the most-progressed connection during collision.
+    pub fn api_state(&self) -> (Option<u32>, BgpState) {
+        // Prefer established
+        if let Some(conn) = self.established_conn() {
+            return (conn.asn, conn.state);
+        }
+        // Pick most-progressed during collision
+        [self.outgoing.as_ref(), self.incoming.as_ref()]
+            .into_iter()
+            .flatten()
+            .max_by_key(|c| c.state as u8)
+            .map(|c| (c.asn, c.state))
+            .unwrap_or((None, BgpState::Idle))
+    }
+
+    /// Send operation to all active peer tasks (both incoming and outgoing slots)
+    pub fn send_to_all(&self, mut make_op: impl FnMut() -> PeerOp) {
+        for conn in [&self.outgoing, &self.incoming].into_iter().flatten() {
+            if let Some(peer_tx) = &conn.peer_tx {
+                let _ = peer_tx.send(make_op());
+            }
+        }
+    }
+
+    /// Find any connection with a peer_tx (for handing off incoming connections)
+    pub fn any_peer_tx(&self) -> Option<&mpsc::UnboundedSender<PeerOp>> {
+        // Check outgoing first (passive mode typically has outgoing task waiting)
+        self.outgoing
+            .as_ref()
+            .and_then(|c| c.peer_tx.as_ref())
+            .or_else(|| self.incoming.as_ref().and_then(|c| c.peer_tx.as_ref()))
     }
 
     pub async fn get_statistics(&self) -> Option<PeerStatistics> {
-        let peer_tx = self.current()?.peer_tx.as_ref()?;
+        let peer_tx = self.established_conn()?.peer_tx.as_ref()?;
         let (tx, rx) = oneshot::channel();
         peer_tx.send(PeerOp::GetStatistics(tx)).ok()?;
         rx.await.ok()
@@ -705,7 +721,7 @@ impl BgpServer {
         peer_tx
     }
 
-    async fn accept_peer(&mut self, mut stream: TcpStream) {
+    async fn accept_peer(&mut self, stream: TcpStream) {
         let Some(peer_ip) = peer_ip(&stream) else {
             error!("failed to get peer address");
             return;
@@ -737,13 +753,11 @@ impl BgpServer {
 
         // Passive mode with existing task: send connection to existing task
         if peer.config.passive_mode {
-            if let Some(conn) = peer.current() {
-                if let Some(peer_tx) = &conn.peer_tx {
-                    let (tcp_rx, tcp_tx) = stream.into_split();
-                    let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
-                    info!(%peer_ip, "sent incoming connection to passive peer");
-                    return;
-                }
+            if let Some(peer_tx) = peer.any_peer_tx() {
+                let (tcp_rx, tcp_tx) = stream.into_split();
+                let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
+                info!(%peer_ip, "sent incoming connection to passive peer");
+                return;
             }
         }
 
@@ -912,7 +926,7 @@ impl BgpServer {
         // Send updates to all established peers (except the originating peer)
         for (peer_addr, entry) in self.peers.iter() {
             // Get the established connection
-            let Some(conn) = entry.established() else {
+            let Some(conn) = entry.established_conn() else {
                 continue;
             };
 
