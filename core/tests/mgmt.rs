@@ -20,6 +20,7 @@ pub use utils::*;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
@@ -35,13 +36,20 @@ async fn test_add_peer_failure() {
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
 
-    // Add peer via gRPC (succeeds, connection attempt is async)
+    // Start a listener that accepts then immediately closes connections
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reject_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = listener.accept().await;
+    });
+
+    // Add peer pointing at the rejecting listener
     let result = server1
         .client
         .add_peer(
             "127.0.0.1".to_string(),
             Some(SessionConfig {
-                port: Some((server1.bgp_port + 1000) as u32),
+                port: Some(reject_port as u32),
                 ..Default::default()
             }),
         )
