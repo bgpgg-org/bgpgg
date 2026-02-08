@@ -629,7 +629,7 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        mut config: PeerConfig,
+        config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
@@ -644,8 +644,6 @@ impl BgpServer {
             }
         };
 
-        // Store address in config and construct socket address
-        config.address = addr;
         let peer_addr = SocketAddr::new(peer_ip, config.port);
 
         // Check if peer already exists
