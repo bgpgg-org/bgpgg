@@ -18,7 +18,7 @@ use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::log::{debug, error, info};
-use crate::server::{AdminState, ConnectionType, ServerOp};
+use crate::server::{AdminState, ServerOp};
 use crate::types::PeerDownReason;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -160,41 +160,9 @@ impl Peer {
                             // Ignored when connected
                         }
                         PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
-                            // RFC 4724 Section 5: If GR active, restart connection with new TCP
-                            let peer_supports_gr = self
-                                .capabilities
-                                .graceful_restart
-                                .as_ref()
-                                .map(|gr| !gr.afi_safi_list.is_empty())
-                                .unwrap_or(false);
-
-                            if peer_supports_gr {
-                                // RFC 4724: Drop established connection, retain routes, go to Connect
-                                info!(peer_ip = %peer_ip, "second connection with GR - restarting to Connect");
-
-                                // Disconnect current connection with route preservation
-                                self.disconnect(false, PeerDownReason::LocalNoNotification(
-                                    FsmEvent::TcpConnectionConfirmed
-                                ));
-
-                                // Set new connection as primary
-                                self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                                self.conn_type = ConnectionType::Incoming;
-
-                                // RFC 4724: Set ConnectRetryCounter to zero
-                                self.fsm.reset_connect_retry_counter();
-
-                                // RFC 4724: Start ConnectRetryTimer and transition to Connect
-                                self.fsm.timers.start_connect_retry();
-                                self.fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
-                                self.notify_state_change();
-                                return false; // Exit Established state loop
-                            } else {
-                                // Already have a connection, drop incoming
-                                debug!(peer_ip = %peer_ip, "dropping duplicate connection in OpenSent/OpenConfirm");
-                                drop(tcp_tx);
-                                drop(tcp_rx);
-                            }
+                            // Drop - server handles GR reconnection at accept time (BIRD style)
+                            drop(tcp_tx);
+                            drop(tcp_rx);
                         }
                         PeerOp::CollisionLost => {
                             // Server detected collision, this connection lost
@@ -257,7 +225,6 @@ impl Peer {
     ) {
         debug!(peer_ip = %self.addr, "TcpConnectionAccepted");
         self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-        self.conn_type = ConnectionType::Incoming;
         self.fsm.timers.stop_connect_retry();
         if self.config.delay_open_time_secs.is_some() {
             self.fsm.timers.start_delay_open_timer();
@@ -410,6 +377,7 @@ pub(super) mod tests {
     use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
+    use crate::server::ConnectionType;
     use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::time::Duration;

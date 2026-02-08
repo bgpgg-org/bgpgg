@@ -25,7 +25,6 @@ use bgpgg::grpc::proto::{
     AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
 use std::net::Ipv4Addr;
-use tokio::io::AsyncReadExt;
 
 #[tokio::test]
 async fn test_max_prefix_limit() {
@@ -310,31 +309,35 @@ async fn test_collision_immediate() {
     }
 }
 
-/// Incoming connections are rejected when peer is already Established.
-/// The Established session should be preserved.
+/// Third incoming connection is rejected when both slots are occupied.
+/// This tests that we don't accept more than 2 connections per peer.
 #[tokio::test]
-async fn test_reject_incoming_when_established() {
-    // server1 and server2 peer and reach Established
+async fn test_reject_third_connection_when_slots_occupied() {
+    use tokio::io::AsyncReadExt;
+
+    // server1 and server2 peer and reach Established (incoming slot occupied on server1)
     let (server1, server2) = setup_two_peered_servers(common::PeerConfig::default()).await;
 
-    // FakePeer on same IP as server2 tries to connect - should be rejected
+    // FakePeer on same IP as server2 tries to connect - should be rejected (third connection)
     let fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;
 
-    // Connection should be rejected - try to read and expect EOF/error
+    // Connection should be rejected - notification sent async, may or may not arrive
     let mut stream = fake_peer.stream.unwrap();
     let mut buf = [0u8; 1024];
     let result =
         tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
 
-    // Should get EOF (connection closed) or timeout (no data)
+    // Should get EOF (connection closed), NOTIFICATION, or timeout
     match result {
-        Ok(Ok(0)) => {} // EOF - connection closed, expected
-        Ok(Ok(n)) => {
-            // Got some data - check if it's a NOTIFICATION
-            assert!(n >= 19, "Expected NOTIFICATION or EOF");
+        Ok(Ok(0)) => {} // EOF - connection closed
+        Ok(Ok(n)) if n >= 19 => {
+            // Got NOTIFICATION - verify it's ConnectionRejected
+            assert_eq!(buf[19], 6, "Expected CEASE error code");
+            assert_eq!(buf[20], 5, "Expected ConnectionRejected subcode");
         }
-        Ok(Err(_)) => {} // Read error - connection rejected, expected
-        Err(_) => {}     // Timeout - no candidate spawned, expected
+        Ok(Ok(_)) => panic!("Unexpected short read"),
+        Ok(Err(_)) => {} // Read error - connection rejected
+        Err(_) => {}     // Timeout - acceptable
     }
 
     // Original peer should still be Established

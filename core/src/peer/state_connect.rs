@@ -17,7 +17,6 @@ use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg_notification::{BgpError, NotificationMessage};
 use crate::log::{debug, error, info};
 use crate::net::create_and_bind_tcp_socket;
-use crate::server::ConnectionType;
 use crate::types::PeerDownReason;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -92,22 +91,9 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // Incoming connection while we're attempting outbound (active-active peering)
-                            if self.conn.is_none() {
-                                info!(peer_ip = %self.addr, "accepting incoming connection in Connect state");
-                                self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                                self.conn_type = ConnectionType::Incoming;
-                                // Transition to OpenSent and send OPEN
-                                if let Err(e) = self.process_event(&FsmEvent::TcpConnectionConfirmed).await {
-                                    error!(peer_ip = %self.addr, error = %e, "failed to process TcpConnectionConfirmed");
-                                    self.disconnect(true, PeerDownReason::LocalNoNotification(FsmEvent::TcpConnectionConfirmed));
-                                }
-                            } else {
-                                // Already have a connection, drop this one
-                                debug!(peer_ip = %self.addr, "dropping duplicate connection in Connect state");
-                                drop(tcp_tx);
-                                drop(tcp_rx);
-                            }
+                            // Drop - incoming connections handled by separate peer task
+                            drop(tcp_tx);
+                            drop(tcp_rx);
                         }
                         _ => {}
                     }

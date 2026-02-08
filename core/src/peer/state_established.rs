@@ -304,12 +304,9 @@ impl Peer {
                         | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart
                         | PeerOp::AutomaticStartPassive
-                        | PeerOp::TcpConnectionAccepted { .. } => {
+                        | PeerOp::TcpConnectionAccepted { .. }
+                        | PeerOp::CollisionLost => {
                             // Ignored when connected
-                        }
-                        PeerOp::CollisionLost => {
-                            // Collision detection doesn't apply in Established state
-                            debug!(peer_ip = %peer_ip, "collision lost ignored in Established state");
                         }
                     }
                 }

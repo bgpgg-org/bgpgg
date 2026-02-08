@@ -715,11 +715,7 @@ impl BgpServer {
 
         if !self.should_accept_peer(peer_ip) {
             info!(%peer_ip, "rejecting unconfigured peer");
-            let notif = NotificationMessage::new(
-                BgpError::Cease(CeaseSubcode::ConnectionRejected),
-                Vec::new(),
-            );
-            let _ = stream.write_all(&notif.serialize()).await;
+            Self::send_rejection(stream);
             return;
         }
 
@@ -733,15 +729,15 @@ impl BgpServer {
     /// a collision candidate in the incoming slot.
     /// Caller must ensure peer is pre-configured (via should_accept_peer check).
     pub(crate) fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
-        let Some(existing) = self.peers.get(&peer_ip) else {
+        let Some(peer) = self.peers.get_mut(&peer_ip) else {
             // This should not happen - should_accept_peer should have rejected
             error!(%peer_ip, "accept_incoming_connection called for unconfigured peer");
             return;
         };
 
         // Passive mode with existing task: send connection to existing task
-        if existing.config.passive_mode {
-            if let Some(conn) = existing.current() {
+        if peer.config.passive_mode {
+            if let Some(conn) = peer.current() {
                 if let Some(peer_tx) = &conn.peer_tx {
                     let (tcp_rx, tcp_tx) = stream.into_split();
                     let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
@@ -752,40 +748,56 @@ impl BgpServer {
         }
 
         // Already have an incoming connection - reject third connection
-        if existing.incoming.is_some() {
+        if peer.incoming.is_some() {
             info!(%peer_ip, "rejecting: incoming slot already occupied");
-            let notif =
-                NotificationMessage::new(BgpError::Cease(CeaseSubcode::ConnectionRejected), vec![]);
-            tokio::spawn(async move {
-                let _ = stream.try_write(&notif.serialize());
-            });
+            Self::send_rejection(stream);
             return;
         }
 
-        // Reject if outgoing is already Established
-        if let Some(out) = &existing.outgoing {
-            if out.state == BgpState::Established {
-                info!(%peer_ip, "rejecting: outgoing already Established");
-                let notif = NotificationMessage::new(
-                    BgpError::Cease(CeaseSubcode::ConnectionRejected),
-                    vec![],
-                );
-                tokio::spawn(async move {
-                    let _ = stream.try_write(&notif.serialize());
-                });
+        // Check if outgoing is Established with GR capability
+        let outgoing_established = peer
+            .outgoing
+            .as_ref()
+            .is_some_and(|out| out.state == BgpState::Established);
+        let outgoing_has_gr = peer
+            .outgoing
+            .as_ref()
+            .and_then(|out| out.capabilities.as_ref())
+            .and_then(|caps| caps.graceful_restart.as_ref())
+            .is_some_and(|gr| !gr.afi_safi_list.is_empty());
+
+        // Handle Established outgoing connection
+        if outgoing_established {
+            if outgoing_has_gr {
+                // RFC 4724: New connection from restarting peer - trigger GR
+                info!(%peer_ip, "GR reconnection: closing stale Established, accepting new");
+                if let Some(peer_tx) = peer.outgoing.as_ref().and_then(|out| out.peer_tx.clone()) {
+                    let _ = peer_tx.send(PeerOp::ManualStop);
+                }
+                peer.outgoing = None;
+            } else {
+                info!(%peer_ip, "rejecting: outgoing already Established (no GR)");
+                Self::send_rejection(stream);
                 return;
             }
         }
 
         // Spawn incoming connection - let check_collision() decide winner
-        // Create channel and set up slot BEFORE spawning to avoid race
-        let incoming_config = existing.config.clone();
+        let config = peer.config.clone();
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-        if let Some(peer) = self.peers.get_mut(&peer_ip) {
-            peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-        }
-        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, incoming_config);
+        peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
+        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, config);
         info!(%peer_ip, "spawned incoming connection");
+    }
+
+    /// Send rejection notification in background task.
+    /// Non-blocking to avoid stalling the server's event loop on socket writes.
+    fn send_rejection(mut stream: TcpStream) {
+        tokio::spawn(async move {
+            let notif =
+                NotificationMessage::new(BgpError::Cease(CeaseSubcode::ConnectionRejected), vec![]);
+            let _ = stream.write_all(&notif.serialize()).await;
+        });
     }
 
     /// Spawn incoming peer task with pre-created channel.

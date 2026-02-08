@@ -866,15 +866,13 @@ async fn test_ipv6_peering() {
     ))
     .await;
 
-    // Peer over IPv6 (both sides must add peer)
-    // Use idle_hold_time_secs=0 for fast reconnect after initial rejection
+    // Peer over IPv6 (both sides add peer, retry handles initial rejection)
     server1
         .client
         .add_peer(
             "::1".to_string(),
             Some(SessionConfig {
                 port: Some(server2.bgp_port as u32),
-                idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
         )
@@ -887,7 +885,6 @@ async fn test_ipv6_peering() {
             "::1".to_string(),
             Some(SessionConfig {
                 port: Some(server1.bgp_port as u32),
-                idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
         )
@@ -1718,6 +1715,127 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
         "stale routes should be immediately cleared when F=0",
     )
     .await;
+}
+
+/// RFC 4724: GR reconnection - when outgoing is Established with GR and new incoming
+/// connection arrives, close old session and accept new (BIRD style).
+#[tokio::test]
+async fn test_gr_reconnection_accepts_new_connection() {
+    // FakePeer listens - server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let peer_port = peer.port();
+
+    // Start server with GR enabled
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.2".to_string(),
+        port: peer_port,
+        graceful_restart: bgpgg::config::GracefulRestartConfig {
+            enabled: true,
+            restart_time: 120,
+        },
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+    peer.read_open().await;
+
+    // Send OPEN with GR capability
+    peer.send_open_with_gr(65002, Ipv4Addr::new(2, 2, 2, 2), 90, 120, false)
+        .await;
+    peer.asn = 65002;
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+
+    // Verify Established
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // Now FakePeer "restarts" - connects to server as new incoming connection
+    // This simulates peer restart where old TCP is stale but server doesn't know yet
+    let mut reconnecting_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+
+    // Server should accept the new connection (trigger GR, close old)
+    // Read server's OPEN on new connection
+    let open = reconnecting_peer.read_open().await;
+    assert_eq!(open.asn as u32, 65001);
+
+    // Complete handshake on new connection
+    reconnecting_peer
+        .send_open_with_gr(65002, Ipv4Addr::new(2, 2, 2, 2), 90, 120, true) // R=1 (restarting)
+        .await;
+    reconnecting_peer.asn = 65002;
+    reconnecting_peer.send_keepalive().await;
+    reconnecting_peer.read_keepalive().await;
+
+    // Verify peer reaches Established on new connection
+    poll_peers(
+        &server,
+        vec![reconnecting_peer.to_peer(BgpState::Established)],
+    )
+    .await;
+}
+
+/// When outgoing is Established without GR capability, new incoming connection
+/// should be rejected to protect the existing session.
+#[tokio::test]
+async fn test_reject_incoming_when_established_no_gr() {
+    // FakePeer listens - server will connect outgoing
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let peer_port = peer.port();
+
+    // Start server with GR disabled
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.2".to_string(),
+        port: peer_port,
+        graceful_restart: bgpgg::config::GracefulRestartConfig {
+            enabled: false,
+            restart_time: 0,
+        },
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+
+    // Accept server's outgoing connection
+    peer.accept().await;
+    peer.read_open().await;
+
+    // Send OPEN WITHOUT GR capability
+    peer.send_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90).await;
+    peer.asn = 65002;
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+
+    // Verify Established
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // Now FakePeer tries to connect as new incoming connection
+    let reconnecting_peer = FakePeer::connect(Some("127.0.0.2"), &server).await;
+
+    // Server should reject - notification sent async, may or may not arrive
+    use tokio::io::AsyncReadExt;
+    let mut stream = reconnecting_peer.stream.unwrap();
+    let mut buf = [0u8; 1024];
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
+
+    // Should get EOF (connection closed), NOTIFICATION, or timeout
+    match result {
+        Ok(Ok(0)) => {} // EOF - connection closed
+        Ok(Ok(n)) if n >= 19 => {
+            // Got NOTIFICATION - verify it's ConnectionRejected
+            assert_eq!(buf[19], 6, "Expected CEASE error code");
+            assert_eq!(buf[20], 5, "Expected ConnectionRejected subcode");
+        }
+        Ok(Ok(_)) => panic!("Unexpected short read"),
+        Ok(Err(_)) => {} // Read error - connection rejected
+        Err(_) => {}     // Timeout - acceptable
+    }
+
+    // Original session should still be Established
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 }
 
 /// RFC 6793: Test peering establishment between peers with large ASNs
