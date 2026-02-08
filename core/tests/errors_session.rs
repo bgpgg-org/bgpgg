@@ -25,14 +25,18 @@ use std::net::Ipv4Addr;
 #[tokio::test]
 async fn test_hold_timer_expiry() {
     let hold_timer_secs: u16 = 3;
-    let server = start_test_server(Config::new(
+    let mut config = Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
-        true,
-    ))
-    .await;
+    );
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.1".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
 
     // FakePeer connects with same hold time but won't send keepalives
     let mut fake_peer = FakePeer::connect(None, &server).await;
@@ -57,23 +61,21 @@ async fn test_hold_timer_expiry() {
     let notif = fake_peer.read_notification().await;
     assert_eq!(*notif.error(), BgpError::HoldTimerExpired);
 
-    // Server should have removed the peer
+    // Peer is configured, so it stays in the list but goes back to non-Established state
     poll_until(
-        || async { verify_peers(&server, vec![]).await },
-        "Timeout waiting for peer removal after hold timer expiry",
+        || async {
+            let peers = server.client.get_peers().await.unwrap_or_default();
+            peers
+                .iter()
+                .any(|p| p.state != BgpState::Established as i32)
+        },
+        "Timeout waiting for peer to leave Established after hold timer expiry",
     )
     .await;
 }
 #[tokio::test]
 async fn test_fsm_error_update_in_openconfirm() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
+    let server = setup_server_with_passive_peer().await;
 
     // Connect and exchange OPEN only - server ends up in OpenConfirm
     let mut peer = FakePeer::connect(None, &server).await;

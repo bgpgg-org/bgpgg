@@ -69,14 +69,14 @@ message SessionConfig {
     optional uint64 delay_open_time_secs = 5;     // Delay before sending OPEN. Unset disables
     optional MaxPrefixSetting max_prefix = 6;
     optional bool send_notification_without_open = 7;  // Allow NOTIFICATION before OPEN (default: false)
-    optional bool collision_detect_established_state = 8;  // Process collisions in Established (default: false)
-    optional uint64 min_route_advertisement_interval_secs = 9;  // MRAI timer (RFC 4271 9.2.1.1, default: 0)
-    optional GracefulRestartConfig graceful_restart = 10;  // Graceful Restart settings
+    optional uint64 min_route_advertisement_interval_secs = 8;  // MRAI timer (RFC 4271 9.2.1.1, default: 0)
+    optional GracefulRestartConfig graceful_restart = 9;  // Graceful Restart settings
+    optional uint32 port = 10;  // Remote BGP port (default: 179)
 }
 
 // Add peer request/response
 message AddPeerRequest {
-    string address = 1;              // IP:PORT format (e.g., "192.168.1.1:179")
+    string address = 1;              // Peer IP address (e.g., "192.168.1.1")
     optional SessionConfig config = 2;  // Omit for all defaults
 }
 
@@ -190,9 +190,8 @@ message Peer {
     uint32 asn = 2;
     BgpState state = 3;
     AdminState admin_state = 4;
-    bool configured = 5;  // true if explicitly configured, false if accepted via accept_unconfigured_peers
-    repeated string import_policies = 6;  // Names of import policies assigned to this peer
-    repeated string export_policies = 7;  // Names of export policies assigned to this peer
+    repeated string import_policies = 5;  // Names of import policies assigned to this peer
+    repeated string export_policies = 6;  // Names of export policies assigned to this peer
 }
 
 // Add route request/response

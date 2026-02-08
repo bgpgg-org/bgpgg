@@ -133,7 +133,7 @@ async fn test_export_policy_prefix_match() {
     ];
 
     for tc in cases {
-        let (server1, mut server2) = setup_two_peered_servers(None).await;
+        let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
         // Apply export policy on server2
         apply_export_reject_policy(
@@ -194,7 +194,7 @@ async fn test_export_policy_large_community_match() {
     use bgpgg::bgp::msg_update_types::LargeCommunity;
     use bgpgg::grpc::proto::{self, defined_set_config};
 
-    let (server1, mut server2) = setup_two_peered_servers(None).await;
+    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add large-community-set
     server2
@@ -343,7 +343,7 @@ async fn test_export_policy_large_community_match() {
 async fn test_export_policy_ext_community_match() {
     use bgpgg::grpc::proto::{self, defined_set_config};
 
-    let (server1, mut server2) = setup_two_peered_servers(None).await;
+    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add ext-community-set
     server2

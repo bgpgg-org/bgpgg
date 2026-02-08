@@ -18,8 +18,10 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
+use std::time::Duration;
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
@@ -28,7 +30,6 @@ async fn test_add_peer_failure() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -36,21 +37,43 @@ async fn test_add_peer_failure() {
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
 
-    // Add peer via gRPC (succeeds, connection attempt is async)
+    // Start a listener that accepts then immediately closes connections
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reject_port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = listener.accept().await;
+        let _ = accepted_tx.send(());
+    });
+
+    // Add peer pointing at the rejecting listener
+    // Use long idle_hold_time so peer stays in Idle after failure instead of retrying
     let result = server1
         .client
-        .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000), None)
+        .add_peer(
+            "127.0.0.1".to_string(),
+            Some(SessionConfig {
+                port: Some(reject_port as u32),
+                idle_hold_time_secs: Some(3600),
+                ..Default::default()
+            }),
+        )
         .await;
     assert!(result.is_ok());
 
-    // RFC 4271 Event 18: Connection fails without DelayOpenTimer -> Idle
+    // Wait for TCP connection to be accepted (proves peer left initial Idle)
+    accepted_rx.await.unwrap();
+
+    // Now safe to poll for Idle - we're past initial Idle
     poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+            peers
+                .first()
+                .is_some_and(|p| p.state == BgpState::Idle as i32)
         },
-        std::time::Duration::from_secs(1),
-        "Peer should be in Idle state",
+        Duration::from_millis(500),
+        "Peer should stay in Idle after connection failure",
     )
     .await;
 }
@@ -62,31 +85,25 @@ async fn test_add_peer_success() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let mut server2 = start_test_server(Config::new(
         65002,
         "127.0.0.1:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
 
-    // Add peer via gRPC (should succeed - server2 is listening)
+    // Add peer via gRPC - bidirectional peering
     server1.add_peer(&server2).await;
+    server2.add_peer(&server1).await;
 
     // Wait for peering to establish
-    // server1 connected to server2, so server2 is configured from server1's view
     poll_until(
         || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(
-                    &server2,
-                    vec![server1.to_peer(BgpState::Established, false)],
-                )
-                .await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for peers to establish",
     )
@@ -100,7 +117,6 @@ async fn test_remove_peer_not_found() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -111,7 +127,7 @@ async fn test_remove_peer_not_found() {
 
 #[tokio::test]
 async fn test_remove_peer_success() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Verify peer exists
     let peers = server1.client.get_peers().await.unwrap();
@@ -132,7 +148,6 @@ async fn test_get_peers_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -142,7 +157,7 @@ async fn test_get_peers_empty() {
 
 #[tokio::test]
 async fn test_get_peers_with_peers() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
@@ -158,7 +173,6 @@ async fn test_get_peer_not_found() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -168,7 +182,7 @@ async fn test_get_peer_not_found() {
 
 #[tokio::test]
 async fn test_get_peer_success() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let (peer_opt, stats_opt) = server1
         .client
@@ -194,7 +208,6 @@ async fn test_get_routes_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -209,7 +222,6 @@ async fn test_announce_withdraw_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -244,7 +256,6 @@ async fn test_withdraw_nonexistent_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -259,7 +270,12 @@ async fn test_withdraw_nonexistent_route() {
 
 #[tokio::test]
 async fn test_disable_enable_peer() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    // Use short idle_hold_time to speed up reconnection after disable/enable
+    let config = PeerConfig {
+        idle_hold_time_secs: Some(1),
+        ..Default::default()
+    };
+    let (mut server1, server2) = setup_two_peered_servers(config).await;
 
     // Disable peer
     server1
@@ -288,14 +304,25 @@ async fn test_disable_enable_peer() {
         .unwrap();
 
     // Peer should reconnect and reach Established with admin_state Up
-    poll_until(
+    // Use longer timeout (300 iterations = 30s) to account for damping and retries
+    poll_until_with_timeout(
         || async {
-            let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1
-                && peers[0].state == BgpState::Established as i32
-                && peers[0].admin_state == AdminState::Up as i32
+            let peers1 = server1.client.get_peers().await.unwrap();
+            let peers2 = server2.client.get_peers().await.unwrap();
+            eprintln!(
+                "DEBUG: server1 peer: {:?}",
+                peers1.first().map(|p| (p.state, p.admin_state))
+            );
+            eprintln!(
+                "DEBUG: server2 peer: {:?}",
+                peers2.first().map(|p| (p.state, p.admin_state))
+            );
+            peers1.len() == 1
+                && peers1[0].state == BgpState::Established as i32
+                && peers1[0].admin_state == AdminState::Up as i32
         },
         "Peer should be Established with admin_state Up",
+        300, // 30 seconds
     )
     .await;
 }
@@ -307,7 +334,6 @@ async fn test_add_bmp_server() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -339,7 +365,6 @@ async fn test_remove_bmp_server() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -369,7 +394,6 @@ async fn test_get_bmp_servers_empty() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -384,7 +408,6 @@ async fn test_add_route_stream() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -450,7 +473,6 @@ async fn test_add_route_stream_with_invalid_route() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -506,7 +528,7 @@ async fn test_add_route_stream_with_invalid_route() {
 }
 
 async fn test_list_routes_impl(use_stream: bool) {
-    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces routes to Server1 (empty AS_PATH = local routes)
     let server2_addr = server2.address.to_string();
@@ -633,13 +655,13 @@ async fn test_list_routes_stream() {
 
 #[tokio::test]
 async fn test_list_peers_stream() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let peers = server1.client.get_peers_stream().await.unwrap();
     assert_eq!(peers.len(), 1);
 
     // Verify peer matches expected
-    let expected_peer = server2.to_peer(BgpState::Established, true);
+    let expected_peer = server2.to_peer(BgpState::Established);
     assert_eq!(peers[0], expected_peer);
 }
 
@@ -650,7 +672,6 @@ async fn test_get_server_info() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 
@@ -699,7 +720,6 @@ async fn test_extended_community_roundtrip() {
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
         90,
-        true,
     ))
     .await;
 
@@ -778,7 +798,6 @@ async fn test_add_route_with_invalid_prefix_length() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
 

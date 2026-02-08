@@ -91,16 +91,9 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // RFC 4271 6.8: Store second connection for collision detection
-                            // Outgoing attempt is in progress, defer collision resolution
-                            if self.collision_conn.is_none() {
-                                info!(peer_ip = %self.addr, "collision: storing second connection (Connect state)");
-                                self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                            } else {
-                                debug!(peer_ip = %self.addr, "collision: dropping third connection");
-                                drop(tcp_tx);
-                                drop(tcp_rx);
-                            }
+                            // Drop - incoming connections handled by separate peer task
+                            drop(tcp_tx);
+                            drop(tcp_rx);
                         }
                         _ => {}
                     }
@@ -138,15 +131,11 @@ impl Peer {
                         self.try_process_event(&FsmEvent::ManualStop).await;
                     }
                     Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                        // RFC 4271 6.8: Store second connection for collision detection
-                        if self.collision_conn.is_none() {
-                            info!(peer_ip = %self.addr, "collision: storing second connection (Connect DelayOpen)");
-                            self.collision_conn = Some(TcpConnection::new(tcp_tx, tcp_rx));
-                        } else {
-                            debug!(peer_ip = %self.addr, "collision: dropping third connection");
-                            drop(tcp_tx);
-                            drop(tcp_rx);
-                        }
+                        // This happens for collision candidates spawned by server
+                        // In DelayOpen, we already have a connection, so drop this one
+                        debug!(peer_ip = %self.addr, "dropping connection in Connect DelayOpen state");
+                        drop(tcp_tx);
+                        drop(tcp_rx);
                     }
                     _ => {}
                 }

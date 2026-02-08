@@ -20,23 +20,11 @@ pub use utils::*;
 use bgpgg::bgp::msg::Message;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::bgp::msg_open::OpenMessage;
-use bgpgg::config::Config;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_open_unsupported_version() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     let msg = build_raw_open(
         65002,
@@ -64,18 +52,7 @@ async fn test_open_unacceptable_hold_time() {
     let test_cases = vec![1, 2];
 
     for hold_time in test_cases {
-        let server = start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-            true,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let msg =
             OpenMessage::new(65002, hold_time, u32::from(Ipv4Addr::new(2, 2, 2, 2))).serialize();
@@ -107,18 +84,7 @@ async fn test_open_bad_bgp_identifier() {
     ];
 
     for (name, bgp_id) in test_cases {
-        let server = start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-            true,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let msg = OpenMessage::new(65002, 300, bgp_id).serialize();
 

@@ -304,7 +304,8 @@ impl Peer {
                         | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart
                         | PeerOp::AutomaticStartPassive
-                        | PeerOp::TcpConnectionAccepted { .. } => {
+                        | PeerOp::TcpConnectionAccepted { .. }
+                        | PeerOp::CollisionLost => {
                             // Ignored when connected
                         }
                     }

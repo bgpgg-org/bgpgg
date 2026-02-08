@@ -273,6 +273,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
 
     PeerConfig {
         address: String::new(),
+        port: cfg.port.map(|p| p as u16).unwrap_or(defaults.port),
         idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
         damp_peer_oscillations: cfg
             .damp_peer_oscillations
@@ -286,9 +287,6 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         send_notification_without_open: cfg
             .send_notification_without_open
             .unwrap_or(defaults.send_notification_without_open),
-        collision_detect_established_state: cfg
-            .collision_detect_established_state
-            .unwrap_or(defaults.collision_detect_established_state),
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
@@ -495,7 +493,6 @@ impl BgpService for BgpGrpcService {
                 asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
-                configured: peer.configured,
                 import_policies: peer.import_policies.clone(),
                 export_policies: peer.export_policies.clone(),
             })
@@ -527,7 +524,6 @@ impl BgpService for BgpGrpcService {
                 asn: peer.asn.unwrap_or(0),
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
-                configured: peer.configured,
                 import_policies: peer.import_policies,
                 export_policies: peer.export_policies,
             })
@@ -566,7 +562,6 @@ impl BgpService for BgpGrpcService {
                     asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                     state: to_proto_state(peer.state),
                     admin_state: to_proto_admin_state(peer.admin_state),
-                    configured: peer.configured,
                     import_policies: peer.import_policies.clone(),
                     export_policies: peer.export_policies.clone(),
                 };

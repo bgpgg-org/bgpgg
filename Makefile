@@ -1,6 +1,6 @@
 .PHONY: all build clean run test fmt setup loadtest lint build-docker smoketest
 
-all:
+all: setup
 	cargo build --release
 
 setup:
@@ -28,7 +28,7 @@ lint: setup
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test: lint
-	cargo test --workspace --exclude loadtests
+	cargo test --workspace --exclude loadtests --no-fail-fast -- --nocapture
 
 fmt:
 	cargo fmt

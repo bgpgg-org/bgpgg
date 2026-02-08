@@ -25,10 +25,10 @@ use std::net::Ipv4Addr;
 #[tokio::test]
 async fn test_remove_peer() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Server2 announces a route to Server1
@@ -70,10 +70,10 @@ async fn test_remove_peer() {
 #[tokio::test]
 async fn test_remove_peer_withdraw_routes() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Server2 announces a route
@@ -125,12 +125,11 @@ async fn test_remove_peer_withdraw_routes() {
 #[tokio::test]
 async fn test_remove_peer_four_node_mesh() {
     let hold_timer_secs = 3;
-    let (mut server1, server2, server3, mut server4) =
-        setup_four_meshed_servers(Some(PeerConfig {
-            hold_timer_secs: Some(hold_timer_secs),
-            ..Default::default()
-        }))
-        .await;
+    let (mut server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
+        hold_timer_secs: Some(hold_timer_secs),
+        ..Default::default()
+    })
+    .await;
 
     // Server4 announces a route to all peers
     let server4_addr = server4.address.to_string();
@@ -216,13 +215,12 @@ async fn test_remove_peer_four_node_mesh() {
 
     // Verify Server1 no longer has Server4 as a peer
     // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true
     assert!(
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -236,15 +234,13 @@ async fn test_manually_stopped_no_auto_reconnect() {
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
-        true,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let mut server2 = start_test_server(Config::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
-        true,
     ))
     .await;
 
@@ -252,9 +248,23 @@ async fn test_manually_stopped_no_auto_reconnect() {
     server1
         .client
         .add_peer(
-            format!("{}:{}", server2.address, server2.bgp_port),
+            server2.address.to_string(),
             Some(SessionConfig {
+                port: Some(server2.bgp_port as u32),
                 idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    // Server2 needs to have server1 as a passive peer
+    server2
+        .client
+        .add_peer(
+            server1.address.to_string(),
+            Some(SessionConfig {
+                port: Some(server1.bgp_port as u32),
+                passive_mode: Some(true),
                 ..Default::default()
             }),
         )
@@ -292,10 +302,10 @@ async fn test_manually_stopped_no_auto_reconnect() {
 
 #[tokio::test]
 async fn test_reject_unconfigured_peer() {
-    // Server with accept_unconfigured_peers=false, 127.0.0.2 is configured
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90, false);
+    // Server with 127.0.0.2 as configured passive peer
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.2:179".to_string(),
+        address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -309,7 +319,7 @@ async fn test_reject_unconfigured_peer() {
     configured_peer.handshake_keepalive().await;
     poll_peers(
         &server,
-        vec![configured_peer.to_peer(BgpState::Established, true)],
+        vec![configured_peer.to_peer(BgpState::Established)],
     )
     .await;
 
@@ -343,7 +353,6 @@ async fn test_manual_stop() {
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             300,
-            true,
         ))
         .await;
 
@@ -353,9 +362,10 @@ async fn test_manual_stop() {
         server
             .client
             .add_peer(
-                format!("127.0.0.2:{}", port),
-                delay_open_time_secs.map(|secs| SessionConfig {
-                    delay_open_time_secs: Some(secs),
+                "127.0.0.2".to_string(),
+                Some(SessionConfig {
+                    port: Some(port as u32),
+                    delay_open_time_secs,
                     ..Default::default()
                 }),
             )

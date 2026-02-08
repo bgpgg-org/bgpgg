@@ -71,8 +71,12 @@ impl Default for GracefulRestartConfig {
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
+    /// Peer IP address (IPv4 or IPv6).
     #[serde(default)]
     pub address: String,
+    /// Remote BGP port (default: 179).
+    #[serde(default = "default_port")]
+    pub port: u16,
     /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
     /// None disables automatic restart. Some(0) = immediate restart. Some(n) = restart after n seconds.
     #[serde(default = "default_idle_hold_time")]
@@ -93,10 +97,6 @@ pub struct PeerConfig {
     /// Default false: OPEN must be sent before NOTIFICATION.
     #[serde(default)]
     pub send_notification_without_open: bool,
-    /// CollisionDetectEstablishedState - process collisions in Established state (RFC 4271 8.1.1).
-    /// Default false: collision detection is ignored when peer is in Established state.
-    #[serde(default)]
-    pub collision_detect_established_state: bool,
     /// MinRouteAdvertisementIntervalTimer - minimum seconds between route advertisements (RFC 4271 9.2.1.1).
     /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
     #[serde(default)]
@@ -128,7 +128,17 @@ fn default_passive_mode() -> bool {
     false
 }
 
+fn default_port() -> u16 {
+    179
+}
+
 impl PeerConfig {
+    /// Returns the socket address (IP + port) for this peer.
+    pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+        let ip: IpAddr = self.address.parse()?;
+        Ok(SocketAddr::new(ip, self.port))
+    }
+
     /// Returns the DelayOpenTime as a Duration, or None if disabled.
     pub fn delay_open_time(&self) -> Option<Duration> {
         self.delay_open_time_secs.map(Duration::from_secs)
@@ -144,6 +154,7 @@ impl Default for PeerConfig {
     fn default() -> Self {
         Self {
             address: String::new(),
+            port: default_port(),
             idle_hold_time_secs: default_idle_hold_time(),
             damp_peer_oscillations: default_damp_peer_oscillations(),
             allow_automatic_stop: default_allow_automatic_stop(),
@@ -151,7 +162,6 @@ impl Default for PeerConfig {
             delay_open_time_secs: None,
             max_prefix: None,
             send_notification_without_open: false,
-            collision_detect_established_state: false,
             min_route_advertisement_interval_secs: None,
             import_policy: Vec::new(),
             export_policy: Vec::new(),
@@ -428,10 +438,6 @@ pub struct Config {
     pub hold_time_secs: u64,
     #[serde(default = "default_connect_retry_time")]
     pub connect_retry_secs: u64,
-    /// Accept connections from unconfigured peers (RFC 4271 8.1.1).
-    /// Security implications: see RFC 4272.
-    #[serde(default)]
-    pub accept_unconfigured_peers: bool,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
     #[serde(default)]
@@ -475,13 +481,7 @@ fn default_log_level() -> String {
 
 impl Config {
     /// Create a new configuration
-    pub fn new(
-        asn: u32,
-        listen_addr: &str,
-        router_id: Ipv4Addr,
-        hold_time_secs: u64,
-        accept_unconfigured_peers: bool,
-    ) -> Self {
+    pub fn new(asn: u32, listen_addr: &str, router_id: Ipv4Addr, hold_time_secs: u64) -> Self {
         Config {
             asn,
             listen_addr: listen_addr.to_string(),
@@ -489,7 +489,6 @@ impl Config {
             grpc_listen_addr: default_grpc_listen_addr(),
             hold_time_secs,
             connect_retry_secs: default_connect_retry_time(),
-            accept_unconfigured_peers,
             peers: Vec::new(),
             bmp_servers: Vec::new(),
             sys_name: None,
@@ -545,7 +544,6 @@ impl Default for Config {
             grpc_listen_addr: default_grpc_listen_addr(),
             hold_time_secs: default_hold_time(),
             connect_retry_secs: default_connect_retry_time(),
-            accept_unconfigured_peers: false,
             peers: Vec::new(),
             bmp_servers: Vec::new(),
             sys_name: None,
@@ -571,27 +569,11 @@ mod tests {
 
     #[test]
     fn test_config_new() {
-        let config = Config::new(
-            65100,
-            "192.168.1.1:179",
-            Ipv4Addr::new(192, 168, 1, 1),
-            180,
-            false,
-        );
+        let config = Config::new(65100, "192.168.1.1:179", Ipv4Addr::new(192, 168, 1, 1), 180);
         assert_eq!(config.asn, 65100);
         assert_eq!(config.listen_addr, "192.168.1.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(config.hold_time_secs, 180);
-        assert!(!config.accept_unconfigured_peers);
-
-        let config = Config::new(
-            65100,
-            "192.168.1.1:179",
-            Ipv4Addr::new(192, 168, 1, 1),
-            180,
-            true,
-        );
-        assert!(config.accept_unconfigured_peers);
     }
 
     #[test]
@@ -601,7 +583,6 @@ mod tests {
         assert_eq!(config.listen_addr, "0.0.0.0:179");
         assert_eq!(config.router_id, Ipv4Addr::new(1, 1, 1, 1));
         assert_eq!(config.grpc_listen_addr, "127.0.0.1:50051");
-        assert!(!config.accept_unconfigured_peers);
     }
 
     #[test]
@@ -615,20 +596,6 @@ mod tests {
         assert_eq!(config.asn, 65200);
         assert_eq!(config.listen_addr, "10.0.0.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(10, 0, 0, 1));
-        assert!(!config.accept_unconfigured_peers); // default
-
-        std::fs::remove_file(temp_file).unwrap();
-    }
-
-    #[test]
-    fn test_config_accept_unconfigured_peers_from_yaml() {
-        let temp_file = write_temp_yaml(
-            "test_config_unconfigured.yaml",
-            "asn: 65200\nlisten_addr: \"10.0.0.1:179\"\nrouter_id: \"10.0.0.1\"\naccept_unconfigured_peers: true\n",
-        );
-
-        let config = Config::from_file(&temp_file).unwrap();
-        assert!(config.accept_unconfigured_peers);
 
         std::fs::remove_file(temp_file).unwrap();
     }

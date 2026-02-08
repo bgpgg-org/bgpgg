@@ -26,18 +26,7 @@ use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_invalid_marker() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Corrupt first byte of marker
     let mut corrupted_marker = BGP_MARKER;
@@ -70,18 +59,7 @@ async fn test_bad_message_length() {
     ];
 
     for (name, length) in test_cases {
-        let server = start_test_server(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-            true,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let wrong_length = u16::from_be_bytes(length);
         let msg = build_raw_open(
@@ -110,18 +88,7 @@ async fn test_bad_message_length() {
 
 #[tokio::test]
 async fn test_keepalive_wrong_length() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // KEEPALIVE must be exactly 19 bytes, make it 20
     let msg = build_raw_keepalive(Some(20));
@@ -139,18 +106,7 @@ async fn test_keepalive_wrong_length() {
 
 #[tokio::test]
 async fn test_notification_length_too_small() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
     // Create a message with type=3 (NOTIFICATION) and length=20
@@ -168,18 +124,7 @@ async fn test_notification_length_too_small() {
 
 #[tokio::test]
 async fn test_invalid_message_type() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-        true,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Create message with invalid type (99)
     let msg = build_raw_open(
@@ -206,9 +151,9 @@ async fn test_invalid_message_type() {
 #[tokio::test]
 async fn test_send_notification_without_open() {
     for flag in [true, false] {
-        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300, false);
+        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1:179".to_string(),
+            address: "127.0.0.1".to_string(),
             passive_mode: true,
             send_notification_without_open: flag,
             delay_open_time_secs: Some(60), // Delay OPEN so we can send invalid msg first

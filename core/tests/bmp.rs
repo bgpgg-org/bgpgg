@@ -42,10 +42,10 @@ async fn test_add_bmp_server_sends_initiation() {
 
 #[tokio::test]
 async fn test_add_bmp_server_with_existing_peers() {
-    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(Some(PeerConfig {
+    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(PeerConfig {
         hold_timer_secs: Some(90),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Announce routes from peer1
@@ -83,7 +83,7 @@ async fn test_add_bmp_server_with_existing_peers() {
     // Add an idle peer (connection will fail - address doesn't exist)
     server
         .client
-        .add_peer("192.168.255.1:179".to_string(), None)
+        .add_peer("192.168.255.1".to_string(), None)
         .await
         .unwrap();
 
@@ -120,7 +120,7 @@ async fn test_add_bmp_server_with_existing_peers() {
             peer_addr: peers[0].address,
             peer_as: peers[0].asn,
             peer_bgp_id: u32::from(peers[0].client.router_id),
-            peer_port: peers[0].bgp_port,
+            peer_port: None, // Port is non-deterministic with active-active peering
         },
     );
     assert_bmp_peer_up_msg(
@@ -130,7 +130,7 @@ async fn test_add_bmp_server_with_existing_peers() {
             peer_addr: peers[1].address,
             peer_as: peers[1].asn,
             peer_bgp_id: u32::from(peers[1].client.router_id),
-            peer_port: peers[1].bgp_port,
+            peer_port: None, // Port is non-deterministic with active-active peering
         },
     );
 
@@ -178,26 +178,16 @@ async fn test_add_bmp_server_with_existing_peers() {
 async fn test_peer_up_down() {
     let mut bmp_server = FakeBmpServer::new().await;
     let mut server1 = start_test_server(test_config(65001, 1)).await;
-    let server2 = start_test_server(test_config(65002, 2)).await;
+    let mut server2 = start_test_server(test_config(65002, 2)).await;
 
     setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
 
-    // Add BGP peer
+    // Add BGP peer (both directions for active-active peering)
     server1.add_peer(&server2).await;
+    server2.add_peer(&server1).await;
 
     // Wait for peer to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
-
-    // Read and verify PeerUp message
-    bmp_server
-        .assert_peer_up(&ExpectedPeerUp {
-            local_addr: server1.address,
-            peer_addr: server2.address,
-            peer_as: server2.asn,
-            peer_bgp_id: u32::from(server2.client.router_id),
-            peer_port: server2.bgp_port,
-        })
-        .await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
     // Remove peer
     server1.remove_peer(&server2).await;
@@ -205,24 +195,33 @@ async fn test_peer_up_down() {
     // Wait for peer to be removed
     poll_peers(&server1, vec![]).await;
 
-    // Read and verify PeerDown message
+    // Read and verify PeerUp and PeerDown messages (skip any RouteMonitoring like EOR)
     bmp_server
-        .assert_peer_down(&ExpectedPeerDown {
-            peer_addr: server2.address,
-            peer_as: server2.asn,
-            peer_bgp_id: u32::from(server2.client.router_id),
-            reason: bgpgg::types::PeerDownReason::PeerDeConfigured,
-        })
+        .assert_messages_skip_routes(&[
+            ExpectedBmpMessage::PeerUp(ExpectedPeerUp {
+                local_addr: server1.address,
+                peer_addr: server2.address,
+                peer_as: server2.asn,
+                peer_bgp_id: u32::from(server2.client.router_id),
+                peer_port: None, // Port is non-deterministic with active-active peering
+            }),
+            ExpectedBmpMessage::PeerDown(ExpectedPeerDown {
+                peer_addr: server2.address,
+                peer_as: server2.asn,
+                peer_bgp_id: u32::from(server2.client.router_id),
+                reason: bgpgg::types::PeerDownReason::PeerDeConfigured,
+            }),
+        ])
         .await;
 }
 
 #[tokio::test]
 async fn test_route_monitoring_on_updates() {
     let mut bmp_server = FakeBmpServer::new().await;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(90),
         ..Default::default()
-    }))
+    })
     .await;
 
     setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
@@ -398,21 +397,22 @@ async fn test_bmp_statistics() {
     bmp_server.accept().await;
     let _initiation = bmp_server.read_initiation().await;
 
-    // Add BGP peer
+    // Add BGP peer (both directions for active-active peering)
     server1.add_peer(&server2).await;
+    server2.add_peer(&server1).await;
 
     // Wait for peer to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
-    // Read first two messages - could be PeerUp and StatisticsReport in any order (race condition)
+    // Read PeerUp and StatisticsReport in any order, skipping any RouteMonitoring (e.g., EOR)
     bmp_server
-        .assert_messages_no_order(&[
+        .assert_messages_skip_routes(&[
             ExpectedBmpMessage::PeerUp(ExpectedPeerUp {
                 local_addr: server1.address,
                 peer_addr: server2.address,
                 peer_as: server2.asn,
                 peer_bgp_id: u32::from(server2.client.router_id),
-                peer_port: server2.bgp_port,
+                peer_port: None, // Port is non-deterministic with active-active peering
             }),
             ExpectedBmpMessage::Statistics(ExpectedStatistics {
                 peer_addr: server2.address,

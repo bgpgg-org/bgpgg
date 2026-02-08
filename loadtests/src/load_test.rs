@@ -159,6 +159,18 @@ async fn establish_upstream_peers(
             bind_addr.ip()
         );
 
+        // Add peer via gRPC first (passive mode - we initiate connection)
+        client
+            .add_peer(bgpgg::grpc::proto::AddPeerRequest {
+                address: bind_addr.ip().to_string(),
+                config: Some(bgpgg::grpc::proto::SessionConfig {
+                    passive_mode: Some(true),
+                    ..Default::default()
+                }),
+            })
+            .await
+            .expect("Failed to add peer");
+
         match crate::sender::establish_connection(
             target,
             sender_asn,
@@ -396,7 +408,6 @@ impl BgpggProcess {
             grpc_listen_addr: grpc_addr.clone(),
             hold_time_secs: 3600, // 1 hour for long-running load tests
             connect_retry_secs: 30,
-            accept_unconfigured_peers: true,
             peers: vec![],
             bmp_servers: vec![],
             defined_sets: Default::default(),
@@ -609,6 +620,18 @@ async fn test_route_convergence() {
         let downstream_asn = 65100 + i as u16;
         let downstream_router_id = Ipv4Addr::new(3, 0, 0, 1 + i as u8);
         let bind_addr: SocketAddr = format!("127.0.0.{}:0", 21 + i).parse().unwrap();
+
+        // Add peer via gRPC first (passive mode - we initiate connection)
+        client
+            .add_peer(bgpgg::grpc::proto::AddPeerRequest {
+                address: bind_addr.ip().to_string(),
+                config: Some(bgpgg::grpc::proto::SessionConfig {
+                    passive_mode: Some(true),
+                    ..Default::default()
+                }),
+            })
+            .await
+            .expect("Failed to add downstream peer");
 
         match crate::sender::establish_connection(
             target,
