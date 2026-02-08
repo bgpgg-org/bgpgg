@@ -75,13 +75,7 @@ async fn test_hold_timer_expiry() {
 }
 #[tokio::test]
 async fn test_fsm_error_update_in_openconfirm() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
-    let server = start_test_server(config).await;
+    let server = setup_server_with_passive_peer().await;
 
     // Connect and exchange OPEN only - server ends up in OpenConfirm
     let mut peer = FakePeer::connect(None, &server).await;

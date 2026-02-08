@@ -324,19 +324,26 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
     }
 }
 
-/// Setup a test server with a FakePeer already connected and in Established state.
+/// Setup a test server with a passive peer configured (no connection yet).
 ///
-/// Returns (TestServer, FakePeer) with default settings:
-/// - Server: ASN 65001, router_id 1.1.1.1, hold_time 300
-/// - FakePeer: ASN 65002, router_id 2.2.2.2
-pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
+/// Use when you need custom handshake behavior (e.g., partial handshake for OpenConfirm tests).
+pub async fn setup_server_with_passive_peer() -> TestServer {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
         address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
-    let server = start_test_server(config).await;
+    start_test_server(config).await
+}
+
+/// Setup a test server with a FakePeer already connected and in Established state.
+///
+/// Returns (TestServer, FakePeer) with default settings:
+/// - Server: ASN 65001, router_id 1.1.1.1, hold_time 300
+/// - FakePeer: ASN 65002, router_id 2.2.2.2
+pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
+    let server = setup_server_with_passive_peer().await;
     let peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
             .await;

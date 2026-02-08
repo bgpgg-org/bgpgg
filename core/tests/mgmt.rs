@@ -44,12 +44,14 @@ async fn test_add_peer_failure() {
     });
 
     // Add peer pointing at the rejecting listener
+    // Use long idle_hold_time so peer stays in Idle after failure instead of retrying
     let result = server1
         .client
         .add_peer(
             "127.0.0.1".to_string(),
             Some(SessionConfig {
                 port: Some(reject_port as u32),
+                idle_hold_time_secs: Some(3600),
                 ..Default::default()
             }),
         )

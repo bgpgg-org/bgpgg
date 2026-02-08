@@ -828,9 +828,16 @@ impl BgpServer {
         peer_ip: IpAddr,
         config: PeerConfig,
     ) {
-        let local_addr = stream
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::new(self.local_addr, 0));
+        // Use port 0 (ephemeral) so this peer can make outgoing connections if needed
+        // (e.g., after collision resolution or hard reset when passive_mode=false).
+        // Using stream.local_addr() would give us the server's listening port, which
+        // would cause EADDRINUSE when trying to reconnect.
+        let local_addr = bind_addr_from_ip(
+            stream
+                .local_addr()
+                .map(|a| a.ip())
+                .unwrap_or(self.local_addr),
+        );
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
