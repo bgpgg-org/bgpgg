@@ -92,7 +92,7 @@ impl Peer {
                             self.try_process_event(&FsmEvent::ManualStop).await;
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
-                            // This happens for collision candidates spawned by server
+                            // Incoming connection while we're attempting outbound (active-active peering)
                             if self.conn.is_none() {
                                 info!(peer_ip = %self.addr, "accepting incoming connection in Connect state");
                                 self.conn = Some(TcpConnection::new(tcp_tx, tcp_rx));

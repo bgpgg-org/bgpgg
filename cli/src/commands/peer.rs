@@ -29,13 +29,6 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
             max_prefix_limit,
             max_prefix_action,
         } => {
-            // Append standard BGP port if not provided
-            let full_address = if address.contains(':') {
-                address
-            } else {
-                format!("{}:179", address)
-            };
-
             let config = max_prefix_limit.map(|limit| SessionConfig {
                 max_prefix: Some(MaxPrefixSetting {
                     limit,
@@ -46,39 +39,23 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                 }),
                 ..Default::default()
             });
-            match client.add_peer(full_address, config).await {
+            match client.add_peer(address, config).await {
                 Ok(message) => println!("{}", message),
                 Err(e) => eprintln!("Error: {}", e.message()),
             }
         }
 
-        PeerCommands::Del { address } => {
-            // Accept both IP and IP:PORT, extract just the IP
-            let peer_ip = if let Ok(sock_addr) = address.parse::<std::net::SocketAddr>() {
-                sock_addr.ip().to_string()
-            } else {
-                address
-            };
-
-            match client.remove_peer(peer_ip).await {
-                Ok(message) => println!("{}", message),
-                Err(e) => eprintln!("Error: {}", e.message()),
-            }
-        }
+        PeerCommands::Del { address } => match client.remove_peer(address).await {
+            Ok(message) => println!("{}", message),
+            Err(e) => eprintln!("Error: {}", e.message()),
+        },
 
         PeerCommands::Show { address } => {
-            // Accept both IP and IP:PORT, extract just the IP
-            let peer_ip = if let Ok(sock_addr) = address.parse::<std::net::SocketAddr>() {
-                sock_addr.ip().to_string()
-            } else {
-                address.clone()
-            };
-
-            let (peer_opt, stats_opt) = client.get_peer(peer_ip.clone()).await?;
+            let (peer_opt, stats_opt) = client.get_peer(address.clone()).await?;
 
             match (peer_opt, stats_opt) {
                 (Some(peer), Some(stats)) => {
-                    println!("Peer: {}", peer_ip);
+                    println!("Peer: {}", address);
                     println!("  ASN:         {}", peer.asn);
                     println!("  State:       {}", format_state(peer.state()));
                     println!("  Admin State: {}", format_admin_state(peer.admin_state()));
@@ -96,7 +73,7 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                     println!("    NOTIFICATION: {}", stats.notification_received);
                 }
                 _ => {
-                    eprintln!("Peer not found: {}", peer_ip);
+                    eprintln!("Peer not found: {}", address);
                 }
             }
         }

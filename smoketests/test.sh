@@ -17,8 +17,8 @@ docker compose -f basic.yml up -d
 sleep 2
 
 echo "Adding peers..."
-docker compose -f basic.yml exec -T peer1 bgpgg peer add 172.30.0.20:179 65002
-docker compose -f basic.yml exec -T peer2 bgpgg peer add 172.30.0.10:179 65001
+docker compose -f basic.yml exec -T peer1 bgpgg peer add 172.30.0.20 65002
+docker compose -f basic.yml exec -T peer2 bgpgg peer add 172.30.0.10 65001
 
 echo "Polling for BGP peering (60 seconds)..."
 for i in $(seq 1 60); do

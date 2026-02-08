@@ -402,9 +402,8 @@ impl ConnectionState {
 /// Peer configuration and state stored in server's HashMap.
 /// The peer IP is the HashMap key.
 ///
-/// Connection slots: Uses BIRD-style fixed slots where direction is determined
-/// by which slot a connection occupies, not by a conn_type field. This prevents
-/// stale conn_type bugs when an unconfigured peer is upgraded to configured.
+/// Connection slots: Direction is determined by which slot a connection occupies
+/// (outgoing vs incoming), not by a conn_type field.
 pub struct PeerInfo {
     pub admin_state: AdminState,
     pub import_policies: Vec<Arc<Policy>>,

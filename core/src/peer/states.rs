@@ -190,9 +190,8 @@ impl Peer {
                                 self.notify_state_change();
                                 return false; // Exit Established state loop
                             } else {
-                                // With server-level collision detection, this shouldn't happen
-                                // as server spawns collision candidates separately
-                                debug!(peer_ip = %peer_ip, "unexpected TcpConnectionAccepted in OpenSent/OpenConfirm");
+                                // Already have a connection, drop incoming
+                                debug!(peer_ip = %peer_ip, "dropping duplicate connection in OpenSent/OpenConfirm");
                                 drop(tcp_tx);
                                 drop(tcp_rx);
                             }
