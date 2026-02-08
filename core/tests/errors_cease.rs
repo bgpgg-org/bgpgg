@@ -82,9 +82,7 @@ async fn test_max_prefix_limit() {
 
         // Wait for peering to establish
         poll_until(
-            || async {
-                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
-            },
+            || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await },
             "Timeout waiting for peering",
         )
         .await;
@@ -114,7 +112,6 @@ async fn test_max_prefix_limit() {
                             asn: 0, // Cleared on disconnect
                             state: BgpState::Idle.into(),
                             admin_state: AdminState::PrefixLimitExceeded.into(),
-                            configured: true,
                             import_policies: vec![],
                             export_policies: vec![],
                         }],
@@ -129,7 +126,7 @@ async fn test_max_prefix_limit() {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             assert!(
-                verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await,
+                verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await,
                 "Test case {}: peer should remain established",
                 name
             );
@@ -188,7 +185,7 @@ async fn test_remove_peer_sends_cease_notification() {
         .await;
     peer.handshake_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     server
         .client
@@ -231,7 +228,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
         .await;
     peer.handshake_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     server
         .client
@@ -308,7 +305,7 @@ async fn test_collision_immediate() {
         }
 
         // Verify session established
-        poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+        poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
     }
 }
 
@@ -341,7 +338,7 @@ async fn test_reject_incoming_when_established() {
 
     // Original peer should still be Established
     assert!(
-        verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await,
+        verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await,
         "Established session should be preserved"
     );
 }
@@ -403,7 +400,7 @@ async fn test_collision_connect_state() {
 
     // Verify session established on incoming connection
     // Without fix: incoming was dropped, this will timeout
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 }
 
 /// RFC 4271 6.8: Deferred collision detection for outgoing connections
@@ -548,11 +545,7 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
     incoming_peer.send_keepalive().await;
 
     // Verify session established via promoted candidate
-    poll_peers(
-        &server,
-        vec![incoming_peer.to_peer(BgpState::Established, true)],
-    )
-    .await;
+    poll_peers(&server, vec![incoming_peer.to_peer(BgpState::Established)]).await;
 }
 
 /// Test that candidate's ASN is preserved when promoted after reaching Established.
@@ -608,9 +601,5 @@ async fn test_collision_candidate_asn_preserved_on_promotion() {
     drop(peer);
 
     // Verify promoted connection has correct ASN (65002, not 0)
-    poll_peers(
-        &server,
-        vec![incoming_peer.to_peer(BgpState::Established, true)],
-    )
-    .await;
+    poll_peers(&server, vec![incoming_peer.to_peer(BgpState::Established)]).await;
 }

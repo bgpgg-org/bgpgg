@@ -492,7 +492,6 @@ impl BgpService for BgpGrpcService {
                 asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
-                configured: peer.configured,
                 import_policies: peer.import_policies.clone(),
                 export_policies: peer.export_policies.clone(),
             })
@@ -524,7 +523,6 @@ impl BgpService for BgpGrpcService {
                 asn: peer.asn.unwrap_or(0),
                 state: to_proto_state(peer.state),
                 admin_state: to_proto_admin_state(peer.admin_state),
-                configured: peer.configured,
                 import_policies: peer.import_policies,
                 export_policies: peer.export_policies,
             })
@@ -563,7 +561,6 @@ impl BgpService for BgpGrpcService {
                     asn: peer.asn.unwrap_or(0), // 0 for peers still in handshake
                     state: to_proto_state(peer.state),
                     admin_state: to_proto_admin_state(peer.admin_state),
-                    configured: peer.configured,
                     import_policies: peer.import_policies.clone(),
                     export_policies: peer.export_policies.clone(),
                 };

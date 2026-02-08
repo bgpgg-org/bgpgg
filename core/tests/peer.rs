@@ -79,7 +79,7 @@ async fn test_peer_down() {
         .unwrap();
 
     // Wait for peering to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
@@ -106,7 +106,7 @@ async fn test_peer_down() {
     server2.kill();
 
     // Poll for peer state change to Idle
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Idle, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Idle)]).await;
 
     // With 3-second GR timer, routes withdrawn after 3 seconds
     poll_until_with_timeout(
@@ -162,27 +162,27 @@ async fn test_peer_down_four_node_mesh() {
             verify_peers(
                 &server1,
                 vec![
-                    server2.to_peer(BgpState::Established, true),
-                    server3.to_peer(BgpState::Established, true),
-                    server4.to_peer(BgpState::Idle, true),
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
+                    server4.to_peer(BgpState::Idle),
                 ],
             )
             .await
                 && verify_peers(
                     &server2,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server3.to_peer(BgpState::Established, true),
-                        server4.to_peer(BgpState::Idle, true),
+                        server1.to_peer(BgpState::Established),
+                        server3.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Idle),
                     ],
                 )
                 .await
                 && verify_peers(
                     &server3,
                     vec![
-                        server1.to_peer(BgpState::Established, true),
-                        server2.to_peer(BgpState::Established, true),
-                        server4.to_peer(BgpState::Idle, true),
+                        server1.to_peer(BgpState::Established),
+                        server2.to_peer(BgpState::Established),
+                        server4.to_peer(BgpState::Idle),
                     ],
                 )
                 .await
@@ -247,8 +247,8 @@ async fn test_peer_up() {
 
     // Verify both peers are still in Established state
     // Active-active peering: both sides call add_peer, so configured=true on both
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -284,9 +284,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -295,9 +295,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -306,9 +306,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -317,9 +317,9 @@ async fn test_peer_up_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -378,8 +378,8 @@ async fn test_peer_crash_and_recover() {
     // Wait for initial establishment
     poll_until(
         || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for initial peer establishment",
     )
@@ -423,8 +423,8 @@ async fn test_peer_crash_and_recover() {
     // Wait for re-establishment
     poll_until(
         || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for peers to re-establish after crash",
     )
@@ -461,7 +461,7 @@ async fn test_auto_reconnect() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
@@ -473,7 +473,6 @@ async fn test_auto_reconnect() {
             asn: 0, // Cleared on disconnect, re-learned on next OPEN
             state: BgpState::OpenSent as i32,
             admin_state: AdminState::Up.into(),
-            configured: true,
             import_policies: vec![],
             export_policies: vec![],
         }],
@@ -486,7 +485,7 @@ async fn test_auto_reconnect() {
         .await;
     peer.handshake_keepalive().await;
     poll_until(
-        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await },
+        || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
         "Timeout waiting for auto-reconnect",
     )
     .await;
@@ -525,7 +524,7 @@ async fn test_idle_hold_time_delay() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
@@ -592,7 +591,7 @@ async fn test_allow_automatic_start_false() {
     peer.accept_handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90)
         .await;
     peer.handshake_keepalive().await;
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // Disconnect
     peer.stream.as_mut().unwrap().shutdown().await.ok();
@@ -643,9 +642,7 @@ async fn test_damp_peer_oscillations() {
             .await;
         peer.handshake_keepalive().await;
         poll_until(
-            || async {
-                verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await
-            },
+            || async { verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await },
             "Timeout waiting for Established",
         )
         .await;
@@ -710,13 +707,7 @@ async fn test_passive_mode() {
     fake_peer.handshake_keepalive().await;
 
     poll_until(
-        || async {
-            verify_peers(
-                &server,
-                vec![fake_peer.to_peer(BgpState::Established, true)],
-            )
-            .await
-        },
+        || async { verify_peers(&server, vec![fake_peer.to_peer(BgpState::Established)]).await },
         "Passive peer should establish when remote connects",
     )
     .await;
@@ -893,8 +884,8 @@ async fn test_ipv6_peering() {
     // Wait for peering to establish
     poll_until(
         || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for IPv6 transport peering to establish",
     )
@@ -1126,8 +1117,8 @@ async fn test_hard_reset_established() {
 
     // Verify configured peers reconnect on both sides
     // Both sides have each other configured, so both stay as configured=true after reconnect
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
-    poll_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
+    poll_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await;
 
     // Verify route is automatically re-advertised after reconnection
     poll_route_propagation(&[(
@@ -1314,7 +1305,7 @@ async fn test_graceful_restart() {
             .await
             .unwrap();
 
-        poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+        poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
         // Announce route from server1 and verify it propagates to server2
         let s1_addr = server1.address.to_string();
@@ -1342,7 +1333,7 @@ async fn test_graceful_restart() {
 
         if tc.expect_routes_retained {
             // For GR: peer goes to Idle but stays in HashMap
-            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle, true)]).await;
+            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle)]).await;
 
             // Routes should be retained during GR timer
             poll_while(
@@ -1374,12 +1365,11 @@ async fn test_graceful_restart() {
             .await;
 
             // Peer should still exist in Idle state (configured peers stay)
-            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle, true)]).await;
+            poll_peers(&server2, vec![server1.to_peer(BgpState::Idle)]).await;
         } else {
             // No GR: Wait for peer to detect disconnect and routes to be withdrawn
             // Configured peer goes to Idle
-            poll_peers_with_timeout(&server2, vec![server1.to_peer(BgpState::Idle, true)], 40)
-                .await;
+            poll_peers_with_timeout(&server2, vec![server1.to_peer(BgpState::Idle)], 40).await;
 
             // Routes should be withdrawn immediately
             poll_route_withdrawal(&[&server2]).await;
@@ -1454,7 +1444,7 @@ async fn test_graceful_restart_reconnect() {
     peer.send_keepalive().await;
     peer.read_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // FakePeer announces route 10.0.0.0/24
     let update = build_raw_update(
@@ -1524,7 +1514,7 @@ async fn test_graceful_restart_reconnect() {
     peer.send_keepalive().await;
     peer.read_keepalive().await;
 
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // RFC 4724 Section 4.2: Receiving Speaker sends full table to Restarting Speaker
     //
@@ -1632,7 +1622,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     // Exchange KEEPALIVEs -> Established
     peer.send_keepalive().await;
     peer.read_keepalive().await;
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // FakePeer announces route 10.0.0.0/24
     let update = build_raw_update(
@@ -1698,7 +1688,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     // Exchange KEEPALIVEs -> Established
     peer.send_keepalive().await;
     peer.read_keepalive().await;
-    poll_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // RFC 4724: With F=0, stale routes should be immediately cleared
     // We should NOT need to wait for EOR - routes should already be gone
@@ -1721,8 +1711,8 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
 async fn test_large_asn_peering() {
     let [s1, s2] = &mut create_asn_chain([4200000001, 4200000002], None).await;
 
-    verify_peers(s1, vec![s2.to_peer(BgpState::Established, false)]).await;
-    verify_peers(s2, vec![s1.to_peer(BgpState::Established, false)]).await;
+    verify_peers(s1, vec![s2.to_peer(BgpState::Established)]).await;
+    verify_peers(s2, vec![s1.to_peer(BgpState::Established)]).await;
 }
 
 /// RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers

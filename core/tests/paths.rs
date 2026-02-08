@@ -883,9 +883,9 @@ async fn test_med_comparison_restricted_to_same_as() {
             verify_peers(
                 &server4,
                 vec![
-                    server1.to_peer(BgpState::Established, true),
-                    server2.to_peer(BgpState::Established, true),
-                    server3.to_peer(BgpState::Established, true),
+                    server1.to_peer(BgpState::Established),
+                    server2.to_peer(BgpState::Established),
+                    server3.to_peer(BgpState::Established),
                 ],
             )
             .await
@@ -1232,7 +1232,7 @@ async fn test_asn_route_propagation() {
 
     for (name, asns) in test_cases {
         let [s1, s2] = &mut create_asn_chain(asns, None).await;
-        verify_peers(s1, vec![s2.to_peer(BgpState::Established, false)]).await;
+        verify_peers(s1, vec![s2.to_peer(BgpState::Established)]).await;
         announce_and_verify_route(
             s1,
             &[s2],

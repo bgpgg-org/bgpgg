@@ -216,13 +216,12 @@ async fn test_remove_peer_four_node_mesh() {
 
     // Verify Server1 no longer has Server4 as a peer
     // mesh_servers: lower index connects to higher index
-    // From connector's view: configured=true
     assert!(
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -319,7 +318,7 @@ async fn test_reject_unconfigured_peer() {
     configured_peer.handshake_keepalive().await;
     poll_peers(
         &server,
-        vec![configured_peer.to_peer(BgpState::Established, true)],
+        vec![configured_peer.to_peer(BgpState::Established)],
     )
     .await;
 

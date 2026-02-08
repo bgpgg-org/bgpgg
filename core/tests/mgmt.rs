@@ -78,8 +78,8 @@ async fn test_add_peer_success() {
     // Wait for peering to establish
     poll_until(
         || async {
-            verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await
-                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)]).await
+            verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                && verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await
         },
         "Timeout waiting for peers to establish",
     )
@@ -637,7 +637,7 @@ async fn test_list_peers_stream() {
     assert_eq!(peers.len(), 1);
 
     // Verify peer matches expected
-    let expected_peer = server2.to_peer(BgpState::Established, true);
+    let expected_peer = server2.to_peer(BgpState::Established);
     assert_eq!(peers[0], expected_peer);
 }
 

@@ -358,9 +358,6 @@ impl BgpServer {
                     _ => None,
                 });
 
-                let has_gr = !gr_afi_safis.is_empty();
-                let configured = peer.configured;
-
                 // Check if there's another connection in the other slot
                 let other_slot_active = match conn_type {
                     ConnectionType::Outgoing => peer.incoming.is_some(),
@@ -374,26 +371,14 @@ impl BgpServer {
                     return;
                 }
 
-                // No other connection - handle based on configured/GR status
-                if configured || has_gr {
-                    // Keep the slot but reset to Idle state (preserve peer_tx for reconnect)
-                    if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
-                        conn.state = BgpState::Idle;
-                        conn.conn_info = None;
-                        conn.asn = None;
-                        conn.bgp_id = None;
-                    }
-                    info!(%peer_ip, has_gr, configured, "peer session ended");
-                } else {
-                    // Unconfigured without GR: clear slot and remove peer
-                    if let Some(conn) = peer.slot_mut(conn_type).take() {
-                        if let Some(peer_tx) = conn.peer_tx {
-                            let _ = peer_tx.send(PeerOp::ManualStop);
-                        }
-                    }
-                    self.peers.remove(&peer_ip);
-                    info!(%peer_ip, "unconfigured peer removed");
+                // Keep the slot but reset to Idle state (preserve peer_tx for reconnect)
+                if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
+                    conn.state = BgpState::Idle;
+                    conn.conn_info = None;
+                    conn.asn = None;
+                    conn.bgp_id = None;
                 }
+                info!(%peer_ip, "peer session ended");
 
                 // RFC 4724: Handle routes based on Graceful Restart state
                 if !gr_afi_safis.is_empty() {
@@ -459,19 +444,6 @@ impl BgpServer {
                     self.propagate_routes(all_changed_prefixes, Some(peer_ip))
                         .await;
                 }
-
-                // Remove unconfigured peer after GR expiry
-                if let Some(peer) = self.peers.get(&peer_ip) {
-                    if !peer.configured {
-                        info!(%peer_ip, "removing unconfigured peer after GR expiry");
-                        if let Some(conn) = peer.active() {
-                            if let Some(peer_tx) = &conn.peer_tx {
-                                let _ = peer_tx.send(PeerOp::ManualStop);
-                            }
-                        }
-                        self.peers.remove(&peer_ip);
-                    }
-                }
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
@@ -482,16 +454,6 @@ impl BgpServer {
                 // Propagate withdrawals if any routes were removed
                 if !changed_prefixes.is_empty() {
                     self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
-                }
-
-                // Remove unconfigured peer after GR complete (if still disconnected)
-                if let Some(peer) = self.peers.get(&peer_ip) {
-                    // Peer has no active connection
-                    let no_active = peer.outgoing.is_none() && peer.incoming.is_none();
-                    if !peer.configured && no_active {
-                        info!(%peer_ip, "removing unconfigured peer after GR complete");
-                        self.peers.remove(&peer_ip);
-                    }
                 }
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
@@ -712,7 +674,7 @@ impl BgpServer {
 
         self.peers.insert(
             peer_ip,
-            PeerInfo::new(true, config.clone(), Some(peer_tx.clone()), Some(conn_type)),
+            PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
         );
 
         // RFC 4271: ManualStart for admin-added peers
@@ -1185,7 +1147,6 @@ impl BgpServer {
                     asn: conn.and_then(|c| c.asn),
                     state: conn.map(|c| c.state).unwrap_or(BgpState::Idle),
                     admin_state: entry.admin_state,
-                    configured: entry.configured,
                     import_policies: entry
                         .import_policies
                         .iter()
@@ -1230,7 +1191,6 @@ impl BgpServer {
             asn: conn.and_then(|c| c.asn),
             state: conn.map(|c| c.state).unwrap_or(BgpState::Idle),
             admin_state: entry.admin_state,
-            configured: entry.configured,
             import_policies: entry
                 .import_policies
                 .iter()
@@ -1402,7 +1362,6 @@ impl BgpServer {
                 asn: conn.and_then(|c| c.asn),
                 state: conn.map(|c| c.state).unwrap_or(BgpState::Idle),
                 admin_state: entry.admin_state,
-                configured: entry.configured,
                 import_policies: entry
                     .import_policies
                     .iter()

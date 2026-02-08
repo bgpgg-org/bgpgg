@@ -187,7 +187,7 @@ async fn test_peer_up_down() {
     server2.add_peer(&server1).await;
 
     // Wait for peer to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
     // Read and verify PeerUp message
     bmp_server
@@ -404,7 +404,7 @@ async fn test_bmp_statistics() {
     server2.add_peer(&server1).await;
 
     // Wait for peer to establish
-    poll_peers(&server1, vec![server2.to_peer(BgpState::Established, true)]).await;
+    poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
     // Read first two messages - could be PeerUp and StatisticsReport in any order (race condition)
     bmp_server

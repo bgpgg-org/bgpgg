@@ -662,7 +662,7 @@ async fn test_update_no_nlri_valid() {
 
     // Peer should still be established (no NOTIFICATION sent)
     assert!(
-        verify_peers(&server, vec![peer.to_peer(BgpState::Established, true)]).await,
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
         "Peer should remain established after valid UPDATE with no NLRI"
     );
 }

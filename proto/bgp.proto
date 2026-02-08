@@ -189,9 +189,8 @@ message Peer {
     uint32 asn = 2;
     BgpState state = 3;
     AdminState admin_state = 4;
-    bool configured = 5;  // true if explicitly configured via add_peer()
-    repeated string import_policies = 6;  // Names of import policies assigned to this peer
-    repeated string export_policies = 7;  // Names of export policies assigned to this peer
+    repeated string import_policies = 5;  // Names of import policies assigned to this peer
+    repeated string export_policies = 6;  // Names of export policies assigned to this peer
 }
 
 // Add route request/response

@@ -82,10 +82,6 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                     println!("  ASN:         {}", peer.asn);
                     println!("  State:       {}", format_state(peer.state()));
                     println!("  Admin State: {}", format_admin_state(peer.admin_state()));
-                    println!(
-                        "  Configured:  {}",
-                        if peer.configured { "yes" } else { "no" }
-                    );
                     println!();
                     println!("Statistics:");
                     println!("  Messages Sent:");

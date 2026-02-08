@@ -54,8 +54,8 @@ async fn test_announce_withdraw() {
     // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server1]).await;
     // Active-active: all peers have configured=true
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -97,8 +97,8 @@ async fn test_announce_withdraw_mesh() {
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -107,8 +107,8 @@ async fn test_announce_withdraw_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -117,8 +117,8 @@ async fn test_announce_withdraw_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -217,9 +217,9 @@ async fn test_announce_withdraw_four_node_mesh() {
         verify_peers(
             &server1,
             vec![
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -228,9 +228,9 @@ async fn test_announce_withdraw_four_node_mesh() {
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -239,9 +239,9 @@ async fn test_announce_withdraw_four_node_mesh() {
         verify_peers(
             &server3,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server4.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server4.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -250,9 +250,9 @@ async fn test_announce_withdraw_four_node_mesh() {
         verify_peers(
             &server4,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server2.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server2.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
@@ -328,18 +328,18 @@ async fn test_ibgp_split_horizon() {
     // Verify all peers are still established
     // Active-active peering: all peers have configured=true
     // Active-active: all peers have configured=true
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
     assert!(
         verify_peers(
             &server2,
             vec![
-                server1.to_peer(BgpState::Established, true),
-                server3.to_peer(BgpState::Established, true),
+                server1.to_peer(BgpState::Established),
+                server3.to_peer(BgpState::Established),
             ],
         )
         .await
     );
-    assert!(verify_peers(&server3, vec![server2.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server3, vec![server2.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -427,31 +427,18 @@ async fn test_as_loop_prevention() {
 
     // Verify all peers are still established
     // chain_servers: server1_a -> server2 -> server1_b
-    // Active-active: all peers have configured=true
-    assert!(
-        verify_peers(
-            &server1_a,
-            vec![server2.to_peer(BgpState::Established, true)],
-        )
-        .await
-    );
+    assert!(verify_peers(&server1_a, vec![server2.to_peer(BgpState::Established)],).await);
     assert!(
         verify_peers(
             &server2,
             vec![
-                server1_a.to_peer(BgpState::Established, true),
-                server1_b.to_peer(BgpState::Established, true),
+                server1_a.to_peer(BgpState::Established),
+                server1_b.to_peer(BgpState::Established),
             ],
         )
         .await
     );
-    assert!(
-        verify_peers(
-            &server1_b,
-            vec![server2.to_peer(BgpState::Established, true)],
-        )
-        .await
-    );
+    assert!(verify_peers(&server1_b, vec![server2.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -530,8 +517,8 @@ async fn test_ipv6_route_exchange() {
 
     // Poll for withdrawal and verify peers are still established
     poll_route_withdrawal(&[&server1]).await;
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
 }
 
 #[tokio::test]
@@ -583,8 +570,8 @@ async fn test_ipv6_nexthop_rewrite() {
         .expect("Failed to withdraw IPv6 route");
 
     poll_route_withdrawal(&[&server1]).await;
-    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established, true)],).await);
-    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established, true)],).await);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)],).await);
+    assert!(verify_peers(&server2, vec![server1.to_peer(BgpState::Established)],).await);
 }
 #[tokio::test]
 async fn test_route_advertised_when_peer_becomes_established() {

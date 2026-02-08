@@ -95,7 +95,6 @@ pub struct GetPeersResponse {
     pub asn: Option<u32>,
     pub state: BgpState,
     pub admin_state: AdminState,
-    pub configured: bool,
     pub import_policies: Vec<String>,
     pub export_policies: Vec<String>,
 }
@@ -106,7 +105,6 @@ pub struct GetPeerResponse {
     pub asn: Option<u32>,
     pub state: BgpState,
     pub admin_state: AdminState,
-    pub configured: bool,
     pub import_policies: Vec<String>,
     pub export_policies: Vec<String>,
     pub statistics: PeerStatistics,
@@ -409,8 +407,6 @@ impl ConnectionState {
 /// stale conn_type bugs when an unconfigured peer is upgraded to configured.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    /// true if explicitly configured via add_peer()
-    pub configured: bool,
     pub import_policies: Vec<Arc<Policy>>,
     pub export_policies: Vec<Arc<Policy>>,
     /// Per-peer session configuration
@@ -423,7 +419,6 @@ pub struct PeerInfo {
 
 impl PeerInfo {
     pub fn new(
-        configured: bool,
         config: PeerConfig,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
         conn_type: Option<ConnectionType>,
@@ -436,7 +431,6 @@ impl PeerInfo {
         };
         Self {
             admin_state: AdminState::Up,
-            configured,
             import_policies: Vec::new(),
             export_policies: Vec::new(),
             config,
@@ -660,7 +654,7 @@ impl BgpServer {
             let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
 
             // Create peer with connection in the appropriate slot
-            let mut entry = PeerInfo::new(true, config, None, None);
+            let mut entry = PeerInfo::new(config, None, None);
             let conn_state = ConnectionState::new(Some(peer_tx.clone()));
             match conn_type {
                 ConnectionType::Outgoing => entry.outgoing = Some(conn_state),
@@ -982,7 +976,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
-        PeerInfo::new(true, PeerConfig::default(), None, None)
+        PeerInfo::new(PeerConfig::default(), None, None)
     }
 
     fn make_server() -> BgpServer {

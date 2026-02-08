@@ -76,7 +76,7 @@ impl Drop for TestServer {
 impl TestServer {
     /// Converts a TestServer to a Peer struct for use in test assertions.
     /// ASN is only known after OPEN exchange, so it's 0 for non-Established states.
-    pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
+    pub fn to_peer(&self, state: BgpState) -> Peer {
         Peer {
             address: self.address.to_string(),
             asn: if state == BgpState::Established {
@@ -86,7 +86,6 @@ impl TestServer {
             },
             state: state.into(),
             admin_state: AdminState::Up.into(),
-            configured,
             import_policies: vec![],
             export_policies: vec![],
         }
@@ -877,12 +876,12 @@ pub async fn chain_servers<const N: usize>(
 
                 // Previous server (if exists) - both configured each other
                 if i > 0 {
-                    expected_peers.push(servers[i - 1].to_peer(BgpState::Established, true));
+                    expected_peers.push(servers[i - 1].to_peer(BgpState::Established));
                 }
 
                 // Next server (if exists) - both configured each other
                 if i < servers.len() - 1 {
-                    expected_peers.push(servers[i + 1].to_peer(BgpState::Established, true));
+                    expected_peers.push(servers[i + 1].to_peer(BgpState::Established));
                 }
 
                 if !verify_peers(server, expected_peers).await {
@@ -1095,7 +1094,7 @@ pub async fn mesh_servers<const N: usize>(
                 for (j, other_server) in servers.iter().enumerate() {
                     if i != j {
                         // Both sides configured each other
-                        expected_peers.push(other_server.to_peer(BgpState::Established, true));
+                        expected_peers.push(other_server.to_peer(BgpState::Established));
                     }
                 }
 
@@ -1307,13 +1306,12 @@ impl FakePeer {
         }
     }
 
-    pub fn to_peer(&self, state: BgpState, configured: bool) -> Peer {
+    pub fn to_peer(&self, state: BgpState) -> Peer {
         Peer {
             address: self.address.clone(),
             asn: self.asn,
             state: state.into(),
             admin_state: AdminState::Up.into(),
-            configured,
             import_policies: vec![],
             export_policies: vec![],
         }
