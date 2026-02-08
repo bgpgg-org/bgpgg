@@ -190,12 +190,6 @@ pub enum PeerOp {
     LocalRibSent {
         afi_safi: crate::bgp::multiprotocol::AfiSafi,
     },
-    /// Update peer config (when upgrading unconfigured peer to configured)
-    UpdateConfig {
-        config: PeerConfig,
-        port: u16,
-        local_addr: std::net::SocketAddr,
-    },
     /// Server detected collision, this connection lost. Send NOTIFICATION and close.
     CollisionLost,
 }

@@ -300,12 +300,6 @@ impl Peer {
                                 }
                             }
                         }
-                        PeerOp::UpdateConfig { config: new_config, port, local_addr } => {
-                            // Update config and connection params (when upgrading unconfigured to configured)
-                            self.config = new_config;
-                            self.port = port;
-                            self.local_addr = local_addr;
-                        }
                         PeerOp::ManualStart
                         | PeerOp::ManualStartPassive
                         | PeerOp::AutomaticStart

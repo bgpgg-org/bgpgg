@@ -474,29 +474,15 @@ impl PeerInfo {
         }
     }
 
-    /// Get the active connection (first non-None slot, preferring established)
-    pub fn active(&self) -> Option<&ConnectionState> {
+    /// Get the current connection (established if any, otherwise any existing connection)
+    pub fn current(&self) -> Option<&ConnectionState> {
         self.established()
             .or(self.outgoing.as_ref())
             .or(self.incoming.as_ref())
     }
 
-    /// Get mutable reference to the active connection
-    pub fn active_mut(&mut self) -> Option<&mut ConnectionState> {
-        if self.outgoing.as_ref().map(|c| c.state) == Some(BgpState::Established) {
-            return self.outgoing.as_mut();
-        }
-        if self.incoming.as_ref().map(|c| c.state) == Some(BgpState::Established) {
-            return self.incoming.as_mut();
-        }
-        if self.outgoing.is_some() {
-            return self.outgoing.as_mut();
-        }
-        self.incoming.as_mut()
-    }
-
     pub async fn get_statistics(&self) -> Option<PeerStatistics> {
-        let peer_tx = self.active()?.peer_tx.as_ref()?;
+        let peer_tx = self.current()?.peer_tx.as_ref()?;
         let (tx, rx) = oneshot::channel();
         peer_tx.send(PeerOp::GetStatistics(tx)).ok()?;
         rx.await.ok()
@@ -756,7 +742,7 @@ impl BgpServer {
 
         // Passive mode with existing task: send connection to existing task
         if existing.config.passive_mode {
-            if let Some(conn) = existing.active() {
+            if let Some(conn) = existing.current() {
                 if let Some(peer_tx) = &conn.peer_tx {
                     let (tcp_rx, tcp_tx) = stream.into_split();
                     let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });

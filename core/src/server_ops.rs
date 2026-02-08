@@ -423,7 +423,7 @@ impl BgpServer {
 
                 // Get the GR AFI/SAFIs from peer's capabilities
                 let gr_afi_safis = if let Some(peer) = self.peers.get(&peer_ip) {
-                    peer.active()
+                    peer.current()
                         .and_then(|c| c.capabilities.as_ref())
                         .and_then(|caps| caps.graceful_restart.as_ref())
                         .map(|gr_cap| gr_cap.afi_safis())
@@ -708,7 +708,7 @@ impl BgpServer {
 
         // Send graceful shutdown notification if peer_tx is active
         if let Some(entry) = self.peers.get(&peer_ip) {
-            if let Some(conn) = entry.active() {
+            if let Some(conn) = entry.current() {
                 if let Some(peer_tx) = &conn.peer_tx {
                     let _ = peer_tx.send(PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
                 }
@@ -767,7 +767,7 @@ impl BgpServer {
         entry.admin_state = AdminState::Down;
 
         // Stop active session if exists
-        if let Some(conn) = entry.active() {
+        if let Some(conn) = entry.current() {
             if let Some(peer_tx) = &conn.peer_tx {
                 let _ = peer_tx.send(PeerOp::ManualStop);
             }
@@ -793,7 +793,7 @@ impl BgpServer {
         entry.admin_state = AdminState::Up;
 
         // RFC 4271: ManualStart for admin-enabled peers
-        if let Some(conn) = entry.active() {
+        if let Some(conn) = entry.current() {
             if let Some(peer_tx) = &conn.peer_tx {
                 if entry.config.passive_mode {
                     let _ = peer_tx.send(PeerOp::ManualStartPassive);
@@ -899,7 +899,7 @@ impl BgpServer {
             return;
         };
 
-        let Some(conn) = peer.active() else {
+        let Some(conn) = peer.current() else {
             let _ = response.send(Err(format!("peer {} has no active task", peer_ip)));
             return;
         };
@@ -1143,7 +1143,7 @@ impl BgpServer {
             .peers
             .iter()
             .map(|(addr, entry)| {
-                let conn = entry.active();
+                let conn = entry.current();
                 GetPeersResponse {
                     address: addr.to_string(),
                     asn: conn.and_then(|c| c.asn),
@@ -1186,7 +1186,7 @@ impl BgpServer {
         };
 
         let stats = entry.get_statistics().await.unwrap_or_default();
-        let conn = entry.active();
+        let conn = entry.current();
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
@@ -1358,7 +1358,7 @@ impl BgpServer {
 
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
         for (addr, entry) in self.peers.iter() {
-            let conn = entry.active();
+            let conn = entry.current();
             let peer = GetPeersResponse {
                 address: addr.to_string(),
                 asn: conn.and_then(|c| c.asn),

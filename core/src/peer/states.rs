@@ -159,12 +159,6 @@ impl Peer {
                         | PeerOp::AutomaticStartPassive => {
                             // Ignored when connected
                         }
-                        PeerOp::UpdateConfig { config: new_config, port, local_addr } => {
-                            // Update config and connection params (when upgrading unconfigured to configured)
-                            self.config = new_config;
-                            self.port = port;
-                            self.local_addr = local_addr;
-                        }
                         PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx } => {
                             // RFC 4724 Section 5: If GR active, restart connection with new TCP
                             let peer_supports_gr = self
