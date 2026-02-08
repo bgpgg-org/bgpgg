@@ -805,9 +805,7 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
 }
 
 /// Chains BGP servers together in a linear topology (active-active peering)
-///
-/// Both sides of each peering call add_peer() on each other, representing real-world
-/// active-active BGP configurations.
+/// Both sides of each peering call add_peer() on each other.
 ///
 /// # Arguments
 /// * `servers` - Array of servers to chain together

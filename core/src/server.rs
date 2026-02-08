@@ -836,7 +836,7 @@ impl BgpServer {
 
         let peer = Peer::new(
             peer_ip,
-            0,
+            config.port,
             peer_rx,
             self.op_tx.clone(),
             self.config.asn,
