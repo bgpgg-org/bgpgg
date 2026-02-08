@@ -124,12 +124,11 @@ async fn test_peer_down() {
 
 #[tokio::test]
 async fn test_peer_down_four_node_mesh() {
-    let (mut server1, server2, server3, mut server4) =
-        setup_four_meshed_servers(Some(PeerConfig {
-            hold_timer_secs: Some(3),
-            ..Default::default()
-        }))
-        .await;
+    let (mut server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
+        hold_timer_secs: Some(3),
+        ..Default::default()
+    })
+    .await;
 
     // Server1 announces a route to all peers
     let server1_addr = server1.address.to_string();
@@ -228,10 +227,10 @@ async fn test_peer_down_four_node_mesh() {
 
 #[tokio::test]
 async fn test_peer_up() {
-    let (server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (server1, server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(3),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Poll until OPEN exchanged and at least one keepalive cycle completed
@@ -253,10 +252,10 @@ async fn test_peer_up() {
 
 #[tokio::test]
 async fn test_peer_up_four_node_mesh() {
-    let (server1, server2, server3, server4) = setup_four_meshed_servers(Some(PeerConfig {
+    let (server1, server2, server3, server4) = setup_four_meshed_servers(PeerConfig {
         hold_timer_secs: Some(3),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Poll until multiple keepalive cycles completed (proves connection stays up)
@@ -776,10 +775,10 @@ async fn test_mrai_rate_limiting() {
 
     for (mrai_secs, num_routes) in test_cases {
         // Set MRAI on the peer config - controls how fast server1 can send updates to server2
-        let (mut server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+        let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
             min_route_advertisement_interval_secs: Some(mrai_secs),
             ..Default::default()
-        }))
+        })
         .await;
 
         let start_time = std::time::Instant::now();
@@ -963,7 +962,7 @@ async fn test_reset_peer_soft() {
 
     for tc in test_cases {
         println!("Running test case: {}", tc.name);
-        let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+        let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
         // Server1 announces a route to server2
         announce_route(
@@ -1052,10 +1051,10 @@ async fn test_reset_peer_soft() {
 #[tokio::test]
 async fn test_hard_reset_established() {
     // Use setup with short idle_hold_time for faster reconnect
-    let (mut server1, server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
         idle_hold_time_secs: Some(1),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Server1 announces a route to server2

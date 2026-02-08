@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
-    let (server1, mut server2) = setup_two_peered_servers(None).await;
+    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
@@ -60,7 +60,7 @@ async fn test_announce_withdraw() {
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh() {
-    let (mut server1, server2, server3) = setup_three_meshed_servers(None).await;
+    let (mut server1, server2, server3) = setup_three_meshed_servers(PeerConfig::default()).await;
 
     // Server1 announces a route to both server2 and server3
     let server1_addr = server1.address.to_string();
@@ -127,7 +127,8 @@ async fn test_announce_withdraw_mesh() {
 
 #[tokio::test]
 async fn test_announce_withdraw_four_node_mesh() {
-    let (mut server1, server2, server3, server4) = setup_four_meshed_servers(None).await;
+    let (mut server1, server2, server3, server4) =
+        setup_four_meshed_servers(PeerConfig::default()).await;
 
     // Server1 announces a route
     announce_route(
@@ -443,7 +444,7 @@ async fn test_as_loop_prevention() {
 
 #[tokio::test]
 async fn test_ipv6_route_exchange() {
-    let (server1, mut server2) = setup_two_peered_servers(None).await;
+    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces both IPv4 and IPv6 routes to Server1 via gRPC
     announce_route(

@@ -575,7 +575,7 @@ async fn test_remove_policy() {
 
 #[tokio::test]
 async fn test_set_policy_assignment() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Create policies on server1
     server1

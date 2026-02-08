@@ -951,7 +951,7 @@ async fn test_med_comparison_restricted_to_same_as() {
 
 #[tokio::test]
 async fn test_normal_community_propagation() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let communities = vec![
         community::from_asn_value(65001, 100),
@@ -990,7 +990,7 @@ async fn test_normal_community_propagation() {
 
 #[tokio::test]
 async fn test_well_known_communities() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add routes with well-known communities (should be filtered)
     announce_route(
@@ -1166,7 +1166,7 @@ async fn test_large_community_propagation() {
     use bgpgg::bgp::msg_update_types::LargeCommunity;
     use bgpgg::grpc::proto;
 
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let large_comms = vec![
         LargeCommunity::new(65536, 100, 200),

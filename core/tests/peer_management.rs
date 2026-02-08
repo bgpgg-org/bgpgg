@@ -25,10 +25,10 @@ use std::net::Ipv4Addr;
 #[tokio::test]
 async fn test_remove_peer() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Server2 announces a route to Server1
@@ -70,10 +70,10 @@ async fn test_remove_peer() {
 #[tokio::test]
 async fn test_remove_peer_withdraw_routes() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(Some(PeerConfig {
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
-    }))
+    })
     .await;
 
     // Server2 announces a route
@@ -125,12 +125,11 @@ async fn test_remove_peer_withdraw_routes() {
 #[tokio::test]
 async fn test_remove_peer_four_node_mesh() {
     let hold_timer_secs = 3;
-    let (mut server1, server2, server3, mut server4) =
-        setup_four_meshed_servers(Some(PeerConfig {
-            hold_timer_secs: Some(hold_timer_secs),
-            ..Default::default()
-        }))
-        .await;
+    let (mut server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
+        hold_timer_secs: Some(hold_timer_secs),
+        ..Default::default()
+    })
+    .await;
 
     // Server4 announces a route to all peers
     let server4_addr = server4.address.to_string();

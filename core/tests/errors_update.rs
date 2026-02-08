@@ -19,7 +19,6 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
 
@@ -47,17 +46,7 @@ async fn test_update_missing_well_known_attribute() {
     ];
 
     for (name, attrs, expected_missing_type) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
         let msg = build_raw_update(
@@ -87,17 +76,7 @@ async fn test_update_missing_well_known_attribute() {
 
 #[tokio::test]
 async fn test_update_malformed_attribute_list() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Withdrawn route: 10.11.12.0/24 (prefix length byte followed by prefix bytes)
     let withdrawn_data = &[24, 10, 11, 12];
@@ -130,17 +109,7 @@ async fn test_update_attribute_flags_error_origin() {
     ];
 
     for (name, wrong_flags) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let malformed_attr =
             build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
@@ -166,17 +135,7 @@ async fn test_update_attribute_flags_error_origin() {
 
 #[tokio::test]
 async fn test_update_attribute_flags_error_med_missing_optional_bit() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Build MED attribute with WRONG flags (missing OPTIONAL bit)
     let wrong_flags = attr_flags::TRANSITIVE; // Should have OPTIONAL too
@@ -249,17 +208,7 @@ async fn test_update_attribute_length_error() {
     ];
 
     for (name, malformed_attr, expected_data_prefix) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         // Build UPDATE with single malformed attribute (no alignment issues!)
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
@@ -284,17 +233,7 @@ async fn test_update_attribute_length_error() {
 
 #[tokio::test]
 async fn test_update_unrecognized_well_known_attribute() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Build an unrecognized well-known attribute (type 9, OPTIONAL=0)
     let unrecognized_attr = build_attr_bytes(attr_flags::TRANSITIVE, 9, 2, &[0xaa, 0xbb]);
@@ -312,17 +251,7 @@ async fn test_update_unrecognized_well_known_attribute() {
 
 #[tokio::test]
 async fn test_update_invalid_origin_attribute() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     let invalid_origin_attr =
         build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
@@ -361,17 +290,7 @@ async fn test_update_invalid_next_hop_attribute() {
     ];
 
     for (name, ip_bytes) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let invalid_next_hop_attr = build_attr_bytes(
             attr_flags::TRANSITIVE,
@@ -423,17 +342,7 @@ async fn test_update_invalid_next_hop_attribute() {
 #[tokio::test]
 async fn test_next_hop_is_local_address_rejected() {
     // Server bound to 127.0.0.1, FakePeer sends UPDATE with NEXT_HOP = 127.0.0.1
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (server, mut peer) = setup_server_and_fake_peer().await;
 
     // Send UPDATE with NEXT_HOP = server's local address (127.0.0.1)
     let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
@@ -498,17 +407,7 @@ async fn test_update_malformed_as_path() {
     ];
 
     for (name, malformed_as_path) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let nlri = &[24, 10, 11, 12];
         let msg = build_raw_update(
@@ -554,17 +453,7 @@ async fn test_update_optional_attribute_error() {
     ];
 
     for (name, flags, type_code, len, data) in test_cases {
-        let server = start_test_server_for_fake_peer(Config::new(
-            65001,
-            "127.0.0.1:0",
-            Ipv4Addr::new(1, 1, 1, 1),
-            300,
-        ))
-        .await;
-        let mut peer = FakePeer::connect(None, &server).await;
-        peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-            .await;
-        peer.handshake_keepalive().await;
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
 
         let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
         let nlri = &[24, 10, 11, 12];
@@ -597,17 +486,7 @@ async fn test_update_optional_attribute_error() {
 
 #[tokio::test]
 async fn test_update_duplicate_attribute() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
 
     // Send UPDATE with two ORIGIN attributes (duplicate)
     let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
@@ -623,17 +502,7 @@ async fn test_update_duplicate_attribute() {
 
 #[tokio::test]
 async fn test_update_no_nlri_valid() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (server, mut peer) = setup_server_and_fake_peer().await;
 
     // UPDATE with valid attributes but no NLRI
     let msg = build_raw_update(
@@ -669,17 +538,7 @@ async fn test_update_no_nlri_valid() {
 
 #[tokio::test]
 async fn test_update_multicast_nlri_ignored() {
-    let server = start_test_server_for_fake_peer(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        300,
-    ))
-    .await;
-    let mut peer = FakePeer::connect(None, &server).await;
-    peer.handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
-        .await;
-    peer.handshake_keepalive().await;
+    let (server, mut peer) = setup_server_and_fake_peer().await;
 
     // Send UPDATE with multicast NLRI (224.0.0.0/24)
     let multicast_nlri = &[24, 224, 0, 0];

@@ -314,7 +314,7 @@ async fn test_collision_immediate() {
 #[tokio::test]
 async fn test_reject_incoming_when_established() {
     // server1 and server2 peer and reach Established
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(common::PeerConfig::default()).await;
 
     // FakePeer on same IP as server2 tries to connect - should be rejected
     let fake_peer = FakePeer::connect(Some("127.0.0.2"), &server1).await;

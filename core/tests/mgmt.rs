@@ -103,7 +103,7 @@ async fn test_remove_peer_not_found() {
 
 #[tokio::test]
 async fn test_remove_peer_success() {
-    let (mut server1, server2) = setup_two_peered_servers(None).await;
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Verify peer exists
     let peers = server1.client.get_peers().await.unwrap();
@@ -133,7 +133,7 @@ async fn test_get_peers_empty() {
 
 #[tokio::test]
 async fn test_get_peers_with_peers() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
@@ -158,7 +158,7 @@ async fn test_get_peer_not_found() {
 
 #[tokio::test]
 async fn test_get_peer_success() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let (peer_opt, stats_opt) = server1
         .client
@@ -251,7 +251,7 @@ async fn test_disable_enable_peer() {
         idle_hold_time_secs: Some(1),
         ..Default::default()
     };
-    let (mut server1, server2) = setup_two_peered_servers(Some(config)).await;
+    let (mut server1, server2) = setup_two_peered_servers(config).await;
 
     // Disable peer
     server1
@@ -504,7 +504,7 @@ async fn test_add_route_stream_with_invalid_route() {
 }
 
 async fn test_list_routes_impl(use_stream: bool) {
-    let (mut server1, mut server2) = setup_two_peered_servers(None).await;
+    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces routes to Server1 (empty AS_PATH = local routes)
     let server2_addr = server2.address.to_string();
@@ -631,7 +631,7 @@ async fn test_list_routes_stream() {
 
 #[tokio::test]
 async fn test_list_peers_stream() {
-    let (server1, server2) = setup_two_peered_servers(None).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let peers = server1.client.get_peers_stream().await.unwrap();
     assert_eq!(peers.len(), 1);

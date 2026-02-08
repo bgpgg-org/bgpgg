@@ -28,7 +28,7 @@ lint: setup
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test: lint
-	RUST_LOG=debug cargo test --workspace --exclude loadtests --no-fail-fast -- --nocapture
+	cargo test --workspace --exclude loadtests --no-fail-fast -- --nocapture
 
 fmt:
 	cargo fmt

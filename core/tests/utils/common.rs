@@ -17,11 +17,12 @@
 use tracing_subscriber::EnvFilter;
 
 /// Initialize tracing for tests. Call at the start of each test.
-/// Uses RUST_LOG env var (e.g., RUST_LOG=debug).
+/// Uses RUST_LOG env var, defaulting to debug for bgpgg only.
 /// Safe to call multiple times - only first call takes effect.
 pub fn init_test_logging() {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "bgpgg=debug".to_string());
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::new(filter))
         .with_test_writer()
         .try_init();
 }
@@ -35,7 +36,9 @@ use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    AdminState, AsPathSegment, AsPathSegmentType, BgpState, Origin, Path, Peer, Route,
+    AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
+    GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, Route,
+    SessionConfig, UnknownAttribute,
 };
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
@@ -139,9 +142,9 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
 }
 
 /// Create SessionConfig with custom graceful restart timer
-pub fn session_config_with_gr_timer(restart_time_secs: u32) -> bgpgg::grpc::proto::SessionConfig {
-    bgpgg::grpc::proto::SessionConfig {
-        graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+pub fn session_config_with_gr_timer(restart_time_secs: u32) -> SessionConfig {
+    SessionConfig {
+        graceful_restart: Some(GracefulRestartConfig {
             enabled: Some(true),
             restart_time_secs: Some(restart_time_secs),
         }),
@@ -159,10 +162,10 @@ pub struct PathParams {
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
     pub atomic_aggregate: bool,
-    pub unknown_attributes: Vec<bgpgg::grpc::proto::UnknownAttribute>,
+    pub unknown_attributes: Vec<UnknownAttribute>,
     pub communities: Vec<u32>,
-    pub extended_communities: Vec<bgpgg::grpc::proto::ExtendedCommunity>,
-    pub large_communities: Vec<bgpgg::grpc::proto::LargeCommunity>,
+    pub extended_communities: Vec<ExtendedCommunity>,
+    pub large_communities: Vec<LargeCommunity>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -315,19 +318,23 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
     }
 }
 
-/// Start a test server with a default passive peer configured for FakePeer connections.
+/// Setup a test server with a FakePeer already connected and in Established state.
 ///
-/// This is a convenience function for tests that use FakePeer to connect to a single server.
-/// It pre-configures a passive peer at 127.0.0.1:179 so FakePeer can connect without
-/// additional setup.
-pub async fn start_test_server_for_fake_peer(config: Config) -> TestServer {
-    let mut config = config;
+/// Returns (TestServer, FakePeer) with default settings:
+/// - Server: ASN 65001, router_id 1.1.1.1, hold_time 300
+/// - FakePeer: ASN 65002, router_id 2.2.2.2
+pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1:0".to_string(), // Port ignored for passive peers
         passive_mode: true,
         ..Default::default()
     });
-    start_test_server(config).await
+    let server = start_test_server(config).await;
+    let peer =
+        FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
+            .await;
+    (server, peer)
 }
 
 /// Sets up two BGP servers with peering established
@@ -339,9 +346,8 @@ pub async fn start_test_server_for_fake_peer(config: Config) -> TestServer {
 ///
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
-pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer, TestServer) {
-    let cfg = config.unwrap_or_default();
-    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestServer) {
+    let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2] = chain_servers(
         [
             start_test_server(Config::new(
@@ -359,7 +365,7 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
             ))
             .await,
         ],
-        cfg,
+        config,
     )
     .await;
 
@@ -380,10 +386,9 @@ pub async fn setup_two_peered_servers(config: Option<PeerConfig>) -> (TestServer
 /// Returns (server1, server2, server3) TestServer instances for each server.
 /// All servers will have 2 peers each in Established state when this function returns.
 pub async fn setup_three_meshed_servers(
-    config: Option<PeerConfig>,
+    config: PeerConfig,
 ) -> (TestServer, TestServer, TestServer) {
-    let cfg = config.unwrap_or_default();
-    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+    let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3] = mesh_servers(
         [
             start_test_server(Config::new(
@@ -408,7 +413,7 @@ pub async fn setup_three_meshed_servers(
             ))
             .await,
         ],
-        cfg,
+        config,
     )
     .await;
 
@@ -432,10 +437,9 @@ pub async fn setup_three_meshed_servers(
 /// Returns (server1, server2, server3, server4) TestServer instances for each server.
 /// All servers will have 3 peers each in Established state when this function returns.
 pub async fn setup_four_meshed_servers(
-    config: Option<PeerConfig>,
+    config: PeerConfig,
 ) -> (TestServer, TestServer, TestServer, TestServer) {
-    let cfg = config.unwrap_or_default();
-    let hold = cfg.hold_timer_secs.unwrap_or(90) as u64;
+    let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3, server4] = mesh_servers(
         [
             start_test_server(Config::new(
@@ -467,7 +471,7 @@ pub async fn setup_four_meshed_servers(
             ))
             .await,
         ],
-        cfg,
+        config,
     )
     .await;
 
@@ -522,7 +526,7 @@ pub struct ExpectedStats {
 }
 
 impl ExpectedStats {
-    pub fn is_met_by(&self, s: &bgpgg::grpc::proto::PeerStatistics) -> bool {
+    pub fn is_met_by(&self, s: &PeerStatistics) -> bool {
         self.open_sent.is_none_or(|e| s.open_sent == e)
             && self.open_received.is_none_or(|e| s.open_received == e)
             && self.update_sent.is_none_or(|e| s.update_sent == e)
@@ -817,23 +821,16 @@ pub async fn chain_servers<const N: usize>(
     mut servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
-    let session_config = if config.gr_restart_time_secs.is_some()
-        || config.idle_hold_time_secs.is_some()
-        || config.min_route_advertisement_interval_secs.is_some()
-    {
-        Some(bgpgg::grpc::proto::SessionConfig {
-            graceful_restart: config.gr_restart_time_secs.map(|secs| {
-                bgpgg::grpc::proto::GracefulRestartConfig {
-                    enabled: Some(true),
-                    restart_time_secs: Some(secs),
-                }
+    let session_config = SessionConfig {
+        graceful_restart: config
+            .gr_restart_time_secs
+            .map(|secs| GracefulRestartConfig {
+                enabled: Some(true),
+                restart_time_secs: Some(secs),
             }),
-            idle_hold_time_secs: config.idle_hold_time_secs,
-            min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
-            ..Default::default()
-        })
-    } else {
-        None
+        idle_hold_time_secs: config.idle_hold_time_secs,
+        min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        ..Default::default()
     };
 
     // Active-active: both sides call add_peer() on each other
@@ -856,30 +853,28 @@ pub async fn chain_servers<const N: usize>(
         // Server i adds server i+1
         servers[i]
             .client
-            .add_peer(next_peer_addr, session_config)
+            .add_peer(next_peer_addr, Some(session_config))
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
 
         // Server i+1 adds server i
         servers[i + 1]
             .client
-            .add_peer(curr_peer_addr, session_config)
+            .add_peer(curr_peer_addr, Some(session_config))
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, i + 1));
     }
 
-    // Active-active: both sides have configured=true
+    // Wait for all peers to reach Established
     poll_until(
         || async {
             for (i, server) in servers.iter().enumerate() {
                 let mut expected_peers = Vec::new();
 
-                // Previous server (if exists) - both configured each other
                 if i > 0 {
                     expected_peers.push(servers[i - 1].to_peer(BgpState::Established));
                 }
 
-                // Next server (if exists) - both configured each other
                 if i < servers.len() - 1 {
                     expected_peers.push(servers[i + 1].to_peer(BgpState::Established));
                 }
@@ -1042,23 +1037,16 @@ pub async fn mesh_servers<const N: usize>(
     mut servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
-    let session_config = if config.gr_restart_time_secs.is_some()
-        || config.idle_hold_time_secs.is_some()
-        || config.min_route_advertisement_interval_secs.is_some()
-    {
-        Some(bgpgg::grpc::proto::SessionConfig {
-            graceful_restart: config.gr_restart_time_secs.map(|secs| {
-                bgpgg::grpc::proto::GracefulRestartConfig {
-                    enabled: Some(true),
-                    restart_time_secs: Some(secs),
-                }
+    let session_config = SessionConfig {
+        graceful_restart: config
+            .gr_restart_time_secs
+            .map(|secs| GracefulRestartConfig {
+                enabled: Some(true),
+                restart_time_secs: Some(secs),
             }),
-            idle_hold_time_secs: config.idle_hold_time_secs,
-            min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
-            ..Default::default()
-        })
-    } else {
-        None
+        idle_hold_time_secs: config.idle_hold_time_secs,
+        min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        ..Default::default()
     };
 
     // Active-active: both sides call add_peer() on each other
@@ -1072,20 +1060,20 @@ pub async fn mesh_servers<const N: usize>(
             // Server i adds server j
             servers[i]
                 .client
-                .add_peer(format!("{}:{}", j_address, j_port), session_config)
+                .add_peer(format!("{}:{}", j_address, j_port), Some(session_config))
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", j, i));
 
             // Server j adds server i
             servers[j]
                 .client
-                .add_peer(format!("{}:{}", i_address, i_port), session_config)
+                .add_peer(format!("{}:{}", i_address, i_port), Some(session_config))
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, j));
         }
     }
 
-    // Active-active: all peers have configured=true
+    // Wait for all peers to reach Established
     poll_until(
         || async {
             for (i, server) in servers.iter().enumerate() {
@@ -1093,7 +1081,7 @@ pub async fn mesh_servers<const N: usize>(
 
                 for (j, other_server) in servers.iter().enumerate() {
                     if i != j {
-                        // Both sides configured each other
+                        // Expect peer in Established state
                         expected_peers.push(other_server.to_peer(BgpState::Established));
                     }
                 }
