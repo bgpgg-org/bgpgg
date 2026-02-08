@@ -462,9 +462,8 @@ impl PeerInfo {
         }
     }
 
-    /// Get connection state for API responses.
-    /// Returns the most-progressed connection during collision.
-    pub fn api_state(&self) -> (Option<u32>, BgpState) {
+    /// Get connection state. Returns the most-progressed connection during collision.
+    pub fn max_state(&self) -> (Option<u32>, BgpState) {
         // Prefer established
         if let Some(conn) = self.established_conn() {
             return (conn.asn, conn.state);
@@ -753,7 +752,10 @@ impl BgpServer {
 
         // Passive mode with existing task: send connection to existing task
         if peer.config.passive_mode {
-            if let Some(peer_tx) = peer.any_peer_tx() {
+            if let Some(peer_tx) = peer
+                .slot(ConnectionType::Incoming)
+                .and_then(|c| c.peer_tx.as_ref())
+            {
                 let (tcp_rx, tcp_tx) = stream.into_split();
                 let _ = peer_tx.send(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx });
                 info!(%peer_ip, "sent incoming connection to passive peer");

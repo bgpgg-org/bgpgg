@@ -809,12 +809,8 @@ impl BgpServer {
         };
 
         // Only allow soft reset on Established peers
-        let conn_state = entry.established_conn().map(|c| c.state);
-        if conn_state != Some(BgpState::Established) {
-            let _ = response.send(Err(format!(
-                "peer {} not in Established state (current: {:?})",
-                addr, conn_state
-            )));
+        if entry.established_conn().is_none() {
+            let _ = response.send(Err(format!("peer {} not in Established state", addr)));
             return;
         }
 
@@ -1122,7 +1118,7 @@ impl BgpServer {
             .peers
             .iter()
             .map(|(addr, entry)| {
-                let (asn, state) = entry.api_state();
+                let (asn, state) = entry.max_state();
                 GetPeersResponse {
                     address: addr.to_string(),
                     asn,
@@ -1165,7 +1161,7 @@ impl BgpServer {
         };
 
         let stats = entry.get_statistics().await.unwrap_or_default();
-        let (asn, state) = entry.api_state();
+        let (asn, state) = entry.max_state();
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
@@ -1337,7 +1333,7 @@ impl BgpServer {
 
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
         for (addr, entry) in self.peers.iter() {
-            let (asn, state) = entry.api_state();
+            let (asn, state) = entry.max_state();
             let peer = GetPeersResponse {
                 address: addr.to_string(),
                 asn,
