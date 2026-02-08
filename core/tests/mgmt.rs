@@ -20,6 +20,7 @@ pub use utils::*;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -39,8 +40,10 @@ async fn test_add_peer_failure() {
     // Start a listener that accepts then immediately closes connections
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let reject_port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _ = listener.accept().await;
+        let _ = accepted_tx.send(());
     });
 
     // Add peer pointing at the rejecting listener
@@ -58,14 +61,19 @@ async fn test_add_peer_failure() {
         .await;
     assert!(result.is_ok());
 
-    // RFC 4271 Event 18: Connection fails without DelayOpenTimer -> Idle
+    // Wait for TCP connection to be accepted (proves peer left initial Idle)
+    accepted_rx.await.unwrap();
+
+    // Now safe to poll for Idle - we're past initial Idle
     poll_until_stable(
         || async {
             let peers = server1.client.get_peers().await.unwrap();
-            peers.len() == 1 && peers[0].state == BgpState::Idle as i32
+            peers
+                .first()
+                .is_some_and(|p| p.state == BgpState::Idle as i32)
         },
-        std::time::Duration::from_secs(1),
-        "Peer should be in Idle state",
+        Duration::from_millis(500),
+        "Peer should stay in Idle after connection failure",
     )
     .await;
 }

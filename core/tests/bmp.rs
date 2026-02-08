@@ -189,31 +189,29 @@ async fn test_peer_up_down() {
     // Wait for peer to establish
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
-    // Read and verify PeerUp message
-    bmp_server
-        .assert_peer_up(&ExpectedPeerUp {
-            local_addr: server1.address,
-            peer_addr: server2.address,
-            peer_as: server2.asn,
-            peer_bgp_id: u32::from(server2.client.router_id),
-            peer_port: None, // Port is non-deterministic with active-active peering
-        })
-        .await;
-
     // Remove peer
     server1.remove_peer(&server2).await;
 
     // Wait for peer to be removed
     poll_peers(&server1, vec![]).await;
 
-    // Read and verify PeerDown message
+    // Read and verify PeerUp and PeerDown messages (skip any RouteMonitoring like EOR)
     bmp_server
-        .assert_peer_down(&ExpectedPeerDown {
-            peer_addr: server2.address,
-            peer_as: server2.asn,
-            peer_bgp_id: u32::from(server2.client.router_id),
-            reason: bgpgg::types::PeerDownReason::PeerDeConfigured,
-        })
+        .assert_messages_skip_routes(&[
+            ExpectedBmpMessage::PeerUp(ExpectedPeerUp {
+                local_addr: server1.address,
+                peer_addr: server2.address,
+                peer_as: server2.asn,
+                peer_bgp_id: u32::from(server2.client.router_id),
+                peer_port: None, // Port is non-deterministic with active-active peering
+            }),
+            ExpectedBmpMessage::PeerDown(ExpectedPeerDown {
+                peer_addr: server2.address,
+                peer_as: server2.asn,
+                peer_bgp_id: u32::from(server2.client.router_id),
+                reason: bgpgg::types::PeerDownReason::PeerDeConfigured,
+            }),
+        ])
         .await;
 }
 
@@ -406,9 +404,9 @@ async fn test_bmp_statistics() {
     // Wait for peer to establish
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
-    // Read first two messages - could be PeerUp and StatisticsReport in any order (race condition)
+    // Read PeerUp and StatisticsReport in any order, skipping any RouteMonitoring (e.g., EOR)
     bmp_server
-        .assert_messages_no_order(&[
+        .assert_messages_skip_routes(&[
             ExpectedBmpMessage::PeerUp(ExpectedPeerUp {
                 local_addr: server1.address,
                 peer_addr: server2.address,

@@ -474,6 +474,57 @@ impl FakeBmpServer {
         );
     }
 
+    /// Read and validate messages in any order, skipping unexpected RouteMonitoring.
+    /// Use this when tests don't care about RouteMonitoring (e.g., EOR messages).
+    pub async fn assert_messages_skip_routes(&mut self, expected: &[ExpectedBmpMessage]) {
+        let mut remaining = expected.to_vec();
+
+        while !remaining.is_empty() {
+            let (msg_type, body) = self.read_message().await;
+
+            // Skip unexpected RouteMonitoring messages (e.g., EOR)
+            if msg_type == BmpMessageType::RouteMonitoring.as_u8() {
+                let has_expected_route = remaining
+                    .iter()
+                    .any(|e| matches!(e, ExpectedBmpMessage::RouteMonitoring(_)));
+                if !has_expected_route {
+                    continue;
+                }
+            }
+
+            let msg = if msg_type == BmpMessageType::PeerUpNotification.as_u8() {
+                BmpMessage::PeerUp(self.parse_peer_up_from_body(&body))
+            } else if msg_type == BmpMessageType::PeerDownNotification.as_u8() {
+                BmpMessage::PeerDown(self.parse_peer_down_from_body(&body))
+            } else if msg_type == BmpMessageType::StatisticsReport.as_u8() {
+                BmpMessage::StatisticsReport(self.parse_statistics_from_body(&body))
+            } else if msg_type == BmpMessageType::RouteMonitoring.as_u8() {
+                BmpMessage::RouteMonitoring(self.parse_route_monitoring_from_body(&body))
+            } else {
+                panic!("Unsupported message type: {}", msg_type);
+            };
+
+            let pos = remaining.iter().position(|exp_msg| match (&msg, exp_msg) {
+                (BmpMessage::PeerUp(a), ExpectedBmpMessage::PeerUp(e)) => {
+                    validate_bmp_peer_up_msg(a, e)
+                }
+                (BmpMessage::PeerDown(a), ExpectedBmpMessage::PeerDown(e)) => {
+                    validate_bmp_peer_down_msg(a, e)
+                }
+                (BmpMessage::StatisticsReport(a), ExpectedBmpMessage::Statistics(e)) => {
+                    validate_bmp_statistics_msg(a, e)
+                }
+                (BmpMessage::RouteMonitoring(a), ExpectedBmpMessage::RouteMonitoring(e)) => {
+                    validate_bmp_route_monitoring_msg(a, e)
+                }
+                _ => false,
+            });
+
+            assert!(pos.is_some(), "Unexpected message type: {}", msg_type);
+            remaining.swap_remove(pos.unwrap());
+        }
+    }
+
     fn parse_peer_up_from_body(&self, body: &[u8]) -> PeerUpMessage {
         let peer_header = parse_peer_header(body);
         let mut offset = PEER_HEADER_SIZE;
