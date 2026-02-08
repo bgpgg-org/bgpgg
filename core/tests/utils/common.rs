@@ -97,7 +97,13 @@ impl TestServer {
     /// Add a peer to this server
     pub async fn add_peer(&mut self, peer: &TestServer) {
         self.client
-            .add_peer(format!("{}:{}", peer.address, peer.bgp_port), None)
+            .add_peer(
+                peer.address.to_string(),
+                Some(SessionConfig {
+                    port: Some(peer.bgp_port as u32),
+                    ..Default::default()
+                }),
+            )
             .await
             .unwrap();
     }
@@ -326,7 +332,7 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
 pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:0".to_string(), // Port ignored for passive peers
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -837,30 +843,25 @@ pub async fn chain_servers<const N: usize>(
     // Chain: s0 <-> s1 <-> s2 <-> ...
     for i in 0..servers.len() - 1 {
         let curr_port = servers[i].bgp_port;
-        let curr_address = servers[i].address;
+        let curr_address = servers[i].address.to_string();
         let next_port = servers[i + 1].bgp_port;
-        let next_address = servers[i + 1].address;
-
-        let curr_peer_addr = match curr_address {
-            std::net::IpAddr::V4(addr) => format!("{}:{}", addr, curr_port),
-            std::net::IpAddr::V6(addr) => format!("[{}]:{}", addr, curr_port),
-        };
-        let next_peer_addr = match next_address {
-            std::net::IpAddr::V4(addr) => format!("{}:{}", addr, next_port),
-            std::net::IpAddr::V6(addr) => format!("[{}]:{}", addr, next_port),
-        };
+        let next_address = servers[i + 1].address.to_string();
 
         // Server i adds server i+1
+        let mut cfg = session_config;
+        cfg.port = Some(next_port as u32);
         servers[i]
             .client
-            .add_peer(next_peer_addr, Some(session_config))
+            .add_peer(next_address, Some(cfg))
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
 
         // Server i+1 adds server i
+        let mut cfg = session_config;
+        cfg.port = Some(curr_port as u32);
         servers[i + 1]
             .client
-            .add_peer(curr_peer_addr, Some(session_config))
+            .add_peer(curr_address, Some(cfg))
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, i + 1));
     }
@@ -1053,21 +1054,25 @@ pub async fn mesh_servers<const N: usize>(
     for i in 0..servers.len() {
         for j in (i + 1)..servers.len() {
             let i_port = servers[i].bgp_port;
-            let i_address = servers[i].address;
+            let i_address = servers[i].address.to_string();
             let j_port = servers[j].bgp_port;
-            let j_address = servers[j].address;
+            let j_address = servers[j].address.to_string();
 
             // Server i adds server j
+            let mut cfg = session_config;
+            cfg.port = Some(j_port as u32);
             servers[i]
                 .client
-                .add_peer(format!("{}:{}", j_address, j_port), Some(session_config))
+                .add_peer(j_address, Some(cfg))
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", j, i));
 
             // Server j adds server i
+            let mut cfg = session_config;
+            cfg.port = Some(i_port as u32);
             servers[j]
                 .client
-                .add_peer(format!("{}:{}", i_address, i_port), Some(session_config))
+                .add_peer(i_address, Some(cfg))
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, j));
         }

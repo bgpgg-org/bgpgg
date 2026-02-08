@@ -273,6 +273,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
 
     PeerConfig {
         address: String::new(),
+        port: cfg.port.map(|p| p as u16).unwrap_or(defaults.port),
         idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
         damp_peer_oscillations: cfg
             .damp_peer_oscillations

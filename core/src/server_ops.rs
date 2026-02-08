@@ -639,22 +639,24 @@ impl BgpServer {
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        config: PeerConfig,
+        mut config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
         info!(peer_addr = %addr, "adding peer via request");
 
-        // Parse peer address
-        let peer_addr = match addr.parse::<SocketAddr>() {
-            Ok(a) => a,
+        // Parse peer IP address
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
             Err(e) => {
                 let _ = response.send(Err(format!("invalid peer address: {}", e)));
                 return;
             }
         };
 
-        let peer_ip = peer_addr.ip();
+        // Store address in config and construct socket address
+        config.address = addr;
+        let peer_addr = SocketAddr::new(peer_ip, config.port);
 
         // Check if peer already exists
         if self.peers.contains_key(&peer_ip) {

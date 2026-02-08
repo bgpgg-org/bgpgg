@@ -83,7 +83,7 @@ async fn test_add_bmp_server_with_existing_peers() {
     // Add an idle peer (connection will fail - address doesn't exist)
     server
         .client
-        .add_peer("192.168.255.1:179".to_string(), None)
+        .add_peer("192.168.255.1".to_string(), None)
         .await
         .unwrap();
 

@@ -769,7 +769,7 @@ async fn test_unknown_optional_attribute_handling(
     server2
         .client
         .add_peer(
-            "127.0.0.1:179".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 ..Default::default()
@@ -1306,7 +1306,7 @@ async fn test_mixed_asn_propagation() {
 async fn test_four_octet_asn_propagation() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     // Add passive peers for all FakePeer connections
-    for addr in ["127.0.0.1:179", "127.0.0.2:179", "127.0.0.3:179"] {
+    for addr in ["127.0.0.1", "127.0.0.2", "127.0.0.3"] {
         config.peers.push(bgpgg::config::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,
@@ -1415,7 +1415,7 @@ async fn test_four_octet_asn_propagation() {
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_path() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    for addr in ["127.0.0.1:179", "127.0.0.2:179"] {
+    for addr in ["127.0.0.1", "127.0.0.2"] {
         config.peers.push(bgpgg::config::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,
@@ -1495,7 +1495,7 @@ async fn test_four_octet_asn_malformed_as4_path() {
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_aggregator() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    for addr in ["127.0.0.1:179", "127.0.0.2:179"] {
+    for addr in ["127.0.0.1", "127.0.0.2"] {
         config.peers.push(bgpgg::config::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,

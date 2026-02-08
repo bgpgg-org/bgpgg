@@ -27,7 +27,7 @@ use std::net::Ipv4Addr;
 async fn test_open_unsupported_version() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -65,7 +65,7 @@ async fn test_open_unacceptable_hold_time() {
     for hold_time in test_cases {
         let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1:179".to_string(),
+            address: "127.0.0.1".to_string(),
             passive_mode: true,
             ..Default::default()
         });
@@ -107,7 +107,7 @@ async fn test_open_bad_bgp_identifier() {
     for (name, bgp_id) in test_cases {
         let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1:179".to_string(),
+            address: "127.0.0.1".to_string(),
             passive_mode: true,
             ..Default::default()
         });

@@ -440,7 +440,13 @@ impl Fsm {
 
             // ===== Active State =====
             (BgpState::Active, FsmEvent::ManualStop) => BgpState::Idle,
-            (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => BgpState::Connect,
+            (BgpState::Active, FsmEvent::ConnectRetryTimerExpires) => {
+                if self.passive_mode {
+                    BgpState::Active // Passive peers stay in Active, don't initiate connections
+                } else {
+                    BgpState::Connect
+                }
+            }
             (BgpState::Active, FsmEvent::DelayOpenTimerExpires) => BgpState::OpenSent,
             (BgpState::Active, FsmEvent::TcpConnectionConfirmed) => BgpState::OpenSent,
             // RFC 4271 Event 18: TcpConnectionFails -> Idle
@@ -1159,5 +1165,26 @@ mod tests {
             BgpState::Established,
             "Established + TcpConnectionConfirmed without GR should -> Established"
         );
+    }
+
+    #[test]
+    fn test_active_connect_retry_timer_expires() {
+        let cases = [
+            (true, BgpState::Active, "passive stays in Active"),
+            (false, BgpState::Connect, "non-passive goes to Connect"),
+        ];
+
+        for (passive_mode, expected, desc) in cases {
+            let mut fsm = Fsm::with_state(
+                BgpState::Active,
+                65000,
+                180,
+                0x01010101,
+                TEST_LOCAL_ADDR,
+                passive_mode,
+            );
+            let new_state = fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
+            assert_eq!(new_state, expected, "{}", desc);
+        }
     }
 }

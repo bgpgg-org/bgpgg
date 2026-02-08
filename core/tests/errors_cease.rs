@@ -70,8 +70,9 @@ async fn test_max_prefix_limit() {
         server2
             .client
             .add_peer(
-                format!("127.0.0.1:{}", server1.bgp_port),
+                "127.0.0.1".to_string(),
                 Some(SessionConfig {
+                    port: Some(server1.bgp_port as u32),
                     max_prefix: Some(MaxPrefixSetting { limit: 2, action }),
                     allow_automatic_stop,
                     ..Default::default()
@@ -171,7 +172,7 @@ async fn test_remove_peer_sends_cease_notification() {
     server
         .client
         .add_peer(
-            "127.0.0.1:179".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 ..Default::default()
@@ -214,7 +215,7 @@ async fn test_disable_peer_sends_admin_shutdown() {
     server
         .client
         .add_peer(
-            "127.0.0.1:179".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 ..Default::default()
@@ -256,11 +257,11 @@ async fn test_collision_immediate() {
     for (server_bgp_id, peer_bgp_id, outgoing_wins) in test_cases {
         // FakePeer listens, server will connect to it
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
-        let listener_addr = format!("127.0.0.3:{}", peer.port());
 
         let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300);
         config.peers.push(PeerConfig {
-            address: listener_addr.to_string(),
+            address: "127.0.0.3".to_string(),
+            port: peer.port(),
             ..Default::default()
         });
         let server = start_test_server(config).await;
@@ -349,11 +350,11 @@ async fn test_reject_incoming_when_established() {
 async fn test_collision_connect_state() {
     // Peer listens, server connects with DelayOpen configured
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
-    let listener_addr = format!("127.0.0.3:{}", peer.port());
 
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
-        address: listener_addr.to_string(),
+        address: "127.0.0.3".to_string(),
+        port: peer.port(),
         delay_open_time_secs: Some(2), // DelayOpen keeps peer in Connect state long enough
         ..Default::default()
     });
@@ -416,11 +417,11 @@ async fn test_collision_deferred() {
     for (server_bgp_id, peer_bgp_id, outgoing_wins) in test_cases {
         // Peer listens at 127.0.0.3, server will connect to it
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
-        let listener_addr = format!("127.0.0.3:{}", peer.port());
 
         let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300);
         config.peers.push(PeerConfig {
-            address: listener_addr.to_string(),
+            address: "127.0.0.3".to_string(),
+            port: peer.port(),
             ..Default::default()
         });
         let server = start_test_server(config).await;
@@ -500,11 +501,11 @@ async fn test_collision_deferred() {
 async fn test_collision_candidate_promotion_on_primary_disconnect() {
     // FakePeer listens, server will connect outgoing
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
-    let listener_addr = format!("127.0.0.3:{}", peer.port());
 
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
-        address: listener_addr.to_string(),
+        address: "127.0.0.3".to_string(),
+        port: peer.port(),
         ..Default::default()
     });
     let server = start_test_server(config).await;
@@ -555,11 +556,11 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
 async fn test_collision_candidate_asn_preserved_on_promotion() {
     // FakePeer listens, server will connect outgoing
     let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
-    let listener_addr = format!("127.0.0.4:{}", peer.port());
 
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
-        address: listener_addr.to_string(),
+        address: "127.0.0.4".to_string(),
+        port: peer.port(),
         ..Default::default()
     });
     let server = start_test_server(config).await;

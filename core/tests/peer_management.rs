@@ -248,8 +248,9 @@ async fn test_manually_stopped_no_auto_reconnect() {
     server1
         .client
         .add_peer(
-            format!("{}:{}", server2.address, server2.bgp_port),
+            server2.address.to_string(),
             Some(SessionConfig {
+                port: Some(server2.bgp_port as u32),
                 idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
@@ -260,8 +261,9 @@ async fn test_manually_stopped_no_auto_reconnect() {
     server2
         .client
         .add_peer(
-            format!("{}:{}", server1.address, server1.bgp_port),
+            server1.address.to_string(),
             Some(SessionConfig {
+                port: Some(server1.bgp_port as u32),
                 passive_mode: Some(true),
                 ..Default::default()
             }),
@@ -303,7 +305,7 @@ async fn test_reject_unconfigured_peer() {
     // Server with 127.0.0.2 as configured passive peer
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.2:179".to_string(),
+        address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -360,9 +362,10 @@ async fn test_manual_stop() {
         server
             .client
             .add_peer(
-                format!("127.0.0.2:{}", port),
-                delay_open_time_secs.map(|secs| SessionConfig {
-                    delay_open_time_secs: Some(secs),
+                "127.0.0.2".to_string(),
+                Some(SessionConfig {
+                    port: Some(port as u32),
+                    delay_open_time_secs,
                     ..Default::default()
                 }),
             )

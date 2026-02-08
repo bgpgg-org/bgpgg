@@ -588,7 +588,7 @@ async fn test_route_advertised_when_peer_becomes_established() {
     server
         .client
         .add_peer(
-            "127.0.0.1:179".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 ..Default::default()

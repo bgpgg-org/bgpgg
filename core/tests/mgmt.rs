@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -38,7 +38,13 @@ async fn test_add_peer_failure() {
     // Add peer via gRPC (succeeds, connection attempt is async)
     let result = server1
         .client
-        .add_peer(format!("127.0.0.1:{}", server1.bgp_port + 1000), None)
+        .add_peer(
+            "127.0.0.1".to_string(),
+            Some(SessionConfig {
+                port: Some((server1.bgp_port + 1000) as u32),
+                ..Default::default()
+            }),
+        )
         .await;
     assert!(result.is_ok());
 

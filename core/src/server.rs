@@ -635,7 +635,7 @@ impl BgpServer {
     /// Initialize configured peers from config and spawn their tasks.
     fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
         for peer_cfg in &self.config.peers.clone() {
-            let Ok(peer_addr) = peer_cfg.address.parse::<SocketAddr>() else {
+            let Ok(peer_addr) = peer_cfg.socket_addr() else {
                 error!(addr = %peer_cfg.address, "invalid peer address in config");
                 continue;
             };

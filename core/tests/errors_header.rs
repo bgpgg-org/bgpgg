@@ -28,7 +28,7 @@ use tokio::time::{timeout, Duration};
 async fn test_invalid_marker() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -71,7 +71,7 @@ async fn test_bad_message_length() {
     for (name, length) in test_cases {
         let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1:179".to_string(),
+            address: "127.0.0.1".to_string(),
             passive_mode: true,
             ..Default::default()
         });
@@ -110,7 +110,7 @@ async fn test_bad_message_length() {
 async fn test_keepalive_wrong_length() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -138,7 +138,7 @@ async fn test_keepalive_wrong_length() {
 async fn test_notification_length_too_small() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -166,7 +166,7 @@ async fn test_notification_length_too_small() {
 async fn test_invalid_message_type() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -203,7 +203,7 @@ async fn test_send_notification_without_open() {
     for flag in [true, false] {
         let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
         config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1:179".to_string(),
+            address: "127.0.0.1".to_string(),
             passive_mode: true,
             send_notification_without_open: flag,
             delay_open_time_secs: Some(60), // Delay OPEN so we can send invalid msg first

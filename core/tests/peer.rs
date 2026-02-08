@@ -58,23 +58,20 @@ async fn test_peer_down() {
         passive_mode: Some(true),
         ..Default::default()
     };
+    let mut config2 = config2;
+    config2.port = Some(server1.bgp_port as u32);
     server2
         .client
-        .add_peer(
-            format!("{}:{}", server1.address, server1.bgp_port),
-            Some(config2),
-        )
+        .add_peer(server1.address.to_string(), Some(config2))
         .await
         .unwrap();
 
     // Server1 connects to server2 with short GR timer
-    let config1 = session_config_with_gr_timer(gr_restart_time_secs);
+    let mut config1 = session_config_with_gr_timer(gr_restart_time_secs);
+    config1.port = Some(server2.bgp_port as u32);
     server1
         .client
-        .add_peer(
-            format!("{}:{}", server2.address, server2.bgp_port),
-            Some(config1),
-        )
+        .add_peer(server2.address.to_string(), Some(config1))
         .await
         .unwrap();
 
@@ -351,8 +348,9 @@ async fn test_peer_crash_and_recover() {
     server2
         .client
         .add_peer(
-            format!("127.0.0.1:{}", server1.bgp_port),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
+                port: Some(server1.bgp_port as u32),
                 passive_mode: Some(true),
                 idle_hold_time_secs: Some(0),
                 ..Default::default()
@@ -365,8 +363,9 @@ async fn test_peer_crash_and_recover() {
     server1
         .client
         .add_peer(
-            format!("127.0.0.2:{}", server2.bgp_port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(server2.bgp_port as u32),
                 idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
@@ -410,8 +409,9 @@ async fn test_peer_crash_and_recover() {
     server1
         .client
         .add_peer(
-            format!("127.0.0.2:{}", server2.bgp_port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(server2.bgp_port as u32),
                 idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
@@ -446,8 +446,9 @@ async fn test_auto_reconnect() {
     server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(port as u32),
                 idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
@@ -509,8 +510,9 @@ async fn test_idle_hold_time_delay() {
     server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(port as u32),
                 idle_hold_time_secs: Some(idle_hold_secs),
                 ..Default::default()
             }),
@@ -576,8 +578,9 @@ async fn test_allow_automatic_start_false() {
     server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(port as u32),
                 idle_hold_time_secs: None, // Disable automatic restart
                 ..Default::default()
             }),
@@ -624,8 +627,9 @@ async fn test_damp_peer_oscillations() {
     server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(port as u32),
                 idle_hold_time_secs: Some(1),
                 damp_peer_oscillations: Some(true),
                 ..Default::default()
@@ -677,7 +681,7 @@ async fn test_passive_mode() {
     server
         .client
         .add_peer(
-            "127.0.0.2:179".to_string(),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 idle_hold_time_secs: Some(0),
@@ -731,8 +735,9 @@ async fn test_delay_open() {
     server
         .client
         .add_peer(
-            format!("127.0.0.2:{}", port),
+            "127.0.0.2".to_string(),
             Some(SessionConfig {
+                port: Some(port as u32),
                 delay_open_time_secs: Some(delay_secs),
                 ..Default::default()
             }),
@@ -862,18 +867,27 @@ async fn test_ipv6_peering() {
     .await;
 
     // Peer over IPv6 (both sides must add peer)
+    // Use idle_hold_time_secs=0 for fast reconnect after initial rejection
     server1
         .client
-        .add_peer(format!("[::1]:{}", server2.bgp_port), None)
+        .add_peer(
+            "::1".to_string(),
+            Some(SessionConfig {
+                port: Some(server2.bgp_port as u32),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
 
     server2
         .client
         .add_peer(
-            format!("[::1]:{}", server1.bgp_port),
+            "::1".to_string(),
             Some(SessionConfig {
-                passive_mode: Some(true),
+                port: Some(server1.bgp_port as u32),
+                idle_hold_time_secs: Some(0),
                 ..Default::default()
             }),
         )
@@ -1153,9 +1167,10 @@ async fn test_hard_reset_non_established_error() {
     server1
         .client
         .add_peer(
-            "127.0.0.1:9999".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
+                port: Some(9999),
                 ..Default::default()
             }),
         )
@@ -1273,34 +1288,32 @@ async fn test_graceful_restart() {
             })
         };
 
+        let mut s2_cfg = s2_session_config.unwrap_or_default();
+        s2_cfg.port = Some(server1.bgp_port as u32);
         server2
             .client
-            .add_peer(
-                format!("{}:{}", server1.address, server1.bgp_port),
-                s2_session_config,
-            )
+            .add_peer(server1.address.to_string(), Some(s2_cfg))
             .await
             .unwrap();
 
         let s1_session_config = if tc.gr_enabled {
-            Some(session_config_with_gr_timer(gr_restart_time_secs))
+            session_config_with_gr_timer(gr_restart_time_secs)
         } else {
             // Disable GR
-            Some(SessionConfig {
+            SessionConfig {
                 graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
                     enabled: Some(false),
                     restart_time_secs: None,
                 }),
                 ..Default::default()
-            })
+            }
         };
 
+        let mut s1_cfg = s1_session_config;
+        s1_cfg.port = Some(server2.bgp_port as u32);
         server1
             .client
-            .add_peer(
-                format!("{}:{}", server2.address, server2.bgp_port),
-                s1_session_config,
-            )
+            .add_peer(server2.address.to_string(), Some(s1_cfg))
             .await
             .unwrap();
 
@@ -1393,7 +1406,7 @@ async fn test_graceful_restart_reconnect() {
 
     // Create FakePeer listener (ephemeral port)
     let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
-    let peer_addr = format!("127.0.0.1:{}", peer.port());
+    let peer_port = peer.port();
 
     // Start server
     let mut server = start_test_server(Config::new(
@@ -1408,8 +1421,9 @@ async fn test_graceful_restart_reconnect() {
     server
         .client
         .add_peer(
-            peer_addr,
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
+                port: Some(peer_port as u32),
                 graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
                     enabled: Some(true),
                     restart_time_secs: Some(gr_restart_time_secs),
@@ -1574,7 +1588,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
 
     // Create FakePeer listener
     let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
-    let peer_addr = format!("127.0.0.1:{}", peer.port());
+    let peer_port = peer.port();
 
     // Start server
     let mut server = start_test_server(Config::new(
@@ -1589,8 +1603,9 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     server
         .client
         .add_peer(
-            peer_addr,
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
+                port: Some(peer_port as u32),
                 graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
                     enabled: Some(true),
                     restart_time_secs: Some(gr_restart_time_secs),
@@ -1735,7 +1750,7 @@ async fn test_large_asn_requires_4byte_capability() {
     server
         .client
         .add_peer(
-            "127.0.0.1:179".to_string(),
+            "127.0.0.1".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
                 ..Default::default()

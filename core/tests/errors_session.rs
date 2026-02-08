@@ -32,7 +32,7 @@ async fn test_hold_timer_expiry() {
         hold_timer_secs as u64,
     );
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });
@@ -77,7 +77,7 @@ async fn test_hold_timer_expiry() {
 async fn test_fsm_error_update_in_openconfirm() {
     let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1:179".to_string(),
+        address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
     });

@@ -71,8 +71,12 @@ impl Default for GracefulRestartConfig {
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
+    /// Peer IP address (IPv4 or IPv6).
     #[serde(default)]
     pub address: String,
+    /// Remote BGP port (default: 179).
+    #[serde(default = "default_port")]
+    pub port: u16,
     /// IdleHoldTime - delay before automatic restart (RFC 4271 8.1.1).
     /// None disables automatic restart. Some(0) = immediate restart. Some(n) = restart after n seconds.
     #[serde(default = "default_idle_hold_time")]
@@ -124,7 +128,17 @@ fn default_passive_mode() -> bool {
     false
 }
 
+fn default_port() -> u16 {
+    179
+}
+
 impl PeerConfig {
+    /// Returns the socket address (IP + port) for this peer.
+    pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+        let ip: IpAddr = self.address.parse()?;
+        Ok(SocketAddr::new(ip, self.port))
+    }
+
     /// Returns the DelayOpenTime as a Duration, or None if disabled.
     pub fn delay_open_time(&self) -> Option<Duration> {
         self.delay_open_time_secs.map(Duration::from_secs)
@@ -140,6 +154,7 @@ impl Default for PeerConfig {
     fn default() -> Self {
         Self {
             address: String::new(),
+            port: default_port(),
             idle_hold_time_secs: default_idle_hold_time(),
             damp_peer_oscillations: default_damp_peer_oscillations(),
             allow_automatic_stop: default_allow_automatic_stop(),
