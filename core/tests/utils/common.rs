@@ -95,21 +95,23 @@ impl TestServer {
     }
 
     /// Add a peer to this server
-    pub async fn add_peer(&mut self, peer: &TestServer) {
+    pub async fn add_peer(&self, peer: &TestServer) {
+        self.add_peer_with_config(peer, SessionConfig::default())
+            .await;
+    }
+
+    /// Add a peer to this server with custom session config.
+    /// Port is always set from the peer's BGP port.
+    pub async fn add_peer_with_config(&self, peer: &TestServer, mut config: SessionConfig) {
+        config.port = Some(peer.bgp_port as u32);
         self.client
-            .add_peer(
-                peer.address.to_string(),
-                Some(SessionConfig {
-                    port: Some(peer.bgp_port as u32),
-                    ..Default::default()
-                }),
-            )
+            .add_peer(peer.address.to_string(), Some(config))
             .await
             .unwrap();
     }
 
     /// Remove a peer from this server
-    pub async fn remove_peer(&mut self, peer: &TestServer) {
+    pub async fn remove_peer(&self, peer: &TestServer) {
         self.client
             .remove_peer(peer.address.to_string())
             .await
@@ -172,6 +174,10 @@ pub struct PathParams {
     pub communities: Vec<u32>,
     pub extended_communities: Vec<ExtendedCommunity>,
     pub large_communities: Vec<LargeCommunity>,
+    /// RFC 4456: ORIGINATOR_ID (IPv4 address as string)
+    pub originator_id: Option<String>,
+    /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
+    pub cluster_list: Vec<String>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -188,6 +194,8 @@ pub fn build_path(params: PathParams) -> Path {
         communities: params.communities,
         extended_communities: params.extended_communities,
         large_communities: params.large_communities,
+        originator_id: params.originator_id,
+        cluster_list: params.cluster_list,
     }
 }
 
@@ -491,13 +499,13 @@ pub async fn setup_four_meshed_servers(
     (server1, server2, server3, server4)
 }
 
-/// Polls for route propagation to multiple servers with expected routes
-pub async fn poll_route_propagation(expectations: &[(&TestServer, Vec<Route>)]) {
-    poll_route_propagation_with_timeout(expectations, 100).await;
+/// Polls until each server's full RIB matches the expected routes exactly
+pub async fn poll_rib(expectations: &[(&TestServer, Vec<Route>)]) {
+    poll_rib_with_timeout(expectations, 100).await;
 }
 
-/// Polls for route propagation with custom timeout (iterations × 100ms)
-pub async fn poll_route_propagation_with_timeout(
+/// Polls until each server's full RIB matches exactly, with custom timeout (iterations x 100ms)
+pub async fn poll_rib_with_timeout(
     expectations: &[(&TestServer, Vec<Route>)],
     max_iterations: usize,
 ) {
@@ -518,6 +526,28 @@ pub async fn poll_route_propagation_with_timeout(
         max_iterations,
     )
     .await;
+}
+
+/// Polls until a specific route exists in a server's RIB, then asserts path attributes
+pub async fn poll_route_exists(server: &TestServer, expected: Route) {
+    poll_until(
+        || async {
+            let Ok(routes) = server.client.get_routes().await else {
+                return false;
+            };
+            routes.iter().any(|r| r.prefix == expected.prefix)
+        },
+        &format!("Timeout waiting for route {} to appear", expected.prefix),
+    )
+    .await;
+
+    let routes = server.client.get_routes().await.unwrap();
+    let actual = routes.iter().find(|r| r.prefix == expected.prefix).unwrap();
+    assert_eq!(
+        actual.paths, expected.paths,
+        "Path mismatch for route {}",
+        expected.prefix
+    );
 }
 
 /// Expected peer statistics for polling. None means don't check that field.
@@ -770,6 +800,10 @@ pub struct RouteParams {
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<bgpgg::bgp::msg_update_types::LargeCommunity>,
+    /// RFC 4456: ORIGINATOR_ID (IPv4 address as string)
+    pub originator_id: Option<String>,
+    /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
+    pub cluster_list: Vec<String>,
 }
 
 /// Announce a route with customizable attributes
@@ -792,7 +826,7 @@ pub struct RouteParams {
 ///     ..Default::default()
 /// }).await;
 /// ```
-pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
+pub async fn announce_route(server: &TestServer, params: RouteParams) {
     server
         .client
         .add_route(
@@ -806,6 +840,8 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
             params.communities,
             params.extended_communities,
             params.large_communities,
+            params.originator_id,
+            params.cluster_list,
         )
         .await
         .unwrap();
@@ -829,7 +865,7 @@ pub async fn announce_route(server: &mut TestServer, params: RouteParams) {
 /// ]).await;
 /// ```
 pub async fn chain_servers<const N: usize>(
-    mut servers: [TestServer; N],
+    servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
@@ -992,7 +1028,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// ).await;
 /// ```
 pub async fn announce_and_verify_route(
-    source: &mut TestServer,
+    source: &TestServer,
     dests: &[&TestServer],
     announce_params: RouteParams,
     expected_path: PathParams,
@@ -1011,7 +1047,7 @@ pub async fn announce_and_verify_route(
         ));
     }
 
-    poll_route_propagation(&expectations).await;
+    poll_rib(&expectations).await;
 }
 
 /// Meshes BGP servers together in a full mesh topology (active-active peering)
@@ -1035,7 +1071,7 @@ pub async fn announce_and_verify_route(
 /// // All three servers are now connected to each other
 /// ```
 pub async fn mesh_servers<const N: usize>(
-    mut servers: [TestServer; N],
+    servers: [TestServer; N],
     config: PeerConfig,
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
@@ -1097,6 +1133,83 @@ pub async fn mesh_servers<const N: usize>(
     .await;
 
     servers
+}
+
+/// Sets up route reflector topology with bidirectional peering and waits for Established.
+///
+/// - `clients_per_rr[i]` are added to `rrs[i]` with `rr_client=true`
+/// - `non_clients` connect to every RR as regular peers
+/// - RRs peer with each other as non-clients
+///
+/// # Examples
+/// ```
+/// // Single RR with 2 clients
+/// setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+///
+/// // Mixed: 1 client, 2 non-clients
+/// setup_rr(vec![&rr], vec![vec![&c1]], vec![&nc1, &nc2]).await;
+///
+/// // Dual RR chain: RRs auto-peer as non-clients
+/// setup_rr(vec![&rr1, &rr2], vec![vec![&client1], vec![&client2]], vec![]).await;
+/// ```
+pub async fn setup_rr(
+    rrs: Vec<&TestServer>,
+    clients_per_rr: Vec<Vec<&TestServer>>,
+    non_clients: Vec<&TestServer>,
+) {
+    assert_eq!(
+        rrs.len(),
+        clients_per_rr.len(),
+        "each RR must have a clients list"
+    );
+
+    let rr_client_cfg = SessionConfig {
+        rr_client: Some(true),
+        ..Default::default()
+    };
+
+    for (rr, rr_clients) in rrs.iter().zip(clients_per_rr.iter()) {
+        for client in rr_clients {
+            rr.add_peer_with_config(client, rr_client_cfg).await;
+            client.add_peer(rr).await;
+        }
+
+        for nc in &non_clients {
+            rr.add_peer(nc).await;
+            nc.add_peer(rr).await;
+        }
+    }
+
+    // RRs peer with each other as non-clients
+    for i in 0..rrs.len() {
+        for j in (i + 1)..rrs.len() {
+            rrs[i].add_peer(rrs[j]).await;
+            rrs[j].add_peer(rrs[i]).await;
+        }
+    }
+
+    // Wait for Established on all RRs
+    for (rr, rr_clients) in rrs.iter().zip(clients_per_rr.iter()) {
+        let mut expected: Vec<_> = rr_clients
+            .iter()
+            .map(|c| c.to_peer(BgpState::Established))
+            .collect();
+        expected.extend(
+            non_clients
+                .iter()
+                .map(|nc| nc.to_peer(BgpState::Established)),
+        );
+        for other_rr in &rrs {
+            if !std::ptr::eq(*rr, *other_rr) {
+                expected.push(other_rr.to_peer(BgpState::Established));
+            }
+        }
+        poll_until(
+            || async { verify_peers(rr, expected.clone()).await },
+            "Timeout waiting for RR peers to reach Established",
+        )
+        .await;
+    }
 }
 
 /// Helper to check if server has expected peers (returns bool, suitable for poll_until)

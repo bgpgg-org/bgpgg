@@ -15,42 +15,85 @@
 use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum RouteSource {
     /// Route learned from an EBGP peer (external AS)
-    Ebgp(IpAddr),
+    /// Contains peer IP and peer's BGP Router ID
+    Ebgp { peer_ip: IpAddr, bgp_id: Ipv4Addr },
     /// Route learned from an IBGP peer (same AS)
-    Ibgp(IpAddr),
+    /// Contains peer IP, peer's BGP Router ID, and whether peer is an RR client
+    Ibgp {
+        peer_ip: IpAddr,
+        bgp_id: Ipv4Addr,
+        rr_client: bool,
+    },
     /// Route originated locally by this router
     Local,
 }
 
 impl RouteSource {
     /// Create a RouteSource based on BGP session type
-    pub fn from_session(session_type: SessionType, peer_addr: IpAddr) -> Self {
+    /// rr_client: For iBGP sessions, whether the peer is configured as an RR client
+    pub fn from_session(
+        session_type: SessionType,
+        peer_ip: IpAddr,
+        bgp_id: Ipv4Addr,
+        rr_client: bool,
+    ) -> Self {
         match session_type {
-            SessionType::Ebgp => RouteSource::Ebgp(peer_addr),
-            SessionType::Ibgp => RouteSource::Ibgp(peer_addr),
+            SessionType::Ebgp => RouteSource::Ebgp { peer_ip, bgp_id },
+            SessionType::Ibgp => RouteSource::Ibgp {
+                peer_ip,
+                bgp_id,
+                rr_client,
+            },
         }
+    }
+
+    /// Check if route was learned from an RR client (only meaningful for iBGP routes)
+    pub fn is_rr_client(&self) -> bool {
+        matches!(
+            self,
+            RouteSource::Ibgp {
+                rr_client: true,
+                ..
+            }
+        )
     }
 
     /// Check if this route was learned via iBGP
     pub fn is_ibgp(&self) -> bool {
-        matches!(self, RouteSource::Ibgp(_))
+        matches!(self, RouteSource::Ibgp { .. })
     }
 
     /// Check if this route was learned via eBGP
     pub fn is_ebgp(&self) -> bool {
-        matches!(self, RouteSource::Ebgp(_))
+        matches!(self, RouteSource::Ebgp { .. })
     }
 
     /// Check if this route was originated locally
     pub fn is_local(&self) -> bool {
         matches!(self, RouteSource::Local)
+    }
+
+    /// Get the peer's BGP Router ID (for ORIGINATOR_ID)
+    pub fn bgp_id(&self) -> Option<Ipv4Addr> {
+        match self {
+            RouteSource::Ebgp { bgp_id, .. } | RouteSource::Ibgp { bgp_id, .. } => Some(*bgp_id),
+            RouteSource::Local => None,
+        }
+    }
+
+    /// Get the peer IP address
+    pub fn peer_ip(&self) -> Option<IpAddr> {
+        match self {
+            RouteSource::Ebgp { peer_ip, .. } | RouteSource::Ibgp { peer_ip, .. } => Some(*peer_ip),
+            RouteSource::Local => None,
+        }
     }
 }
 
@@ -64,19 +107,35 @@ pub struct Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
     fn test_route_source_from_session() {
         let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let bgp_id1 = Ipv4Addr::new(1, 1, 1, 1);
+        let bgp_id2 = Ipv4Addr::new(2, 2, 2, 2);
         assert_eq!(
-            RouteSource::from_session(SessionType::Ebgp, ip1),
-            RouteSource::Ebgp(ip1)
+            RouteSource::from_session(SessionType::Ebgp, ip1, bgp_id1, false),
+            RouteSource::Ebgp {
+                peer_ip: ip1,
+                bgp_id: bgp_id1
+            }
         );
         assert_eq!(
-            RouteSource::from_session(SessionType::Ibgp, ip2),
-            RouteSource::Ibgp(ip2)
+            RouteSource::from_session(SessionType::Ibgp, ip2, bgp_id2, true),
+            RouteSource::Ibgp {
+                peer_ip: ip2,
+                bgp_id: bgp_id2,
+                rr_client: true
+            }
+        );
+        assert_eq!(
+            RouteSource::from_session(SessionType::Ibgp, ip2, bgp_id2, false),
+            RouteSource::Ibgp {
+                peer_ip: ip2,
+                bgp_id: bgp_id2,
+                rr_client: false
+            }
         );
     }
 
@@ -84,8 +143,18 @@ mod tests {
     fn test_is_ibgp() {
         let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        assert!(RouteSource::Ibgp(ip1).is_ibgp());
-        assert!(!RouteSource::Ebgp(ip2).is_ibgp());
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
+        assert!(RouteSource::Ibgp {
+            peer_ip: ip1,
+            bgp_id,
+            rr_client: false
+        }
+        .is_ibgp());
+        assert!(!RouteSource::Ebgp {
+            peer_ip: ip2,
+            bgp_id
+        }
+        .is_ibgp());
         assert!(!RouteSource::Local.is_ibgp());
     }
 
@@ -93,8 +162,18 @@ mod tests {
     fn test_is_ebgp() {
         let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        assert!(RouteSource::Ebgp(ip1).is_ebgp());
-        assert!(!RouteSource::Ibgp(ip2).is_ebgp());
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
+        assert!(RouteSource::Ebgp {
+            peer_ip: ip1,
+            bgp_id
+        }
+        .is_ebgp());
+        assert!(!RouteSource::Ibgp {
+            peer_ip: ip2,
+            bgp_id,
+            rr_client: false
+        }
+        .is_ebgp());
         assert!(!RouteSource::Local.is_ebgp());
     }
 
@@ -102,8 +181,75 @@ mod tests {
     fn test_is_local() {
         let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
         assert!(RouteSource::Local.is_local());
-        assert!(!RouteSource::Ebgp(ip1).is_local());
-        assert!(!RouteSource::Ibgp(ip2).is_local());
+        assert!(!RouteSource::Ebgp {
+            peer_ip: ip1,
+            bgp_id
+        }
+        .is_local());
+        assert!(!RouteSource::Ibgp {
+            peer_ip: ip2,
+            bgp_id,
+            rr_client: false
+        }
+        .is_local());
+    }
+
+    #[test]
+    fn test_bgp_id() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
+        assert_eq!(RouteSource::Ebgp { peer_ip, bgp_id }.bgp_id(), Some(bgp_id));
+        assert_eq!(
+            RouteSource::Ibgp {
+                peer_ip,
+                bgp_id,
+                rr_client: false
+            }
+            .bgp_id(),
+            Some(bgp_id)
+        );
+        assert_eq!(RouteSource::Local.bgp_id(), None);
+    }
+
+    #[test]
+    fn test_peer_ip() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
+        assert_eq!(
+            RouteSource::Ebgp { peer_ip, bgp_id }.peer_ip(),
+            Some(peer_ip)
+        );
+        assert_eq!(
+            RouteSource::Ibgp {
+                peer_ip,
+                bgp_id,
+                rr_client: false
+            }
+            .peer_ip(),
+            Some(peer_ip)
+        );
+        assert_eq!(RouteSource::Local.peer_ip(), None);
+    }
+
+    #[test]
+    fn test_is_rr_client() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let bgp_id = Ipv4Addr::new(1, 1, 1, 1);
+        assert!(RouteSource::Ibgp {
+            peer_ip,
+            bgp_id,
+            rr_client: true
+        }
+        .is_rr_client());
+        assert!(!RouteSource::Ibgp {
+            peer_ip,
+            bgp_id,
+            rr_client: false
+        }
+        .is_rr_client());
+        assert!(!RouteSource::Ebgp { peer_ip, bgp_id }.is_rr_client());
+        assert!(!RouteSource::Local.is_rr_client());
     }
 }

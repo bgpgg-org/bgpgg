@@ -375,7 +375,7 @@ pub(super) mod tests {
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
     use crate::config::PeerConfig;
     use crate::peer::BgpOpenParams;
-    use crate::peer::{BgpState, Fsm, PeerStatistics, SessionType};
+    use crate::peer::{BgpState, Fsm, LocalConfig, PeerStatistics, SessionType};
     use crate::rib::rib_in::AdjRibIn;
     use crate::server::ConnectionType;
     use std::collections::HashSet;
@@ -408,19 +408,27 @@ pub(super) mod tests {
 
         // Create peer directly for testing
         let local_ip = crate::net::ipv4(127, 0, 0, 1);
+        let local_config = LocalConfig {
+            asn: 65000,
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            hold_time: 180,
+            addr: SocketAddr::new(local_ip, 0),
+            cluster_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        };
         Peer {
             addr: addr.ip(),
             port: addr.port(),
-            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
+            fsm: Fsm::with_state(state, false),
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
+            bgp_id: Some(std::net::Ipv4Addr::new(10, 0, 0, 1)),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
             peer_rx,
             server_tx,
-            local_addr: SocketAddr::new(local_ip, 0),
+            local_config,
             connect_retry_secs: 120,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,

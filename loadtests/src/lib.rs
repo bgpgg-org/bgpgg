@@ -130,24 +130,30 @@ pub fn create_update_message(
         }]
     };
 
-    let update = UpdateMessage::new(
+    let path = Path {
         origin,
-        as_path_segments,
-        NextHopAddr::Ipv4(next_hop),
-        routes,
+        as_path: as_path_segments,
+        next_hop: NextHopAddr::Ipv4(next_hop),
+        source: RouteSource::Local,
         local_pref,
         med,
-        false,
-        None,
+        atomic_aggregate: false,
+        aggregator: None,
         communities,
-        vec![], // extended_communities
-        vec![], // large_communities
-        vec![],
+        extended_communities: vec![],
+        large_communities: vec![],
+        unknown_attrs: vec![],
+        originator_id: None,
+        cluster_list: vec![],
+    };
+
+    let update = UpdateMessage::new(
+        &path,
+        routes,
         MessageFormat {
             use_4byte_asn: true,
         },
     );
-
     update.serialize()
 }
 
@@ -241,23 +247,30 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
         .peer_address
         .parse()
         .map_err(|_| format!("Invalid peer_address: {}", proto_path.peer_address))?;
-    let source = RouteSource::Ebgp(peer_ip);
+    // For load tests, derive bgp_id from peer_ip
+    let bgp_id = match peer_ip {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+    };
+    let source = RouteSource::Ebgp { peer_ip, bgp_id };
 
     // Convert communities
     let communities: Vec<u32> = proto_path.communities.clone();
 
-    Ok(Path::from_attributes(
+    Ok(Path {
         origin,
         as_path,
-        NextHopAddr::Ipv4(next_hop),
+        next_hop: NextHopAddr::Ipv4(next_hop),
         source,
-        proto_path.local_pref,
-        proto_path.med,
-        proto_path.atomic_aggregate,
-        None, // aggregator
+        local_pref: proto_path.local_pref,
+        med: proto_path.med,
+        atomic_aggregate: proto_path.atomic_aggregate,
+        aggregator: None,
         communities,
-        vec![], // extended_communities
-        vec![], // large_communities
-        vec![], // unknown_attrs not compared
-    ))
+        extended_communities: vec![],
+        large_communities: vec![],
+        unknown_attrs: vec![],
+        originator_id: None,
+        cluster_list: vec![],
+    })
 }

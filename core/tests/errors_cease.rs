@@ -45,7 +45,7 @@ async fn test_max_prefix_limit() {
 
     for (name, action, allow_automatic_stop, expect_disconnect) in test_cases {
         // Server1: will inject routes
-        let mut server1 = start_test_server(Config::new(
+        let server1 = start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -54,7 +54,7 @@ async fn test_max_prefix_limit() {
         .await;
 
         // Server2: will receive routes with max_prefix limit
-        let mut server2 = start_test_server(Config::new(
+        let server2 = start_test_server(Config::new(
             65002,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
@@ -90,7 +90,7 @@ async fn test_max_prefix_limit() {
         // Server1 adds 3 routes (exceeds limit of 2)
         for i in 0..3 {
             announce_route(
-                &mut server1,
+                &server1,
                 RouteParams {
                     prefix: format!("10.{}.0.0/24", i),
                     next_hop: "1.1.1.1".to_string(),
@@ -159,7 +159,7 @@ async fn test_max_prefix_limit() {
 
 #[tokio::test]
 async fn test_remove_peer_sends_cease_notification() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -202,7 +202,7 @@ async fn test_remove_peer_sends_cease_notification() {
 
 #[tokio::test]
 async fn test_disable_peer_sends_admin_shutdown() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

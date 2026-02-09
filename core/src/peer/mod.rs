@@ -20,14 +20,16 @@ use crate::bgp::multiprotocol::AfiSafi;
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info};
+use crate::net::IpNetwork;
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::Route;
+use crate::rib::{Path, Route};
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Error};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
@@ -97,6 +99,19 @@ pub struct BgpOpenParams {
     pub local_hold_time: u16,
     pub peer_capabilities: PeerCapabilities,
 }
+
+/// Local router configuration passed to each peer
+#[derive(Debug, Clone)]
+pub struct LocalConfig {
+    pub asn: u32,
+    pub bgp_id: std::net::Ipv4Addr,
+    pub hold_time: u16,
+    pub addr: SocketAddr,
+    pub cluster_id: std::net::Ipv4Addr,
+}
+
+/// (announced routes, withdrawn prefixes)
+pub(super) type RouteChanges = (Vec<(IpNetwork, Arc<Path>)>, Vec<IpNetwork>);
 
 mod fsm;
 mod incoming;
@@ -277,6 +292,8 @@ pub struct Peer {
     pub port: u16,
     pub fsm: Fsm,
     pub asn: Option<u32>,
+    /// Peer's BGP Router ID from OPEN message
+    pub bgp_id: Option<std::net::Ipv4Addr>,
     pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
@@ -285,8 +302,8 @@ pub struct Peer {
     conn: Option<TcpConnection>,
     peer_rx: mpsc::UnboundedReceiver<PeerOp>,
     server_tx: mpsc::UnboundedSender<ServerOp>,
-    /// Local address for binding outbound connections
-    local_addr: SocketAddr,
+    /// Local router configuration
+    local_config: LocalConfig,
     /// ConnectRetryTime from global config (RFC 4271 8.1.2)
     connect_retry_secs: u64,
     /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
@@ -324,28 +341,18 @@ impl Peer {
         port: u16,
         peer_rx: mpsc::UnboundedReceiver<PeerOp>,
         server_tx: mpsc::UnboundedSender<ServerOp>,
-        local_asn: u32,
-        local_hold_time: u16,
-        local_bgp_id: u32,
-        local_addr: SocketAddr,
+        local_config: LocalConfig,
         config: PeerConfig,
         connect_retry_secs: u64,
         conn_type: ConnectionType,
     ) -> Self {
-        let local_ip = local_addr.ip();
         Peer {
             addr,
             port,
-            fsm: Fsm::new(
-                local_asn,
-                local_hold_time,
-                local_bgp_id,
-                local_ip,
-                config.delay_open_time(),
-                config.passive_mode,
-            ),
+            fsm: Fsm::new(config.delay_open_time(), config.passive_mode),
             conn: None,
             asn: None,
+            bgp_id: None,
             rib_in: AdjRibIn::new(),
             session_type: None,
             statistics: PeerStatistics::default(),
@@ -357,7 +364,7 @@ impl Peer {
             config,
             peer_rx,
             server_tx,
-            local_addr,
+            local_config,
             connect_retry_secs,
             consecutive_down_count: 0,
             conn_type,
@@ -686,8 +693,8 @@ impl Peer {
                         let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
                             peer_asn: open.asn,
                             peer_hold_time: open.hold_time,
-                            local_asn: self.fsm.local_asn(),
-                            local_hold_time: self.fsm.local_hold_time(),
+                            local_asn: self.local_config.asn,
+                            local_hold_time: self.local_config.hold_time,
                             peer_capabilities: PeerCapabilities::default(),
                             peer_bgp_id: open.bgp_identifier,
                         });
@@ -755,19 +762,27 @@ pub mod test_helpers {
 
         // Create peer directly for testing
         let local_ip = ipv4(127, 0, 0, 1);
+        let local_config = LocalConfig {
+            asn: 65000,
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            hold_time: 180,
+            addr: SocketAddr::new(local_ip, 0),
+            cluster_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        };
         Peer {
             addr: addr.ip(),
             port: addr.port(),
-            fsm: Fsm::with_state(state, 65000, 180, 0x01010101, local_ip, false),
+            fsm: Fsm::with_state(state, false),
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
+            bgp_id: Some(std::net::Ipv4Addr::new(10, 0, 0, 1)),
             rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
             peer_rx,
             server_tx,
-            local_addr: SocketAddr::new(local_ip, 0),
+            local_config,
             connect_retry_secs: 120,
             consecutive_down_count: 0,
             conn_type: ConnectionType::Outgoing,

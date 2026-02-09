@@ -33,7 +33,7 @@ pub(crate) mod test_helpers {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
-    pub fn create_test_path(peer_ip: IpAddr) -> Arc<Path> {
+    pub fn create_test_path(peer_ip: IpAddr, bgp_id: Ipv4Addr) -> Arc<Path> {
         Arc::new(Path {
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
@@ -42,7 +42,7 @@ pub(crate) mod test_helpers {
                 asn_list: vec![100, 200],
             }],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp(peer_ip),
+            source: RouteSource::Ebgp { peer_ip, bgp_id },
             local_pref: Some(100),
             med: Some(0),
             atomic_aggregate: false,
@@ -51,10 +51,16 @@ pub(crate) mod test_helpers {
             extended_communities: vec![],
             large_communities: vec![],
             unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
         })
     }
 
-    pub fn create_test_path_with(peer_ip: IpAddr, f: impl FnOnce(&mut Path)) -> Arc<Path> {
+    pub fn create_test_path_with(
+        peer_ip: IpAddr,
+        bgp_id: Ipv4Addr,
+        f: impl FnOnce(&mut Path),
+    ) -> Arc<Path> {
         let mut path = Path {
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
@@ -63,7 +69,7 @@ pub(crate) mod test_helpers {
                 asn_list: vec![100, 200],
             }],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp(peer_ip),
+            source: RouteSource::Ebgp { peer_ip, bgp_id },
             local_pref: Some(100),
             med: Some(0),
             atomic_aggregate: false,
@@ -72,6 +78,8 @@ pub(crate) mod test_helpers {
             extended_communities: vec![],
             large_communities: vec![],
             unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
         };
         f(&mut path);
         Arc::new(path)

@@ -18,7 +18,7 @@ use bgpgg::grpc::BgpClient;
 use crate::{GlobalCommands, RibCommands};
 
 pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = BgpClient::connect(addr.clone())
+    let client = BgpClient::connect(addr.clone())
         .await
         .map_err(|e| format!("Failed to connect to BGP daemon at {}: {}", addr, e))?;
 
@@ -91,6 +91,8 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
                         communities_vec,
                         vec![], // extended_communities
                         vec![], // large_communities
+                        None,   // originator_id
+                        vec![], // cluster_list
                     )
                     .await?;
 

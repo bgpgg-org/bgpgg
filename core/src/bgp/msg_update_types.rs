@@ -66,6 +66,8 @@ pub mod attr_type_code {
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
     pub const COMMUNITIES: u8 = 8;
+    pub const ORIGINATOR_ID: u8 = 9;
+    pub const CLUSTER_LIST: u8 = 10;
     pub const MP_REACH_NLRI: u8 = 14;
     pub const MP_UNREACH_NLRI: u8 = 15;
     pub const EXTENDED_COMMUNITIES: u8 = 16;
@@ -103,6 +105,8 @@ pub enum PathAttrValue {
     AtomicAggregate,
     Aggregator(Aggregator),
     Communities(Vec<u32>),
+    OriginatorId(Ipv4Addr),
+    ClusterList(Vec<Ipv4Addr>),
     MpReachNlri(MpReachNlri),
     MpUnreachNlri(MpUnreachNlri),
     ExtendedCommunities(Vec<u64>),
@@ -145,6 +149,8 @@ impl PathAttribute {
             PathAttrValue::AtomicAggregate => attr_type_code::ATOMIC_AGGREGATE,
             PathAttrValue::Aggregator(_) => attr_type_code::AGGREGATOR,
             PathAttrValue::Communities(_) => attr_type_code::COMMUNITIES,
+            PathAttrValue::OriginatorId(_) => attr_type_code::ORIGINATOR_ID,
+            PathAttrValue::ClusterList(_) => attr_type_code::CLUSTER_LIST,
             PathAttrValue::MpReachNlri(_) => attr_type_code::MP_REACH_NLRI,
             PathAttrValue::MpUnreachNlri(_) => attr_type_code::MP_UNREACH_NLRI,
             PathAttrValue::ExtendedCommunities(_) => attr_type_code::EXTENDED_COMMUNITIES,
@@ -166,6 +172,8 @@ pub(crate) enum AttrType {
     AtomicAggregate = 6,
     Aggregator = 7,
     Communities = 8,
+    OriginatorId = 9,
+    ClusterList = 10,
     MpReachNlri = 14,
     MpUnreachNlri = 15,
     ExtendedCommunities = 16,
@@ -187,6 +195,8 @@ impl TryFrom<u8> for AttrType {
             6 => Ok(AttrType::AtomicAggregate),
             7 => Ok(AttrType::Aggregator),
             8 => Ok(AttrType::Communities),
+            9 => Ok(AttrType::OriginatorId),
+            10 => Ok(AttrType::ClusterList),
             14 => Ok(AttrType::MpReachNlri),
             15 => Ok(AttrType::MpUnreachNlri),
             16 => Ok(AttrType::ExtendedCommunities),
@@ -212,6 +222,9 @@ impl AttrType {
             AttrType::AtomicAggregate => PathAttrFlag::TRANSITIVE,
             AttrType::Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::Communities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are optional, non-transitive
+            AttrType::OriginatorId => PathAttrFlag::OPTIONAL,
+            AttrType::ClusterList => PathAttrFlag::OPTIONAL,
             AttrType::MpReachNlri => PathAttrFlag::OPTIONAL,
             AttrType::MpUnreachNlri => PathAttrFlag::OPTIONAL,
             AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
@@ -238,6 +251,8 @@ impl AttrType {
             AttrType::MultiExtiDisc
                 | AttrType::Aggregator
                 | AttrType::Communities
+                | AttrType::OriginatorId
+                | AttrType::ClusterList
                 | AttrType::MpReachNlri
                 | AttrType::MpUnreachNlri
                 | AttrType::ExtendedCommunities

@@ -20,7 +20,8 @@ asn: 65000
 router_id: 1.1.1.1
 listen_addr: "0.0.0.0:17900"  # (Optional) Use high port to avoid needing root
 peers:
-  - address: "192.168.1.1:17900"
+  - address: "192.168.1.1"
+    port: 17900
     asn: 65001
 ```
 

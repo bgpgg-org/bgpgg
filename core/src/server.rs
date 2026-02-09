@@ -27,14 +27,14 @@ use crate::peer::outgoing::{
     send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
 };
 use crate::peer::BgpState;
-use crate::peer::{Peer, PeerCapabilities, PeerOp, PeerStatistics};
+use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{Path, Route};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -162,6 +162,8 @@ pub enum MgmtOp {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
+        originator_id: Option<std::net::Ipv4Addr>,
+        cluster_list: Vec<std::net::Ipv4Addr>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
@@ -559,8 +561,7 @@ impl BgpServer {
 
     /// Resolve import policies for a peer from config
     pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        // Always start with default_in policy (AS-loop prevention, etc.)
-        let mut policies = vec![Arc::new(Policy::default_in(self.config.asn))];
+        let mut policies = vec![Arc::new(Policy::default_in())];
 
         // Append user-configured policies
         for name in &peer_config.import_policy {
@@ -575,13 +576,8 @@ impl BgpServer {
     }
 
     /// Resolve export policies for a peer from config
-    pub(crate) fn resolve_export_policies(
-        &self,
-        peer_config: &PeerConfig,
-        peer_asn: u32,
-    ) -> Vec<Arc<Policy>> {
-        // Always start with default_out policy (iBGP reflection prevention, etc.)
-        let mut policies = vec![Arc::new(Policy::default_out(self.config.asn, peer_asn))];
+    pub(crate) fn resolve_export_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
+        let mut policies = vec![Arc::new(Policy::default_out())];
 
         // Append user-configured policies
         for name in &peer_config.export_policy {
@@ -699,15 +695,19 @@ impl BgpServer {
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
+        let local_config = LocalConfig {
+            asn: self.config.asn,
+            bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
+            hold_time: self.config.hold_time_secs as u16,
+            addr: bind_addr,
+            cluster_id: self.config.cluster_id(),
+        };
         let peer = Peer::new(
             addr.ip(),
             addr.port(),
             peer_rx,
             self.op_tx.clone(),
-            self.config.asn,
-            self.config.hold_time_secs as u16,
-            self.local_bgp_id,
-            bind_addr,
+            local_config,
             config,
             self.config.connect_retry_secs,
             conn_type,
@@ -841,15 +841,19 @@ impl BgpServer {
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
+        let local_config = LocalConfig {
+            asn: self.config.asn,
+            bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
+            hold_time: self.config.hold_time_secs as u16,
+            addr: local_addr,
+            cluster_id: self.config.cluster_id(),
+        };
         let peer = Peer::new(
             peer_ip,
             config.port,
             peer_rx,
             self.op_tx.clone(),
-            self.config.asn,
-            self.config.hold_time_secs as u16,
-            self.local_bgp_id,
-            local_addr,
+            local_config,
             config.clone(),
             self.config.connect_retry_secs,
             ConnectionType::Incoming,
@@ -911,12 +915,17 @@ impl BgpServer {
 
     /// Propagate route changes to all established peers (except the originating peer)
     /// If originating_peer is None, propagates to all peers (used for locally originated routes)
+    ///
+    /// RFC 4456 Route Reflector filtering is handled by compute_routes_for_peer based on:
+    /// - path.source.is_rr_client(): whether source peer was an RR client
+    /// - rr_client: whether peer is an RR client
     pub(crate) async fn propagate_routes(
         &mut self,
         changed_prefixes: Vec<IpNetwork>,
         originating_peer: Option<IpAddr>,
     ) {
         let local_asn = self.config.asn;
+        let cluster_id = self.config.cluster_id();
 
         // For each changed prefix, determine what to send
         let mut to_announce = Vec::new();
@@ -950,6 +959,7 @@ impl BgpServer {
 
             // Get peer ASN, default to local ASN if not yet known
             let peer_asn = conn.asn.unwrap_or(local_asn);
+            let rr_client = entry.config.rr_client;
 
             // Get local address used for this peering session (RFC 4271 5.1.3)
             // Falls back to router ID if connection info not available
@@ -982,6 +992,8 @@ impl BgpServer {
                     local_next_hop,
                     export_policies,
                     peer_supports_4byte_asn,
+                    rr_client,
+                    cluster_id,
                 );
             } else {
                 error!(peer_ip = %peer_addr, "export policies not set for established peer");

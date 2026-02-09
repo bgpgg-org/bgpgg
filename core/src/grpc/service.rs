@@ -18,7 +18,6 @@ use crate::bgp::msg_update::{
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
-use crate::rib::RouteSource;
 use crate::server::{AdminState, MgmtOp};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
@@ -100,10 +99,11 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 })
                 .collect(),
             next_hop: path.next_hop.to_string(),
-            peer_address: match path.source {
-                RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => addr.to_string(),
-                RouteSource::Local => LOCAL_ROUTE_SOURCE_STR.to_string(),
-            },
+            peer_address: path
+                .source
+                .peer_ip()
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| LOCAL_ROUTE_SOURCE_STR.to_string()),
             local_pref: path.local_pref,
             med: path.med,
             atomic_aggregate: path.atomic_aggregate,
@@ -138,6 +138,8 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 .iter()
                 .map(internal_to_proto_large_community)
                 .collect(),
+            originator_id: path.originator_id.map(|id| id.to_string()),
+            cluster_list: path.cluster_list.iter().map(|id| id.to_string()).collect(),
         })
         .collect();
 
@@ -291,6 +293,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         import_policy: Vec::new(),
         export_policy: Vec::new(),
         graceful_restart,
+        rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
     }
 }
 
@@ -619,6 +622,21 @@ impl BgpService for BgpGrpcService {
             .map(proto_large_community_to_internal)
             .collect();
 
+        // Parse RFC 4456 route reflector attributes
+        let originator_id = req
+            .originator_id
+            .as_ref()
+            .map(|s| s.parse::<std::net::Ipv4Addr>())
+            .transpose()
+            .map_err(|_| Status::invalid_argument("Invalid originator_id IP address"))?;
+
+        let cluster_list: Vec<std::net::Ipv4Addr> = req
+            .cluster_list
+            .iter()
+            .map(|s| s.parse::<std::net::Ipv4Addr>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Status::invalid_argument("Invalid cluster_list IP address"))?;
+
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
@@ -632,6 +650,8 @@ impl BgpService for BgpGrpcService {
             communities: req.communities,
             extended_communities,
             large_communities,
+            originator_id,
+            cluster_list,
             response: tx,
         };
 
@@ -688,6 +708,27 @@ impl BgpService for BgpGrpcService {
                 .map(proto_large_community_to_internal)
                 .collect();
 
+            // Parse RFC 4456 route reflector attributes
+            let originator_id = match req
+                .originator_id
+                .as_ref()
+                .map(|s| s.parse::<std::net::Ipv4Addr>())
+                .transpose()
+            {
+                Ok(id) => id,
+                Err(_) => continue, // Skip routes with invalid originator_id
+            };
+
+            let cluster_list: Vec<std::net::Ipv4Addr> = match req
+                .cluster_list
+                .iter()
+                .map(|s| s.parse::<std::net::Ipv4Addr>())
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(cl) => cl,
+                Err(_) => continue, // Skip routes with invalid cluster_list
+            };
+
             // Send request to BGP server
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
@@ -701,6 +742,8 @@ impl BgpService for BgpGrpcService {
                 communities: req.communities,
                 extended_communities,
                 large_communities,
+                originator_id,
+                cluster_list,
                 response: tx,
             };
 

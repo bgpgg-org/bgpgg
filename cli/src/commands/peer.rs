@@ -18,7 +18,7 @@ use bgpgg::grpc::BgpClient;
 use crate::PeerCommands;
 
 pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = BgpClient::connect(addr.clone())
+    let client = BgpClient::connect(addr.clone())
         .await
         .map_err(|e| format!("Failed to connect to BGP daemon at {}: {}", addr, e))?;
 

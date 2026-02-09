@@ -72,6 +72,7 @@ message SessionConfig {
     optional uint64 min_route_advertisement_interval_secs = 8;  // MRAI timer (RFC 4271 9.2.1.1, default: 0)
     optional GracefulRestartConfig graceful_restart = 9;  // Graceful Restart settings
     optional uint32 port = 10;  // Remote BGP port (default: 179)
+    optional bool rr_client = 11;  // RFC 4456: Mark peer as route reflector client
 }
 
 // Add peer request/response
@@ -206,6 +207,9 @@ message AddRouteRequest {
     repeated uint32 communities = 8;    // BGP Communities (RFC 1997)
     repeated ExtendedCommunity extended_communities = 9; // Extended Communities (RFC 4360)
     repeated LargeCommunity large_communities = 10; // Large Communities (RFC 8092)
+    // RFC 4456: Route Reflector attributes
+    optional string originator_id = 11;  // ORIGINATOR_ID (IPv4 address)
+    repeated string cluster_list = 12;   // CLUSTER_LIST (list of IPv4 addresses)
 }
 
 message AddRouteResponse {
@@ -283,6 +287,9 @@ message Path {
     repeated uint32 communities = 9;
     repeated ExtendedCommunity extended_communities = 10;
     repeated LargeCommunity large_communities = 11;
+    // RFC 4456: Route Reflector attributes
+    optional string originator_id = 12;  // ORIGINATOR_ID (IPv4 address)
+    repeated string cluster_list = 13;   // CLUSTER_LIST (list of IPv4 addresses)
 }
 
 // Unknown attribute

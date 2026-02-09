@@ -1,0 +1,411 @@
+// Copyright 2026 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Route Reflector tests (RFC 4456)
+
+mod utils;
+pub use utils::*;
+
+use bgpgg::grpc::proto::{Origin, Route};
+use std::net::Ipv4Addr;
+use tokio::time::Duration;
+
+/// Test that Route Reflector reflects routes between iBGP clients.
+/// Topology: Client1 -- RR -- Client2 (all ASN 65001)
+/// Without RR, Client2 would not receive routes from Client1 (iBGP split horizon).
+/// With RR, Client2 receives routes reflected by the RR with ORIGINATOR_ID + CLUSTER_LIST.
+#[tokio::test]
+async fn test_route_reflector_basic() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+    let rr = start_test_server(test_config(asn, 2)).await;
+    let client2 = start_test_server(test_config(asn, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // RFC 4456: RR sets ORIGINATOR_ID to originator's router-id and prepends
+    // its cluster_id to CLUSTER_LIST when reflecting to clients
+    poll_route_exists(
+        &client2,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: rr.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["2.2.2.2".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+}
+
+/// Test RFC 4456 mixed topology: client routes reflected to everyone,
+/// non-client routes reflected to clients only.
+///
+/// Topology (all ASN 65001 / iBGP):
+///   Client (127.0.0.1, rid=1.1.1.1) -- rr_client=true on RR
+///          |
+///          RR (127.0.0.2, rid=2.2.2.2)
+///         / \
+///   NC1 (127.0.0.3, rid=3.3.3.3) -- rr_client=false
+///   NC2 (127.0.0.4, rid=4.4.4.4) -- rr_client=false
+#[tokio::test]
+async fn test_route_reflector_mixed_topology() {
+    let asn = 65001;
+    let c1 = start_test_server(test_config(asn, 1)).await;
+    let rr = start_test_server(test_config(asn, 2)).await;
+    let nc1 = start_test_server(test_config(asn, 3)).await;
+    let nc2 = start_test_server(test_config(asn, 4)).await;
+
+    setup_rr(vec![&rr], vec![vec![&c1]], vec![&nc1, &nc2]).await;
+
+    // Phase 1: Client announces route -> reflected to everyone (clients + non-clients)
+    announce_route(
+        &c1,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let client_route = vec![Route {
+        prefix: "10.1.0.0/24".to_string(),
+        paths: vec![build_path(PathParams {
+            as_path: vec![],
+            next_hop: "192.168.1.1".to_string(),
+            peer_address: rr.address.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            originator_id: Some("1.1.1.1".to_string()),
+            cluster_list: vec!["2.2.2.2".to_string()],
+            ..Default::default()
+        })],
+    }];
+
+    poll_rib(&[(&nc1, client_route.clone()), (&nc2, client_route.clone())]).await;
+
+    // Phase 2: Non-client announces route -> reflected to clients only
+    announce_route(
+        &nc1,
+        RouteParams {
+            prefix: "10.2.0.0/24".to_string(),
+            next_hop: "192.168.3.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Client should receive nc1's route via RR
+    poll_route_exists(
+        &c1,
+        Route {
+            prefix: "10.2.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![],
+                next_hop: "192.168.3.1".to_string(),
+                peer_address: rr.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                originator_id: Some("3.3.3.3".to_string()),
+                cluster_list: vec!["2.2.2.2".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+
+    // NC2 should NOT receive nc1's route (non-client -> non-client is not reflected)
+    // We already confirmed Client got it (so RR processed the route), now verify NC2 stability
+    poll_while(
+        || async {
+            let Ok(routes) = nc2.client.get_routes().await else {
+                return false;
+            };
+            // NC2 should only have the client route, not NC1's route
+            routes.len() == 1 && routes[0].prefix == "10.1.0.0/24"
+        },
+        Duration::from_secs(2),
+        "NC2 should not receive non-client route from NC1",
+    )
+    .await;
+}
+
+/// RFC 4456 Section 8: Two RRs in the same cluster (same cluster_id) must not
+/// reflect routes to each other. RR1 prepends cluster_id to CLUSTER_LIST; RR2
+/// sees its own cluster_id and rejects the route.
+///
+/// Topology: Client1 -- RR1(cluster=9.9.9.9) -- RR2(cluster=9.9.9.9) -- Client2
+#[tokio::test]
+async fn test_rr_cluster_loop_detection() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+
+    let mut rr1_config = test_config(asn, 2);
+    rr1_config.cluster_id = Some(Ipv4Addr::new(9, 9, 9, 9));
+    let rr1 = start_test_server(rr1_config).await;
+
+    let mut rr2_config = test_config(asn, 3);
+    rr2_config.cluster_id = Some(Ipv4Addr::new(9, 9, 9, 9));
+    let rr2 = start_test_server(rr2_config).await;
+
+    let client2 = start_test_server(test_config(asn, 4)).await;
+
+    setup_rr(
+        vec![&rr1, &rr2],
+        vec![vec![&client1], vec![&client2]],
+        vec![],
+    )
+    .await;
+
+    // Client1 announces route -> RR1 reflects to RR2 with CLUSTER_LIST=[9.9.9.9]
+    // RR2 sees 9.9.9.9 (its own cluster_id) -> rejects
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Route should exist on RR1 (accepted from its client)
+    poll_route_exists(
+        &rr1,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: client1.address.to_string(),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+
+    // RR2 rejected the route (cluster loop), so neither RR2 nor Client2 should have it
+    poll_while(
+        || async {
+            let Ok(rr2_routes) = rr2.client.get_routes().await else {
+                return false;
+            };
+            let Ok(client2_routes) = client2.client.get_routes().await else {
+                return false;
+            };
+            rr2_routes.is_empty() && client2_routes.is_empty()
+        },
+        Duration::from_secs(2),
+        "Route should not appear on RR2 or Client2 (same-cluster loop prevention)",
+    )
+    .await;
+}
+
+/// RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive and must be
+/// stripped when advertising to eBGP peers.
+///
+/// Topology: Client(65001) -- RR(65001) -- eBGP(65002)
+#[tokio::test]
+async fn test_rr_ebgp_attribute_stripping() {
+    let client = start_test_server(test_config(65001, 1)).await;
+    let rr = start_test_server(test_config(65001, 2)).await;
+    let ebgp_peer = start_test_server(test_config(65002, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client]], vec![&ebgp_peer]).await;
+
+    announce_route(
+        &client,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // eBGP peer should receive route WITHOUT ORIGINATOR_ID/CLUSTER_LIST
+    poll_route_exists(
+        &ebgp_peer,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001])],
+                next_hop: rr.address.to_string(),
+                peer_address: rr.address.to_string(),
+                local_pref: Some(100),
+                originator_id: None,
+                cluster_list: vec![],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+}
+
+/// RFC 4456: When cluster_id is explicitly configured, RR uses it instead of
+/// router_id in CLUSTER_LIST.
+///
+/// Topology: Client1 -- RR(cluster_id=9.9.9.9, rid=2.2.2.2) -- Client2
+#[tokio::test]
+async fn test_rr_custom_cluster_id() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+
+    let mut rr_config = test_config(asn, 2);
+    rr_config.cluster_id = Some(Ipv4Addr::new(9, 9, 9, 9));
+    let rr = start_test_server(rr_config).await;
+
+    let client2 = start_test_server(test_config(asn, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // CLUSTER_LIST should contain 9.9.9.9 (custom cluster_id), not 2.2.2.2 (router_id)
+    poll_route_exists(
+        &client2,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: rr.address.to_string(),
+                local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["9.9.9.9".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+}
+
+/// RFC 4456: Route traversing two RRs accumulates both cluster_ids in
+/// CLUSTER_LIST. ORIGINATOR_ID is preserved from the first RR.
+///
+/// Topology: Client1 -- RR1 -- RR2 -- Client2
+#[tokio::test]
+async fn test_rr_multi_hop_cluster_list() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+    let rr1 = start_test_server(test_config(asn, 2)).await;
+    let rr2 = start_test_server(test_config(asn, 3)).await;
+    let client2 = start_test_server(test_config(asn, 4)).await;
+
+    setup_rr(
+        vec![&rr1, &rr2],
+        vec![vec![&client1], vec![&client2]],
+        vec![],
+    )
+    .await;
+
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // ORIGINATOR_ID=1.1.1.1 (preserved from first RR)
+    // CLUSTER_LIST=[3.3.3.3, 2.2.2.2] (each RR prepended its own)
+    poll_route_exists(
+        &client2,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: rr2.address.to_string(),
+                local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["3.3.3.3".to_string(), "2.2.2.2".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+}
+
+/// RFC 4456: Route withdrawals must be reflected the same way as announcements.
+///
+/// Topology: Client1 -- RR -- Client2
+#[tokio::test]
+async fn test_rr_withdrawal_reflection() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+    let rr = start_test_server(test_config(asn, 2)).await;
+    let client2 = start_test_server(test_config(asn, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    poll_route_exists(
+        &client2,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: rr.address.to_string(),
+                local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["2.2.2.2".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+
+    // Withdraw and verify reflected withdrawal
+    client1
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+    poll_route_withdrawal(&[&client2]).await;
+}

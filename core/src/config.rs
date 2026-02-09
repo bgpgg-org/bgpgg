@@ -110,6 +110,9 @@ pub struct PeerConfig {
     /// Graceful Restart configuration (RFC 4724)
     #[serde(default, rename = "graceful-restart")]
     pub graceful_restart: GracefulRestartConfig,
+    /// RFC 4456: Mark this peer as a route reflector client
+    #[serde(default, rename = "rr-client")]
+    pub rr_client: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -166,6 +169,7 @@ impl Default for PeerConfig {
             import_policy: Vec::new(),
             export_policy: Vec::new(),
             graceful_restart: GracefulRestartConfig::default(),
+            rr_client: false,
         }
     }
 }
@@ -457,6 +461,9 @@ pub struct Config {
     /// Policy definitions
     #[serde(default, rename = "policy-definitions")]
     pub policy_definitions: Vec<PolicyDefinitionConfig>,
+    /// RFC 4456: Cluster ID for route reflector. Defaults to router_id if not set.
+    #[serde(default, rename = "cluster-id")]
+    pub cluster_id: Option<Ipv4Addr>,
 }
 
 fn default_listen_addr() -> String {
@@ -496,7 +503,13 @@ impl Config {
             log_level: default_log_level(),
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
+            cluster_id: None,
         }
+    }
+
+    /// RFC 4456: Get effective cluster_id (defaults to router_id)
+    pub fn cluster_id(&self) -> Ipv4Addr {
+        self.cluster_id.unwrap_or(self.router_id)
     }
 
     /// Get BMP sysName (RFC 7854). Returns configured value or default.
@@ -551,6 +564,7 @@ impl Default for Config {
             log_level: default_log_level(),
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
+            cluster_id: None,
         }
     }
 }
@@ -617,5 +631,15 @@ mod tests {
         assert!(result.is_err());
 
         std::fs::remove_file(temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_cluster_id() {
+        let mut config = Config::new(65000, "0.0.0.0:179", Ipv4Addr::new(10, 0, 0, 1), 180);
+        // Defaults to router_id
+        assert_eq!(config.cluster_id(), Ipv4Addr::new(10, 0, 0, 1));
+        // Can be overridden
+        config.cluster_id = Some(Ipv4Addr::new(1, 2, 3, 4));
+        assert_eq!(config.cluster_id(), Ipv4Addr::new(1, 2, 3, 4));
     }
 }

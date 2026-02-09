@@ -81,10 +81,14 @@ pub(super) fn validate_attribute_length(
         AttrType::Aggregator => attr_len == 6 || attr_len == 8, // 2-byte or 4-byte ASN + IPv4
         AttrType::AsPath => true,                               // Variable length
         AttrType::Communities => attr_len.is_multiple_of(4),    // Must be multiple of 4
-        AttrType::MpReachNlri => true,                          // Variable length
-        AttrType::MpUnreachNlri => true,                        // Variable length
+        // RFC 4456: ORIGINATOR_ID is 4 bytes (IPv4 address)
+        AttrType::OriginatorId => attr_len == 4,
+        // RFC 4456: CLUSTER_LIST is N*4 bytes (list of IPv4 addresses)
+        AttrType::ClusterList => attr_len.is_multiple_of(4),
+        AttrType::MpReachNlri => true,   // Variable length
+        AttrType::MpUnreachNlri => true, // Variable length
         AttrType::ExtendedCommunities => attr_len.is_multiple_of(8), // Must be multiple of 8
-        AttrType::As4Path => true,                              // Variable length (RFC 6793)
+        AttrType::As4Path => true,       // Variable length (RFC 6793)
         AttrType::As4Aggregator => true, // Variable length - validation in parser (RFC 6793)
         AttrType::LargeCommunities => attr_len.is_multiple_of(12), // Must be multiple of 12
     };
@@ -529,6 +533,25 @@ pub(super) fn read_attr_large_communities(
     Ok(large_communities)
 }
 
+/// RFC 4456: Read ORIGINATOR_ID attribute (4 bytes = IPv4 address)
+pub(super) fn read_attr_originator_id(bytes: &[u8]) -> Ipv4Addr {
+    let mut octets = [0u8; 4];
+    octets.copy_from_slice(&bytes[0..4]);
+    Ipv4Addr::from(octets)
+}
+
+/// RFC 4456: Read CLUSTER_LIST attribute (N*4 bytes = list of IPv4 addresses)
+pub(super) fn read_attr_cluster_list(bytes: &[u8]) -> Vec<Ipv4Addr> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut octets = [0u8; 4];
+            octets.copy_from_slice(chunk);
+            Ipv4Addr::from(octets)
+        })
+        .collect()
+}
+
 pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, ParserError> {
     // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
     const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
@@ -753,6 +776,14 @@ pub(super) fn read_path_attribute(
                     let communities = read_attr_communities(attr_data)?;
                     PathAttrValue::Communities(communities)
                 }
+                AttrType::OriginatorId => {
+                    let originator_id = read_attr_originator_id(attr_data);
+                    PathAttrValue::OriginatorId(originator_id)
+                }
+                AttrType::ClusterList => {
+                    let cluster_list = read_attr_cluster_list(attr_data);
+                    PathAttrValue::ClusterList(cluster_list)
+                }
                 AttrType::MpReachNlri => {
                     let mp_reach = read_attr_mp_reach_nlri(attr_data)?;
                     // Validate routes match declared AFI
@@ -948,6 +979,14 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
             }
             comm_bytes
         }
+        PathAttrValue::OriginatorId(originator_id) => originator_id.octets().to_vec(),
+        PathAttrValue::ClusterList(cluster_list) => {
+            let mut cluster_bytes = Vec::new();
+            for &cluster_id in cluster_list {
+                cluster_bytes.extend_from_slice(&cluster_id.octets());
+            }
+            cluster_bytes
+        }
         PathAttrValue::MpReachNlri(mp_reach) => write_attr_mp_reach_nlri(mp_reach),
         PathAttrValue::MpUnreachNlri(mp_unreach) => write_attr_mp_unreach_nlri(mp_unreach),
         PathAttrValue::ExtendedCommunities(ext_communities) => {
@@ -1005,6 +1044,8 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
         PathAttrValue::AtomicAggregate => AttrType::AtomicAggregate as u8,
         PathAttrValue::Aggregator(_) => AttrType::Aggregator as u8,
         PathAttrValue::Communities(_) => AttrType::Communities as u8,
+        PathAttrValue::OriginatorId(_) => AttrType::OriginatorId as u8,
+        PathAttrValue::ClusterList(_) => AttrType::ClusterList as u8,
         PathAttrValue::MpReachNlri(_) => AttrType::MpReachNlri as u8,
         PathAttrValue::MpUnreachNlri(_) => AttrType::MpUnreachNlri as u8,
         PathAttrValue::ExtendedCommunities(_) => AttrType::ExtendedCommunities as u8,
@@ -2358,5 +2399,34 @@ mod tests {
         assert!(is_confed_segment(AsPathSegmentType::AsConfedSet));
         assert!(!is_confed_segment(AsPathSegmentType::AsSequence));
         assert!(!is_confed_segment(AsPathSegmentType::AsSet));
+    }
+
+    #[test]
+    fn test_read_attr_originator_id() {
+        assert_eq!(
+            read_attr_originator_id(&[192, 168, 1, 1]),
+            Ipv4Addr::new(192, 168, 1, 1)
+        );
+        assert_eq!(
+            read_attr_originator_id(&[10, 0, 0, 1]),
+            Ipv4Addr::new(10, 0, 0, 1)
+        );
+    }
+
+    #[test]
+    fn test_read_attr_cluster_list() {
+        assert_eq!(
+            read_attr_cluster_list(&[192, 168, 1, 1]),
+            vec![Ipv4Addr::new(192, 168, 1, 1)]
+        );
+        assert_eq!(
+            read_attr_cluster_list(&[192, 168, 1, 1, 10, 0, 0, 1, 172, 16, 0, 1]),
+            vec![
+                Ipv4Addr::new(192, 168, 1, 1),
+                Ipv4Addr::new(10, 0, 0, 1),
+                Ipv4Addr::new(172, 16, 0, 1),
+            ]
+        );
+        assert!(read_attr_cluster_list(&[]).is_empty());
     }
 }

@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -80,14 +80,14 @@ async fn test_add_peer_failure() {
 
 #[tokio::test]
 async fn test_add_peer_success() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let mut server2 = start_test_server(Config::new(
+    let server2 = start_test_server(Config::new(
         65002,
         "127.0.0.1:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -112,7 +112,7 @@ async fn test_add_peer_success() {
 
 #[tokio::test]
 async fn test_remove_peer_not_found() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -127,7 +127,7 @@ async fn test_remove_peer_not_found() {
 
 #[tokio::test]
 async fn test_remove_peer_success() {
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Verify peer exists
     let peers = server1.client.get_peers().await.unwrap();
@@ -217,7 +217,7 @@ async fn test_get_routes_empty() {
 
 #[tokio::test]
 async fn test_announce_withdraw_route() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -227,7 +227,7 @@ async fn test_announce_withdraw_route() {
 
     // Announce route first
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -251,7 +251,7 @@ async fn test_announce_withdraw_route() {
 
 #[tokio::test]
 async fn test_withdraw_nonexistent_route() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -275,7 +275,7 @@ async fn test_disable_enable_peer() {
         idle_hold_time_secs: Some(1),
         ..Default::default()
     };
-    let (mut server1, server2) = setup_two_peered_servers(config).await;
+    let (server1, server2) = setup_two_peered_servers(config).await;
 
     // Disable peer
     server1
@@ -329,7 +329,7 @@ async fn test_disable_enable_peer() {
 
 #[tokio::test]
 async fn test_add_bmp_server() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -360,7 +360,7 @@ async fn test_add_bmp_server() {
 
 #[tokio::test]
 async fn test_remove_bmp_server() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -403,7 +403,7 @@ async fn test_get_bmp_servers_empty() {
 
 #[tokio::test]
 async fn test_add_route_stream() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -468,7 +468,7 @@ async fn test_add_route_stream() {
 
 #[tokio::test]
 async fn test_add_route_stream_with_invalid_route() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -528,13 +528,13 @@ async fn test_add_route_stream_with_invalid_route() {
 }
 
 async fn test_list_routes_impl(use_stream: bool) {
-    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces routes to Server1 (empty AS_PATH = local routes)
     let server2_addr = server2.address.to_string();
     for i in 0..5 {
         announce_route(
-            &mut server2,
+            &server2,
             RouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: server2_addr.clone(),
@@ -548,7 +548,7 @@ async fn test_list_routes_impl(use_stream: bool) {
     // Server1 also announces local routes
     for i in 10..15 {
         announce_route(
-            &mut server1,
+            &server1,
             RouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: "192.168.1.1".to_string(),
@@ -667,7 +667,7 @@ async fn test_list_peers_stream() {
 
 #[tokio::test]
 async fn test_get_server_info() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -681,7 +681,7 @@ async fn test_get_server_info() {
     // Add some routes
     for i in 0..5 {
         announce_route(
-            &mut server,
+            &server,
             RouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: "192.168.1.1".to_string(),
@@ -715,7 +715,7 @@ async fn test_extended_community_roundtrip() {
     use bgpgg::bgp::ext_community::*;
     use bgpgg::grpc::proto::extended_community::Community;
 
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -743,6 +743,8 @@ async fn test_extended_community_roundtrip() {
             vec![],
             ext_comms.clone(),
             vec![], // large_communities
+            None,   // originator_id
+            vec![], // cluster_list
         )
         .await
         .unwrap();
@@ -793,7 +795,7 @@ async fn test_extended_community_roundtrip() {
 
 #[tokio::test]
 async fn test_add_route_with_invalid_prefix_length() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -814,6 +816,8 @@ async fn test_add_route_with_invalid_prefix_length() {
             false,
             vec![],
             vec![],
+            vec![],
+            None,
             vec![],
         )
         .await;
@@ -836,6 +840,8 @@ async fn test_add_route_with_invalid_prefix_length() {
             vec![],
             vec![],
             vec![],
+            None,
+            vec![],
         )
         .await;
 
@@ -856,6 +862,8 @@ async fn test_add_route_with_invalid_prefix_length() {
             false,
             vec![],
             vec![],
+            vec![],
+            None,
             vec![],
         )
         .await;

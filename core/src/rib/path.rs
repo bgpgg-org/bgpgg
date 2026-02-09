@@ -35,41 +35,13 @@ pub struct Path {
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<LargeCommunity>,
     pub unknown_attrs: Vec<PathAttribute>,
+    /// RFC 4456: ORIGINATOR_ID attribute for route reflector loop prevention
+    pub originator_id: Option<std::net::Ipv4Addr>,
+    /// RFC 4456: CLUSTER_LIST attribute for route reflector loop prevention
+    pub cluster_list: Vec<std::net::Ipv4Addr>,
 }
 
 impl Path {
-    /// Create a Path from BGP UPDATE message attributes
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_attributes(
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        next_hop: NextHopAddr,
-        source: RouteSource,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        aggregator: Option<Aggregator>,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<LargeCommunity>,
-        unknown_attrs: Vec<PathAttribute>,
-    ) -> Self {
-        Path {
-            origin,
-            as_path,
-            next_hop,
-            source,
-            local_pref,
-            med,
-            atomic_aggregate,
-            aggregator,
-            communities,
-            extended_communities,
-            large_communities,
-            unknown_attrs,
-        }
-    }
-
     /// Create a Path from an UPDATE message. Returns None if required attributes are missing.
     /// peer_supports_4byte_asn: Whether the peer that sent this UPDATE supports 4-byte ASN
     pub fn from_update_msg(
@@ -98,6 +70,8 @@ impl Path {
             extended_communities: update_msg.extended_communities().unwrap_or_default(),
             large_communities: update_msg.large_communities().unwrap_or_default(),
             unknown_attrs: update_msg.unknown_attrs(),
+            originator_id: update_msg.originator_id(),
+            cluster_list: update_msg.cluster_list().unwrap_or_default(),
         })
     }
 
@@ -245,25 +219,53 @@ impl Ord for Path {
 
         // Step 5: Prefer eBGP-learned routes over iBGP-learned routes
         match (&self.source, &other.source) {
-            (RouteSource::Ebgp(_), RouteSource::Ibgp(_)) => return Ordering::Greater,
-            (RouteSource::Ibgp(_), RouteSource::Ebgp(_)) => return Ordering::Less,
+            (RouteSource::Ebgp { .. }, RouteSource::Ibgp { .. }) => return Ordering::Greater,
+            (RouteSource::Ibgp { .. }, RouteSource::Ebgp { .. }) => return Ordering::Less,
             // Local routes are considered better than any BGP-learned route
-            (RouteSource::Local, RouteSource::Ebgp(_) | RouteSource::Ibgp(_)) => {
+            (RouteSource::Local, RouteSource::Ebgp { .. } | RouteSource::Ibgp { .. }) => {
                 return Ordering::Greater
             }
-            (RouteSource::Ebgp(_) | RouteSource::Ibgp(_), RouteSource::Local) => {
+            (RouteSource::Ebgp { .. } | RouteSource::Ibgp { .. }, RouteSource::Local) => {
                 return Ordering::Less
             }
             _ => {}
         }
 
-        // Step 6: If both paths are external, prefer the route from the BGP speaker
-        // with the lowest BGP Identifier (using peer address as proxy)
+        // RFC 4456 Section 9: Prefer shorter CLUSTER_LIST
+        match other.cluster_list.len().cmp(&self.cluster_list.len()) {
+            Ordering::Greater => return Ordering::Greater,
+            Ordering::Less => return Ordering::Less,
+            Ordering::Equal => {}
+        }
+
+        // RFC 4456 Section 9: Use ORIGINATOR_ID instead of BGP ID for iBGP tie-breaking
+        if let (
+            RouteSource::Ibgp {
+                bgp_id: self_bgp_id,
+                ..
+            },
+            RouteSource::Ibgp {
+                bgp_id: other_bgp_id,
+                ..
+            },
+        ) = (&self.source, &other.source)
+        {
+            let self_id = self.originator_id.unwrap_or(*self_bgp_id);
+            let other_id = other.originator_id.unwrap_or(*other_bgp_id);
+            match other_id.cmp(&self_id) {
+                Ordering::Greater => return Ordering::Greater,
+                Ordering::Less => return Ordering::Less,
+                Ordering::Equal => {}
+            }
+        }
+
+        // Step 7: If both paths are external, prefer the route from the BGP speaker
+        // with the lowest BGP Identifier
         match (&self.source, &other.source) {
-            (RouteSource::Ebgp(a), RouteSource::Ebgp(b)) => {
+            (RouteSource::Ebgp { bgp_id: a, .. }, RouteSource::Ebgp { bgp_id: b, .. }) => {
                 b.cmp(a) // reverse for "prefer lower"
             }
-            (RouteSource::Ibgp(a), RouteSource::Ibgp(b)) => {
+            (RouteSource::Ibgp { bgp_id: a, .. }, RouteSource::Ibgp { bgp_id: b, .. }) => {
                 b.cmp(a) // also break ties for iBGP routes
             }
             _ => Ordering::Equal,
@@ -281,6 +283,10 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
     }
 
+    fn test_bgp_id(last: u8) -> Ipv4Addr {
+        Ipv4Addr::new(1, 1, 1, last)
+    }
+
     fn make_base_path() -> Path {
         Path {
             origin: Origin::IGP,
@@ -290,7 +296,10 @@ mod tests {
                 asn_list: vec![65001],
             }],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-            source: RouteSource::Ebgp(test_ip(1)),
+            source: RouteSource::Ebgp {
+                peer_ip: test_ip(1),
+                bgp_id: test_bgp_id(1),
+            },
             local_pref: Some(100),
             med: None,
             atomic_aggregate: false,
@@ -299,6 +308,8 @@ mod tests {
             extended_communities: vec![],
             large_communities: vec![],
             unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
         }
     }
 
@@ -387,7 +398,10 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ebgp(test_ip(1));
+        path2.source = RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+        };
 
         assert!(path1 > path2);
     }
@@ -397,7 +411,11 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         path1.source = RouteSource::Local;
-        path2.source = RouteSource::Ibgp(test_ip(1));
+        path2.source = RouteSource::Ibgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+            rr_client: false,
+        };
 
         assert!(path1 > path2);
     }
@@ -406,45 +424,119 @@ mod tests {
     fn test_ebgp_vs_ibgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp(test_ip(1));
-        path2.source = RouteSource::Ibgp(test_ip(2));
+        path1.source = RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+        };
+        path2.source = RouteSource::Ibgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(2),
+            rr_client: false,
+        };
 
         assert!(path1 > path2);
     }
 
     #[test]
-    fn test_peer_address_tiebreaker() {
+    fn test_peer_bgp_id_tiebreaker() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.source = RouteSource::Ebgp(test_ip(1));
-        path2.source = RouteSource::Ebgp(test_ip(2));
+        path1.source = RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+        };
+        path2.source = RouteSource::Ebgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(2),
+        };
 
-        // Lower peer address should win
+        // Lower BGP ID should win
+        assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_originator_id_tiebreaker() {
+        // RFC 4456: iBGP routes should use ORIGINATOR_ID for tie-breaking
+        let mut path1 = make_base_path();
+        let mut path2 = make_base_path();
+        path1.source = RouteSource::Ibgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(10), // Higher peer BGP ID
+            rr_client: false,
+        };
+        path2.source = RouteSource::Ibgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(1), // Lower peer BGP ID
+            rr_client: false,
+        };
+        // path1 has lower ORIGINATOR_ID, should win despite higher peer BGP ID
+        path1.originator_id = Some(test_bgp_id(1));
+        path2.originator_id = Some(test_bgp_id(2));
+
+        assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_originator_id_fallback_to_peer_id() {
+        // RFC 4456: If no ORIGINATOR_ID, fall back to peer's BGP ID
+        let mut path1 = make_base_path();
+        let mut path2 = make_base_path();
+        path1.source = RouteSource::Ibgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+            rr_client: false,
+        };
+        path2.source = RouteSource::Ibgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(2),
+            rr_client: false,
+        };
+        // No ORIGINATOR_ID set, should use peer BGP ID
+        assert!(path1 > path2);
+    }
+
+    #[test]
+    fn test_cluster_list_length() {
+        // RFC 4456: Prefer shorter CLUSTER_LIST
+        let mut path1 = make_base_path();
+        let mut path2 = make_base_path();
+        path1.cluster_list = vec![test_bgp_id(1)];
+        path2.cluster_list = vec![test_bgp_id(1), test_bgp_id(2)];
+
         assert!(path1 > path2);
     }
 
     #[test]
     fn test_from_update_msg() {
-        let source = RouteSource::Ebgp(test_ip(1));
+        let source = RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: test_bgp_id(1),
+        };
 
         // Valid UPDATE with all required attrs
-        let update = UpdateMessage::new(
-            Origin::IGP,
-            vec![AsPathSegment {
+        let path = Path {
+            origin: Origin::IGP,
+            as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
                 asn_list: vec![65001],
             }],
-            NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            source: RouteSource::Local,
+            local_pref: Some(100),
+            med: Some(50),
+            atomic_aggregate: true,
+            aggregator: None,
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        };
+        let update = UpdateMessage::new(
+            &path,
             vec![],
-            Some(100),
-            Some(50),
-            true,
-            None,
-            vec![],
-            vec![],
-            vec![],
-            vec![], // large_communities
             MessageFormat {
                 use_4byte_asn: false,
             },
@@ -511,14 +603,20 @@ mod tests {
         let tests = [
             (
                 "same AS - lower MED wins",
-                RouteSource::Ebgp(test_ip(1)),
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
                 vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,
                     asn_list: vec![65001],
                 }],
                 Some(50),
-                RouteSource::Ebgp(test_ip(1)),
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
                 vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,
@@ -529,14 +627,20 @@ mod tests {
             ),
             (
                 "different AS - MED not compared",
-                RouteSource::Ebgp(test_ip(1)),
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
                 vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,
                     asn_list: vec![65001],
                 }],
                 Some(100),
-                RouteSource::Ebgp(test_ip(1)),
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
                 vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,
@@ -560,7 +664,10 @@ mod tests {
                 RouteSource::Local,
                 vec![],
                 Some(100),
-                RouteSource::Ebgp(test_ip(1)),
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
                 vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,

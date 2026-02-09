@@ -23,9 +23,7 @@ use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use super::{Peer, SessionType};
-
-type UpdateResult = (Vec<IpNetwork>, Vec<(IpNetwork, Arc<Path>)>);
+use super::{Peer, RouteChanges, SessionType};
 
 impl Peer {
     /// Validate AFI/SAFI is negotiated and not disabled.
@@ -73,12 +71,55 @@ impl Peer {
         true
     }
 
+    /// RFC 4271: Check for AS_PATH loop (local ASN appears in path).
+    /// Returns true if loop detected (route should be rejected).
+    fn has_as_path_loop(&self, path: &Path) -> bool {
+        let local_asn = self.local_config.asn;
+        for segment in &path.as_path {
+            if segment.asn_list.contains(&local_asn) {
+                warn!(
+                    local_asn,
+                    peer = %self.addr,
+                    "rejecting UPDATE: AS_PATH contains local ASN (loop)"
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    /// RFC 4456 Section 8: Check for route reflector loop.
+    /// Returns true if loop detected (route should be rejected).
+    fn has_rr_loop(&self, path: &Path) -> bool {
+        let local_router_id = self.local_config.bgp_id;
+
+        if path.originator_id == Some(local_router_id) {
+            warn!(
+                originator_id = %local_router_id,
+                peer = %self.addr,
+                "rejecting UPDATE: ORIGINATOR_ID matches local router_id (RR loop)"
+            );
+            return true;
+        }
+
+        if path.cluster_list.contains(&self.local_config.cluster_id) {
+            warn!(
+                cluster_id = %self.local_config.cluster_id,
+                peer = %self.addr,
+                "rejecting UPDATE: CLUSTER_LIST contains local cluster_id (RR loop)"
+            );
+            return true;
+        }
+
+        false
+    }
+
     /// Handle a BGP UPDATE message
     /// Returns (withdrawn_prefixes, announced_routes) - only what changed in THIS update
     pub(super) fn handle_update(
         &mut self,
         mut update_msg: UpdateMessage,
-    ) -> Result<UpdateResult, BgpError> {
+    ) -> Result<RouteChanges, BgpError> {
         // RFC 4760 Section 7: Validate multiprotocol NLRI against negotiated capabilities
         if !self.validate_multiprotocol_capabilities(&update_msg) {
             return Ok((vec![], vec![]));
@@ -127,9 +168,10 @@ impl Peer {
             }
         }
 
-        let withdrawn = self.process_withdrawals(&update_msg);
-        let announced = self.process_announcements(&update_msg)?;
-        Ok((withdrawn, announced))
+        let mut withdrawn = self.process_withdrawals(&update_msg);
+        let (announced, rejected) = self.process_announcements(&update_msg)?;
+        withdrawn.extend(rejected);
+        Ok((announced, withdrawn))
     }
 
     /// Process withdrawn routes from an UPDATE message
@@ -168,17 +210,19 @@ impl Peer {
     fn process_announcements(
         &mut self,
         update_msg: &UpdateMessage,
-    ) -> Result<Vec<(IpNetwork, Arc<Path>)>, BgpError> {
+    ) -> Result<RouteChanges, BgpError> {
         if !self.check_max_prefix_limit(update_msg.nlri_list().len())? {
-            return Ok(Vec::new());
+            return Ok((vec![], vec![]));
         }
 
-        let mut announced = Vec::new();
+        let peer_bgp_id = self.bgp_id.ok_or(BgpError::FiniteStateMachineError)?;
 
         let source = RouteSource::from_session(
             self.session_type
                 .expect("session_type must be set in Established state"),
             self.addr,
+            peer_bgp_id,
+            self.config.rr_client,
         );
 
         let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
@@ -187,30 +231,42 @@ impl Peer {
             if !update_msg.nlri_list().is_empty() {
                 warn!(peer_ip = %self.addr, "UPDATE has NLRI but missing required attributes, skipping announcements");
             }
-            return Ok(announced);
+            return Ok((vec![], vec![]));
         };
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
-        let is_local_nexthop = match (&path.next_hop, self.fsm.local_addr()) {
+        let local_ip = self.local_config.addr.ip();
+        let is_local_nexthop = match (&path.next_hop, local_ip) {
             (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
             (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
             _ => false,
         };
         if is_local_nexthop {
             warn!(next_hop = %path.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
-            return Ok(announced);
+            return Ok((vec![], vec![]));
+        }
+
+        // RFC 4271: AS_PATH loop prevention - return prefixes as implicit withdrawals
+        if self.has_as_path_loop(&path) {
+            return Ok((vec![], update_msg.nlri_list()));
+        }
+
+        // RFC 4456 Section 8: Route Reflector loop prevention for iBGP routes
+        if self.session_type == Some(SessionType::Ibgp) && self.has_rr_loop(&path) {
+            return Ok((vec![], update_msg.nlri_list()));
         }
 
         // Wrap path in Arc once
         let path_arc = Arc::new(path);
 
+        let mut announced = Vec::new();
         for prefix in update_msg.nlri_list() {
             info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
             self.rib_in.add_route(prefix, Arc::clone(&path_arc));
             announced.push((prefix, Arc::clone(&path_arc)));
         }
 
-        Ok(announced)
+        Ok((announced, vec![]))
     }
 }
 
@@ -218,12 +274,36 @@ impl Peer {
 mod tests {
     use super::*;
     use crate::bgp::msg::MessageFormat;
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin};
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::config::MaxPrefixSetting;
     use crate::net::Ipv4Net;
     use crate::peer::BgpState;
     use crate::peer::PeerCapabilities;
+    use crate::rib::{Path, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn test_path_with_as(first_as: u32) -> Path {
+        Path {
+            origin: Origin::IGP,
+            as_path: vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![first_as],
+            }],
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            source: RouteSource::Local,
+            local_pref: None,
+            med: None,
+            atomic_aggregate: false,
+            aggregator: None,
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        }
+    }
 
     #[tokio::test]
     async fn test_validate_afi_safi() {
@@ -277,22 +357,9 @@ mod tests {
             peer.session_type = Some(session_type);
             peer.asn = Some(peer_asn);
 
+            let path = test_path_with_as(first_as);
             let update = UpdateMessage::new(
-                Origin::IGP,
-                vec![AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: 1,
-                    asn_list: vec![first_as],
-                }],
-                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-                vec![],
-                None,
-                None,
-                false,
-                None,
-                vec![],
-                vec![],
-                vec![],
+                &path,
                 vec![],
                 MessageFormat {
                     use_4byte_asn: false,
@@ -397,22 +464,8 @@ mod tests {
                     })
                     .collect();
                 let initial_update = UpdateMessage::new(
-                    Origin::IGP,
-                    vec![AsPathSegment {
-                        segment_type: AsPathSegmentType::AsSequence,
-                        segment_len: 1,
-                        asn_list: vec![65001],
-                    }],
-                    NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                    &test_path_with_as(65001),
                     initial_nlri,
-                    None,
-                    None,
-                    false,
-                    None,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![], // large_communities
                     MessageFormat {
                         use_4byte_asn: false,
                     },
@@ -430,22 +483,8 @@ mod tests {
                 .collect();
 
             let update = UpdateMessage::new(
-                Origin::IGP,
-                vec![AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: 1,
-                    asn_list: vec![65001],
-                }],
-                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                &test_path_with_as(65001),
                 nlri,
-                None,
-                None,
-                false,
-                None,
-                vec![],
-                vec![],
-                vec![],
-                vec![], // large_communities
                 MessageFormat {
                     use_4byte_asn: false,
                 },
@@ -527,9 +566,12 @@ mod tests {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
             peer.config.max_prefix = setting;
             let test_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let test_bgp_id = Ipv4Addr::new(10, 0, 0, 1);
             for i in 0..rib_count {
-                peer.rib_in
-                    .add_route(create_test_prefix_n(i as u8), create_test_path(test_ip));
+                peer.rib_in.add_route(
+                    create_test_prefix_n(i as u8),
+                    create_test_path(test_ip, test_bgp_id),
+                );
             }
 
             let result = peer.check_max_prefix_limit(incoming);

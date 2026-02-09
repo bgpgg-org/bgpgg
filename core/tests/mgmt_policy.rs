@@ -235,7 +235,7 @@ async fn test_add_defined_sets() {
     ];
 
     for (desc, input, expected) in test_cases {
-        let mut server = start_test_server(Config::new(
+        let server = start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -259,7 +259,7 @@ async fn test_add_defined_sets() {
 
 #[tokio::test]
 async fn test_add_duplicate_set_fails() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -287,7 +287,7 @@ async fn test_add_duplicate_set_fails() {
 
 #[tokio::test]
 async fn test_list_defined_sets() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -331,7 +331,7 @@ async fn test_list_defined_sets() {
 
 #[tokio::test]
 async fn test_remove_defined_set() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -370,7 +370,7 @@ async fn test_remove_defined_set() {
 
 #[tokio::test]
 async fn test_add_policy() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -422,7 +422,7 @@ async fn test_add_policy() {
 
 #[tokio::test]
 async fn test_add_policy_missing_defined_set() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -450,7 +450,7 @@ async fn test_add_policy_missing_defined_set() {
 
 #[tokio::test]
 async fn test_list_policies() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -526,7 +526,7 @@ async fn test_list_policies() {
 
 #[tokio::test]
 async fn test_remove_policy() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -575,7 +575,7 @@ async fn test_remove_policy() {
 
 #[tokio::test]
 async fn test_set_policy_assignment() {
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Create policies on server1
     server1
@@ -670,7 +670,7 @@ async fn test_set_policy_assignment() {
 
 #[tokio::test]
 async fn test_reject_policy_name_starting_with_underscore() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

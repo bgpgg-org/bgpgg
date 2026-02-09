@@ -32,7 +32,7 @@ async fn test_peer_down() {
     let gr_restart_time_secs = 3; // 3-second GR timer for testing
 
     // Set up servers
-    let [mut server1, mut server2] = [
+    let [server1, mut server2] = [
         start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
@@ -82,7 +82,7 @@ async fn test_peer_down() {
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
     announce_and_verify_route(
-        &mut server2,
+        &server2,
         &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
@@ -122,7 +122,7 @@ async fn test_peer_down() {
 
 #[tokio::test]
 async fn test_peer_down_four_node_mesh() {
-    let (mut server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
+    let (server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
         hold_timer_secs: Some(3),
         ..Default::default()
     })
@@ -131,7 +131,7 @@ async fn test_peer_down_four_node_mesh() {
     // Server1 announces a route to all peers
     let server1_addr = server1.address.to_string();
     announce_and_verify_route(
-        &mut server1,
+        &server1,
         &[&server2, &server3, &server4],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
@@ -190,7 +190,7 @@ async fn test_peer_down_four_node_mesh() {
 
     // Verify Server2 and Server3 still have the route (learned from Server1, not Server4)
     // eBGP: NEXT_HOP rewritten to router IDs
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             &server2,
             vec![Route {
@@ -329,7 +329,7 @@ async fn test_peer_crash_and_recover() {
 
     // Server2 is stable (passive, won't crash) - its port never changes
     // Server1 is active, will crash and recover
-    let mut server2 = start_test_server(Config::new(
+    let server2 = start_test_server(Config::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -398,7 +398,7 @@ async fn test_peer_crash_and_recover() {
     .await;
 
     // Restart server1 - it gets a new port, but that's fine since it initiates
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -433,7 +433,7 @@ async fn test_peer_crash_and_recover() {
 
 #[tokio::test]
 async fn test_auto_reconnect() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -495,7 +495,7 @@ async fn test_auto_reconnect() {
 /// Test that idle_hold_time delays reconnection attempts
 #[tokio::test]
 async fn test_idle_hold_time_delay() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -565,7 +565,7 @@ async fn test_idle_hold_time_delay() {
 /// Test that allow_automatic_start=false prevents auto-reconnect
 #[tokio::test]
 async fn test_allow_automatic_start_false() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -614,7 +614,7 @@ async fn test_allow_automatic_start_false() {
 /// Test that manually stopped peer doesn't auto-reconnect even with idle_hold_time configured
 #[tokio::test]
 async fn test_damp_peer_oscillations() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -669,7 +669,7 @@ async fn test_damp_peer_oscillations() {
 /// Test PassiveTcpEstablishment - server waits for remote to connect (RFC 4271 8.1.1)
 #[tokio::test]
 async fn test_passive_mode() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -719,7 +719,7 @@ async fn test_passive_mode() {
 
 #[tokio::test]
 async fn test_delay_open() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -781,7 +781,7 @@ async fn test_mrai_rate_limiting() {
 
     for (mrai_secs, num_routes) in test_cases {
         // Set MRAI on the peer config - controls how fast server1 can send updates to server2
-        let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
+        let (server1, server2) = setup_two_peered_servers(PeerConfig {
             min_route_advertisement_interval_secs: Some(mrai_secs),
             ..Default::default()
         })
@@ -792,7 +792,7 @@ async fn test_mrai_rate_limiting() {
         // Rapidly announce multiple routes
         for i in 0..num_routes {
             announce_route(
-                &mut server1,
+                &server1,
                 RouteParams {
                     prefix: format!("10.{}.0.0/24", i),
                     next_hop: "192.168.1.1".to_string(),
@@ -803,7 +803,7 @@ async fn test_mrai_rate_limiting() {
         }
 
         // Poll until all routes propagate
-        poll_route_propagation(&[(
+        poll_rib(&[(
             &server2,
             (0..num_routes)
                 .map(|i| Route {
@@ -851,7 +851,7 @@ async fn test_mrai_rate_limiting() {
 async fn test_ipv6_peering() {
     let hold_timer_secs = 3;
 
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "[::1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -859,7 +859,7 @@ async fn test_ipv6_peering() {
     ))
     .await;
 
-    let mut server2 = start_test_server(Config::new(
+    let server2 = start_test_server(Config::new(
         65002,
         "[::1]:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -974,11 +974,11 @@ async fn test_reset_peer_soft() {
 
     for tc in test_cases {
         println!("Running test case: {}", tc.name);
-        let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+        let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
         // Server1 announces a route to server2
         announce_route(
-            &mut server1,
+            &server1,
             RouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
@@ -988,7 +988,7 @@ async fn test_reset_peer_soft() {
         .await;
 
         // Wait for route to propagate
-        poll_route_propagation(&[(
+        poll_rib(&[(
             &server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
@@ -1064,7 +1064,7 @@ async fn test_reset_peer_soft() {
 async fn test_hard_reset_established() {
     // Use setup with short idle_hold_time for faster reconnect
     // Disable GR so routes are withdrawn (not marked stale) on disconnect
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
+    let (server1, server2) = setup_two_peered_servers(PeerConfig {
         idle_hold_time_secs: Some(1),
         graceful_restart: Some(GracefulRestartConfig {
             enabled: Some(false),
@@ -1076,7 +1076,7 @@ async fn test_hard_reset_established() {
 
     // Server1 announces a route to server2
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1086,7 +1086,7 @@ async fn test_hard_reset_established() {
     .await;
 
     // Wait for route to propagate
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -1118,7 +1118,7 @@ async fn test_hard_reset_established() {
     poll_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await;
 
     // Verify route is automatically re-advertised after reconnection
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -1139,7 +1139,7 @@ async fn test_hard_reset_established() {
 async fn test_hard_reset_non_established_error() {
     use bgpgg::config::Config;
 
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
@@ -1187,7 +1187,7 @@ async fn test_hard_reset_non_established_error() {
 async fn test_hard_reset_peer_not_found() {
     use bgpgg::config::Config;
 
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
@@ -1306,7 +1306,7 @@ async fn test_graceful_restart() {
         // Announce route from server1 and verify it propagates to server2
         let s1_addr = server1.address.to_string();
         announce_and_verify_route(
-            &mut server1,
+            &server1,
             &[&server2],
             RouteParams {
                 prefix: "10.0.0.0/24".to_string(),
@@ -1393,7 +1393,7 @@ async fn test_graceful_restart_reconnect() {
     let peer_port = peer.port();
 
     // Start server
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1575,7 +1575,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     let peer_port = peer.port();
 
     // Start server
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1843,7 +1843,7 @@ async fn test_large_asn_peering() {
 async fn test_large_asn_requires_4byte_capability() {
     // Create server with large ASN (> 65535)
     let large_asn = 4200000001;
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         large_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
