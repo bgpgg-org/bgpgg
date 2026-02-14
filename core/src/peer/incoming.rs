@@ -227,12 +227,20 @@ impl Peer {
 
         let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
 
-        let Some(path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn) else {
+        let Some(mut path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn)
+        else {
             if !update_msg.nlri_list().is_empty() {
                 warn!(peer_ip = %self.addr, "UPDATE has NLRI but missing required attributes, skipping announcements");
             }
             return Ok((vec![], vec![]));
         };
+
+        // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive;
+        // strip on eBGP receive in case a buggy peer sent them.
+        if self.session_type == Some(SessionType::Ebgp) {
+            path.originator_id = None;
+            path.cluster_list.clear();
+        }
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
         let local_ip = self.local_config.addr.ip();

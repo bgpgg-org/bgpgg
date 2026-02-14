@@ -941,6 +941,10 @@ impl BgpServer {
             }
         }
 
+        // TODO(add-path): Withdrawals skip RR filtering — non-client iBGP peers may
+        // receive withdrawals for routes they never got. Harmless but wasteful. Fix
+        // when adding per-peer export tracking for ADD-PATH.
+
         // Send updates to all established peers (except the originating peer)
         for (peer_addr, entry) in self.peers.iter() {
             // Get the established connection

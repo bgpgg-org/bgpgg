@@ -1318,15 +1318,20 @@ impl BgpServer {
             }
         }
 
-        // Use EXACT same filtering + transformation logic
-        // Note: For adj-rib-out query, we use router_id as next hop (hypothetical)
+        let local_next_hop = conn
+            .conn_info
+            .as_ref()
+            .map(|conn_info| conn_info.local_address)
+            .ok_or("established peer missing conn_info".to_string())?;
+
         let filtered = compute_routes_for_peer(
             &to_announce,
             self.config.asn,
             peer_asn,
-            IpAddr::V4(self.config.router_id),
+            local_next_hop,
             export_policies,
             peer_info.config.rr_client,
+            self.config.cluster_id(),
         );
 
         // Group by prefix for Route struct

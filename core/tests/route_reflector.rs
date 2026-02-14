@@ -17,9 +17,178 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::grpc::proto::{Origin, Route};
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::grpc::proto::{Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
 use tokio::time::Duration;
+
+/// RFC 4456 Section 8: ORIGINATOR_ID loop detection.
+/// A route arriving with ORIGINATOR_ID equal to the RR's own router-id must be rejected.
+///
+/// Topology: Client(rid=1.1.1.1) -- RR(rid=2.2.2.2) -- Client2(rid=3.3.3.3)
+/// Client announces a route with originator_id=2.2.2.2 (RR's router-id).
+/// RR detects the loop and rejects the route. Client2 never sees it.
+#[tokio::test]
+async fn test_rr_originator_id_loop_detection() {
+    let asn = 65001;
+    let client = start_test_server(test_config(asn, 1)).await;
+    let rr = start_test_server(test_config(asn, 2)).await;
+    let client2 = start_test_server(test_config(asn, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client, &client2]], vec![]).await;
+
+    // Announce a route with originator_id matching the RR's router-id (loop!)
+    announce_route(
+        &client,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            originator_id: Some("2.2.2.2".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Also announce a clean route to prove the path works
+    announce_route(
+        &client,
+        RouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Wait for the clean route to propagate (proves RR processed updates from Client)
+    poll_route_exists(
+        &client2,
+        Route {
+            prefix: "10.1.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: rr.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["2.2.2.2".to_string()],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+
+    // The poisoned route (originator_id=RR's rid) should never appear on Client2
+    poll_while(
+        || async {
+            let Ok(routes) = client2.client.get_routes().await else {
+                return false;
+            };
+            routes.len() == 1 && routes[0].prefix == "10.1.0.0/24"
+        },
+        Duration::from_secs(2),
+        "Poisoned route with RR's own ORIGINATOR_ID should not appear on Client2",
+    )
+    .await;
+}
+
+/// eBGP route sent to iBGP clients and non-clients without RR attributes.
+/// When an eBGP peer sends a route to the RR, the RR forwards it to all
+/// iBGP peers. Since the route came from eBGP (not iBGP), ORIGINATOR_ID
+/// and CLUSTER_LIST should NOT be added.
+///
+/// Topology: eBGP(65002) -- RR(65001) -- Client(65001)
+///                                    \-- NC(65001)
+#[tokio::test]
+async fn test_rr_ebgp_route_reflected_to_clients() {
+    let client = start_test_server(test_config(65001, 1)).await;
+    let rr = start_test_server(test_config(65001, 2)).await;
+    let ebgp_peer = start_test_server(test_config(65002, 3)).await;
+    let nc = start_test_server(test_config(65001, 4)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client]], vec![&ebgp_peer, &nc]).await;
+
+    announce_route(
+        &ebgp_peer,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.3.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Both client and non-client should receive route WITHOUT RR attributes
+    // (route came from eBGP, not iBGP - no reflection attributes needed)
+    let expected_route = Route {
+        prefix: "10.0.0.0/24".to_string(),
+        paths: vec![build_path(PathParams {
+            as_path: vec![as_sequence(vec![65002])],
+            next_hop: ebgp_peer.address.to_string(),
+            peer_address: rr.address.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            originator_id: None,
+            cluster_list: vec![],
+            ..Default::default()
+        })],
+    };
+
+    poll_rib(&[
+        (&client, vec![expected_route.clone()]),
+        (&nc, vec![expected_route]),
+    ])
+    .await;
+}
+
+/// RR locally originated routes are sent to clients without RR attributes.
+/// When the RR itself originates a route via add_route (RouteSource::Local),
+/// ORIGINATOR_ID and CLUSTER_LIST should NOT be added since the route
+/// is not being reflected from an iBGP peer.
+///
+/// Topology: Client1(65001) -- RR(65001) -- Client2(65001)
+/// RR announces a route via add_route.
+#[tokio::test]
+async fn test_rr_locally_originated_route() {
+    let asn = 65001;
+    let client1 = start_test_server(test_config(asn, 1)).await;
+    let rr = start_test_server(test_config(asn, 2)).await;
+    let client2 = start_test_server(test_config(asn, 3)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+
+    // RR itself originates a route
+    announce_route(
+        &rr,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.2.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Both clients should receive route WITHOUT ORIGINATOR_ID/CLUSTER_LIST
+    // (route is locally originated by the RR, not reflected from an iBGP peer)
+    let expected_route = Route {
+        prefix: "10.0.0.0/24".to_string(),
+        paths: vec![build_path(PathParams {
+            next_hop: "192.168.2.1".to_string(),
+            peer_address: rr.address.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            originator_id: None,
+            cluster_list: vec![],
+            ..Default::default()
+        })],
+    };
+
+    poll_rib(&[
+        (&client1, vec![expected_route.clone()]),
+        (&client2, vec![expected_route]),
+    ])
+    .await;
+}
 
 /// Test that Route Reflector reflects routes between iBGP clients.
 /// Topology: Client1 -- RR -- Client2 (all ASN 65001)
@@ -408,4 +577,81 @@ async fn test_rr_withdrawal_reflection() {
         .await
         .unwrap();
     poll_route_withdrawal(&[&client2]).await;
+}
+
+/// ORIGINATOR_ID and CLUSTER_LIST are non-transitive: they must be stripped
+/// on eBGP receive. If a buggy eBGP peer sends them, the RR should not leak
+/// them into the iBGP mesh. Uses FakePeer to inject raw UPDATE bytes
+/// bypassing our outgoing logic.
+///
+/// Topology: FakePeer(65002) -raw UPDATE-> RR(65001) -- Client(65001)
+#[tokio::test]
+async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
+    let client = start_test_server(test_config(65001, 1)).await;
+    let rr = start_test_server(test_config(65001, 2)).await;
+
+    setup_rr(vec![&rr], vec![vec![&client]], vec![]).await;
+
+    // Create FakePeer as eBGP peer; RR connects out to it
+    let mut fake = FakePeer::new("127.0.0.3:0", 65002).await;
+    let fake_port = fake.port();
+    rr.client
+        .add_peer(
+            "127.0.0.3".to_string(),
+            Some(SessionConfig {
+                port: Some(fake_port as u32),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    fake.accept().await;
+    fake.accept_handshake_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300)
+        .await;
+    fake.handshake_keepalive().await;
+
+    // Send raw UPDATE with bogus ORIGINATOR_ID and CLUSTER_LIST
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_2byte(vec![65002]),
+            &attr_next_hop(Ipv4Addr::new(127, 0, 0, 3)),
+            // Bogus non-transitive attrs that should be stripped on eBGP receive
+            &build_attr_bytes(
+                attr_flags::OPTIONAL,
+                attr_type_code::ORIGINATOR_ID,
+                4,
+                &[99, 99, 99, 99],
+            ),
+            &build_attr_bytes(
+                attr_flags::OPTIONAL,
+                attr_type_code::CLUSTER_LIST,
+                4,
+                &[88, 88, 88, 88],
+            ),
+        ],
+        &[24, 10, 0, 0], // 10.0.0.0/24
+        None,
+    );
+    fake.send_raw(&update).await;
+
+    // Client should receive route WITHOUT the bogus RR attributes
+    poll_route_exists(
+        &client,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65002])],
+                next_hop: "127.0.0.3".to_string(),
+                peer_address: rr.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                originator_id: None,
+                cluster_list: vec![],
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
 }

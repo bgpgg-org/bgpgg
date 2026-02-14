@@ -318,11 +318,11 @@ fn build_export_next_hop(
 
 /// Compute filtered and transformed routes for a peer
 /// Returns Vec of (prefix, transformed_path) ready to advertise
-/// rr_client: true if peer is configured as an RR client
 ///
 /// RFC 4456 Route Reflector rules for iBGP routes to iBGP peers:
 /// - Route from client -> reflect to all (clients + non-clients)
 /// - Route from non-client -> reflect to clients only
+/// - Sets ORIGINATOR_ID and prepends cluster_id to CLUSTER_LIST when reflecting
 pub fn compute_routes_for_peer(
     to_announce: &[(IpNetwork, Arc<Path>)],
     local_asn: u32,
@@ -330,6 +330,7 @@ pub fn compute_routes_for_peer(
     local_next_hop: IpAddr,
     export_policies: &[Arc<crate::policy::Policy>],
     rr_client: bool,
+    cluster_id: std::net::Ipv4Addr,
 ) -> Vec<(IpNetwork, Path)> {
     let is_ibgp = local_asn == peer_asn;
 
@@ -400,6 +401,11 @@ pub fn compute_routes_for_peer(
                 path_mut.cluster_list.clear();
             }
 
+            // RFC 4456: Apply RR attributes when reflecting iBGP routes to iBGP peers
+            if is_ibgp && path.source.is_ibgp() {
+                apply_rr_attributes(&mut path_mut, cluster_id);
+            }
+
             Some((*prefix, path_mut))
         })
         .collect()
@@ -421,8 +427,6 @@ fn apply_rr_attributes(path: &mut Path, cluster_id: std::net::Ipv4Addr) {
 
 /// Send route announcements to a peer
 /// Batches prefixes that share the same path attributes into single UPDATE messages
-/// rr_client: Whether peer is configured as an RR client
-/// cluster_id: Used for RFC 4456 route reflector attributes (only applied for iBGP peers)
 #[allow(clippy::too_many_arguments)]
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
@@ -440,29 +444,18 @@ pub fn send_announcements_to_peer(
         return;
     }
 
-    let is_ibgp = local_asn == peer_asn;
-
-    let mut filtered = compute_routes_for_peer(
+    let filtered = compute_routes_for_peer(
         to_announce,
         local_asn,
         peer_asn,
         local_next_hop,
         export_policies,
         rr_client,
+        cluster_id,
     );
 
     if filtered.is_empty() {
         return;
-    }
-
-    // RFC 4456: Apply RR attributes when reflecting iBGP routes to iBGP peers
-    if is_ibgp {
-        for (_, path) in filtered.iter_mut() {
-            // Only apply RR attributes to routes that were learned via iBGP
-            if path.source.is_ibgp() {
-                apply_rr_attributes(path, cluster_id);
-            }
-        }
     }
 
     // Convert back to Arc<Path> for batching
