@@ -337,6 +337,7 @@ mod tests {
                 route_refresh: false,
                 four_octet_asn: None,
                 graceful_restart: None,
+                add_path: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 
@@ -373,6 +374,7 @@ mod tests {
                 vec![],
                 MessageFormat {
                     use_4byte_asn: false,
+                    add_path: false,
                 },
             );
 
@@ -478,6 +480,7 @@ mod tests {
                     initial_nlri,
                     MessageFormat {
                         use_4byte_asn: false,
+                        add_path: false,
                     },
                 );
                 peer.handle_update(initial_update).unwrap();
@@ -497,6 +500,7 @@ mod tests {
                 nlri,
                 MessageFormat {
                     use_4byte_asn: false,
+                    add_path: false,
                 },
             );
 

@@ -20,7 +20,9 @@ use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, ParamVal};
+use crate::bgp::msg_open_types::{
+    AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
+};
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info, warn};
@@ -29,6 +31,8 @@ use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncWriteExt;
+
+use crate::config::AddPathSend;
 
 use super::{Peer, RouteChanges, SessionType};
 
@@ -47,10 +51,7 @@ fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSe
 }
 
 /// Build complete list of optional parameters for OPEN message
-fn build_optional_params(
-    asn: u32,
-    gr_config: &crate::config::GracefulRestartConfig,
-) -> Vec<OptionalParam> {
+fn build_optional_params(asn: u32, config: &crate::config::PeerConfig) -> Vec<OptionalParam> {
     let afi_safis = default_afi_safis();
     let mut optional_params = Vec::new();
 
@@ -67,7 +68,7 @@ fn build_optional_params(
     ));
 
     // Add Graceful Restart capability (RFC 4724) if enabled
-    if gr_config.enabled {
+    if config.graceful_restart.enabled {
         // Receiving Speaker mode: R bit = false (we don't preserve forwarding state)
         // F bit = false for all AFI/SAFIs (no forwarding state preservation)
         let afi_safi_list: Vec<_> = afi_safis
@@ -76,7 +77,7 @@ fn build_optional_params(
             .collect();
         optional_params.push(OptionalParam::new_capability(
             Capability::new_graceful_restart(
-                gr_config.restart_time,
+                config.graceful_restart.restart_time,
                 false, // R bit: we don't preserve forwarding state across restarts
                 afi_safi_list,
             ),
@@ -87,6 +88,22 @@ fn build_optional_params(
     optional_params.push(OptionalParam::new_capability(
         Capability::new_four_octet_asn(asn),
     ));
+
+    // Add ADD-PATH capability (RFC 7911) if configured
+    let add_path_send = !matches!(config.add_path_send, crate::config::AddPathSend::Disabled);
+    let add_path_receive = config.add_path_receive;
+    if add_path_send || add_path_receive {
+        let mode = match (add_path_send, add_path_receive) {
+            (true, true) => AddPathMode::Both,
+            (true, false) => AddPathMode::Send,
+            (false, true) => AddPathMode::Receive,
+            (false, false) => unreachable!(),
+        };
+        let entries: Vec<_> = afi_safis.iter().map(|as_| (*as_, mode)).collect();
+        optional_params.push(OptionalParam::new_capability(Capability::new_add_path(
+            &entries,
+        )));
+    }
 
     optional_params
 }
@@ -118,6 +135,10 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                     // RFC 4724: Parse Graceful Restart capability
                     capabilities.graceful_restart = cap.as_graceful_restart();
                 }
+                BgpCapabiltyCode::AddPath => {
+                    // RFC 7911: Parse ADD-PATH capability
+                    capabilities.add_path = cap.as_add_path();
+                }
                 _ => {}
             }
         }
@@ -131,9 +152,9 @@ fn create_open_message(
     asn: u32,
     hold_time: u16,
     router_id: Ipv4Addr,
-    gr_config: &crate::config::GracefulRestartConfig,
+    config: &crate::config::PeerConfig,
 ) -> OpenMessage {
-    let optional_params = build_optional_params(asn, gr_config);
+    let optional_params = build_optional_params(asn, config);
 
     // Calculate total optional params length
     let optional_params_len = optional_params
@@ -162,7 +183,7 @@ impl Peer {
             self.local_config.asn,
             self.local_config.hold_time,
             self.local_config.bgp_id,
-            &self.config.graceful_restart,
+            &self.config,
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -201,11 +222,17 @@ impl Peer {
         // Both must advertise for it to be negotiated
         let negotiated_four_octet_asn = peer_capabilities.four_octet_asn;
 
+        // Negotiate ADD-PATH capability (RFC 7911)
+        // Send is negotiated when local advertised send AND peer advertised receive
+        // Receive is negotiated when local advertised receive AND peer advertised send
+        let negotiated_add_path = self.negotiate_add_path(&peer_capabilities);
+
         self.capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
             route_refresh: negotiated_route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
             graceful_restart: peer_capabilities.graceful_restart,
+            add_path: negotiated_add_path,
         };
 
         // RFC 4724: Update FSM with GR status
@@ -239,6 +266,7 @@ impl Peer {
               route_refresh = self.capabilities.route_refresh,
               four_octet_asn = ?self.capabilities.four_octet_asn,
               graceful_restart = ?self.capabilities.graceful_restart,
+              add_path = ?self.capabilities.add_path,
               peer_ip = %self.addr,
               "peer capabilities");
 
@@ -504,6 +532,46 @@ impl Peer {
         });
     }
 
+    /// Negotiate ADD-PATH capability (RFC 7911)
+    /// Local send is negotiated when local config has send enabled AND peer advertised receive.
+    /// Local receive is negotiated when local config has receive enabled AND peer advertised send.
+    fn negotiate_add_path(&self, peer_caps: &PeerCapabilities) -> Option<AddPathCapability> {
+        let local_send = !matches!(self.config.add_path_send, AddPathSend::Disabled);
+        let local_receive = self.config.add_path_receive;
+
+        let peer_add_path = match &peer_caps.add_path {
+            Some(ap) => ap,
+            None => return None,
+        };
+
+        if !local_send && !local_receive {
+            return None;
+        }
+
+        let mut entries = Vec::new();
+        for (afi_safi, peer_mode) in &peer_add_path.entries {
+            let can_send = local_send && peer_mode.can_receive();
+            let can_recv = local_receive && peer_mode.can_send();
+
+            let mode = match (can_send, can_recv) {
+                (true, true) => Some(AddPathMode::Both),
+                (true, false) => Some(AddPathMode::Send),
+                (false, true) => Some(AddPathMode::Receive),
+                (false, false) => None,
+            };
+
+            if let Some(mode) = mode {
+                entries.push((*afi_safi, mode));
+            }
+        }
+
+        if entries.is_empty() {
+            None
+        } else {
+            Some(AddPathCapability { entries })
+        }
+    }
+
     /// Send UPDATE message bytes and reset keepalive timer (RFC 4271 requirement)
     pub(super) async fn send_update(&mut self, update_bytes: Vec<u8>) -> Result<(), io::Error> {
         let conn = self
@@ -558,8 +626,8 @@ mod tests {
 
     #[test]
     fn test_extract_capabilities() {
-        let gr_config = crate::config::GracefulRestartConfig::default();
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &gr_config);
+        let config = crate::config::PeerConfig::default();
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
         let capabilities = extract_capabilities(&open_msg);
 
         // Check multiprotocol capabilities
@@ -653,6 +721,7 @@ mod tests {
                 vec![],
                 MessageFormat {
                     use_4byte_asn: true,
+                    add_path: false,
                 },
             );
 
@@ -691,6 +760,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 

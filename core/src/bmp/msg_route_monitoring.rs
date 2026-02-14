@@ -100,6 +100,7 @@ mod tests {
             })],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 

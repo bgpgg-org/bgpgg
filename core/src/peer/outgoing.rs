@@ -206,6 +206,7 @@ pub fn send_withdrawals_to_peer(
         to_withdraw.to_vec(),
         MessageFormat {
             use_4byte_asn: peer_supports_4byte_asn,
+            add_path: false,
         },
     );
     let serialized = withdraw_msg.serialize();
@@ -425,8 +426,44 @@ fn apply_rr_attributes(path: &mut Path, cluster_id: std::net::Ipv4Addr) {
     path.cluster_list.insert(0, cluster_id);
 }
 
-/// Send route announcements to a peer
-/// Batches prefixes that share the same path attributes into single UPDATE messages
+/// Send per-path-id withdrawal messages to an ADD-PATH peer
+pub fn send_addpath_withdrawals_to_peer(
+    peer_addr: IpAddr,
+    peer_tx: &mpsc::UnboundedSender<PeerOp>,
+    to_withdraw: &[(IpNetwork, u32)],
+    peer_supports_4byte_asn: bool,
+) {
+    if to_withdraw.is_empty() {
+        return;
+    }
+
+    // Group by path_id for efficient encoding (each path_id gets its own UPDATE)
+    let mut by_path_id: HashMap<u32, Vec<IpNetwork>> = HashMap::new();
+    for (prefix, path_id) in to_withdraw {
+        by_path_id.entry(*path_id).or_default().push(*prefix);
+    }
+
+    for (path_id, prefixes) in by_path_id {
+        let withdraw_msg = UpdateMessage::new_withdraw_with_path_id(
+            prefixes.clone(),
+            MessageFormat {
+                use_4byte_asn: peer_supports_4byte_asn,
+                add_path: true,
+            },
+            Some(path_id),
+        );
+        let serialized = withdraw_msg.serialize();
+        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
+            error!(%peer_addr, error = %e, "failed to send ADD-PATH WITHDRAW to peer");
+        } else {
+            info!(count = prefixes.len(), path_id, %peer_addr, "propagated ADD-PATH withdrawals to peer");
+        }
+    }
+}
+
+/// Send route announcements to a peer.
+/// Batches prefixes that share the same path attributes into single UPDATE messages.
+/// Returns the list of (prefix, exported_path) actually sent (post-policy).
 #[allow(clippy::too_many_arguments)]
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
@@ -439,9 +476,10 @@ pub fn send_announcements_to_peer(
     peer_supports_4byte_asn: bool,
     rr_client: bool,
     cluster_id: std::net::Ipv4Addr,
-) {
+    add_path: bool,
+) -> Vec<(IpNetwork, Arc<Path>)> {
     if to_announce.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let filtered = compute_routes_for_peer(
@@ -455,7 +493,7 @@ pub fn send_announcements_to_peer(
     );
 
     if filtered.is_empty() {
-        return;
+        return Vec::new();
     }
 
     // Convert back to Arc<Path> for batching
@@ -475,6 +513,7 @@ pub fn send_announcements_to_peer(
             batch.prefixes.clone(),
             MessageFormat {
                 use_4byte_asn: peer_supports_4byte_asn,
+                add_path,
             },
         );
 
@@ -492,6 +531,8 @@ pub fn send_announcements_to_peer(
             info!(count = batch.prefixes.len(), %peer_addr, "propagated routes to peer");
         }
     }
+
+    filtered_arc
 }
 
 #[cfg(test)]
@@ -1021,6 +1062,7 @@ mod tests {
             false,
             false, // rr_client
             Ipv4Addr::new(1, 1, 1, 1),
+            false, // add_path
         );
 
         // Verify no message was sent

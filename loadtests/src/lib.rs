@@ -154,6 +154,7 @@ pub fn create_update_message(
         routes,
         MessageFormat {
             use_4byte_asn: true,
+            add_path: false,
         },
     );
     update.serialize()

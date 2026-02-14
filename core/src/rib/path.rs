@@ -105,7 +105,7 @@ impl Path {
 
         Some(Path {
             local_path_id: 0,
-            remote_path_id: None,
+            remote_path_id: update_msg.path_id(),
             origin,
             as_path,
             next_hop,
@@ -591,6 +591,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: false,
+                add_path: false,
             },
         );
         let path = Path::from_update_msg(&update, source, false);
@@ -607,6 +608,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: false,
+                add_path: false,
             },
         );
         assert!(Path::from_update_msg(&empty_update, source, false).is_none());

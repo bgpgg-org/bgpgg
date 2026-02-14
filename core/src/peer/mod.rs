@@ -15,7 +15,7 @@
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::GracefulRestartCapability;
+use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
@@ -67,6 +67,9 @@ pub struct PeerCapabilities {
     /// Graceful Restart capability (RFC 4724)
     /// Contains what the peer advertised in their OPEN message
     pub graceful_restart: Option<GracefulRestartCapability>,
+    /// ADD-PATH capability (RFC 7911)
+    /// Contains the negotiated ADD-PATH send/receive per AFI/SAFI
+    pub add_path: Option<AddPathCapability>,
 }
 
 impl PeerCapabilities {
@@ -86,6 +89,30 @@ impl PeerCapabilities {
             .as_ref()
             .map(|gr_cap| gr_cap.afi_safis())
             .unwrap_or_default()
+    }
+
+    /// Check if ADD-PATH send is negotiated for a specific AFI/SAFI
+    pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| {
+                ap.entries
+                    .iter()
+                    .any(|(as_, mode)| as_ == afi_safi && mode.can_send())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check if ADD-PATH receive is negotiated for a specific AFI/SAFI
+    pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| {
+                ap.entries
+                    .iter()
+                    .any(|(as_, mode)| as_ == afi_safi && mode.can_receive())
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -622,7 +649,10 @@ impl Peer {
 
             // Create EOR message
             let use_4byte_asn = self.capabilities.supports_four_octet_asn();
-            let format = MessageFormat { use_4byte_asn };
+            let format = MessageFormat {
+                use_4byte_asn,
+                add_path: false,
+            };
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 
             // Send EOR

@@ -14,6 +14,43 @@
 
 pub(crate) const BGP_VERSION: u8 = 4;
 
+/// RFC 7911: ADD-PATH send/receive mode per AFI/SAFI
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum AddPathMode {
+    Receive = 1,
+    Send = 2,
+    Both = 3,
+}
+
+impl AddPathMode {
+    pub fn can_send(self) -> bool {
+        matches!(self, AddPathMode::Send | AddPathMode::Both)
+    }
+
+    pub fn can_receive(self) -> bool {
+        matches!(self, AddPathMode::Receive | AddPathMode::Both)
+    }
+}
+
+impl TryFrom<u8> for AddPathMode {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(AddPathMode::Receive),
+            2 => Ok(AddPathMode::Send),
+            3 => Ok(AddPathMode::Both),
+            _ => Err(()),
+        }
+    }
+}
+
+/// RFC 7911: ADD-PATH capability information
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct AddPathCapability {
+    pub entries: Vec<(crate::bgp::multiprotocol::AfiSafi, AddPathMode)>,
+}
+
 /// Graceful Restart capability information
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct GracefulRestartCapability {
@@ -56,6 +93,7 @@ pub(crate) enum BgpCapabiltyCode {
     RouteRefresh = 2,
     GracefulRestart = 64,
     FourOctetAsn = 65,
+    AddPath = 69,
     Unknown,
 }
 
@@ -66,6 +104,7 @@ impl From<u8> for BgpCapabiltyCode {
             2 => BgpCapabiltyCode::RouteRefresh,
             64 => BgpCapabiltyCode::GracefulRestart,
             65 => BgpCapabiltyCode::FourOctetAsn,
+            69 => BgpCapabiltyCode::AddPath,
             _ => BgpCapabiltyCode::Unknown,
         }
     }
@@ -78,6 +117,7 @@ impl BgpCapabiltyCode {
             BgpCapabiltyCode::RouteRefresh => 2,
             BgpCapabiltyCode::GracefulRestart => 64,
             BgpCapabiltyCode::FourOctetAsn => 65,
+            BgpCapabiltyCode::AddPath => 69,
             BgpCapabiltyCode::Unknown => 0,
         }
     }
@@ -249,6 +289,55 @@ impl Capability {
             len: val.len() as u8,
             val,
         }
+    }
+
+    /// Create an ADD-PATH capability (RFC 7911)
+    /// Each entry is (AfiSafi, mode) where mode indicates send/receive/both
+    pub(crate) fn new_add_path(
+        entries: &[(crate::bgp::multiprotocol::AfiSafi, AddPathMode)],
+    ) -> Self {
+        let mut val = Vec::new();
+        for (afi_safi, mode) in entries {
+            let afi_bytes = (afi_safi.afi as u16).to_be_bytes();
+            val.push(afi_bytes[0]);
+            val.push(afi_bytes[1]);
+            val.push(afi_safi.safi as u8);
+            val.push(*mode as u8);
+        }
+        Capability {
+            code: BgpCapabiltyCode::AddPath,
+            len: val.len() as u8,
+            val,
+        }
+    }
+
+    /// Extract ADD-PATH capability info if this is an AddPath capability
+    pub(crate) fn as_add_path(&self) -> Option<AddPathCapability> {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        if !matches!(self.code, BgpCapabiltyCode::AddPath) {
+            return None;
+        }
+
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        // Each tuple: AFI(2) + SAFI(1) + Send/Receive(1) = 4 bytes
+        while offset + 4 <= self.val.len() {
+            let afi_val = u16::from_be_bytes([self.val[offset], self.val[offset + 1]]);
+            let safi_val = self.val[offset + 2];
+            let mode_val = self.val[offset + 3];
+
+            if let (Ok(afi), Ok(safi), Ok(mode)) = (
+                Afi::try_from(afi_val),
+                Safi::try_from(safi_val),
+                AddPathMode::try_from(mode_val),
+            ) {
+                entries.push((AfiSafi::new(afi, safi), mode));
+            }
+            offset += 4;
+        }
+
+        Some(AddPathCapability { entries })
     }
 
     /// Extract Graceful Restart capability info if this is a GracefulRestart capability
@@ -429,5 +518,37 @@ mod tests {
             assert_eq!(parsed.restart_state, restart_state);
             assert_eq!(parsed.afi_safi_list, afi_safi_list);
         }
+    }
+
+    #[test]
+    fn test_add_path_roundtrip() {
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+
+        let cases = vec![
+            vec![(ipv4_unicast, AddPathMode::Send)],
+            vec![(ipv4_unicast, AddPathMode::Receive)],
+            vec![(ipv4_unicast, AddPathMode::Both)],
+            vec![
+                (ipv4_unicast, AddPathMode::Send),
+                (ipv6_unicast, AddPathMode::Both),
+            ],
+        ];
+
+        for entries in cases {
+            let cap = Capability::new_add_path(&entries);
+            let parsed = cap.as_add_path().expect("should parse ADD-PATH capability");
+            assert_eq!(parsed.entries, entries);
+        }
+    }
+
+    #[test]
+    fn test_add_path_mode_helpers() {
+        assert!(AddPathMode::Send.can_send());
+        assert!(!AddPathMode::Send.can_receive());
+        assert!(!AddPathMode::Receive.can_send());
+        assert!(AddPathMode::Receive.can_receive());
+        assert!(AddPathMode::Both.can_send());
+        assert!(AddPathMode::Both.can_receive());
     }
 }

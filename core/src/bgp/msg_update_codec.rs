@@ -659,7 +659,7 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     bytes.push(0);
 
     // NLRI
-    let nlri_bytes = write_nlri_list(&mp_reach.nlri);
+    let nlri_bytes = write_nlri_list(&mp_reach.nlri, None);
     bytes.extend_from_slice(&nlri_bytes);
 
     bytes
@@ -675,7 +675,7 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     bytes.push(mp_unreach.safi as u8);
 
     // Withdrawn routes
-    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
+    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes, None));
 
     bytes
 }
@@ -912,9 +912,13 @@ pub(super) fn read_path_attributes(
     Ok(path_attributes)
 }
 
-pub(super) fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
+pub(super) fn write_nlri_list(nlri_list: &[IpNetwork], path_id: Option<u32>) -> Vec<u8> {
     let mut bytes = Vec::new();
     for network in nlri_list {
+        // RFC 7911: prepend 4-byte path identifier when ADD-PATH is enabled
+        if let Some(pid) = path_id {
+            bytes.extend_from_slice(&pid.to_be_bytes());
+        }
         match network {
             IpNetwork::V4(net) => {
                 bytes.push(net.prefix_length);

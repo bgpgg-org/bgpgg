@@ -68,6 +68,20 @@ impl Default for GracefulRestartConfig {
     }
 }
 
+/// RFC 7911: ADD-PATH send mode
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AddPathSend {
+    /// Do not send multiple paths (default)
+    #[default]
+    Disabled,
+    /// Send all paths for each prefix
+    All,
+    /// Send up to N best paths for each prefix
+    #[serde(rename = "best")]
+    Best(u32),
+}
+
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
@@ -113,6 +127,12 @@ pub struct PeerConfig {
     /// RFC 4456: Mark this peer as a route reflector client
     #[serde(default, rename = "rr-client")]
     pub rr_client: bool,
+    /// RFC 7911: ADD-PATH send mode for this peer
+    #[serde(default, rename = "add-path-send")]
+    pub add_path_send: AddPathSend,
+    /// RFC 7911: Whether to accept multiple paths from this peer
+    #[serde(default, rename = "add-path-receive")]
+    pub add_path_receive: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -170,6 +190,8 @@ impl Default for PeerConfig {
             export_policy: Vec::new(),
             graceful_restart: GracefulRestartConfig::default(),
             rr_client: false,
+            add_path_send: AddPathSend::default(),
+            add_path_receive: false,
         }
     }
 }

@@ -25,7 +25,7 @@ use super::msg_update_codec::{
 };
 use super::msg_update_types::{MpReachNlri, MpUnreachNlri, AS_TRANS, MAX_2BYTE_ASN};
 use super::multiprotocol::{Afi, Safi};
-use super::utils::{parse_nlri_list, ParserError};
+use super::utils::{parse_nlri_list, parse_nlri_list_addpath, ParserError};
 use crate::net::IpNetwork;
 use crate::rib::Path;
 
@@ -145,6 +145,12 @@ impl UpdateMessage {
 
         let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
+        let path_id = if format.add_path {
+            Some(path.local_path_id)
+        } else {
+            None
+        };
+
         UpdateMessage {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
@@ -152,10 +158,19 @@ impl UpdateMessage {
             path_attributes,
             nlri_list: ipv4_routes,
             format,
+            path_id,
         }
     }
 
     pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>, format: MessageFormat) -> Self {
+        Self::new_withdraw_with_path_id(withdrawn_routes, format, None)
+    }
+
+    pub fn new_withdraw_with_path_id(
+        withdrawn_routes: Vec<IpNetwork>,
+        format: MessageFormat,
+        path_id: Option<u32>,
+    ) -> Self {
         // Partition withdrawals by address family
         let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn_routes
             .into_iter()
@@ -175,7 +190,7 @@ impl UpdateMessage {
             });
         }
 
-        let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn);
+        let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn, path_id);
         let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
         UpdateMessage {
@@ -185,6 +200,7 @@ impl UpdateMessage {
             path_attributes,
             nlri_list: vec![],
             format,
+            path_id,
         }
     }
 
@@ -507,14 +523,39 @@ impl UpdateMessage {
         self.format.use_4byte_asn
     }
 
+    /// RFC 7911: Get the path identifier from ADD-PATH encoding
+    pub fn path_id(&self) -> Option<u32> {
+        self.path_id
+    }
+
     pub fn from_bytes(bytes: Vec<u8>, use_4byte_asn: bool) -> Result<Self, ParserError> {
+        Self::from_bytes_with_format(
+            bytes,
+            MessageFormat {
+                use_4byte_asn,
+                add_path: false,
+            },
+        )
+    }
+
+    pub fn from_bytes_with_format(
+        bytes: Vec<u8>,
+        format: MessageFormat,
+    ) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;
 
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
-        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len])?;
+        let (withdrawn_routes, path_id) = if format.add_path {
+            let entries = parse_nlri_list_addpath(&data[..withdrawn_routes_len])?;
+            let first_path_id = entries.first().map(|(_, pid)| *pid);
+            let prefixes = entries.into_iter().map(|(net, _)| net).collect();
+            (prefixes, first_path_id)
+        } else {
+            (parse_nlri_list(&data[..withdrawn_routes_len])?, None)
+        };
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -528,13 +569,25 @@ impl UpdateMessage {
         data = data[TOTAL_ATTR_LENGTH_SIZE..].to_vec();
 
         let path_attributes =
-            read_path_attributes(&data[..total_path_attributes_len], use_4byte_asn)?;
+            read_path_attributes(&data[..total_path_attributes_len], format.use_4byte_asn)?;
         data = data[total_path_attributes_len..].to_vec();
 
-        let nlri_list = match total_path_attributes_len {
-            0 => vec![],
-            _ => parse_nlri_list(&data)?,
+        let (nlri_list, nlri_path_id) = match total_path_attributes_len {
+            0 => (vec![], None),
+            _ => {
+                if format.add_path {
+                    let entries = parse_nlri_list_addpath(&data)?;
+                    let first_path_id = entries.first().map(|(_, pid)| *pid);
+                    let prefixes = entries.into_iter().map(|(net, _)| net).collect();
+                    (prefixes, first_path_id)
+                } else {
+                    (parse_nlri_list(&data)?, None)
+                }
+            }
         };
+
+        // Use NLRI path_id if available, otherwise use withdrawn path_id
+        let path_id = nlri_path_id.or(path_id);
 
         validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
 
@@ -544,7 +597,8 @@ impl UpdateMessage {
             total_path_attributes_len: total_path_attributes_len as u16,
             path_attributes,
             nlri_list,
-            format: MessageFormat { use_4byte_asn },
+            format,
+            path_id,
         })
     }
 
@@ -585,6 +639,7 @@ impl UpdateMessage {
                 path_attributes: Vec::new(),
                 nlri_list: Vec::new(),
                 format,
+                path_id: None,
             }
         } else {
             // All other AFI/SAFI: MP_UNREACH_NLRI with empty withdrawn routes
@@ -602,6 +657,7 @@ impl UpdateMessage {
                 }],
                 nlri_list: Vec::new(),
                 format,
+                path_id: None,
             }
         }
     }
@@ -616,6 +672,8 @@ pub struct UpdateMessage {
     nlri_list: Vec<IpNetwork>,
     /// Message encoding format based on negotiated capabilities
     format: MessageFormat,
+    /// RFC 7911: Path Identifier for ADD-PATH (same for all NLRIs in this message)
+    path_id: Option<u32>,
 }
 
 impl Message for UpdateMessage {
@@ -659,7 +717,7 @@ impl Message for UpdateMessage {
         let mut bytes = Vec::new();
 
         // Withdrawn routes
-        let withdrawn_routes_bytes = write_nlri_list(&self.withdrawn_routes);
+        let withdrawn_routes_bytes = write_nlri_list(&self.withdrawn_routes, self.path_id);
         bytes.extend_from_slice(&(withdrawn_routes_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&withdrawn_routes_bytes);
 
@@ -670,7 +728,7 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&path_attributes_bytes);
 
         // NLRI
-        let nlri_bytes = write_nlri_list(&self.nlri_list);
+        let nlri_bytes = write_nlri_list(&self.nlri_list, self.path_id);
         bytes.extend_from_slice(&nlri_bytes);
 
         bytes
@@ -850,7 +908,8 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 20,
-            format: MessageFormat { use_4byte_asn: false },
+            format: MessageFormat { use_4byte_asn: false, add_path: false },
+            path_id: None,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -907,7 +966,8 @@ mod tests {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
             total_path_attributes_len: 20,
-            format: MessageFormat { use_4byte_asn: false },
+            format: MessageFormat { use_4byte_asn: false, add_path: false },
+            path_id: None,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -966,7 +1026,8 @@ mod tests {
                 }),
             ],
             total_path_attributes_len: 0,
-            format: MessageFormat { use_4byte_asn: false },
+            format: MessageFormat { use_4byte_asn: false, add_path: false },
+            path_id: None,
             path_attributes: vec![],
             nlri_list: vec![],
         }
@@ -1067,6 +1128,7 @@ mod tests {
             withdrawn_routes.clone(),
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 
@@ -1095,6 +1157,7 @@ mod tests {
             withdrawn_routes,
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 
@@ -1137,6 +1200,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg.local_pref(), Some(200));
@@ -1147,6 +1211,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg_no_pref.local_pref(), None);
@@ -1163,6 +1228,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg.med(), Some(50));
@@ -1173,6 +1239,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg_no_med.med(), None);
@@ -1201,6 +1268,7 @@ mod tests {
                 vec![],
                 MessageFormat {
                     use_4byte_asn: false,
+                    add_path: false,
                 },
             );
 
@@ -1235,6 +1303,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 
@@ -1290,7 +1359,7 @@ mod tests {
             prefix_length: 8,
         })];
 
-        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_routes);
+        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_routes, None);
 
         let msg = UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
@@ -1300,7 +1369,9 @@ mod tests {
             nlri_list,
             format: MessageFormat {
                 use_4byte_asn: false,
+                add_path: false,
             },
+            path_id: None,
         };
 
         let bytes = msg.to_bytes();
@@ -1387,7 +1458,9 @@ mod tests {
             nlri_list: vec![],
             format: MessageFormat {
                 use_4byte_asn: false,
+                add_path: false,
             },
+            path_id: None,
         };
 
         let bytes = msg.to_bytes();
@@ -1836,6 +1909,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg.leftmost_as(), Some(65001));
@@ -1845,6 +1919,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
         assert_eq!(msg_empty_path.leftmost_as(), None);
@@ -1973,6 +2048,7 @@ mod tests {
             vec![ipv6_prefix],
             MessageFormat {
                 use_4byte_asn: false,
+                add_path: false,
             },
         );
 
@@ -2006,6 +2082,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 
@@ -2069,6 +2146,7 @@ mod tests {
             vec![],
             MessageFormat {
                 use_4byte_asn: true,
+                add_path: false,
             },
         );
 
@@ -2089,6 +2167,7 @@ mod tests {
     fn test_is_eor() {
         let format = MessageFormat {
             use_4byte_asn: true,
+            add_path: false,
         };
 
         let cases = vec![
@@ -2101,6 +2180,7 @@ mod tests {
                     path_attributes: vec![],
                     nlri_list: vec![],
                     format,
+                    path_id: None,
                 },
                 true,
             ),
@@ -2120,6 +2200,7 @@ mod tests {
                     }],
                     nlri_list: vec![],
                     format,
+                    path_id: None,
                 },
                 true,
             ),
@@ -2135,6 +2216,7 @@ mod tests {
                         prefix_length: 8,
                     })],
                     format,
+                    path_id: None,
                 },
                 false,
             ),
@@ -2169,7 +2251,10 @@ mod tests {
         ];
 
         for (desc, afi, safi, use_4byte_asn) in cases {
-            let format = MessageFormat { use_4byte_asn };
+            let format = MessageFormat {
+                use_4byte_asn,
+                add_path: false,
+            };
             let eor = UpdateMessage::new_eor(afi, safi, format);
 
             // All EOR markers should be recognized as EOR
@@ -2202,5 +2287,78 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_addpath_encode_decode_roundtrip() {
+        let format = MessageFormat {
+            use_4byte_asn: true,
+            add_path: true,
+        };
+
+        let path = Path {
+            local_path_id: 42,
+            ..test_path()
+        };
+
+        let nlri = vec![
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            }),
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(192, 168, 1, 0),
+                prefix_length: 24,
+            }),
+        ];
+
+        let msg = UpdateMessage::new(&path, nlri.clone(), format);
+        assert_eq!(msg.path_id(), Some(42));
+
+        let bytes = msg.to_bytes();
+        let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
+
+        assert_eq!(decoded.path_id(), Some(42));
+        assert_eq!(decoded.nlri_list, nlri);
+        assert_eq!(decoded.origin(), Some(Origin::IGP));
+        assert_eq!(
+            decoded.next_hop(),
+            Some(NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+    }
+
+    #[test]
+    fn test_addpath_withdraw_encode_decode() {
+        let format = MessageFormat {
+            use_4byte_asn: true,
+            add_path: true,
+        };
+
+        let withdrawn = vec![IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        })];
+
+        let msg = UpdateMessage::new_withdraw_with_path_id(withdrawn.clone(), format, Some(7));
+        let bytes = msg.to_bytes();
+        let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
+
+        assert_eq!(decoded.path_id(), Some(7));
+        assert_eq!(decoded.withdrawn_routes, withdrawn);
+    }
+
+    #[test]
+    fn test_addpath_disabled_no_path_id() {
+        let format = MessageFormat {
+            use_4byte_asn: true,
+            add_path: false,
+        };
+
+        let msg = UpdateMessage::new(&test_path(), vec![], format);
+        assert_eq!(msg.path_id(), None);
+
+        let bytes = msg.to_bytes();
+        let decoded = UpdateMessage::from_bytes(bytes, true).unwrap();
+        assert_eq!(decoded.path_id(), None);
     }
 }

@@ -28,6 +28,8 @@ pub const MAX_MESSAGE_SIZE: u16 = 4096;
 pub struct MessageFormat {
     /// Whether to use 4-byte ASN encoding (RFC 6793)
     pub use_4byte_asn: bool,
+    /// Whether to use ADD-PATH encoding (RFC 7911) - path_id prepended to each NLRI
+    pub add_path: bool,
 }
 
 // BGP header marker (16 bytes of 0xFF)

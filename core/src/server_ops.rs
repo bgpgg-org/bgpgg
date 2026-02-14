@@ -20,10 +20,7 @@ use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
-use crate::peer::outgoing::{
-    batch_announcements_by_path, compute_routes_for_peer, send_announcements_to_peer,
-    should_propagate_to_peer,
-};
+use crate::peer::outgoing::{batch_announcements_by_path, send_announcements_to_peer};
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
@@ -262,7 +259,7 @@ impl BgpServer {
                 let import_policies = peer.policy_in();
 
                 if !import_policies.is_empty() {
-                    let changed_prefixes = self.loc_rib.update_from_peer(
+                    let (best_changed, all_affected) = self.loc_rib.update_from_peer(
                         peer_ip,
                         withdrawn.clone(),
                         announced.clone(),
@@ -279,18 +276,12 @@ impl BgpServer {
                         },
                     );
 
-                    // RFC 4724: Mark announced routes as refreshed if peer has stale routes
-                    if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
-                        for (prefix, _) in &announced {
-                            self.loc_rib.mark_peer_routes_refreshed(peer_ip, *prefix);
-                        }
-                    }
-
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
-                    if !changed_prefixes.is_empty() {
-                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    if !best_changed.is_empty() || !all_affected.is_empty() {
+                        self.propagate_routes(best_changed, all_affected, Some(peer_ip))
+                            .await;
                     }
 
                     // BMP: Send route monitoring for this update
@@ -382,6 +373,7 @@ impl BgpServer {
                     conn.asn = None;
                     conn.bgp_id = None;
                 }
+                peer.adj_rib_out.clear();
                 info!(%peer_ip, "peer session ended");
 
                 // RFC 4724: Handle routes based on Graceful Restart state
@@ -399,7 +391,12 @@ impl BgpServer {
                     // Only propagate withdrawals if the disconnected connection was Established
                     let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
                     if !changed_prefixes.is_empty() {
-                        self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                        self.propagate_routes(
+                            changed_prefixes.clone(),
+                            changed_prefixes,
+                            Some(peer_ip),
+                        )
+                        .await;
                     }
                 }
 
@@ -435,8 +432,12 @@ impl BgpServer {
 
                 // Propagate withdrawals if any routes were removed
                 if !all_changed_prefixes.is_empty() {
-                    self.propagate_routes(all_changed_prefixes, Some(peer_ip))
-                        .await;
+                    self.propagate_routes(
+                        all_changed_prefixes.clone(),
+                        all_changed_prefixes,
+                        Some(peer_ip),
+                    )
+                    .await;
                 }
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
@@ -447,7 +448,12 @@ impl BgpServer {
 
                 // Propagate withdrawals if any routes were removed
                 if !changed_prefixes.is_empty() {
-                    self.propagate_routes(changed_prefixes, Some(peer_ip)).await;
+                    self.propagate_routes(
+                        changed_prefixes.clone(),
+                        changed_prefixes,
+                        Some(peer_ip),
+                    )
+                    .await;
                 }
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
@@ -603,7 +609,8 @@ impl BgpServer {
             }
 
             if !all_changed.is_empty() {
-                self.propagate_routes(all_changed, Some(peer_ip)).await;
+                self.propagate_routes(all_changed.clone(), all_changed, Some(peer_ip))
+                    .await;
             }
         }
 
@@ -615,7 +622,8 @@ impl BgpServer {
             .collect();
 
         if !all_prefixes.is_empty() {
-            self.propagate_routes(all_prefixes, None).await;
+            self.propagate_routes(all_prefixes.clone(), all_prefixes, None)
+                .await;
         }
 
         // Signal that loc-rib has been sent for all negotiated AFI/SAFIs
@@ -730,6 +738,7 @@ impl BgpServer {
 
         // Propagate route changes (withdrawals or new best paths) to all remaining peers
         self.propagate_routes(
+            changed_prefixes.clone(),
             changed_prefixes,
             None, // Don't exclude any peer since the removed peer is already gone
         )
@@ -1007,13 +1016,14 @@ impl BgpServer {
 
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
+            let mut all_sent = Vec::new();
 
             match afi {
                 Afi::Ipv4 => {
                     for route in self.loc_rib.iter_ipv4_unicast_routes() {
                         chunk.push(route);
                         if chunk.len() >= CHUNK_SIZE {
-                            send_announcements_to_peer(
+                            let sent = send_announcements_to_peer(
                                 peer_ip,
                                 peer_tx,
                                 &chunk,
@@ -1024,7 +1034,9 @@ impl BgpServer {
                                 peer_supports_4byte_asn,
                                 rr_client,
                                 cluster_id,
+                                false,
                             );
+                            all_sent.extend(sent);
                             total_sent += chunk.len();
                             chunk.clear();
                         }
@@ -1034,7 +1046,7 @@ impl BgpServer {
                     for route in self.loc_rib.iter_ipv6_unicast_routes() {
                         chunk.push(route);
                         if chunk.len() >= CHUNK_SIZE {
-                            send_announcements_to_peer(
+                            let sent = send_announcements_to_peer(
                                 peer_ip,
                                 peer_tx,
                                 &chunk,
@@ -1045,7 +1057,9 @@ impl BgpServer {
                                 peer_supports_4byte_asn,
                                 rr_client,
                                 cluster_id,
+                                false,
                             );
+                            all_sent.extend(sent);
                             total_sent += chunk.len();
                             chunk.clear();
                         }
@@ -1054,7 +1068,7 @@ impl BgpServer {
             }
 
             if !chunk.is_empty() {
-                send_announcements_to_peer(
+                let sent = send_announcements_to_peer(
                     peer_ip,
                     peer_tx,
                     &chunk,
@@ -1065,11 +1079,26 @@ impl BgpServer {
                     peer_supports_4byte_asn,
                     rr_client,
                     cluster_id,
+                    false,
                 );
+                all_sent.extend(sent);
                 total_sent += chunk.len();
             }
 
             info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
+
+            // Update adj_rib_out: clear old entries for this AFI, insert new
+            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                let is_target_afi = |prefix: &IpNetwork| match afi {
+                    Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
+                    Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
+                };
+                peer.adj_rib_out
+                    .retain(|(prefix, _), _| !is_target_afi(prefix));
+                for (prefix, path) in all_sent {
+                    peer.adj_rib_out.insert((prefix, path.local_path_id), path);
+                }
+            }
         }
     }
 
@@ -1109,7 +1138,8 @@ impl BgpServer {
         );
 
         // Propagate to all peers using the common propagation logic
-        self.propagate_routes(vec![prefix], None).await;
+        self.propagate_routes(vec![prefix], vec![prefix], None)
+            .await;
 
         let _ = response.send(Ok(()));
     }
@@ -1129,7 +1159,8 @@ impl BgpServer {
             // Propagate to all peers using the common propagation logic
             // This will automatically send withdrawal if no alternate path exists,
             // or announce the new best path if an alternate path is available
-            self.propagate_routes(vec![prefix], None).await;
+            self.propagate_routes(vec![prefix], vec![prefix], None)
+                .await;
         }
 
         let _ = response.send(Ok(()));
@@ -1296,64 +1327,19 @@ impl BgpServer {
             .get(&peer_addr)
             .ok_or(format!("peer {} not found", peer_addr))?;
 
-        let conn = peer_info
-            .established_conn()
-            .ok_or("peer not established".to_string())?;
-
-        let peer_asn = conn.asn.ok_or("peer ASN not set".to_string())?;
-
-        let export_policies = &peer_info.export_policies;
-        if export_policies.is_empty() {
-            return Err("export policies not initialized".to_string());
+        // Read directly from adj_rib_out (empty if peer isn't established)
+        let mut routes_map: HashMap<IpNetwork, Vec<Arc<Path>>> = HashMap::new();
+        for ((prefix, _path_id), path) in &peer_info.adj_rib_out {
+            routes_map
+                .entry(*prefix)
+                .or_default()
+                .push(Arc::clone(path));
         }
 
-        // Build to_announce list from ALL loc_rib routes (same as propagation)
-        let mut to_announce = Vec::new();
-        for route in self.loc_rib.iter_routes() {
-            if let Some(best_path) = self.loc_rib.get_best_path(&route.prefix) {
-                // Extract originating_peer from path.source
-                let originating_peer = best_path.source.peer_ip();
-
-                // Apply EXACT same check as propagation
-                if !should_propagate_to_peer(peer_addr, conn.state, originating_peer) {
-                    continue;
-                }
-
-                to_announce.push((route.prefix, best_path.clone()));
-            }
-        }
-
-        let local_next_hop = conn
-            .conn_info
-            .as_ref()
-            .map(|conn_info| conn_info.local_address)
-            .ok_or("established peer missing conn_info".to_string())?;
-
-        let filtered = compute_routes_for_peer(
-            &to_announce,
-            self.config.asn,
-            peer_asn,
-            local_next_hop,
-            export_policies,
-            peer_info.config.rr_client,
-            self.config.cluster_id(),
-        );
-
-        // Group by prefix for Route struct
-        let mut routes_map: HashMap<IpNetwork, Vec<Path>> = HashMap::new();
-        for (prefix, path) in filtered {
-            routes_map.entry(prefix).or_default().push(path);
-        }
-
-        let adj_out_routes: Vec<Route> = routes_map
+        Ok(routes_map
             .into_iter()
-            .map(|(prefix, paths)| Route {
-                prefix,
-                paths: paths.into_iter().map(Arc::new).collect(),
-            })
-            .collect();
-
-        Ok(adj_out_routes)
+            .map(|(prefix, paths)| Route { prefix, paths })
+            .collect())
     }
 
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
@@ -1452,8 +1438,13 @@ impl BgpServer {
 
         // Send withdrawals if any
         if !withdrawn.is_empty() {
-            let update =
-                UpdateMessage::new_withdraw(withdrawn.to_vec(), MessageFormat { use_4byte_asn });
+            let update = UpdateMessage::new_withdraw(
+                withdrawn.to_vec(),
+                MessageFormat {
+                    use_4byte_asn,
+                    add_path: false,
+                },
+            );
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
@@ -1469,7 +1460,10 @@ impl BgpServer {
                 let update = UpdateMessage::new(
                     &batch.path,
                     batch.prefixes,
-                    MessageFormat { use_4byte_asn },
+                    MessageFormat {
+                        use_4byte_asn,
+                        add_path: false,
+                    },
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
                     peer_ip,
@@ -2029,7 +2023,14 @@ fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<Updat
     batches
         .into_iter()
         .map(|batch| {
-            UpdateMessage::new(&batch.path, batch.prefixes, MessageFormat { use_4byte_asn })
+            UpdateMessage::new(
+                &batch.path,
+                batch.prefixes,
+                MessageFormat {
+                    use_4byte_asn,
+                    add_path: false,
+                },
+            )
         })
         .collect()
 }
@@ -2136,7 +2137,6 @@ impl BgpServer {
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
 
-            // Get iterator (no allocation)
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
             let cluster_id = self.config.cluster_id();
@@ -2147,6 +2147,8 @@ impl BgpServer {
                 .map(|conn_info| conn_info.local_address)
                 .unwrap_or(self.local_addr);
 
+            let mut all_sent = Vec::new();
+
             // Process in chunks
             match afi {
                 Afi::Ipv4 => {
@@ -2154,7 +2156,7 @@ impl BgpServer {
                         chunk.push(route);
 
                         if chunk.len() >= CHUNK_SIZE {
-                            send_announcements_to_peer(
+                            let sent = send_announcements_to_peer(
                                 peer_ip,
                                 peer_tx,
                                 &chunk,
@@ -2165,7 +2167,9 @@ impl BgpServer {
                                 peer_supports_4byte_asn,
                                 rr_client,
                                 cluster_id,
+                                false,
                             );
+                            all_sent.extend(sent);
                             total_sent += chunk.len();
                             chunk.clear();
                         }
@@ -2176,7 +2180,7 @@ impl BgpServer {
                         chunk.push(route);
 
                         if chunk.len() >= CHUNK_SIZE {
-                            send_announcements_to_peer(
+                            let sent = send_announcements_to_peer(
                                 peer_ip,
                                 peer_tx,
                                 &chunk,
@@ -2187,7 +2191,9 @@ impl BgpServer {
                                 peer_supports_4byte_asn,
                                 rr_client,
                                 cluster_id,
+                                false,
                             );
+                            all_sent.extend(sent);
                             total_sent += chunk.len();
                             chunk.clear();
                         }
@@ -2197,7 +2203,7 @@ impl BgpServer {
 
             // Send remaining routes
             if !chunk.is_empty() {
-                send_announcements_to_peer(
+                let sent = send_announcements_to_peer(
                     peer_ip,
                     peer_tx,
                     &chunk,
@@ -2208,11 +2214,26 @@ impl BgpServer {
                     peer_supports_4byte_asn,
                     rr_client,
                     cluster_id,
+                    false,
                 );
+                all_sent.extend(sent);
                 total_sent += chunk.len();
             }
 
             info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
+
+            // Update adj_rib_out: clear old entries for this AFI, insert new
+            if let Some(peer) = self.peers.get_mut(&peer_ip) {
+                let is_target_afi = |prefix: &IpNetwork| match afi {
+                    Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
+                    Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
+                };
+                peer.adj_rib_out
+                    .retain(|(prefix, _), _| !is_target_afi(prefix));
+                for (prefix, path) in all_sent {
+                    peer.adj_rib_out.insert((prefix, path.local_path_id), path);
+                }
+            }
         }
     }
 }

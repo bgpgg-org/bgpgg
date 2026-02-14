@@ -68,6 +68,57 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
+/// RFC 7911: Parse NLRI list with 4-byte path identifiers prepended to each entry
+pub fn parse_nlri_list_addpath(bytes: &[u8]) -> Result<Vec<(IpNetwork, u32)>, ParserError> {
+    use super::msg_notification::{BgpError, UpdateMessageError};
+
+    let mut cursor = 0;
+    let mut nlri_list = Vec::new();
+
+    while cursor < bytes.len() {
+        if cursor + 4 > bytes.len() {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
+                data: Vec::new(),
+            });
+        }
+        let path_id = u32::from_be_bytes([
+            bytes[cursor],
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+        ]);
+        cursor += 4;
+
+        let prefix_length = bytes[cursor];
+        cursor += 1;
+
+        let byte_len = validate_and_calculate_byte_len(
+            prefix_length,
+            MAX_IPV4_PREFIX_LEN,
+            bytes.len() - cursor,
+        )?;
+
+        let mut ip_buffer = [0; 4];
+        ip_buffer[..byte_len].copy_from_slice(&bytes[cursor..(byte_len + cursor)]);
+
+        let net = Ipv4Net {
+            address: Ipv4Addr::from(ip_buffer),
+            prefix_length,
+        };
+
+        if net.is_multicast() {
+            cursor += byte_len;
+            continue;
+        }
+
+        nlri_list.push((IpNetwork::V4(net), path_id));
+        cursor += byte_len;
+    }
+
+    Ok(nlri_list)
+}
+
 pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
     let mut cursor = 0;
     let mut nlri_list: Vec<IpNetwork> = Vec::new();
@@ -385,5 +436,46 @@ mod tests {
             }
             _ => panic!("Expected InvalidNetworkField"),
         }
+    }
+
+    #[test]
+    fn test_parse_nlri_list_addpath() {
+        // path_id(4) + prefix_len(1) + prefix_octets(3) = 8 bytes per entry
+        let data: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x01, // path_id = 1
+            0x18, 0x0a, 0x0b, 0x0c, // 10.11.12.0/24
+            0x00, 0x00, 0x00, 0x02, // path_id = 2
+            0x10, 0xc0, 0xa8, // 192.168.0.0/16
+        ];
+
+        let result = parse_nlri_list_addpath(&data).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0],
+            (
+                IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 11, 12, 0),
+                    prefix_length: 24,
+                }),
+                1
+            )
+        );
+        assert_eq!(
+            result[1],
+            (
+                IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(192, 168, 0, 0),
+                    prefix_length: 16,
+                }),
+                2
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_nlri_list_addpath_truncated_path_id() {
+        // Only 2 bytes where 4-byte path_id is expected
+        let data: Vec<u8> = vec![0x00, 0x01];
+        assert!(parse_nlri_list_addpath(&data).is_err());
     }
 }

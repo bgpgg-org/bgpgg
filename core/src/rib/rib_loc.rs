@@ -35,10 +35,11 @@ pub struct LocRib {
     ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
 
     /// Track stale routes during Graceful Restart (RFC 4724)
-    /// Key: (peer_ip, afi_safi), Value: set of stale prefixes
-    /// Routes are marked stale when peer disconnects with GR enabled
-    /// Routes are unmarked when refreshed during GR, or removed after EOR/timer expiry
-    stale_routes: HashMap<(IpAddr, crate::bgp::multiprotocol::AfiSafi), HashSet<IpNetwork>>,
+    /// Key: (peer_ip, afi_safi), Value: set of stale local_path_ids
+    /// Routes are marked stale when peer disconnects with GR enabled.
+    /// Per-path tracking: new/replaced paths get fresh IDs and are never stale.
+    /// At EOR sweep, stale IDs that were already replaced are freed no-ops.
+    stale_routes: HashMap<(IpAddr, crate::bgp::multiprotocol::AfiSafi), HashSet<u32>>,
 
     /// ADD-PATH local path ID allocator (RFC 7911)
     path_ids: PathIdAllocator,
@@ -125,6 +126,57 @@ fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> V
 
 fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
     path.source.peer_ip() == Some(peer_ip)
+}
+
+/// Collect local_path_ids for all paths from a peer in a table.
+fn collect_peer_path_ids<K: Eq + Hash>(table: &HashMap<K, Route>, peer_ip: IpAddr) -> Vec<u32> {
+    table
+        .values()
+        .flat_map(|route| {
+            route
+                .paths
+                .iter()
+                .filter(move |p| is_path_from_peer(p, peer_ip))
+                .map(|p| p.local_path_id)
+        })
+        .collect()
+}
+
+/// Remove paths matching a set of local_path_ids from a table.
+/// Returns (freed_ids, changed_prefixes) where changed_prefixes are those whose best path changed.
+fn remove_paths_by_ids<K: Eq + Hash + Copy>(
+    table: &mut HashMap<K, Route>,
+    stale_ids: &HashSet<u32>,
+) -> (Vec<u32>, Vec<IpNetwork>) {
+    let mut freed_ids = Vec::new();
+    let mut changed = Vec::new();
+
+    for route in table.values_mut() {
+        let old_best = route.paths.first().map(Arc::clone);
+        let before = route.paths.len();
+        let removed: Vec<u32> = route
+            .paths
+            .iter()
+            .filter(|p| stale_ids.contains(&p.local_path_id))
+            .map(|p| p.local_path_id)
+            .collect();
+        if removed.is_empty() {
+            continue;
+        }
+        route
+            .paths
+            .retain(|p| !stale_ids.contains(&p.local_path_id));
+        freed_ids.extend(removed);
+        if before != route.paths.len() {
+            let new_best = route.paths.first();
+            if old_best.as_ref() != new_best {
+                changed.push(route.prefix);
+            }
+        }
+    }
+    table.retain(|_, route| !route.paths.is_empty());
+
+    (freed_ids, changed)
 }
 
 /// Remove all paths from a peer and return their local_path_ids for freeing.
@@ -223,14 +275,16 @@ impl LocRib {
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
     /// Applies import policy (via closure) before adding routes
-    /// Returns the set of prefixes where the best path actually changed
+    /// Returns (best_changed, all_affected):
+    /// - best_changed: prefixes where the best path changed (for non-ADD-PATH peers)
+    /// - all_affected: all prefixes touched by this update (for ADD-PATH peers)
     pub fn update_from_peer<F>(
         &mut self,
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, Arc<Path>)>,
         import_policy: F,
-    ) -> Vec<IpNetwork>
+    ) -> (Vec<IpNetwork>, Vec<IpNetwork>)
     where
         F: Fn(&IpNetwork, &mut Path) -> bool,
     {
@@ -265,11 +319,12 @@ impl LocRib {
             }
         }
 
-        // Return only prefixes where best path actually changed
-        affected
-            .into_iter()
+        let best_changed = affected
+            .iter()
             .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).map(Arc::clone))
-            .collect()
+            .cloned()
+            .collect();
+        (best_changed, affected)
     }
 }
 
@@ -389,6 +444,22 @@ impl LocRib {
         }
     }
 
+    /// Get all paths for a specific prefix (for ADD-PATH propagation)
+    pub fn get_all_paths(&self, prefix: &IpNetwork) -> Vec<Arc<Path>> {
+        match prefix {
+            IpNetwork::V4(v4_prefix) => self
+                .ipv4_unicast
+                .get(v4_prefix)
+                .map(|r| r.paths.clone())
+                .unwrap_or_default(),
+            IpNetwork::V6(v6_prefix) => self
+                .ipv6_unicast
+                .get(v6_prefix)
+                .map(|r| r.paths.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Check if a prefix exists in Loc-RIB
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
         match prefix {
@@ -418,7 +489,8 @@ impl LocRib {
     }
 
     /// Mark all routes from a peer for a specific AFI/SAFI as stale (RFC 4724 Graceful Restart)
-    /// Returns the count of routes marked as stale
+    /// Tracks stale local_path_ids. New/replaced paths get fresh IDs, so they're never stale.
+    /// Returns the count of path IDs marked as stale.
     pub fn mark_peer_routes_stale(
         &mut self,
         peer_ip: IpAddr,
@@ -426,88 +498,62 @@ impl LocRib {
     ) -> usize {
         use crate::bgp::multiprotocol::{Afi, Safi};
 
-        let all_prefixes = self.get_prefixes_from_peer(peer_ip);
+        let path_ids: Vec<u32> = match (afi_safi.afi, afi_safi.safi) {
+            (Afi::Ipv4, Safi::Unicast) => collect_peer_path_ids(&self.ipv4_unicast, peer_ip),
+            (Afi::Ipv6, Safi::Unicast) => collect_peer_path_ids(&self.ipv6_unicast, peer_ip),
+            _ => Vec::new(),
+        };
 
-        let prefixes: Vec<IpNetwork> = all_prefixes
-            .into_iter()
-            .filter(|prefix| {
-                matches!(
-                    (afi_safi.afi, afi_safi.safi, prefix),
-                    (Afi::Ipv4, Safi::Unicast, IpNetwork::V4(_))
-                        | (Afi::Ipv6, Safi::Unicast, IpNetwork::V6(_))
-                )
-            })
-            .collect();
-
-        let count = prefixes.len();
+        let count = path_ids.len();
         if count > 0 {
             self.stale_routes
                 .entry((peer_ip, afi_safi))
                 .or_default()
-                .extend(prefixes);
+                .extend(path_ids);
             info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = count,
                   "marked routes as stale for Graceful Restart");
         }
         count
     }
 
-    /// Check if a specific route is marked as stale
-    pub fn is_route_stale(
-        &self,
-        peer_ip: IpAddr,
-        afi_safi: crate::bgp::multiprotocol::AfiSafi,
-        prefix: IpNetwork,
-    ) -> bool {
-        self.stale_routes
-            .get(&(peer_ip, afi_safi))
-            .map(|set| set.contains(&prefix))
-            .unwrap_or(false)
-    }
-
-    /// Mark a route as refreshed (remove from stale set) during Graceful Restart
-    pub fn mark_peer_routes_refreshed(&mut self, peer_ip: IpAddr, prefix: IpNetwork) {
-        let afi_safi = prefix.afi_safi();
-        if let Some(stale_set) = self.stale_routes.get_mut(&(peer_ip, afi_safi)) {
-            if stale_set.remove(&prefix) {
-                debug!(peer_ip = %peer_ip, prefix = ?prefix, "route refreshed during GR");
-            }
-        }
-    }
-
-    /// Remove all stale routes from a peer for a specific AFI/SAFI
-    /// Returns prefixes where the best path changed
+    /// Remove all stale routes from a peer for a specific AFI/SAFI.
+    /// Removes paths whose local_path_ids are in the stale set.
+    /// Returns prefixes where the best path changed.
     pub fn remove_peer_routes_stale(
         &mut self,
         peer_ip: IpAddr,
         afi_safi: crate::bgp::multiprotocol::AfiSafi,
     ) -> Vec<IpNetwork> {
-        let stale_prefixes = self
+        let stale_ids = self
             .stale_routes
             .remove(&(peer_ip, afi_safi))
             .unwrap_or_default();
-        if stale_prefixes.is_empty() {
+        if stale_ids.is_empty() {
             return Vec::new();
         }
 
-        info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = stale_prefixes.len(),
+        info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = stale_ids.len(),
               "removing stale routes after GR timer expiry/EOR");
 
         let mut changed_prefixes = Vec::new();
 
-        for prefix in stale_prefixes {
-            // Snapshot old best path
-            let old_best = self.get_best_path(&prefix).map(Arc::clone);
-
-            // Remove path from peer
-            let removed = self.remove_peer_path(prefix, peer_ip);
-
-            if removed {
-                // Check if best path changed
-                let new_best = self.get_best_path(&prefix);
-                if old_best.as_ref() != new_best {
-                    changed_prefixes.push(prefix);
+        use crate::bgp::multiprotocol::{Afi, Safi};
+        match (afi_safi.afi, afi_safi.safi) {
+            (Afi::Ipv4, Safi::Unicast) => {
+                let (freed, changed) = remove_paths_by_ids(&mut self.ipv4_unicast, &stale_ids);
+                for id in freed {
+                    self.path_ids.free(id);
                 }
+                changed_prefixes.extend(changed);
             }
+            (Afi::Ipv6, Safi::Unicast) => {
+                let (freed, changed) = remove_paths_by_ids(&mut self.ipv6_unicast, &stale_ids);
+                for id in freed {
+                    self.path_ids.free(id);
+                }
+                changed_prefixes.extend(changed);
+            }
+            _ => {}
         }
 
         changed_prefixes
@@ -1021,5 +1067,59 @@ mod tests {
         let mut ids: Vec<u32> = routes.iter().map(|r| r.paths[0].local_path_id).collect();
         ids.sort();
         assert_eq!(ids, vec![1, 2], "freed IDs should be reused");
+    }
+
+    #[test]
+    fn test_get_all_paths() {
+        let mut loc_rib = LocRib::new();
+        let prefix = create_test_prefix();
+
+        // Empty prefix -> empty vec
+        assert!(loc_rib.get_all_paths(&prefix).is_empty());
+
+        // One path
+        loc_rib.add_route(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
+        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 1);
+
+        // Two paths from different peers
+        loc_rib.add_route(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
+        let paths = loc_rib.get_all_paths(&prefix);
+        assert_eq!(paths.len(), 2);
+        // Paths should be sorted (best first)
+        assert!(paths[0] >= paths[1]);
+    }
+
+    #[test]
+    fn test_update_from_peer_returns_all_affected() {
+        let mut loc_rib = LocRib::new();
+        let peer1 = test_peer_ip();
+        let peer2 = test_peer_ip2();
+        let prefix = create_test_prefix();
+
+        // Add a route from peer1 (the best)
+        loc_rib.add_route(prefix, create_test_path(peer1, test_bgp_id()));
+
+        // Now announce from peer2 with a worse path (longer AS path)
+        let worse_path = create_test_path_with(peer2, test_bgp_id2(), |p| {
+            p.as_path = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 3,
+                asn_list: vec![100, 200, 300],
+            }];
+        });
+
+        let (best_changed, all_affected) =
+            loc_rib.update_from_peer(peer2, vec![], vec![(prefix, worse_path)], |_, _| true);
+
+        // Best didn't change (peer1's path is still best)
+        assert!(best_changed.is_empty(), "best should not have changed");
+        // But the prefix IS affected (new path added)
+        assert_eq!(
+            all_affected,
+            vec![prefix],
+            "prefix should be in all_affected"
+        );
+        // Both paths should exist
+        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
     }
 }
