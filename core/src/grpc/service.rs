@@ -140,6 +140,8 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 .collect(),
             originator_id: path.originator_id.map(|id| id.to_string()),
             cluster_list: path.cluster_list.iter().map(|id| id.to_string()).collect(),
+            local_path_id: path.local_path_id,
+            remote_path_id: path.remote_path_id,
         })
         .collect();
 

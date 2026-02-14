@@ -131,6 +131,8 @@ pub fn create_update_message(
     };
 
     let path = Path {
+        local_path_id: 0,
+        remote_path_id: None,
         origin,
         as_path: as_path_segments,
         next_hop: NextHopAddr::Ipv4(next_hop),
@@ -258,6 +260,8 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
     let communities: Vec<u32> = proto_path.communities.clone();
 
     Ok(Path {
+        local_path_id: 0,
+        remote_path_id: None,
         origin,
         as_path,
         next_hop: NextHopAddr::Ipv4(next_hop),

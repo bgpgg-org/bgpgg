@@ -27,6 +27,8 @@ pub fn init_test_logging() {
         .try_init();
 }
 
+use std::collections::HashMap;
+
 use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
@@ -178,6 +180,10 @@ pub struct PathParams {
     pub originator_id: Option<String>,
     /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
     pub cluster_list: Vec<String>,
+    /// RFC 7911: locally assigned path ID (0 = not allocated)
+    pub local_path_id: u32,
+    /// RFC 7911: path ID received from peer
+    pub remote_path_id: Option<u32>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -196,19 +202,45 @@ pub fn build_path(params: PathParams) -> Path {
         large_communities: params.large_communities,
         originator_id: params.originator_id,
         cluster_list: params.cluster_list,
+        local_path_id: params.local_path_id,
+        remote_path_id: params.remote_path_id,
+    }
+}
+
+/// Strip path IDs from a proto Path for comparison (path IDs are allocation
+/// metadata, not BGP attributes, so tests shouldn't assert on specific values).
+fn strip_path_ids(path: &Path) -> Path {
+    let mut stripped = path.clone();
+    stripped.local_path_id = 0;
+    stripped.remote_path_id = None;
+    stripped
+}
+
+fn strip_route_path_ids(route: &Route) -> Route {
+    Route {
+        prefix: route.prefix.clone(),
+        paths: route.paths.iter().map(strip_path_ids).collect(),
     }
 }
 
 pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
-    use std::collections::HashMap;
-
     let routes_map: HashMap<_, _> = actual
         .iter()
-        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+        .map(|r| {
+            (
+                r.prefix.clone(),
+                strip_route_path_ids(r).paths.first().cloned(),
+            )
+        })
         .collect();
     let expected_map: HashMap<_, _> = expected
         .iter()
-        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
+        .map(|r| {
+            (
+                r.prefix.clone(),
+                strip_route_path_ids(r).paths.first().cloned(),
+            )
+        })
         .collect();
 
     routes_map == expected_map
@@ -543,8 +575,10 @@ pub async fn poll_route_exists(server: &TestServer, expected: Route) {
 
     let routes = server.client.get_routes().await.unwrap();
     let actual = routes.iter().find(|r| r.prefix == expected.prefix).unwrap();
+    let actual_stripped = strip_route_path_ids(actual);
+    let expected_stripped = strip_route_path_ids(&expected);
     assert_eq!(
-        actual.paths, expected.paths,
+        actual_stripped.paths, expected_stripped.paths,
         "Path mismatch for route {}",
         expected.prefix
     );
@@ -630,24 +664,13 @@ pub async fn wait_convergence(
     route_expectations: &[(&TestServer, Vec<Route>)],
     stats_expectations: &[(&TestServer, &TestServer, ExpectedStats)],
 ) {
-    use std::collections::HashMap;
-
     poll_until(
         || async {
             for (server, expected_routes) in route_expectations {
                 let Ok(routes) = server.client.get_routes().await else {
                     return false;
                 };
-                // Compare only best paths (first path in each route)
-                let routes_map: HashMap<_, _> = routes
-                    .into_iter()
-                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
-                    .collect();
-                let expected_map: HashMap<_, _> = expected_routes
-                    .iter()
-                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
-                    .collect();
-                if routes_map != expected_map {
+                if !routes_match(&routes, expected_routes) {
                     return false;
                 }
             }

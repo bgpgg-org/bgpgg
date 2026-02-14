@@ -514,6 +514,8 @@ mod tests {
 
     fn make_path(source: RouteSource, as_path: Vec<AsPathSegment>, next_hop: NextHopAddr) -> Path {
         Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path,
             next_hop,
@@ -887,6 +889,8 @@ mod tests {
     #[test]
     fn test_build_export_local_pref() {
         let path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
@@ -914,6 +918,8 @@ mod tests {
     fn test_build_export_med() {
         // Route from eBGP with MED
         let ebgp_path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
@@ -941,6 +947,8 @@ mod tests {
 
         // Local route with MED
         let local_path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
@@ -1080,6 +1088,8 @@ mod tests {
         let non_transitive = 0x4002FDE800000064u64;
 
         let path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),

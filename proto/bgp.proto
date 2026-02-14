@@ -290,6 +290,9 @@ message Path {
     // RFC 4456: Route Reflector attributes
     optional string originator_id = 12;  // ORIGINATOR_ID (IPv4 address)
     repeated string cluster_list = 13;   // CLUSTER_LIST (list of IPv4 addresses)
+    // RFC 7911: ADD-PATH identifiers
+    uint32 local_path_id = 14;                // Locally assigned path ID (0 = not allocated)
+    optional uint32 remote_path_id = 15;      // Path ID received from peer (absent = no ADD-PATH)
 }
 
 // Unknown attribute

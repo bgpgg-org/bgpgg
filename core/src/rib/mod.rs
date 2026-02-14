@@ -20,6 +20,7 @@
 //! - Adj-RIB-Out: Computed dynamically on-demand (not stored)
 
 mod path;
+pub mod path_id;
 pub mod rib_in;
 pub mod rib_loc;
 mod types;

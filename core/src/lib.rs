@@ -35,6 +35,8 @@ pub(crate) mod test_helpers {
 
     pub fn create_test_path(peer_ip: IpAddr, bgp_id: Ipv4Addr) -> Arc<Path> {
         Arc::new(Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
@@ -62,6 +64,8 @@ pub(crate) mod test_helpers {
         f: impl FnOnce(&mut Path),
     ) -> Arc<Path> {
         let mut path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,

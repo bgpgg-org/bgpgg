@@ -1,0 +1,124 @@
+// Copyright 2026 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/// Bitmap allocator for ADD-PATH local path IDs.
+///
+/// Each bit represents one ID. IDs are 1-based (0 is reserved as sentinel
+/// for unallocated paths in adj-rib-in). Scans from word 0 on every alloc;
+/// the bitmap is small enough (~12KB for 800k paths) to fit in L2 cache
+/// and `trailing_ones()` compiles to a single TZCNT instruction.
+///
+/// Auto-grows when all bits are set. Free is O(1).
+pub struct PathIdAllocator {
+    bits: Vec<u64>,
+}
+
+impl Default for PathIdAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PathIdAllocator {
+    pub fn new() -> Self {
+        PathIdAllocator { bits: Vec::new() }
+    }
+
+    /// Allocate the next available path ID (1-based). Auto-grows if full.
+    pub fn alloc(&mut self) -> u32 {
+        for idx in 0..self.bits.len() {
+            let word = self.bits[idx];
+            if word != u64::MAX {
+                let bit = word.trailing_ones();
+                self.bits[idx] |= 1 << bit;
+                return (idx as u32) * 64 + bit + 1;
+            }
+        }
+        // All full or empty: grow by one word
+        self.bits.push(1);
+        let idx = self.bits.len() - 1;
+        (idx as u32) * 64 + 1
+    }
+
+    /// Free a previously allocated path ID. No-op if id == 0 (sentinel).
+    pub fn free(&mut self, id: u32) {
+        if id == 0 {
+            return;
+        }
+        let id = id - 1; // adjust for 1-based offset
+        let word_idx = id as usize / 64;
+        let bit_idx = id % 64;
+        if word_idx < self.bits.len() {
+            self.bits[word_idx] &= !(1u64 << bit_idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_id_allocator() {
+        let tests = [
+            ("sequential alloc", vec!["a", "a", "a"], vec![1, 2, 3]),
+            (
+                "free and reuse",
+                vec!["a", "a", "a", "f2", "a"],
+                vec![1, 2, 3, 0, 2],
+            ),
+            ("free(0) is no-op then alloc", vec!["f0", "a"], vec![0, 1]),
+        ];
+
+        for (name, ops, expected) in tests {
+            let mut alloc = PathIdAllocator::new();
+            let mut results = Vec::new();
+            for op in &ops {
+                if *op == "a" {
+                    results.push(alloc.alloc());
+                } else if let Some(id_str) = op.strip_prefix('f') {
+                    let id: u32 = id_str.parse().unwrap();
+                    alloc.free(id);
+                    results.push(0); // placeholder
+                }
+            }
+            assert_eq!(results, expected, "test case: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_grow_past_first_word() {
+        let mut alloc = PathIdAllocator::new();
+        // Fill 64 IDs (one full word)
+        for expected in 1..=64 {
+            assert_eq!(alloc.alloc(), expected);
+        }
+        // 65th should grow to second word
+        assert_eq!(alloc.alloc(), 65);
+        assert_eq!(alloc.bits.len(), 2);
+    }
+
+    #[test]
+    fn test_free_enables_reuse_from_earlier_word() {
+        let mut alloc = PathIdAllocator::new();
+        // Alloc 65 IDs (spans 2 words)
+        for _ in 0..65 {
+            alloc.alloc();
+        }
+        // Free ID 1 (in word 0)
+        alloc.free(1);
+        // Next alloc should return 1 (scans from word 0)
+        assert_eq!(alloc.alloc(), 1);
+    }
+}

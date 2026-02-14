@@ -292,6 +292,8 @@ mod tests {
 
     fn test_path_with_as(first_as: u32) -> Path {
         Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,

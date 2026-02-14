@@ -159,6 +159,8 @@ pub(crate) mod test_helpers {
 
     pub fn create_path(source: RouteSource) -> Path {
         Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![],
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),

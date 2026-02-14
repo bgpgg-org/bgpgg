@@ -20,9 +20,14 @@ use crate::bgp::msg_update_types::{AsPath, LargeCommunity, AS_TRANS};
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 
-/// Represents a BGP path with all its attributes
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Represents a BGP path with all its attributes.
+/// PartialEq/Eq/Hash compare only BGP attributes, not path IDs (metadata).
+#[derive(Debug, Clone)]
 pub struct Path {
+    /// 0 = not allocated (adj-rib-in), >0 = loc-rib allocated by PathIdAllocator
+    pub local_path_id: u32,
+    /// Path ID received from peer (None = no ADD-PATH negotiated)
+    pub remote_path_id: Option<u32>,
     pub origin: Origin,
     pub as_path: Vec<AsPathSegment>,
     pub next_hop: NextHopAddr,
@@ -39,6 +44,47 @@ pub struct Path {
     pub originator_id: Option<std::net::Ipv4Addr>,
     /// RFC 4456: CLUSTER_LIST attribute for route reflector loop prevention
     pub cluster_list: Vec<std::net::Ipv4Addr>,
+}
+
+// Compare only BGP attributes, not path IDs (which are allocation metadata).
+impl PartialEq for Path {
+    fn eq(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.as_path == other.as_path
+            && self.next_hop == other.next_hop
+            && self.source == other.source
+            && self.local_pref == other.local_pref
+            && self.med == other.med
+            && self.atomic_aggregate == other.atomic_aggregate
+            && self.aggregator == other.aggregator
+            && self.communities == other.communities
+            && self.extended_communities == other.extended_communities
+            && self.large_communities == other.large_communities
+            && self.unknown_attrs == other.unknown_attrs
+            && self.originator_id == other.originator_id
+            && self.cluster_list == other.cluster_list
+    }
+}
+
+impl Eq for Path {}
+
+impl std::hash::Hash for Path {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.origin.hash(state);
+        self.as_path.hash(state);
+        self.next_hop.hash(state);
+        self.source.hash(state);
+        self.local_pref.hash(state);
+        self.med.hash(state);
+        self.atomic_aggregate.hash(state);
+        self.aggregator.hash(state);
+        self.communities.hash(state);
+        self.extended_communities.hash(state);
+        self.large_communities.hash(state);
+        self.unknown_attrs.hash(state);
+        self.originator_id.hash(state);
+        self.cluster_list.hash(state);
+    }
 }
 
 impl Path {
@@ -58,6 +104,8 @@ impl Path {
         let aggregator = Self::get_aggregator(update_msg, peer_supports_4byte_asn);
 
         Some(Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin,
             as_path,
             next_hop,
@@ -289,6 +337,8 @@ mod tests {
 
     fn make_base_path() -> Path {
         Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
@@ -515,6 +565,8 @@ mod tests {
 
         // Valid UPDATE with all required attrs
         let path = Path {
+            local_path_id: 0,
+            remote_path_id: None,
             origin: Origin::IGP,
             as_path: vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
