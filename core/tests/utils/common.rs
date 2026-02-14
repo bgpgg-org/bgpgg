@@ -27,7 +27,11 @@ pub fn init_test_logging() {
         .try_init();
 }
 
-use bgpgg::bgp::msg::{read_bgp_message, BgpMessage, Message, MessageType, BGP_MARKER};
+use std::collections::{HashMap, HashSet};
+
+use bgpgg::bgp::msg::{
+    read_bgp_message, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER, PRE_OPEN_FORMAT,
+};
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
@@ -36,7 +40,7 @@ use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
+    AddPathSendMode, AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
     GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, Route,
     SessionConfig, UnknownAttribute,
 };
@@ -131,6 +135,8 @@ pub struct PeerConfig {
     pub graceful_restart: Option<GracefulRestartConfig>,
     pub idle_hold_time_secs: Option<u64>,
     pub min_route_advertisement_interval_secs: Option<u64>,
+    pub add_path_send: Option<bool>,
+    pub add_path_receive: Option<bool>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -178,6 +184,10 @@ pub struct PathParams {
     pub originator_id: Option<String>,
     /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
     pub cluster_list: Vec<String>,
+    /// RFC 7911: locally assigned path ID (None = not in loc-rib)
+    pub local_path_id: Option<u32>,
+    /// RFC 7911: path ID received from peer
+    pub remote_path_id: Option<u32>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -196,22 +206,135 @@ pub fn build_path(params: PathParams) -> Path {
         large_communities: params.large_communities,
         originator_id: params.originator_id,
         cluster_list: params.cluster_list,
+        local_path_id: params.local_path_id,
+        remote_path_id: params.remote_path_id,
     }
 }
 
-pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
-    use std::collections::HashMap;
+/// Strip path IDs from a proto Path for attribute comparison.
+/// Path IDs are allocation metadata, not BGP attributes.
+fn strip_path_ids(path: &Path) -> Path {
+    let mut stripped = path.clone();
+    stripped.local_path_id = None;
+    stripped.remote_path_id = None;
+    stripped
+}
 
-    let routes_map: HashMap<_, _> = actual
-        .iter()
-        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
-        .collect();
-    let expected_map: HashMap<_, _> = expected
-        .iter()
-        .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
-        .collect();
+fn strip_route_path_ids(route: &Route) -> Route {
+    Route {
+        prefix: route.prefix.clone(),
+        paths: route.paths.iter().map(strip_path_ids).collect(),
+    }
+}
 
-    routes_map == expected_map
+/// Controls path ID validation and comparison strategy in routes_match.
+#[derive(Clone, Copy)]
+pub enum ExpectPathId {
+    /// Don't check path IDs, compare best path only (adj-rib-in/out)
+    Ignore,
+    /// Assert local_path_id is Some, compare best path only (loc-rib)
+    Present,
+    /// Assert Some + distinct per prefix, compare all paths (ADD-PATH)
+    Distinct,
+}
+
+fn assert_path_ids_present(routes: &[Route]) {
+    for route in routes {
+        for path in &route.paths {
+            assert!(
+                path.local_path_id.is_some(),
+                "path for prefix {} from peer {} missing local_path_id",
+                route.prefix,
+                path.peer_address
+            );
+        }
+    }
+}
+
+fn assert_path_ids_distinct(routes: &[Route]) {
+    for route in routes {
+        let ids: Vec<u32> = route.paths.iter().filter_map(|p| p.local_path_id).collect();
+        let unique: HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "duplicate local_path_ids for prefix {}: {:?}",
+            route.prefix,
+            ids
+        );
+    }
+}
+
+/// Compare actual routes against expected.
+///
+/// - Ignore: compare best path only, no path ID checks (adj-rib-in/out)
+/// - Present: compare best path only, assert path IDs present (loc-rib)
+/// - Distinct: compare all paths, assert path IDs present + distinct (ADD-PATH)
+///
+/// Always strips path IDs before attribute comparison — tests don't predict
+/// allocator values.
+pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) -> bool {
+    match expect {
+        ExpectPathId::Ignore => {}
+        ExpectPathId::Present => assert_path_ids_present(actual),
+        ExpectPathId::Distinct => {
+            assert_path_ids_present(actual);
+            assert_path_ids_distinct(actual);
+        }
+    }
+
+    if matches!(expect, ExpectPathId::Distinct) {
+        let actual_map: HashMap<_, _> = actual
+            .iter()
+            .map(|r| (r.prefix.clone(), &r.paths))
+            .collect();
+        let expected_map: HashMap<_, _> = expected
+            .iter()
+            .map(|r| (r.prefix.clone(), &r.paths))
+            .collect();
+
+        if actual_map.len() != expected_map.len() {
+            return false;
+        }
+
+        for (prefix, expected_paths) in &expected_map {
+            let Some(actual_paths) = actual_map.get(prefix) else {
+                return false;
+            };
+            if actual_paths.len() != expected_paths.len() {
+                return false;
+            }
+            let actual_stripped: Vec<Path> = actual_paths.iter().map(strip_path_ids).collect();
+            let expected_stripped: Vec<Path> = expected_paths.iter().map(strip_path_ids).collect();
+            for expected_path in &expected_stripped {
+                if !actual_stripped.contains(expected_path) {
+                    return false;
+                }
+            }
+        }
+        true
+    } else {
+        let routes_map: HashMap<_, _> = actual
+            .iter()
+            .map(|r| {
+                (
+                    r.prefix.clone(),
+                    strip_route_path_ids(r).paths.first().cloned(),
+                )
+            })
+            .collect();
+        let expected_map: HashMap<_, _> = expected
+            .iter()
+            .map(|r| {
+                (
+                    r.prefix.clone(),
+                    strip_route_path_ids(r).paths.first().cloned(),
+                )
+            })
+            .collect();
+
+        routes_map == expected_map
+    }
 }
 
 /// Helper to create a standard test config with sane defaults
@@ -365,6 +488,37 @@ pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
 /// # Arguments
 /// * `config` - Peer configuration (hold timer, GR, etc). Defaults to hold_timer=90s if not specified.
 ///
+/// Bidirectional peering of two servers with default config, waits for Established.
+pub async fn peer_servers(server1: &TestServer, server2: &TestServer) {
+    peer_servers_with_config(server1, server2, SessionConfig::default()).await;
+}
+
+/// Bidirectional peering of two servers with custom config, waits for Established.
+pub async fn peer_servers_with_config(
+    server1: &TestServer,
+    server2: &TestServer,
+    config: SessionConfig,
+) {
+    server1.add_peer_with_config(server2, config).await;
+    server2.add_peer_with_config(server1, config).await;
+
+    let peer_addr = server2.address.to_string();
+    poll_until(
+        || async {
+            server1.client.get_peers().await.is_ok_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.address == peer_addr && peer.state == BgpState::Established as i32
+                })
+            })
+        },
+        &format!(
+            "Timeout waiting for AS{} <-> AS{} to establish",
+            server1.asn, server2.asn
+        ),
+    )
+    .await;
+}
+
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
 pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestServer) {
@@ -504,6 +658,26 @@ pub async fn poll_rib(expectations: &[(&TestServer, Vec<Route>)]) {
     poll_rib_with_timeout(expectations, 100).await;
 }
 
+/// Polls until each server's RIB matches expected routes using ADD-PATH comparison.
+/// Uses ExpectPathId::Distinct to assert multiple paths per prefix with distinct path_ids.
+pub async fn poll_rib_addpath(expectations: &[(&TestServer, Vec<Route>)]) {
+    poll_until(
+        || async {
+            for (server, expected_routes) in expectations {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                if !routes_match(&routes, expected_routes, ExpectPathId::Distinct) {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for ADD-PATH routes to propagate",
+    )
+    .await;
+}
+
 /// Polls until each server's full RIB matches exactly, with custom timeout (iterations x 100ms)
 pub async fn poll_rib_with_timeout(
     expectations: &[(&TestServer, Vec<Route>)],
@@ -516,7 +690,7 @@ pub async fn poll_rib_with_timeout(
                     return false;
                 };
 
-                if !routes_match(&routes, expected_routes) {
+                if !routes_match(&routes, expected_routes, ExpectPathId::Present) {
                     return false;
                 }
             }
@@ -542,11 +716,14 @@ pub async fn poll_route_exists(server: &TestServer, expected: Route) {
     .await;
 
     let routes = server.client.get_routes().await.unwrap();
-    let actual = routes.iter().find(|r| r.prefix == expected.prefix).unwrap();
-    assert_eq!(
-        actual.paths, expected.paths,
-        "Path mismatch for route {}",
-        expected.prefix
+    let actual: Vec<Route> = routes
+        .into_iter()
+        .filter(|r| r.prefix == expected.prefix)
+        .collect();
+    assert!(
+        routes_match(&actual, &[expected], ExpectPathId::Present),
+        "Route mismatch on server {}",
+        server.address
     );
 }
 
@@ -630,24 +807,13 @@ pub async fn wait_convergence(
     route_expectations: &[(&TestServer, Vec<Route>)],
     stats_expectations: &[(&TestServer, &TestServer, ExpectedStats)],
 ) {
-    use std::collections::HashMap;
-
     poll_until(
         || async {
             for (server, expected_routes) in route_expectations {
                 let Ok(routes) = server.client.get_routes().await else {
                     return false;
                 };
-                // Compare only best paths (first path in each route)
-                let routes_map: HashMap<_, _> = routes
-                    .into_iter()
-                    .map(|r| (r.prefix.clone(), r.paths.into_iter().next()))
-                    .collect();
-                let expected_map: HashMap<_, _> = expected_routes
-                    .iter()
-                    .map(|r| (r.prefix.clone(), r.paths.first().cloned()))
-                    .collect();
-                if routes_map != expected_map {
+                if !routes_match(&routes, expected_routes, ExpectPathId::Present) {
                     return false;
                 }
             }
@@ -872,6 +1038,15 @@ pub async fn chain_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        add_path_send: config.add_path_send.map(|v| {
+            if v {
+                AddPathSendMode::AddPathSendAll
+            } else {
+                AddPathSendMode::AddPathSendDisabled
+            }
+            .into()
+        }),
+        add_path_receive: config.add_path_receive,
         ..Default::default()
     };
 
@@ -1078,6 +1253,15 @@ pub async fn mesh_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        add_path_send: config.add_path_send.map(|v| {
+            if v {
+                AddPathSendMode::AddPathSendAll
+            } else {
+                AddPathSendMode::AddPathSendDisabled
+            }
+            .into()
+        }),
+        add_path_receive: config.add_path_receive,
         ..Default::default()
     };
 
@@ -1340,6 +1524,14 @@ impl FakePeer {
         self.stream = Some(stream);
     }
 
+    /// Returns the MessageFormat based on negotiated capabilities.
+    fn message_format(&self) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_4byte_asn,
+            add_path: false,
+        }
+    }
+
     /// Exchange OPEN messages with peer (ends up in OpenConfirm state).
     /// For outgoing connections: sends OPEN then reads OPEN.
     pub async fn handshake_open(&mut self, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
@@ -1355,7 +1547,7 @@ impl FakePeer {
             .expect("Failed to send OPEN");
 
         // Read their OPEN
-        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1370,7 +1562,7 @@ impl FakePeer {
         self.asn = asn;
 
         // Read their OPEN (they connected, they send first)
-        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
             .await
             .expect("Failed to read OPEN");
         match msg {
@@ -1398,13 +1590,59 @@ impl FakePeer {
             .await
             .expect("Failed to send KEEPALIVE");
 
-        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+        let format = self.message_format();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
             .await
             .expect("Failed to read KEEPALIVE");
         match msg {
             BgpMessage::Keepalive(_) => {}
             _ => panic!("Expected KEEPALIVE message during handshake"),
         }
+    }
+
+    /// Accept incoming connection and complete full BGP handshake.
+    /// Mirrors connect_and_handshake but for incoming connections (FakePeer listens).
+    /// Without capabilities: uses OpenMessage::new (plain OPEN).
+    /// With capabilities: uses build_raw_open (custom OPEN with capabilities).
+    pub async fn accept_and_handshake(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        capabilities: Option<Vec<Vec<u8>>>,
+    ) {
+        self.accept().await;
+        self.asn = asn;
+
+        // Read their OPEN
+        let _server_open = self.read_open().await;
+
+        // Send our OPEN
+        if let Some(caps) = capabilities {
+            let asn_2byte = if asn > 65535 { AS_TRANS } else { asn as u16 };
+            self.supports_4byte_asn = true;
+            let open = build_raw_open(
+                asn_2byte,
+                300,
+                u32::from(router_id),
+                RawOpenOptions {
+                    capabilities: Some(caps),
+                    ..Default::default()
+                },
+            );
+            self.send_raw(&open).await;
+        } else {
+            let open = OpenMessage::new(asn, 300, u32::from(router_id));
+            self.stream
+                .as_mut()
+                .unwrap()
+                .write_all(&open.serialize())
+                .await
+                .expect("Failed to send OPEN");
+        }
+
+        // Exchange KEEPALIVEs
+        self.send_keepalive().await;
+        self.read_keepalive().await;
     }
 
     pub fn to_peer(&self, state: BgpState) -> Peer {
@@ -1489,7 +1727,7 @@ impl FakePeer {
 
     /// Read and discard an OPEN message
     pub async fn read_open(&mut self) -> OpenMessage {
-        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
             .await
             .unwrap();
         match msg {
@@ -1500,7 +1738,8 @@ impl FakePeer {
 
     /// Read and discard a KEEPALIVE message
     pub async fn read_keepalive(&mut self) {
-        let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+        let format = self.message_format();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
             .await
             .unwrap();
         assert!(matches!(msg, BgpMessage::Keepalive(_)));
@@ -1508,9 +1747,10 @@ impl FakePeer {
 
     /// Read a NOTIFICATION message (skips any KEEPALIVEs) with 5s timeout
     pub async fn read_notification(&mut self) -> NotificationMessage {
+        let format = self.message_format();
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(self.stream.as_mut().unwrap(), false)
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
                     .await
                     .expect("Failed to read message");
 
@@ -1531,9 +1771,10 @@ impl FakePeer {
 
     /// Read an UPDATE message (skips any KEEPALIVEs) with 5s timeout
     pub async fn read_update(&mut self) -> UpdateMessage {
+        let format = self.message_format();
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(self.stream.as_mut().unwrap(), self.supports_4byte_asn)
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
                     .await
                     .expect("Failed to read UPDATE");
 
@@ -1885,5 +2126,16 @@ pub fn build_multiprotocol_capability_ipv4_unicast() -> Vec<u8> {
         0, 1, // AFI = 1 (IPv4)
         0, // Reserved
         1, // SAFI = 1 (Unicast)
+    ]
+}
+
+/// Build ADD-PATH capability (RFC 7911) for IPv4 Unicast, send+receive
+pub fn build_addpath_capability_ipv4_unicast() -> Vec<u8> {
+    vec![
+        69, // Capability code 69 = ADD-PATH
+        4,  // Length: 4 bytes
+        0, 1, // AFI = 1 (IPv4)
+        1, // SAFI = 1 (Unicast)
+        3, // Send + Receive
     ]
 }

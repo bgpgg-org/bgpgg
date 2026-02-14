@@ -29,30 +29,66 @@ pub mod types;
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::path_id::PathIdAllocator;
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
+    /// Sequential path ID allocator for tests. Starts at 1, increments.
+    /// Tracks freed IDs so tests can assert free() was called.
+    pub struct FakeAllocator {
+        next: u32,
+        pub freed: Vec<u32>,
+    }
+
+    impl FakeAllocator {
+        pub fn new() -> Self {
+            Self {
+                next: 1,
+                freed: Vec::new(),
+            }
+        }
+    }
+
+    impl PathIdAllocator for FakeAllocator {
+        fn alloc(&mut self) -> u32 {
+            let id = self.next;
+            self.next += 1;
+            id
+        }
+        fn free(&mut self, id: u32) {
+            self.freed.push(id);
+        }
+        fn free_all(&mut self, ids: Vec<u32>) {
+            self.freed.extend(&ids);
+        }
+    }
+
     pub fn create_test_path(peer_ip: IpAddr, bgp_id: Ipv4Addr) -> Arc<Path> {
         Arc::new(Path {
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![100, 200],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp { peer_ip, bgp_id },
-            local_pref: Some(100),
-            med: Some(0),
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                source: RouteSource::Ebgp { peer_ip, bgp_id },
+                local_pref: Some(100),
+                med: Some(0),
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         })
     }
 
@@ -62,24 +98,29 @@ pub(crate) mod test_helpers {
         f: impl FnOnce(&mut Path),
     ) -> Arc<Path> {
         let mut path = Path {
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![100, 200],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp { peer_ip, bgp_id },
-            local_pref: Some(100),
-            med: Some(0),
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                source: RouteSource::Ebgp { peer_ip, bgp_id },
+                local_pref: Some(100),
+                med: Some(0),
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         };
         f(&mut path);
         Arc::new(path)

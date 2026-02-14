@@ -134,9 +134,8 @@ impl Peer {
                 result = conn.msg_rx.recv() => {
                     match result {
                         Some(Ok(bytes)) => {
-                            // Parse bytes using negotiated 4-byte ASN capability
-                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
-                            match Self::parse_bgp_message(&bytes, use_4byte_asn) {
+                            let format = self.capabilities.receive_format();
+                            match Self::parse_bgp_message(&bytes, format) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");

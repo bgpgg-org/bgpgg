@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
     attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, LargeCommunity,
-    MpReachNlri, MpUnreachNlri, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
+    MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrFlag, PathAttrValue,
+    PathAttribute,
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{
@@ -180,9 +182,9 @@ pub(super) fn validate_well_known_mandatory_attributes(
     Ok(())
 }
 
-fn validate_nlri_afi(afi: &Afi, routes: &[IpNetwork]) -> bool {
-    for route in routes {
-        match (afi, route) {
+fn validate_nlri_afi(afi: &Afi, nlri_list: &[Nlri]) -> bool {
+    for nlri in nlri_list {
+        match (afi, &nlri.prefix) {
             (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
             _ => return false,
         }
@@ -552,7 +554,10 @@ pub(super) fn read_attr_cluster_list(bytes: &[u8]) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, ParserError> {
+pub(super) fn read_attr_mp_reach_nlri(
+    bytes: &[u8],
+    add_path: bool,
+) -> Result<MpReachNlri, ParserError> {
     // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
     const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
     const RESERVED_SIZE: usize = 1;
@@ -596,11 +601,11 @@ pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, Parse
     };
 
     let cursor = HEADER_SIZE + next_hop_len;
+    let nlri_bytes = &bytes[cursor + RESERVED_SIZE..];
 
-    // Parse NLRI (skip 1 reserved byte)
     let nlri = match afi {
-        Afi::Ipv4 => parse_nlri_list(&bytes[cursor + RESERVED_SIZE..])?,
-        Afi::Ipv6 => parse_nlri_v6_list(&bytes[cursor + RESERVED_SIZE..])?,
+        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
+        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
     };
 
     Ok(MpReachNlri {
@@ -611,7 +616,10 @@ pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, Parse
     })
 }
 
-pub(super) fn read_attr_mp_unreach_nlri(bytes: &[u8]) -> Result<MpUnreachNlri, ParserError> {
+pub(super) fn read_attr_mp_unreach_nlri(
+    bytes: &[u8],
+    add_path: bool,
+) -> Result<MpUnreachNlri, ParserError> {
     if bytes.len() < 3 {
         return Err(ParserError::BgpError {
             error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
@@ -622,9 +630,10 @@ pub(super) fn read_attr_mp_unreach_nlri(bytes: &[u8]) -> Result<MpUnreachNlri, P
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
 
+    let nlri_bytes = &bytes[3..];
     let withdrawn_routes = match afi {
-        Afi::Ipv4 => parse_nlri_list(&bytes[3..])?,
-        Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..])?,
+        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
+        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
     };
 
     Ok(MpUnreachNlri {
@@ -658,9 +667,8 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     // Reserved (1 byte)
     bytes.push(0);
 
-    // NLRI
-    let nlri_bytes = write_nlri_list(&mp_reach.nlri);
-    bytes.extend_from_slice(&nlri_bytes);
+    // NLRI - each entry may have its own path_id (RFC 7911)
+    bytes.extend_from_slice(&write_nlri_list(&mp_reach.nlri));
 
     bytes
 }
@@ -674,7 +682,6 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     // SAFI (1 byte)
     bytes.push(mp_unreach.safi as u8);
 
-    // Withdrawn routes
     bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
 
     bytes
@@ -682,8 +689,10 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
 
 pub(super) fn read_path_attribute(
     bytes: &[u8],
-    use_4byte_asn: bool,
+    format: MessageFormat,
 ) -> Result<(Option<PathAttribute>, u8), ParserError> {
+    let use_4byte_asn = format.use_4byte_asn;
+    let add_path = format.add_path;
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
 
@@ -785,7 +794,7 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::ClusterList(cluster_list)
                 }
                 AttrType::MpReachNlri => {
-                    let mp_reach = read_attr_mp_reach_nlri(attr_data)?;
+                    let mp_reach = read_attr_mp_reach_nlri(attr_data, add_path)?;
                     // Validate routes match declared AFI
                     if !validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) {
                         return Err(optional_attribute_error(attr_bytes));
@@ -793,7 +802,7 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::MpReachNlri(mp_reach)
                 }
                 AttrType::MpUnreachNlri => {
-                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data)?;
+                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data, add_path)?;
                     // Validate routes match declared AFI
                     if !validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) {
                         return Err(optional_attribute_error(attr_bytes));
@@ -863,14 +872,14 @@ pub(super) fn read_path_attribute(
 
 pub(super) fn read_path_attributes(
     bytes: &[u8],
-    use_4byte_asn: bool,
+    format: MessageFormat,
 ) -> Result<Vec<PathAttribute>, ParserError> {
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
     let mut seen_type_codes: HashSet<u8> = HashSet::new();
 
     while cursor < bytes.len() {
-        let (attribute_opt, offset) = read_path_attribute(&bytes[cursor..], use_4byte_asn)?;
+        let (attribute_opt, offset) = read_path_attribute(&bytes[cursor..], format)?;
         let offset_usize = offset as usize;
 
         if let Some(attribute) = attribute_opt {
@@ -912,10 +921,15 @@ pub(super) fn read_path_attributes(
     Ok(path_attributes)
 }
 
-pub(super) fn write_nlri_list(nlri_list: &[IpNetwork]) -> Vec<u8> {
+/// Encode NLRI entries to wire format. Each entry's optional path_id (RFC 7911)
+/// is prepended when present.
+pub(super) fn write_nlri_list(nlri_list: &[Nlri]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    for network in nlri_list {
-        match network {
+    for nlri in nlri_list {
+        if let Some(pid) = nlri.path_id {
+            bytes.extend_from_slice(&pid.to_be_bytes());
+        }
+        match &nlri.prefix {
             IpNetwork::V4(net) => {
                 bytes.push(net.prefix_length);
                 let octets = net.address.octets();
@@ -1085,6 +1099,13 @@ pub(super) fn write_path_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
+    use crate::bgp::msg_update_types::AttrType;
+    use crate::bgp::{
+        nlri_v4, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
+    };
+    use crate::net::Ipv6Net;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     // Sample MP_REACH_NLRI for IPv4 (192.168.1.1, NLRI=10.0.0.0/8)
     const MP_REACH_IPV4_SAMPLE: &[u8] = &[
@@ -1095,17 +1116,14 @@ mod tests {
         0x00, // Reserved
         0x08, 0x0a, // NLRI: 10.0.0.0/8
     ];
-    use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
-    use crate::bgp::msg_update_types::AttrType;
-
-    use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
 
     const PATH_ATTR_ORIGIN_EGP: &[u8] =
         &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 1];
 
     #[test]
     fn test_read_path_attribute_origin() {
-        let (attribute_opt, offset) = read_path_attribute(PATH_ATTR_ORIGIN_EGP, false).unwrap();
+        let (attribute_opt, offset) =
+            read_path_attribute(PATH_ATTR_ORIGIN_EGP, DEFAULT_FORMAT).unwrap();
         let attribute = attribute_opt.unwrap();
 
         assert_eq!(
@@ -1122,7 +1140,7 @@ mod tests {
     fn test_read_path_attribute_origin_invalid_value() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1136,7 +1154,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities() {
-        let (attr_opt, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, false).unwrap();
+        let (attr_opt, offset) =
+            read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1169,7 +1188,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = parsed_attr.value {
@@ -1205,7 +1224,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities_empty() {
-        let (attr_opt, offset) = read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, false).unwrap();
+        let (attr_opt, offset) =
+            read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1220,7 +1240,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities_well_known() {
-        let (attr_opt, _) = read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, false).unwrap();
+        let (attr_opt, _) =
+            read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = attr.value {
@@ -1245,7 +1266,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, .. }) => {
                 assert_eq!(
                     error,
@@ -1284,7 +1305,6 @@ mod tests {
     #[test]
     fn test_extended_communities_roundtrip() {
         use crate::bgp::msg_update_types::{from_ipv4, from_two_octet_as, SUBTYPE_ROUTE_TARGET};
-        use std::net::Ipv4Addr;
 
         let original_ext_communities = vec![
             from_two_octet_as(SUBTYPE_ROUTE_TARGET, 65000, 100),
@@ -1300,7 +1320,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::ExtendedCommunities(ext_communities) = parsed_attr.value {
@@ -1314,18 +1334,22 @@ mod tests {
     const PATH_ATTR_AS_PATH: &[u8] = &[
         PathAttrFlag::TRANSITIVE,
         AttrType::AsPath as u8,
-        0x06,
+        0x0a, // 1 + 1 + 2*4 = 10 bytes (4-byte ASN)
         AsPathSegmentType::AsSet as u8,
         0x02,
         0x00,
-        0x10,
+        0x00,
+        0x00,
+        0x10, // ASN 16
+        0x00,
+        0x00,
         0x01,
-        0x12,
+        0x12, // ASN 274
     ];
 
     #[test]
     fn test_read_path_attribute_as_path() {
-        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         let segments = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
@@ -1340,7 +1364,7 @@ mod tests {
                 value: PathAttrValue::AsPath(AsPath { segments }),
             }
         );
-        assert_eq!(offset, 9);
+        assert_eq!(offset, 13);
     }
 
     #[test]
@@ -1352,7 +1376,7 @@ mod tests {
             AsPathSegmentType::AsSet as u8,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1376,7 +1400,7 @@ mod tests {
             0x10,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1392,7 +1416,7 @@ mod tests {
     fn test_read_path_attribute_as_path_empty() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1409,20 +1433,26 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,
             AttrType::AsPath as u8,
-            0x0a,
+            0x10, // 10 + 6 = 16 bytes (4-byte ASN)
             AsPathSegmentType::AsSequence as u8,
             0x02,
             0x00,
-            0x0a,
             0x00,
-            0x14,
+            0x00,
+            0x0a, // ASN 10
+            0x00,
+            0x00,
+            0x00,
+            0x14, // ASN 20
             AsPathSegmentType::AsSet as u8,
             0x01,
             0x00,
-            0x1e,
+            0x00,
+            0x00,
+            0x1e, // ASN 30
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1444,7 +1474,7 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(offset, 13);
+        assert_eq!(offset, 19);
     }
 
     // NEXT_HOP attribute tests
@@ -1460,7 +1490,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
-        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, false).unwrap();
+        let (as_path_opt, offset) =
+            read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1485,7 +1516,7 @@ mod tests {
             0x0e,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1517,7 +1548,7 @@ mod tests {
                 ip_bytes[3],
             ];
 
-            match read_path_attribute(&input, false) {
+            match read_path_attribute(&input, DEFAULT_FORMAT) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1545,7 +1576,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1568,7 +1599,7 @@ mod tests {
             0x01,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1593,7 +1624,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1616,7 +1647,7 @@ mod tests {
             0x0f,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1637,7 +1668,7 @@ mod tests {
             0x00,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1658,7 +1689,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1687,7 +1718,7 @@ mod tests {
             0x0d,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, false).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1713,7 +1744,7 @@ mod tests {
             0x0a,
         ];
 
-        match read_path_attribute(input, false) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1728,7 +1759,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_extended_communities() {
         let (attr_opt, offset) =
-            read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, false).unwrap();
+            read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1757,7 +1788,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, false).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
@@ -1811,136 +1842,255 @@ mod tests {
 
     #[test]
     fn test_validate_nlri_afi_mismatch() {
-        use crate::net::{Ipv4Net, Ipv6Net};
-        use std::net::{Ipv4Addr, Ipv6Addr};
+        let ipv6_route = Nlri {
+            prefix: IpNetwork::V6(Ipv6Net {
+                address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                prefix_length: 64,
+            }),
+            path_id: None,
+        };
+        let ipv4_route = nlri_v4(192, 168, 1, 0, 24, None);
 
-        // IPv4 AFI with IPv6 routes should fail
-        let ipv6_routes = vec![IpNetwork::V6(Ipv6Net {
-            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-            prefix_length: 64,
-        })];
-        assert!(!validate_nlri_afi(&Afi::Ipv4, &ipv6_routes));
+        // AFI mismatch should fail
+        assert!(!validate_nlri_afi(&Afi::Ipv4, &[ipv6_route]));
+        assert!(!validate_nlri_afi(&Afi::Ipv6, &[ipv4_route]));
 
-        // IPv6 AFI with IPv4 routes should fail
-        let ipv4_routes = vec![IpNetwork::V4(Ipv4Net {
-            address: Ipv4Addr::new(192, 168, 1, 0),
-            prefix_length: 24,
-        })];
-        assert!(!validate_nlri_afi(&Afi::Ipv6, &ipv4_routes));
-
-        // IPv4 AFI with IPv4 routes should succeed
-        assert!(validate_nlri_afi(&Afi::Ipv4, &ipv4_routes));
-
-        // IPv6 AFI with IPv6 routes should succeed
-        assert!(validate_nlri_afi(&Afi::Ipv6, &ipv6_routes));
+        // AFI match should succeed
+        assert!(validate_nlri_afi(&Afi::Ipv4, &[ipv4_route]));
+        assert!(validate_nlri_afi(&Afi::Ipv6, &[ipv6_route]));
     }
 
     #[test]
     fn test_read_attr_mp_reach_nlri_ipv4() {
-        use crate::net::Ipv4Net;
-        use std::net::Ipv4Addr;
+        // (name, input, add_path, expected_nlri)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                MP_REACH_IPV4_SAMPLE,
+                false,
+                vec![nlri_v4(10, 0, 0, 0, 8, None)],
+            ),
+            (
+                "with add_path",
+                &[
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x04, // Next hop length = 4
+                    0xc0, 0xa8, 0x01, 0x01, // Next hop 192.168.1.1
+                    0x00, // Reserved
+                    // NLRI: path_id=42, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x2a, 0x08, 0x0a,
+                ],
+                true,
+                vec![nlri_v4(10, 0, 0, 0, 8, Some(42))],
+            ),
+            (
+                "with add_path multiple NLRIs",
+                &[
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x04, // Next hop length = 4
+                    0xc0, 0xa8, 0x01, 0x01, // Next hop 192.168.1.1
+                    0x00, // Reserved
+                    // NLRI 1: path_id=1, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a,
+                    // NLRI 2: path_id=2, 172.16.0.0/16
+                    0x00, 0x00, 0x00, 0x02, 0x10, 0xac, 0x10,
+                ],
+                true,
+                vec![
+                    nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                    nlri_v4(172, 16, 0, 0, 16, Some(2)),
+                ],
+            ),
+        ];
 
-        let result = read_attr_mp_reach_nlri(MP_REACH_IPV4_SAMPLE).unwrap();
+        for (name, input, add_path, expected_nlri) in tests {
+            let result = read_attr_mp_reach_nlri(input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv4, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(
+                result.next_hop,
+                NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                "{name}"
+            );
+            assert_eq!(result.nlri, expected_nlri, "{name}");
+        }
+    }
 
-        assert_eq!(result.afi, Afi::Ipv4);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(
-            result.next_hop,
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1))
-        );
-        assert_eq!(result.nlri.len(), 1);
-        assert_eq!(
-            result.nlri[0],
-            IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            })
-        );
+    #[test]
+    fn test_mp_reach_ipv4_addpath_roundtrip() {
+        let mp_reach = MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+            nlri: vec![
+                nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                nlri_v4(172, 16, 0, 0, 16, Some(2)),
+            ],
+        };
+
+        let bytes = write_attr_mp_reach_nlri(&mp_reach);
+        let parsed = read_attr_mp_reach_nlri(&bytes, true).unwrap();
+
+        assert_eq!(parsed.afi, mp_reach.afi);
+        assert_eq!(parsed.safi, mp_reach.safi);
+        assert_eq!(parsed.next_hop, mp_reach.next_hop);
+        assert_eq!(parsed.nlri, mp_reach.nlri);
     }
 
     #[test]
     fn test_read_attr_mp_reach_nlri_ipv6() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
-        // MP_REACH_NLRI: AFI=IPv6, SAFI=1, next_hop=2001:db8::1, NLRI=2001:db8::/32
-        let input: &[u8] = &[
+        // Common IPv6 header: AFI=IPv6, SAFI=1, next_hop=2001:db8::1
+        let ipv6_header: &[u8] = &[
             0x00, 0x02, // AFI = IPv6 (2)
             0x01, // SAFI = 1 (unicast)
             0x10, // Next hop length = 16
             0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, // Next hop 2001:db8::1
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // Reserved
-            0x20, 0x20, 0x01, 0x0d, 0xb8, // NLRI: 2001:db8::/32
         ];
 
-        let result = read_attr_mp_reach_nlri(input).unwrap();
+        // (name, nlri_bytes, add_path, expected_nlri)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                // 2001:db8::/32
+                &[0x20, 0x20, 0x01, 0x0d, 0xb8],
+                false,
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    path_id: None,
+                }],
+            ),
+            (
+                "with add_path",
+                // path_id=100, 2001:db8::/32
+                &[0x00, 0x00, 0x00, 0x64, 0x20, 0x20, 0x01, 0x0d, 0xb8],
+                true,
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    path_id: Some(100),
+                }],
+            ),
+        ];
 
-        assert_eq!(result.afi, Afi::Ipv6);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(
-            result.next_hop,
-            NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1))
-        );
-        assert_eq!(result.nlri.len(), 1);
-        assert_eq!(
-            result.nlri[0],
-            IpNetwork::V6(Ipv6Net {
-                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
-                prefix_length: 32,
-            })
-        );
+        for (name, nlri_bytes, add_path, expected_nlri) in tests {
+            let mut input = ipv6_header.to_vec();
+            input.extend_from_slice(nlri_bytes);
+
+            let result = read_attr_mp_reach_nlri(&input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv6, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(
+                result.next_hop,
+                NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+                "{name}"
+            );
+            assert_eq!(result.nlri, expected_nlri, "{name}");
+        }
     }
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv4() {
-        use crate::net::Ipv4Net;
-        use std::net::Ipv4Addr;
-
-        // MP_UNREACH_NLRI: AFI=IPv4, SAFI=1, withdrawn=10.0.0.0/8
-        let input: &[u8] = &[
-            0x00, 0x01, // AFI = IPv4 (1)
-            0x01, // SAFI = 1 (unicast)
-            0x08, 0x0a, // Withdrawn: 10.0.0.0/8
+        // (name, input, add_path, expected_withdrawn)
+        let tests: Vec<(&str, Vec<u8>, bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x08, 0x0a, // Withdrawn: 10.0.0.0/8
+                ],
+                false,
+                vec![nlri_v4(10, 0, 0, 0, 8, None)],
+            ),
+            (
+                "with add_path",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    // path_id=5, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x05, 0x08, 0x0a,
+                ],
+                true,
+                vec![nlri_v4(10, 0, 0, 0, 8, Some(5))],
+            ),
+            (
+                "with add_path same prefix different path_ids",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    // path_id=1, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a, // path_id=2, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x02, 0x08, 0x0a,
+                ],
+                true,
+                vec![
+                    nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                    nlri_v4(10, 0, 0, 0, 8, Some(2)),
+                ],
+            ),
         ];
 
-        let result = read_attr_mp_unreach_nlri(input).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv4);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(result.withdrawn_routes.len(), 1);
-        assert_eq!(
-            result.withdrawn_routes[0],
-            IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            })
-        );
+        for (name, input, add_path, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(&input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv4, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");
+        }
     }
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv6() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
-        // MP_UNREACH_NLRI: AFI=IPv6, SAFI=1, withdrawn=2001:db8::/32
-        let input: &[u8] = &[
-            0x00, 0x02, // AFI = IPv6 (2)
-            0x01, // SAFI = 1 (unicast)
-            0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
+        // (name, input, add_path, expected_withdrawn)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                &[
+                    0x00, 0x02, // AFI = IPv6
+                    0x01, // SAFI = unicast
+                    0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
+                ],
+                false,
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    path_id: None,
+                }],
+            ),
+            (
+                "with add_path",
+                &[
+                    0x00, 0x02, // AFI = IPv6
+                    0x01, // SAFI = unicast
+                    // path_id=7, 2001:db8::/32
+                    0x00, 0x00, 0x00, 0x07, 0x20, 0x20, 0x01, 0x0d, 0xb8,
+                ],
+                true,
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    path_id: Some(7),
+                }],
+            ),
         ];
 
-        let result = read_attr_mp_unreach_nlri(input).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv6);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(result.withdrawn_routes.len(), 1);
-        assert_eq!(
-            result.withdrawn_routes[0],
-            IpNetwork::V6(Ipv6Net {
-                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
-                prefix_length: 32,
-            })
-        );
+        for (name, input, add_path, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv6, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");
+        }
     }
 
     #[test]
@@ -1965,7 +2115,7 @@ mod tests {
         attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
 
         // Should fail with MalformedAttributeList
-        let result = read_path_attributes(&attrs_bytes, false);
+        let result = read_path_attributes(&attrs_bytes, DEFAULT_FORMAT);
         assert!(result.is_err());
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(
@@ -2080,7 +2230,7 @@ mod tests {
         ];
 
         for test in tests {
-            let result = read_path_attribute(test.input, false);
+            let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
             let (attr_opt, offset) = result.unwrap();
             assert!(
@@ -2113,7 +2263,7 @@ mod tests {
             0x14, // Second ASN: 20
         ];
 
-        let result = read_path_attribute(input, false);
+        let result = read_path_attribute(input, DEFAULT_FORMAT);
         assert!(result.is_ok());
         let (attr_opt, _) = result.unwrap();
         assert!(
@@ -2133,18 +2283,20 @@ mod tests {
     #[test]
     fn test_malformed_as_path() {
         // Regular AS_PATH (well-known mandatory) should still cause errors
-        // Segment length claims 2 ASNs but we only provide data for 1
+        // Segment claims 2 ASNs but data is truncated
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,
             AttrType::AsPath as u8,
-            0x04, // Length: 4 bytes (segment header=2, 1 ASN in 2-byte format=2)
+            0x06, // Length: 6 bytes (segment header=2, 1 ASN=4)
             AsPathSegmentType::AsSequence as u8,
             0x02, // Segment length claims: 2 ASNs (but only 1 ASN worth of data follows)
+            0x00,
+            0x00,
             0x00,
             0x0a, // First ASN: 10 (second ASN missing - truncated)
         ];
 
-        let result = read_path_attribute(input, false);
+        let result = read_path_attribute(input, DEFAULT_FORMAT);
         assert!(result.is_err(), "Malformed AS_PATH should cause error");
 
         if let Err(ParserError::BgpError { error, .. }) = result {
@@ -2221,7 +2373,7 @@ mod tests {
         ];
 
         for test in tests {
-            let result = read_path_attribute(test.input, false);
+            let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
             let (attr_opt, _) = result.unwrap();
             assert!(

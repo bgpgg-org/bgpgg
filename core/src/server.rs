@@ -15,8 +15,8 @@
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
-use crate::bgp::multiprotocol::{Afi, Safi};
+use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
@@ -24,13 +24,13 @@ use crate::log::{error, info};
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::outgoing::{
-    send_announcements_to_peer, send_withdrawals_to_peer, should_propagate_to_peer,
+    propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
 };
 use crate::peer::BgpState;
-use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
+use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics, Withdrawal};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{Path, Route};
+use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -153,17 +153,7 @@ pub enum MgmtOp {
     },
     AddRoute {
         prefix: IpNetwork,
-        next_hop: NextHopAddr,
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        originator_id: Option<std::net::Ipv4Addr>,
-        cluster_list: Vec<std::net::Ipv4Addr>,
+        attrs: PathAttrs,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
@@ -282,8 +272,8 @@ pub enum ServerOp {
     },
     PeerUpdate {
         peer_ip: IpAddr,
-        withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, Arc<Path>)>,
+        withdrawn: Vec<Withdrawal>,
+        announced: Vec<PrefixPath>,
     },
     PeerDisconnected {
         peer_ip: IpAddr,
@@ -399,6 +389,30 @@ impl ConnectionState {
             capabilities: None,
         }
     }
+
+    pub fn supports_four_octet_asn(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.supports_four_octet_asn())
+    }
+
+    pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_send_negotiated(afi_safi))
+    }
+
+    pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_receive_negotiated(afi_safi))
+    }
+
+    pub fn add_path_receive(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_receive())
+    }
 }
 
 /// Peer configuration and state stored in server's HashMap.
@@ -416,6 +430,8 @@ pub struct PeerInfo {
     pub outgoing: Option<ConnectionState>,
     /// Incoming connection slot (peer initiated)
     pub incoming: Option<ConnectionState>,
+    /// Per-peer adj-rib-out: tracks routes actually exported to this peer.
+    pub adj_rib_out: AdjRibOut,
 }
 
 impl PeerInfo {
@@ -437,6 +453,7 @@ impl PeerInfo {
             config,
             outgoing,
             incoming,
+            adj_rib_out: AdjRibOut::new(),
         }
     }
 
@@ -916,38 +933,26 @@ impl BgpServer {
     /// Propagate route changes to all established peers (except the originating peer)
     /// If originating_peer is None, propagates to all peers (used for locally originated routes)
     ///
-    /// RFC 4456 Route Reflector filtering is handled by compute_routes_for_peer based on:
+    /// Loops per-AFI/SAFI so ADD-PATH is checked per address family, not globally.
+    ///
+    /// RFC 4456 Route Reflector filtering is handled by compute_export_path based on:
     /// - path.source.is_rr_client(): whether source peer was an RR client
     /// - rr_client: whether peer is an RR client
     pub(crate) async fn propagate_routes(
         &mut self,
-        changed_prefixes: Vec<IpNetwork>,
+        delta: RouteDelta,
         originating_peer: Option<IpAddr>,
     ) {
-        let local_asn = self.config.asn;
-        let cluster_id = self.config.cluster_id();
-
-        // For each changed prefix, determine what to send
-        let mut to_announce = Vec::new();
-        let mut to_withdraw = Vec::new();
-
-        for prefix in changed_prefixes {
-            if let Some(best_path) = self.loc_rib.get_best_path(&prefix) {
-                // We have a best path - prepare announcement
-                to_announce.push((prefix, best_path.clone()));
-            } else {
-                // No path exists - prepare withdrawal
-                to_withdraw.push(prefix);
-            }
+        if !delta.has_changes() {
+            return;
         }
 
-        // TODO(add-path): Withdrawals skip RR filtering — non-client iBGP peers may
-        // receive withdrawals for routes they never got. Harmless but wasteful. Fix
-        // when adding per-peer export tracking for ADD-PATH.
+        let local_asn = self.config.asn;
+        let cluster_id = self.config.cluster_id();
+        let local_addr = self.local_addr;
+        let loc_rib = &self.loc_rib;
 
-        // Send updates to all established peers (except the originating peer)
-        for (peer_addr, entry) in self.peers.iter() {
-            // Get the established connection
+        for (peer_addr, entry) in self.peers.iter_mut() {
             let Some(conn) = entry.established_conn() else {
                 continue;
             };
@@ -956,51 +961,75 @@ impl BgpServer {
                 continue;
             }
 
-            // Need active peer_tx to send updates
-            let Some(peer_tx) = &conn.peer_tx else {
+            let Some(peer_tx) = conn.peer_tx.clone() else {
                 continue;
             };
 
-            // Get peer ASN, default to local ASN if not yet known
-            let peer_asn = conn.asn.unwrap_or(local_asn);
-            let rr_client = entry.config.rr_client;
-
-            // Get local address used for this peering session (RFC 4271 5.1.3)
-            // Falls back to router ID if connection info not available
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(self.local_addr);
-
-            let export_policies = entry.policy_out();
-            if !export_policies.is_empty() {
-                let peer_supports_4byte_asn = conn
-                    .capabilities
-                    .as_ref()
-                    .map(|caps| caps.supports_four_octet_asn())
-                    .unwrap_or(false);
-
-                send_withdrawals_to_peer(
-                    *peer_addr,
-                    peer_tx,
-                    &to_withdraw,
-                    peer_supports_4byte_asn,
-                );
-                send_announcements_to_peer(
-                    *peer_addr,
-                    peer_tx,
-                    &to_announce,
-                    local_asn,
-                    peer_asn,
-                    local_next_hop,
-                    export_policies,
-                    peer_supports_4byte_asn,
-                    rr_client,
-                    cluster_id,
-                );
-            } else {
+            let export_policies = entry.policy_out().to_vec();
+            if export_policies.is_empty() {
                 error!(peer_ip = %peer_addr, "export policies not set for established peer");
+                continue;
+            }
+
+            let afis = [
+                (
+                    Afi::Ipv4,
+                    conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)),
+                ),
+                (
+                    Afi::Ipv6,
+                    conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
+                ),
+            ];
+
+            let ctx = PeerExportContext {
+                peer_addr: *peer_addr,
+                peer_tx: &peer_tx,
+                local_asn,
+                peer_asn: conn.asn.unwrap_or(local_asn),
+                local_next_hop: conn
+                    .conn_info
+                    .as_ref()
+                    .map(|conn_info| conn_info.local_address)
+                    .unwrap_or(local_addr),
+                export_policies: &export_policies,
+                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                rr_client: entry.config.rr_client,
+                cluster_id,
+                add_path_send: false, // overridden per-AFI below
+            };
+
+            for (afi, add_path_send) in afis {
+                let source = if add_path_send {
+                    &delta.changed
+                } else {
+                    &delta.best_changed
+                };
+
+                let changed: Vec<IpNetwork> = source
+                    .iter()
+                    .filter(|prefix| {
+                        matches!(
+                            (prefix, afi),
+                            (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
+                        )
+                    })
+                    .copied()
+                    .collect();
+
+                if changed.is_empty() {
+                    continue;
+                }
+
+                propagate_routes_to_peer(
+                    &PeerExportContext {
+                        add_path_send,
+                        ..ctx
+                    },
+                    &changed,
+                    loc_rib,
+                    &mut entry.adj_rib_out,
+                );
             }
         }
     }

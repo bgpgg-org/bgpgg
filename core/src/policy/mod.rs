@@ -154,25 +154,30 @@ impl PolicyContext {
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::Ipv4Addr;
 
     pub fn create_path(source: RouteSource) -> Path {
         Path {
-            origin: Origin::IGP,
-            as_path: vec![],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 

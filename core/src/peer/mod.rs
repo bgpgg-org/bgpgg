@@ -12,24 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message};
+use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::GracefulRestartCapability;
-use crate::bgp::multiprotocol::AfiSafi;
+use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
+use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info};
 use crate::net::IpNetwork;
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::{Path, Route};
+use crate::rib::{PrefixPath, Route};
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Error};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
@@ -67,6 +68,9 @@ pub struct PeerCapabilities {
     /// Graceful Restart capability (RFC 4724)
     /// Contains what the peer advertised in their OPEN message
     pub graceful_restart: Option<GracefulRestartCapability>,
+    /// ADD-PATH capability (RFC 7911)
+    /// Contains the negotiated ADD-PATH send/receive per AFI/SAFI
+    pub add_path: Option<AddPathCapability>,
 }
 
 impl PeerCapabilities {
@@ -86,6 +90,64 @@ impl PeerCapabilities {
             .as_ref()
             .map(|gr_cap| gr_cap.afi_safis())
             .unwrap_or_default()
+    }
+
+    /// Check if ADD-PATH send is negotiated for a specific AFI/SAFI
+    pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| {
+                ap.entries
+                    .iter()
+                    .any(|(as_, mode)| as_ == afi_safi && mode.can_send())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Negotiated AFI/SAFIs. RFC 4760: if multiprotocol is not negotiated,
+    /// IPv4 Unicast is assumed.
+    pub fn afi_safis(&self) -> Vec<AfiSafi> {
+        if self.multiprotocol.is_empty() {
+            vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]
+        } else {
+            self.multiprotocol.iter().copied().collect()
+        }
+    }
+
+    /// Build MessageFormat for parsing incoming messages from this peer
+    pub fn receive_format(&self) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_four_octet_asn(),
+            add_path: self.add_path_receive(),
+        }
+    }
+
+    /// Build MessageFormat for encoding outgoing messages to this peer
+    pub fn send_format(&self, afi_safi: &AfiSafi) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_four_octet_asn(),
+            add_path: self.add_path_send_negotiated(afi_safi),
+        }
+    }
+
+    /// Check if ADD-PATH receive is negotiated for a specific AFI/SAFI
+    pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| {
+                ap.entries
+                    .iter()
+                    .any(|(as_, mode)| as_ == afi_safi && mode.can_receive())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check if ADD-PATH receive is negotiated for any AFI/SAFI
+    pub fn add_path_receive(&self) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| ap.entries.iter().any(|(_, mode)| mode.can_receive()))
+            .unwrap_or(false)
     }
 }
 
@@ -110,8 +172,11 @@ pub struct LocalConfig {
     pub cluster_id: std::net::Ipv4Addr,
 }
 
-/// (announced routes, withdrawn prefixes)
-pub(super) type RouteChanges = (Vec<(IpNetwork, Arc<Path>)>, Vec<IpNetwork>);
+/// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
+pub type Withdrawal = (IpNetwork, Option<u32>);
+
+/// (announced routes, withdrawn routes)
+pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<Withdrawal>);
 
 mod fsm;
 mod incoming;
@@ -596,9 +661,6 @@ impl Peer {
     /// it completes the initial routing update for an address family after the BGP session
     /// is established." This helps routing convergence in general, not just for GR.
     async fn send_eor_markers(&mut self, afi_safis: &[AfiSafi]) -> Result<(), io::Error> {
-        use crate::bgp::msg::MessageFormat;
-        use crate::bgp::msg_update::UpdateMessage;
-
         let conn = self
             .conn
             .as_mut()
@@ -621,8 +683,7 @@ impl Peer {
             }
 
             // Create EOR message
-            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
-            let format = MessageFormat { use_4byte_asn };
+            let format = self.capabilities.send_format(afi_safi);
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 
             // Send EOR
@@ -646,18 +707,17 @@ impl Peer {
     ///
     /// # Arguments
     /// * `bytes` - Complete BGP message including header
-    /// * `use_4byte_asn` - Whether to use 4-byte ASN encoding
+    /// * `format` - Message encoding format based on negotiated capabilities
     ///
-    /// # Note on use_4byte_asn during OPEN exchange
-    /// During OPEN message exchange, `use_4byte_asn` MUST be `false` because:
+    /// # Note on format during OPEN exchange
+    /// During OPEN message exchange, `format` MUST have `use_4byte_asn: false` because:
     /// - RFC 6793: OPEN messages always use 2-byte ASN encoding
     /// - If peer ASN > 65535, OPEN uses AS_TRANS (23456) and real ASN goes in capability
     /// - Only after OPEN negotiation can we determine if peer supports 4-byte ASNs
-    /// - After negotiation, set `use_4byte_asn = negotiated_capabilities.supports_four_octet_asn()`
-    fn parse_bgp_message(bytes: &[u8], use_4byte_asn: bool) -> Result<BgpMessage, ParserError> {
+    fn parse_bgp_message(bytes: &[u8], format: MessageFormat) -> Result<BgpMessage, ParserError> {
         let message_type = bytes[18];
         let body = bytes[19..].to_vec();
-        BgpMessage::from_bytes(message_type, body, use_4byte_asn)
+        BgpMessage::from_bytes(message_type, body, format)
     }
 
     /// Convert BGP parse error to FSM event for error handling.
@@ -684,39 +744,36 @@ impl Peer {
     /// OPEN message to reduce resource consumption from connection collisions.
     async fn handle_delay_open_message(&mut self, result: Option<Result<Vec<u8>, ParserError>>) {
         match result {
-            Some(Ok(bytes)) => {
-                // RFC 6793: OPEN messages always use 2-byte ASN encoding
-                match Self::parse_bgp_message(&bytes, false) {
-                    Ok(BgpMessage::Open(open)) => {
-                        debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
-                        self.fsm.timers.stop_delay_open_timer();
-                        let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
-                            peer_asn: open.asn,
-                            peer_hold_time: open.hold_time,
-                            local_asn: self.local_config.asn,
-                            local_hold_time: self.local_config.hold_time,
-                            peer_capabilities: PeerCapabilities::default(),
-                            peer_bgp_id: open.bgp_identifier,
-                        });
-                        if let Err(e) = self.process_event(&event).await {
-                            error!(peer_ip = %self.addr, error = %e, "failed to send response to OPEN");
-                            self.disconnect(true, PeerDownReason::LocalNoNotification(event));
-                        }
-                    }
-                    Ok(BgpMessage::Notification(notif)) => {
-                        self.handle_notification_received(&notif).await;
-                    }
-                    Ok(_) => {
-                        error!(peer_ip = %self.addr, "unexpected message while waiting for DelayOpen");
-                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
-                    }
-                    Err(e) => {
-                        debug!(peer_ip = %self.addr, error = ?e, "parse error while waiting for DelayOpen");
-                        let event = Self::parse_error_to_fsm_event(&e);
-                        self.try_process_event(&event).await;
+            Some(Ok(bytes)) => match Self::parse_bgp_message(&bytes, PRE_OPEN_FORMAT) {
+                Ok(BgpMessage::Open(open)) => {
+                    debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
+                    self.fsm.timers.stop_delay_open_timer();
+                    let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                        peer_asn: open.asn,
+                        peer_hold_time: open.hold_time,
+                        local_asn: self.local_config.asn,
+                        local_hold_time: self.local_config.hold_time,
+                        peer_capabilities: PeerCapabilities::default(),
+                        peer_bgp_id: open.bgp_identifier,
+                    });
+                    if let Err(e) = self.process_event(&event).await {
+                        error!(peer_ip = %self.addr, error = %e, "failed to send response to OPEN");
+                        self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                     }
                 }
-            }
+                Ok(BgpMessage::Notification(notif)) => {
+                    self.handle_notification_received(&notif).await;
+                }
+                Ok(_) => {
+                    error!(peer_ip = %self.addr, "unexpected message while waiting for DelayOpen");
+                    self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                }
+                Err(e) => {
+                    debug!(peer_ip = %self.addr, error = ?e, "parse error while waiting for DelayOpen");
+                    let event = Self::parse_error_to_fsm_event(&e);
+                    self.try_process_event(&event).await;
+                }
+            },
             Some(Err(e)) => {
                 // Header validation error from read task
                 debug!(peer_ip = %self.addr, error = %e, "connection error while waiting for DelayOpen");

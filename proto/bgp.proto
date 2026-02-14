@@ -54,6 +54,12 @@ message MaxPrefixSetting {
     MaxPrefixAction action = 2;
 }
 
+// RFC 7911: ADD-PATH send mode
+enum AddPathSendMode {
+    ADD_PATH_SEND_DISABLED = 0;
+    ADD_PATH_SEND_ALL = 1;
+}
+
 // Graceful Restart configuration (RFC 4724)
 message GracefulRestartConfig {
     optional bool enabled = 1;
@@ -73,6 +79,8 @@ message SessionConfig {
     optional GracefulRestartConfig graceful_restart = 9;  // Graceful Restart settings
     optional uint32 port = 10;  // Remote BGP port (default: 179)
     optional bool rr_client = 11;  // RFC 4456: Mark peer as route reflector client
+    optional AddPathSendMode add_path_send = 12;   // RFC 7911: send mode
+    optional bool add_path_receive = 13;  // RFC 7911: Accept multiple paths from peer
 }
 
 // Add peer request/response
@@ -290,6 +298,9 @@ message Path {
     // RFC 4456: Route Reflector attributes
     optional string originator_id = 12;  // ORIGINATOR_ID (IPv4 address)
     repeated string cluster_list = 13;   // CLUSTER_LIST (list of IPv4 addresses)
+    // RFC 7911: ADD-PATH identifiers
+    optional uint32 local_path_id = 14;       // Locally assigned path ID (absent = not in loc-rib)
+    optional uint32 remote_path_id = 15;      // Path ID received from peer (absent = no ADD-PATH)
 }
 
 // Unknown attribute

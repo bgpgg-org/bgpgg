@@ -14,13 +14,13 @@
 
 use super::fsm::FsmEvent;
 use super::{BgpOpenParams, PeerCapabilities};
-#[cfg(test)]
-use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, ParamVal};
+use crate::bgp::msg_open_types::{
+    AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
+};
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info, warn};
@@ -29,6 +29,8 @@ use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncWriteExt;
+
+use crate::config::{AddPathSend, PeerConfig};
 
 use super::{Peer, RouteChanges, SessionType};
 
@@ -47,10 +49,7 @@ fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSe
 }
 
 /// Build complete list of optional parameters for OPEN message
-fn build_optional_params(
-    asn: u32,
-    gr_config: &crate::config::GracefulRestartConfig,
-) -> Vec<OptionalParam> {
+fn build_optional_params(asn: u32, config: &PeerConfig) -> Vec<OptionalParam> {
     let afi_safis = default_afi_safis();
     let mut optional_params = Vec::new();
 
@@ -67,7 +66,7 @@ fn build_optional_params(
     ));
 
     // Add Graceful Restart capability (RFC 4724) if enabled
-    if gr_config.enabled {
+    if config.graceful_restart.enabled {
         // Receiving Speaker mode: R bit = false (we don't preserve forwarding state)
         // F bit = false for all AFI/SAFIs (no forwarding state preservation)
         let afi_safi_list: Vec<_> = afi_safis
@@ -76,7 +75,7 @@ fn build_optional_params(
             .collect();
         optional_params.push(OptionalParam::new_capability(
             Capability::new_graceful_restart(
-                gr_config.restart_time,
+                config.graceful_restart.restart_time,
                 false, // R bit: we don't preserve forwarding state across restarts
                 afi_safi_list,
             ),
@@ -87,6 +86,15 @@ fn build_optional_params(
     optional_params.push(OptionalParam::new_capability(
         Capability::new_four_octet_asn(asn),
     ));
+
+    // Add ADD-PATH capability (RFC 7911) if configured
+    let add_path_send = !matches!(config.add_path_send, AddPathSend::Disabled);
+    if let Some(mode) = AddPathMode::from_flags(add_path_send, config.add_path_receive) {
+        let entries: Vec<_> = afi_safis.iter().map(|afi_safi| (*afi_safi, mode)).collect();
+        optional_params.push(OptionalParam::new_capability(Capability::new_add_path(
+            &entries,
+        )));
+    }
 
     optional_params
 }
@@ -118,6 +126,10 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                     // RFC 4724: Parse Graceful Restart capability
                     capabilities.graceful_restart = cap.as_graceful_restart();
                 }
+                BgpCapabiltyCode::AddPath => {
+                    // RFC 7911: Parse ADD-PATH capability
+                    capabilities.add_path = cap.as_add_path();
+                }
                 _ => {}
             }
         }
@@ -131,9 +143,9 @@ fn create_open_message(
     asn: u32,
     hold_time: u16,
     router_id: Ipv4Addr,
-    gr_config: &crate::config::GracefulRestartConfig,
+    config: &PeerConfig,
 ) -> OpenMessage {
-    let optional_params = build_optional_params(asn, gr_config);
+    let optional_params = build_optional_params(asn, config);
 
     // Calculate total optional params length
     let optional_params_len = optional_params
@@ -162,7 +174,7 @@ impl Peer {
             self.local_config.asn,
             self.local_config.hold_time,
             self.local_config.bgp_id,
-            &self.config.graceful_restart,
+            &self.config,
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -193,19 +205,21 @@ impl Peer {
         let negotiated_multiprotocol =
             negotiate_multiprotocol(&local_afi_safis, &peer_capabilities.multiprotocol);
 
-        // Negotiate Route Refresh capability (RFC 2918)
-        // We always advertise it, so it's negotiated if the peer also advertises it
-        let negotiated_route_refresh = peer_capabilities.route_refresh;
-
         // Negotiate Four-Octet ASN capability (RFC 6793)
         // Both must advertise for it to be negotiated
         let negotiated_four_octet_asn = peer_capabilities.four_octet_asn;
 
+        // Negotiate ADD-PATH capability (RFC 7911)
+        // Send is negotiated when local advertised send AND peer advertised receive
+        // Receive is negotiated when local advertised receive AND peer advertised send
+        let negotiated_add_path = self.negotiate_add_path(&peer_capabilities);
+
         self.capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
-            route_refresh: negotiated_route_refresh,
+            route_refresh: peer_capabilities.route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
             graceful_restart: peer_capabilities.graceful_restart,
+            add_path: negotiated_add_path,
         };
 
         // RFC 4724: Update FSM with GR status
@@ -239,6 +253,7 @@ impl Peer {
               route_refresh = self.capabilities.route_refresh,
               four_octet_asn = ?self.capabilities.four_octet_asn,
               graceful_restart = ?self.capabilities.graceful_restart,
+              add_path = ?self.capabilities.add_path,
               peer_ip = %self.addr,
               "peer capabilities");
 
@@ -504,6 +519,41 @@ impl Peer {
         });
     }
 
+    /// Negotiate ADD-PATH capability (RFC 7911)
+    /// Local send is negotiated when local config has send enabled AND peer advertised receive.
+    /// Local receive is negotiated when local config has receive enabled AND peer advertised send.
+    fn negotiate_add_path(&self, peer_caps: &PeerCapabilities) -> Option<AddPathCapability> {
+        let local_send = !matches!(self.config.add_path_send, AddPathSend::Disabled);
+        let local_receive = self.config.add_path_receive;
+
+        let peer_add_path = match &peer_caps.add_path {
+            Some(ap) => ap,
+            None => return None,
+        };
+
+        if !local_send && !local_receive {
+            return None;
+        }
+
+        let mut entries = Vec::new();
+        for (afi_safi, peer_mode) in &peer_add_path.entries {
+            let can_send = local_send && peer_mode.can_receive();
+            let can_recv = local_receive && peer_mode.can_send();
+
+            let mode = AddPathMode::from_flags(can_send, can_recv);
+
+            if let Some(mode) = mode {
+                entries.push((*afi_safi, mode));
+            }
+        }
+
+        if entries.is_empty() {
+            None
+        } else {
+            Some(AddPathCapability { entries })
+        }
+    }
+
     /// Send UPDATE message bytes and reset keepalive timer (RFC 4271 requirement)
     pub(super) async fn send_update(&mut self, update_bytes: Vec<u8>) -> Result<(), io::Error> {
         let conn = self
@@ -527,37 +577,44 @@ mod tests {
     use crate::bgp::msg_update::{
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
+    use crate::bgp::DEFAULT_FORMAT;
     use crate::peer::fsm::BgpState;
-    use crate::rib::{Path, RouteSource};
+    use crate::peer::states::tests::create_test_peer_with_state;
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::Ipv4Addr;
 
     fn test_path() -> Path {
         Path {
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65001],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source: RouteSource::Local,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 
     #[test]
     fn test_extract_capabilities() {
-        let gr_config = crate::config::GracefulRestartConfig::default();
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &gr_config);
+        let config = PeerConfig::default();
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
         let capabilities = extract_capabilities(&open_msg);
 
         // Check multiprotocol capabilities
@@ -571,6 +628,51 @@ mod tests {
 
         // Check route refresh capability
         assert!(capabilities.route_refresh);
+
+        // Check four-octet ASN capability
+        assert_eq!(capabilities.four_octet_asn, Some(65001));
+
+        // Check graceful restart capability (enabled by default)
+        assert!(capabilities.graceful_restart.is_some());
+
+        // Check add_path capability (disabled by default)
+        assert!(capabilities.add_path.is_none());
+    }
+
+    #[test]
+    fn test_extract_capabilities_add_path() {
+        let ipv4_uni = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv6_uni = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+
+        let test_cases = vec![
+            ("send", AddPathSend::All, false, AddPathMode::Send),
+            ("receive", AddPathSend::Disabled, true, AddPathMode::Receive),
+            ("both", AddPathSend::All, true, AddPathMode::Both),
+        ];
+
+        for (name, send, receive, expected_mode) in test_cases {
+            let config = PeerConfig {
+                add_path_send: send,
+                add_path_receive: receive,
+                ..PeerConfig::default()
+            };
+            let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
+            let caps = extract_capabilities(&open_msg);
+            let add_path = caps
+                .add_path
+                .unwrap_or_else(|| panic!("expected add_path for {}", name));
+            assert_eq!(add_path.entries.len(), 2, "{}", name);
+            assert!(
+                add_path.entries.contains(&(ipv4_uni, expected_mode)),
+                "{}",
+                name
+            );
+            assert!(
+                add_path.entries.contains(&(ipv6_uni, expected_mode)),
+                "{}",
+                name
+            );
+        }
     }
 
     #[tokio::test]
@@ -632,7 +734,6 @@ mod tests {
     async fn test_update_rejected_in_non_established_states() {
         // RFC 4271 Section 9: "An UPDATE message may be received only in the Established state.
         // Receiving an UPDATE message in any other state is an error."
-        use crate::peer::states::tests::create_test_peer_with_state;
 
         let non_established_states = vec![
             BgpState::Connect,
@@ -646,13 +747,7 @@ mod tests {
             peer.config.send_notification_without_open = true;
 
             let path = test_path();
-            let update = UpdateMessage::new(
-                &path,
-                vec![],
-                MessageFormat {
-                    use_4byte_asn: true,
-                },
-            );
+            let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let result = peer.handle_message(BgpMessage::Update(update)).await;
 
@@ -678,19 +773,12 @@ mod tests {
     #[tokio::test]
     async fn test_update_accepted_in_established() {
         // RFC 4271 Section 9: UPDATE is processed normally in Established state
-        use crate::peer::states::tests::create_test_peer_with_state;
 
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
         peer.fsm.timers.start_hold_timer();
 
         let path = test_path();
-        let update = UpdateMessage::new(
-            &path,
-            vec![],
-            MessageFormat {
-                use_4byte_asn: true,
-            },
-        );
+        let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let result = peer.handle_message(BgpMessage::Update(update)).await;
 

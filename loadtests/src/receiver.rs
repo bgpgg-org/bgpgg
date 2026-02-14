@@ -1,5 +1,5 @@
 use crate::bgp_handshake;
-use bgpgg::bgp::msg::BgpMessage;
+use bgpgg::bgp::msg::{BgpMessage, MessageFormat};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -39,9 +39,17 @@ pub async fn run_receiver(
     };
 
     loop {
-        match bgpgg::bgp::msg::read_bgp_message(&mut stream, false).await {
+        match bgpgg::bgp::msg::read_bgp_message(
+            &mut stream,
+            MessageFormat {
+                use_4byte_asn: false,
+                add_path: false,
+            },
+        )
+        .await
+        {
             Ok(BgpMessage::Update(update)) => {
-                let nlri_count = update.nlri_list().len();
+                let nlri_count = update.nlri_prefixes().len();
 
                 if nlri_count > 0 {
                     let now = Instant::now();
