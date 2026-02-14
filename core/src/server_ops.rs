@@ -999,6 +999,11 @@ impl BgpServer {
 
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(self.local_addr);
 
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
@@ -1014,7 +1019,7 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
                                 rr_client,
@@ -1035,7 +1040,7 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
                                 rr_client,
@@ -1055,7 +1060,7 @@ impl BgpServer {
                     &chunk,
                     self.config.asn,
                     peer_asn,
-                    IpAddr::V4(self.config.router_id),
+                    local_next_hop,
                     export_policies,
                     peer_supports_4byte_asn,
                     rr_client,
@@ -2136,6 +2141,11 @@ impl BgpServer {
             let mut total_sent = 0;
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(self.local_addr);
 
             // Process in chunks
             match afi {
@@ -2150,7 +2160,7 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                std::net::IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
                                 rr_client,
@@ -2172,7 +2182,7 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                std::net::IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
                                 rr_client,
@@ -2193,7 +2203,7 @@ impl BgpServer {
                     &chunk,
                     self.config.asn,
                     peer_asn,
-                    std::net::IpAddr::V4(self.config.router_id),
+                    local_next_hop,
                     export_policies,
                     peer_supports_4byte_asn,
                     rr_client,

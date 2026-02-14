@@ -773,8 +773,11 @@ async fn test_route_convergence() {
                     }
                 };
 
-                let expected_exported =
-                    transform_path_for_ebgp_export(expected_path, 65000, Ipv4Addr::new(1, 1, 1, 1));
+                let expected_exported = transform_path_for_ebgp_export(
+                    expected_path,
+                    65000,
+                    Ipv4Addr::new(127, 0, 0, 1),
+                );
 
                 if actual_path != expected_exported {
                     mismatches.push(format!(
