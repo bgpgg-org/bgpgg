@@ -14,7 +14,6 @@
 
 //! This module implements the BGP FSM.
 
-use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use super::BgpOpenParams;
@@ -280,12 +279,6 @@ pub struct Fsm {
     /// ConnectRetryCounter (RFC 4271 8.2.2)
     pub connect_retry_counter: u32,
 
-    /// Local BGP configuration
-    local_asn: u32,
-    local_hold_time: u16,
-    local_bgp_id: u32,
-    local_addr: IpAddr,
-
     /// Passive mode: if true, wait for incoming connections (Active state)
     /// if false, initiate connections (Connect state)
     passive_mode: bool,
@@ -296,22 +289,11 @@ pub struct Fsm {
 
 impl Fsm {
     /// Create a new FSM in Idle state (RFC 4271 8.2.2).
-    pub fn new(
-        local_asn: u32,
-        local_hold_time: u16,
-        local_bgp_id: u32,
-        local_addr: IpAddr,
-        delay_open_time: Option<Duration>,
-        passive_mode: bool,
-    ) -> Self {
+    pub fn new(delay_open_time: Option<Duration>, passive_mode: bool) -> Self {
         Fsm {
             state: BgpState::Idle,
             timers: FsmTimers::new(delay_open_time),
             connect_retry_counter: 0,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-            local_addr,
             passive_mode,
             graceful_restart_negotiated: false,
         }
@@ -319,22 +301,11 @@ impl Fsm {
 
     /// Create a new FSM with a specific initial state (for testing)
     #[cfg(test)]
-    pub fn with_state(
-        state: BgpState,
-        local_asn: u32,
-        local_hold_time: u16,
-        local_bgp_id: u32,
-        local_addr: IpAddr,
-        passive_mode: bool,
-    ) -> Self {
+    pub fn with_state(state: BgpState, passive_mode: bool) -> Self {
         Fsm {
             state,
             timers: FsmTimers::default(),
             connect_retry_counter: 0,
-            local_asn,
-            local_hold_time,
-            local_bgp_id,
-            local_addr,
             passive_mode,
             graceful_restart_negotiated: false,
         }
@@ -343,26 +314,6 @@ impl Fsm {
     /// Get current state
     pub fn state(&self) -> BgpState {
         self.state
-    }
-
-    /// Get local ASN
-    pub fn local_asn(&self) -> u32 {
-        self.local_asn
-    }
-
-    /// Get local hold time
-    pub fn local_hold_time(&self) -> u16 {
-        self.local_hold_time
-    }
-
-    /// Get local BGP ID
-    pub fn local_bgp_id(&self) -> u32 {
-        self.local_bgp_id
-    }
-
-    /// Get local address
-    pub fn local_addr(&self) -> IpAddr {
-        self.local_addr
     }
 
     /// Reset ConnectRetryCounter to zero (RFC 4271 8.2.2)
@@ -566,33 +517,16 @@ impl Fsm {
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, MessageHeaderError, OpenMessageError};
-    use crate::net::ipv4;
-
-    const TEST_LOCAL_ADDR: IpAddr = ipv4(127, 0, 0, 1);
 
     #[test]
     fn test_initial_state() {
-        let fsm = Fsm::with_state(
-            BgpState::Connect,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let fsm = Fsm::with_state(BgpState::Connect, false);
         assert_eq!(fsm.state(), BgpState::Connect);
     }
 
     #[test]
     fn test_tcp_connection_confirmed() {
-        let mut fsm = Fsm::with_state(
-            BgpState::Connect,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let mut fsm = Fsm::with_state(BgpState::Connect, false);
 
         // Connect -> OpenSent
         let new_state = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -602,14 +536,7 @@ mod tests {
 
     #[test]
     fn test_successful_connection_establishment() {
-        let mut fsm = Fsm::with_state(
-            BgpState::Connect,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let mut fsm = Fsm::with_state(BgpState::Connect, false);
 
         // Connect -> OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -636,28 +563,14 @@ mod tests {
     fn test_connection_failure_handling() {
         {
             // RFC 4271 Event 18: TcpConnectionFails without DelayOpenTimer -> Idle
-            let mut fsm = Fsm::with_state(
-                BgpState::Connect,
-                65000,
-                180,
-                0x01010101,
-                TEST_LOCAL_ADDR,
-                false,
-            );
+            let mut fsm = Fsm::with_state(BgpState::Connect, false);
             fsm.handle_event(&FsmEvent::TcpConnectionFails);
             assert_eq!(fsm.state(), BgpState::Idle);
         }
 
         {
             // RFC 4271 Event 18: TcpConnectionFails with DelayOpenTimer running -> Active
-            let mut fsm = Fsm::with_state(
-                BgpState::Connect,
-                65000,
-                180,
-                0x01010101,
-                TEST_LOCAL_ADDR,
-                false,
-            );
+            let mut fsm = Fsm::with_state(BgpState::Connect, false);
             fsm.timers.start_delay_open_timer();
             fsm.handle_event(&FsmEvent::TcpConnectionFails);
             assert_eq!(fsm.state(), BgpState::Active);
@@ -670,14 +583,7 @@ mod tests {
 
     #[test]
     fn test_hold_timer_expiry() {
-        let mut fsm = Fsm::with_state(
-            BgpState::Connect,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let mut fsm = Fsm::with_state(BgpState::Connect, false);
 
         // Move to OpenSent
         fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
@@ -899,14 +805,7 @@ mod tests {
         ];
 
         for (initial_state, event, expected_state) in test_cases {
-            let mut fsm = Fsm::with_state(
-                initial_state,
-                65000,
-                180,
-                0x01010101,
-                TEST_LOCAL_ADDR,
-                false,
-            );
+            let mut fsm = Fsm::with_state(initial_state, false);
             let new_state = fsm.handle_event(&event);
 
             assert_eq!(
@@ -964,14 +863,7 @@ mod tests {
         ];
 
         for (initial_state, event) in test_cases {
-            let mut fsm = Fsm::with_state(
-                initial_state,
-                65000,
-                180,
-                0x01010101,
-                TEST_LOCAL_ADDR,
-                false,
-            );
+            let mut fsm = Fsm::with_state(initial_state, false);
             let new_state = fsm.handle_event(&event);
 
             assert_eq!(
@@ -986,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_reset_connect_retry_counter() {
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, false);
+        let mut fsm = Fsm::new(None, false);
 
         fsm.connect_retry_counter = 5;
         assert_eq!(fsm.connect_retry_counter, 5);
@@ -998,12 +890,12 @@ mod tests {
     #[test]
     fn test_idle_hold_timer_expires() {
         // Passive mode: Idle -> Active
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, true);
+        let mut fsm = Fsm::new(None, true);
         let new_state = fsm.handle_event(&FsmEvent::IdleHoldTimerExpires);
         assert_eq!(new_state, BgpState::Active);
 
         // Active mode: Idle -> Connect
-        let mut fsm = Fsm::new(65000, 180, 0x01010101, TEST_LOCAL_ADDR, None, false);
+        let mut fsm = Fsm::new(None, false);
         let new_state = fsm.handle_event(&FsmEvent::IdleHoldTimerExpires);
         assert_eq!(new_state, BgpState::Connect);
     }
@@ -1026,7 +918,7 @@ mod tests {
             BgpState::OpenConfirm,
             BgpState::Established,
         ] {
-            let mut fsm = Fsm::with_state(state, 65000, 180, 0x01010101, TEST_LOCAL_ADDR, false);
+            let mut fsm = Fsm::with_state(state, false);
             let new_state = fsm.handle_event(&FsmEvent::BgpUpdateMsgErr(notif.clone()));
             assert_eq!(new_state, BgpState::Idle);
         }
@@ -1129,14 +1021,7 @@ mod tests {
     #[test]
     fn test_graceful_restart_tcp_connection_in_established() {
         // RFC 4724: Second TCP connection in Established with GR negotiated -> Connect
-        let mut fsm = Fsm::with_state(
-            BgpState::Established,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let mut fsm = Fsm::with_state(BgpState::Established, false);
 
         // Test 1: GR negotiated - should transition to Connect
         fsm.set_graceful_restart_negotiated(true);
@@ -1148,14 +1033,7 @@ mod tests {
         );
 
         // Test 2: GR not negotiated - should stay in Established (for collision detection)
-        let mut fsm = Fsm::with_state(
-            BgpState::Established,
-            65000,
-            180,
-            0x01010101,
-            TEST_LOCAL_ADDR,
-            false,
-        );
+        let mut fsm = Fsm::with_state(BgpState::Established, false);
         fsm.set_graceful_restart_negotiated(false);
         let new_state = fsm.handle_event(&FsmEvent::TcpConnectionConfirmed);
         assert_eq!(
@@ -1173,14 +1051,7 @@ mod tests {
         ];
 
         for (passive_mode, expected, desc) in cases {
-            let mut fsm = Fsm::with_state(
-                BgpState::Active,
-                65000,
-                180,
-                0x01010101,
-                TEST_LOCAL_ADDR,
-                passive_mode,
-            );
+            let mut fsm = Fsm::with_state(BgpState::Active, passive_mode);
             let new_state = fsm.handle_event(&FsmEvent::ConnectRetryTimerExpires);
             assert_eq!(new_state, expected, "{}", desc);
         }

@@ -30,7 +30,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, Route, RouteSource};
+use crate::rib::{Path, Route};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -85,6 +85,8 @@ impl BgpServer {
                 communities,
                 extended_communities,
                 large_communities,
+                originator_id,
+                cluster_list,
                 response,
             } => {
                 self.handle_add_route(
@@ -98,6 +100,8 @@ impl BgpServer {
                     communities,
                     extended_communities,
                     large_communities,
+                    originator_id,
+                    cluster_list,
                     response,
                 )
                 .await;
@@ -230,7 +234,7 @@ impl BgpServer {
                 // Clone config for immutable access, then mutate peer
                 if let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) {
                     let import_policies = self.resolve_import_policies(&peer_config);
-                    let export_policies = self.resolve_export_policies(&peer_config, asn);
+                    let export_policies = self.resolve_export_policies(&peer_config);
 
                     if let Some(peer) = self.peers.get_mut(&peer_ip) {
                         if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
@@ -993,6 +997,14 @@ impl BgpServer {
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
 
+            let cluster_id = self.config.cluster_id();
+            let rr_client = peer_info.config.rr_client;
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(self.local_addr);
+
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
 
@@ -1007,9 +1019,11 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
+                                rr_client,
+                                cluster_id,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1026,9 +1040,11 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
+                                rr_client,
+                                cluster_id,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -1044,9 +1060,11 @@ impl BgpServer {
                     &chunk,
                     self.config.asn,
                     peer_asn,
-                    IpAddr::V4(self.config.router_id),
+                    local_next_hop,
                     export_policies,
                     peer_supports_4byte_asn,
+                    rr_client,
+                    cluster_id,
                 );
                 total_sent += chunk.len();
             }
@@ -1068,6 +1086,8 @@ impl BgpServer {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
+        originator_id: Option<std::net::Ipv4Addr>,
+        cluster_list: Vec<std::net::Ipv4Addr>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
         info!(?prefix, ?next_hop, "adding route via request");
@@ -1084,6 +1104,8 @@ impl BgpServer {
             communities,
             extended_communities,
             large_communities,
+            originator_id,
+            cluster_list,
         );
 
         // Propagate to all peers using the common propagation logic
@@ -1290,10 +1312,7 @@ impl BgpServer {
         for route in self.loc_rib.iter_routes() {
             if let Some(best_path) = self.loc_rib.get_best_path(&route.prefix) {
                 // Extract originating_peer from path.source
-                let originating_peer = match best_path.source {
-                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => Some(addr),
-                    RouteSource::Local => None,
-                };
+                let originating_peer = best_path.source.peer_ip();
 
                 // Apply EXACT same check as propagation
                 if !should_propagate_to_peer(peer_addr, conn.state, originating_peer) {
@@ -1304,14 +1323,20 @@ impl BgpServer {
             }
         }
 
-        // Use EXACT same filtering + transformation logic
-        // Note: For adj-rib-out query, we use router_id as next hop (hypothetical)
+        let local_next_hop = conn
+            .conn_info
+            .as_ref()
+            .map(|conn_info| conn_info.local_address)
+            .ok_or("established peer missing conn_info".to_string())?;
+
         let filtered = compute_routes_for_peer(
             &to_announce,
             self.config.asn,
             peer_asn,
-            IpAddr::V4(self.config.router_id),
+            local_next_hop,
             export_policies,
+            peer_info.config.rr_client,
+            self.config.cluster_id(),
         );
 
         // Group by prefix for Route struct
@@ -1442,18 +1467,8 @@ impl BgpServer {
             let batches = batch_announcements_by_path(announced);
             for batch in batches {
                 let update = UpdateMessage::new(
-                    batch.path.origin,
-                    batch.path.as_path.clone(),
-                    batch.path.next_hop,
+                    &batch.path,
                     batch.prefixes,
-                    batch.path.local_pref,
-                    batch.path.med,
-                    batch.path.atomic_aggregate,
-                    batch.path.aggregator.clone(),
-                    batch.path.communities.clone(),
-                    batch.path.extended_communities.clone(),
-                    batch.path.large_communities.clone(),
-                    batch.path.unknown_attrs.clone(),
                     MessageFormat { use_4byte_asn },
                 );
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
@@ -2014,21 +2029,7 @@ fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<Updat
     batches
         .into_iter()
         .map(|batch| {
-            UpdateMessage::new(
-                batch.path.origin,
-                batch.path.as_path.clone(),
-                batch.path.next_hop,
-                batch.prefixes,
-                batch.path.local_pref,
-                batch.path.med,
-                batch.path.atomic_aggregate,
-                batch.path.aggregator.clone(),
-                batch.path.communities.clone(),
-                batch.path.extended_communities.clone(),
-                batch.path.large_communities.clone(),
-                batch.path.unknown_attrs.clone(),
-                MessageFormat { use_4byte_asn },
-            )
+            UpdateMessage::new(&batch.path, batch.prefixes, MessageFormat { use_4byte_asn })
         })
         .collect()
 }
@@ -2138,6 +2139,13 @@ impl BgpServer {
             // Get iterator (no allocation)
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
             let mut total_sent = 0;
+            let cluster_id = self.config.cluster_id();
+            let rr_client = peer_info.config.rr_client;
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(self.local_addr);
 
             // Process in chunks
             match afi {
@@ -2152,9 +2160,11 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                std::net::IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
+                                rr_client,
+                                cluster_id,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -2172,9 +2182,11 @@ impl BgpServer {
                                 &chunk,
                                 self.config.asn,
                                 peer_asn,
-                                std::net::IpAddr::V4(self.config.router_id),
+                                local_next_hop,
                                 export_policies,
                                 peer_supports_4byte_asn,
+                                rr_client,
+                                cluster_id,
                             );
                             total_sent += chunk.len();
                             chunk.clear();
@@ -2191,9 +2203,11 @@ impl BgpServer {
                     &chunk,
                     self.config.asn,
                     peer_asn,
-                    std::net::IpAddr::V4(self.config.router_id),
+                    local_next_hop,
                     export_policies,
                     peer_supports_4byte_asn,
+                    rr_client,
+                    cluster_id,
                 );
                 total_sent += chunk.len();
             }

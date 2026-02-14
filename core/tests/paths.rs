@@ -95,7 +95,7 @@ async fn test_origin_preservation() {
 
     // Verify ORIGIN is preserved at each hop
     // eBGP rewrites NEXT_HOP to local address of the sending speaker
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             build_expected_routes(
@@ -144,7 +144,7 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     // S1 -> S2 (eBGP): S1 creates AS_PATH=[65001], NEXT_HOP=1.1.1.1
     // S2 -> S3 (iBGP): S2 preserves AS_PATH=[65001] (does NOT prepend), NEXT_HOP=1.1.1.1 (preserved)
     // S3 -> S4 (eBGP): S3 prepends AS_PATH=[65002, 65001], NEXT_HOP=3.3.3.3 (rewritten to S3's router ID)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             vec![Route {
@@ -217,7 +217,7 @@ async fn test_originating_speaker_as_path() {
     //
     // S1 -> S2 (iBGP): S1 sends empty AS_PATH (case b), NEXT_HOP=192.168.1.1 (preserved explicit value)
     // S2 -> S3 (eBGP): S2 creates AS_PATH=[65001] (prepends its AS), NEXT_HOP=2.2.2.2 (rewritten to S2's router ID)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             vec![Route {
@@ -280,7 +280,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // Verify S2 receives the route with AS_SEQUENCE[65001] prepended
     // Result: AS_SEQUENCE[65001], AS_SET[65003, 65004], AS_SEQUENCE[65005]
     // eBGP: NEXT_HOP rewritten to S1's router ID
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -333,7 +333,7 @@ async fn test_next_hop_locally_originated_to_ibgp() {
 
     // RFC expectation: S2 should receive the route with NEXT_HOP set to S1's local address
     // (the interface address used for the peering session)
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -379,7 +379,7 @@ async fn test_next_hop_rewrite_to_ebgp() {
     // Verify NEXT_HOP handling:
     // S1 -> S2 (iBGP): NEXT_HOP preserved as 192.168.1.100
     // S2 -> S3 (eBGP): NEXT_HOP rewritten to S2's local address (2.2.2.2)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             vec![Route {
@@ -442,7 +442,7 @@ async fn test_local_pref_send_to_ibgp() {
     // Verify:
     // S2 (eBGP): receives route with LOCAL_PREF=100 (set by DefaultLocalPref policy)
     // S3 (iBGP): receives route with LOCAL_PREF=100 (proves LOCAL_PREF was in UPDATE from S2)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             vec![Route {
@@ -507,7 +507,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
     .await;
 
     // Verify S2 first (iBGP): receives route with LOCAL_PREF=200 (preserved from S1)
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -525,7 +525,7 @@ async fn test_local_pref_not_sent_to_ebgp() {
 
     // Verify S3 (eBGP): receives route with LOCAL_PREF=100 (set by DefaultLocalPref policy, NOT from S2)
     //                   This proves LOCAL_PREF was NOT sent in UPDATE from S2 to S3
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -573,7 +573,7 @@ async fn test_med_propagation_over_ibgp() {
     // Verify:
     // S2 (eBGP): receives route with MED=50
     // S3 (iBGP): receives route with MED=50 (proves MED was propagated over iBGP)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             server2,
             vec![Route {
@@ -637,7 +637,7 @@ async fn test_med_not_propagated_to_other_as() {
     .await;
 
     // Verify S2 first (eBGP): receives route with MED=50
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -656,7 +656,7 @@ async fn test_med_not_propagated_to_other_as() {
 
     // Verify S3 (eBGP to different AS): receives route with MED=None
     // This proves MED was NOT propagated to other neighboring AS (AS65002)
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -702,7 +702,7 @@ async fn test_atomic_aggregate_propagation() {
     .await;
 
     // Verify S2 (eBGP): receives route with ATOMIC_AGGREGATE=true
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -721,7 +721,7 @@ async fn test_atomic_aggregate_propagation() {
 
     // Verify S3 (iBGP): receives route with ATOMIC_AGGREGATE=true
     // This proves ATOMIC_AGGREGATE was propagated over iBGP
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -804,7 +804,7 @@ async fn test_unknown_optional_attribute_handling(
 
     server1.send_raw(&msg).await;
 
-    poll_route_propagation(&[(
+    poll_rib(&[(
         server3,
         vec![Route {
             prefix: "192.168.1.0/24".to_string(),
@@ -839,28 +839,28 @@ async fn test_med_comparison_restricted_to_same_as() {
     // Expected winner: S2 (AS65001, MED=50)
     // - S1 vs S2: same AS, MED compared -> S2 wins (50 < 100)
     // - S2 vs S3: different AS, MED NOT compared -> falls to peer address -> S2 wins (127.0.0.2 < 127.0.0.3)
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let mut server2 = start_test_server(Config::new(
+    let server2 = start_test_server(Config::new(
         65001,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
     ))
     .await;
-    let mut server3 = start_test_server(Config::new(
+    let server3 = start_test_server(Config::new(
         65002,
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
         90,
     ))
     .await;
-    let mut server4 = start_test_server(Config::new(
+    let server4 = start_test_server(Config::new(
         65004,
         "127.0.0.4:0",
         Ipv4Addr::new(4, 4, 4, 4),
@@ -896,7 +896,7 @@ async fn test_med_comparison_restricted_to_same_as() {
 
     // All announce same prefix with different MEDs
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -907,7 +907,7 @@ async fn test_med_comparison_restricted_to_same_as() {
     .await;
 
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
@@ -918,7 +918,7 @@ async fn test_med_comparison_restricted_to_same_as() {
     .await;
 
     announce_route(
-        &mut server3,
+        &server3,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
@@ -931,7 +931,7 @@ async fn test_med_comparison_restricted_to_same_as() {
     // S4 should select S2's route (AS65001, MED=50)
     // This proves: MED compared within AS65001 (S2 beat S1)
     //              MED NOT compared across ASes (S2 beat S3 despite higher MED)
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server4,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -951,7 +951,7 @@ async fn test_med_comparison_restricted_to_same_as() {
 
 #[tokio::test]
 async fn test_normal_community_propagation() {
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let communities = vec![
         community::from_asn_value(65001, 100),
@@ -960,7 +960,7 @@ async fn test_normal_community_propagation() {
     ];
 
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -970,7 +970,7 @@ async fn test_normal_community_propagation() {
     )
     .await;
 
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -990,11 +990,11 @@ async fn test_normal_community_propagation() {
 
 #[tokio::test]
 async fn test_well_known_communities() {
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add routes with well-known communities (should be filtered)
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1005,7 +1005,7 @@ async fn test_well_known_communities() {
     .await;
 
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1016,7 +1016,7 @@ async fn test_well_known_communities() {
     .await;
 
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1028,7 +1028,7 @@ async fn test_well_known_communities() {
 
     // Add normal route (should propagate)
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.4.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1141,7 +1141,7 @@ async fn test_extended_communities_filtering() {
         )
         .await;
 
-        poll_route_propagation(&[(
+        poll_rib(&[(
             server2,
             vec![Route {
                 prefix: "10.0.0.0/24".to_string(),
@@ -1166,7 +1166,7 @@ async fn test_large_community_propagation() {
     use bgpgg::bgp::msg_update_types::LargeCommunity;
     use bgpgg::grpc::proto;
 
-    let (mut server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let large_comms = vec![
         LargeCommunity::new(65536, 100, 200),
@@ -1175,7 +1175,7 @@ async fn test_large_community_propagation() {
     ];
 
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -1204,7 +1204,7 @@ async fn test_large_community_propagation() {
         },
     ];
 
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server2,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -1277,7 +1277,7 @@ async fn test_mixed_asn_propagation() {
     .await;
 
     // Verify route reaches s3 with correct AS path and next_hop rewritten to s2
-    poll_route_propagation(&[(
+    poll_rib(&[(
         s3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
@@ -1550,4 +1550,255 @@ async fn test_four_octet_asn_malformed_as4_aggregator() {
 
     // AS4_AGGREGATOR: discarded (was malformed - wrong length)
     assert!(update.as4_aggregator().is_none());
+}
+
+#[tokio::test]
+async fn test_best_path_selection() {
+    // Table-driven test covering all tiebreaker steps from Path::cmp().
+    // 3-server iBGP mesh (all ASN 65001). s1 and s2 announce the same prefix
+    // with different attributes. s3 receives both and selects the best.
+    // Each case uses a unique prefix so all cases coexist without interference.
+    //
+    // s1: router_id=1.1.1.1, s2: router_id=2.2.2.2, s3: router_id=3.3.3.3
+    let [server1, server2, server3] = mesh_servers(
+        [
+            start_test_server(test_config(65001, 1)).await,
+            start_test_server(test_config(65001, 2)).await,
+            start_test_server(test_config(65001, 3)).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    struct Case {
+        name: &'static str,
+        prefix: &'static str,
+        s1_next_hop: &'static str,
+        s1_origin: Origin,
+        s1_as_path: Vec<AsPathSegment>,
+        s1_local_pref: Option<u32>,
+        s1_med: Option<u32>,
+        s1_originator_id: Option<&'static str>,
+        s1_cluster_list: Vec<&'static str>,
+        s2_next_hop: &'static str,
+        s2_origin: Origin,
+        s2_as_path: Vec<AsPathSegment>,
+        s2_local_pref: Option<u32>,
+        s2_med: Option<u32>,
+        s2_originator_id: Option<&'static str>,
+        s2_cluster_list: Vec<&'static str>,
+        /// true = s1 wins, false = s2 wins
+        s1_wins: bool,
+    }
+
+    let cases = vec![
+        // Step 1: Higher LOCAL_PREF wins
+        Case {
+            name: "local_pref",
+            prefix: "10.1.0.0/24",
+            s1_next_hop: "192.168.1.1",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![],
+            s1_local_pref: Some(200),
+            s1_med: None,
+            s1_originator_id: None,
+            s1_cluster_list: vec![],
+            s2_next_hop: "192.168.2.1",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: None,
+            s2_cluster_list: vec![],
+            s1_wins: true,
+        },
+        // Step 2: Shorter AS_PATH wins
+        Case {
+            name: "as_path_length",
+            prefix: "10.2.0.0/24",
+            s1_next_hop: "192.168.1.2",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![as_sequence(vec![65002])],
+            s1_local_pref: Some(100),
+            s1_med: None,
+            s1_originator_id: None,
+            s1_cluster_list: vec![],
+            s2_next_hop: "192.168.2.2",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![as_sequence(vec![65002, 65003])],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: None,
+            s2_cluster_list: vec![],
+            s1_wins: true,
+        },
+        // Step 3: Lower ORIGIN wins (IGP < INCOMPLETE)
+        Case {
+            name: "origin",
+            prefix: "10.3.0.0/24",
+            s1_next_hop: "192.168.1.3",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![],
+            s1_local_pref: Some(100),
+            s1_med: None,
+            s1_originator_id: None,
+            s1_cluster_list: vec![],
+            s2_next_hop: "192.168.2.3",
+            s2_origin: Origin::Incomplete,
+            s2_as_path: vec![],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: None,
+            s2_cluster_list: vec![],
+            s1_wins: true,
+        },
+        // Step 4: Lower MED wins (same neighboring AS)
+        Case {
+            name: "med",
+            prefix: "10.4.0.0/24",
+            s1_next_hop: "192.168.1.4",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![as_sequence(vec![65002])],
+            s1_local_pref: Some(100),
+            s1_med: Some(50),
+            s1_originator_id: None,
+            s1_cluster_list: vec![],
+            s2_next_hop: "192.168.2.4",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![as_sequence(vec![65002])],
+            s2_local_pref: Some(100),
+            s2_med: Some(100),
+            s2_originator_id: None,
+            s2_cluster_list: vec![],
+            s1_wins: true,
+        },
+        // Step 6: Shorter CLUSTER_LIST wins
+        Case {
+            name: "cluster_list",
+            prefix: "10.6.0.0/24",
+            s1_next_hop: "192.168.1.6",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![],
+            s1_local_pref: Some(100),
+            s1_med: None,
+            s1_originator_id: Some("5.5.5.5"),
+            s1_cluster_list: vec!["10.10.10.1", "10.10.10.2"],
+            s2_next_hop: "192.168.2.6",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: Some("5.5.5.5"),
+            s2_cluster_list: vec!["10.10.10.3"],
+            s1_wins: false,
+        },
+        // Step 7: Lower ORIGINATOR_ID wins (same CLUSTER_LIST length)
+        Case {
+            name: "originator_id",
+            prefix: "10.7.0.0/24",
+            s1_next_hop: "192.168.1.7",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![],
+            s1_local_pref: Some(100),
+            s1_med: None,
+            s1_originator_id: Some("2.2.2.2"),
+            s1_cluster_list: vec!["9.9.9.9"],
+            s2_next_hop: "192.168.2.7",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: Some("1.1.1.1"),
+            s2_cluster_list: vec!["9.9.9.9"],
+            s1_wins: false,
+        },
+        // Step 8: Lower BGP ID wins (no ORIGINATOR_ID set)
+        Case {
+            name: "bgp_id",
+            prefix: "10.8.0.0/24",
+            s1_next_hop: "192.168.1.8",
+            s1_origin: Origin::Igp,
+            s1_as_path: vec![],
+            s1_local_pref: Some(100),
+            s1_med: None,
+            s1_originator_id: None,
+            s1_cluster_list: vec![],
+            s2_next_hop: "192.168.2.8",
+            s2_origin: Origin::Igp,
+            s2_as_path: vec![],
+            s2_local_pref: Some(100),
+            s2_med: None,
+            s2_originator_id: None,
+            s2_cluster_list: vec![],
+            s1_wins: true,
+        },
+    ];
+
+    // Announce all routes from s1, then all from s2
+    for case in &cases {
+        server1
+            .client
+            .add_route(
+                case.prefix.to_string(),
+                case.s1_next_hop.to_string(),
+                case.s1_origin,
+                case.s1_as_path.clone(),
+                case.s1_local_pref,
+                case.s1_med,
+                false,
+                vec![],
+                vec![],
+                vec![],
+                case.s1_originator_id.map(str::to_string),
+                case.s1_cluster_list.iter().map(|s| s.to_string()).collect(),
+            )
+            .await
+            .unwrap();
+    }
+    for case in &cases {
+        server2
+            .client
+            .add_route(
+                case.prefix.to_string(),
+                case.s2_next_hop.to_string(),
+                case.s2_origin,
+                case.s2_as_path.clone(),
+                case.s2_local_pref,
+                case.s2_med,
+                false,
+                vec![],
+                vec![],
+                vec![],
+                case.s2_originator_id.map(str::to_string),
+                case.s2_cluster_list.iter().map(|s| s.to_string()).collect(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Verify s3 selected the expected winner for each case
+    let s1_addr = server1.address.to_string();
+    let s2_addr = server2.address.to_string();
+    for case in &cases {
+        let expected_peer = if case.s1_wins { &s1_addr } else { &s2_addr };
+        poll_until(
+            || async {
+                let Ok(routes) = server3.client.get_routes().await else {
+                    return false;
+                };
+                let Some(route) = routes.iter().find(|r| r.prefix == case.prefix) else {
+                    return false;
+                };
+                let Some(best) = route.paths.first() else {
+                    return false;
+                };
+                best.peer_address == *expected_peer
+            },
+            &format!(
+                "Timeout: {} - expected winner peer {}",
+                case.name, expected_peer
+            ),
+        )
+        .await;
+    }
 }

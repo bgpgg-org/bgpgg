@@ -60,7 +60,7 @@ impl Peer {
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
             tokio::select! {
-                result = create_and_bind_tcp_socket(self.local_addr, peer_addr) => {
+                result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr) => {
                     match result {
                         Ok(stream) => {
                             info!(peer_ip = %self.addr, "TCP connection established");

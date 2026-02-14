@@ -118,20 +118,27 @@ impl PeerRoute {
             }]
         };
 
-        Path::from_attributes(
-            self.origin,
-            as_path_segments,
-            NextHopAddr::Ipv4(next_hop),
-            RouteSource::Ebgp(peer_ip),
-            Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
-            self.med,
-            false, // atomic_aggregate
-            None,  // aggregator
-            self.communities.clone(),
-            vec![], // extended_communities
-            vec![], // large_communities
-            vec![], // unknown_attrs
-        )
+        // For load tests, derive bgp_id from peer_ip
+        let bgp_id = match peer_ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+        };
+        Path {
+            origin: self.origin,
+            as_path: as_path_segments,
+            next_hop: NextHopAddr::Ipv4(next_hop),
+            source: RouteSource::Ebgp { peer_ip, bgp_id },
+            local_pref: Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
+            med: self.med,
+            atomic_aggregate: false,
+            aggregator: None,
+            communities: self.communities.clone(),
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        }
     }
 }
 

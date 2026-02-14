@@ -24,16 +24,13 @@ use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParam, Pa
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info, warn};
-use crate::net::IpNetwork;
-use crate::rib::Path;
 use crate::server::ServerOp;
 use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
-use super::{Peer, SessionType};
+use super::{Peer, RouteChanges, SessionType};
 
 /// Default AFI/SAFIs to advertise via multiprotocol capability
 fn default_afi_safis() -> Vec<AfiSafi> {
@@ -162,9 +159,9 @@ impl Peer {
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no TCP connection"))?;
         let open_msg = create_open_message(
-            self.fsm.local_asn(),
-            self.fsm.local_hold_time(),
-            Ipv4Addr::from(self.fsm.local_bgp_id()),
+            self.local_config.asn,
+            self.local_config.hold_time,
+            self.local_config.bgp_id,
             &self.config.graceful_restart,
         );
         self.sent_open = Some(open_msg.clone());
@@ -218,7 +215,7 @@ impl Peer {
 
         // RFC 6793 Section 4.2.1: Peering between NEW and OLD speakers is only
         // possible if the NEW speaker has a two-octet AS number
-        let local_asn = self.fsm.local_asn();
+        let local_asn = self.local_config.asn;
         if local_asn > MAX_2BYTE_ASN && negotiated_four_octet_asn.is_none() {
             // We have a large ASN but peer doesn't support 4-byte ASNs
             // This violates RFC 6793 - the session cannot function correctly
@@ -334,7 +331,7 @@ impl Peer {
                     self.fsm.timers.reset_hold_timer();
                 }
 
-                if let Some((withdrawn, announced)) = delta {
+                if let Some((announced, withdrawn)) = delta {
                     let _ = self.server_tx.send(ServerOp::PeerUpdate {
                         peer_ip,
                         withdrawn,
@@ -389,11 +386,11 @@ impl Peer {
     }
 
     /// Process a BGP message and return route changes for Loc-RIB update if applicable
-    /// Returns (withdrawn_prefixes, announced_routes) or None if not an UPDATE
+    /// Returns RouteChanges (announced, withdrawn) or None if not an UPDATE
     pub(super) async fn handle_message(
         &mut self,
         message: BgpMessage,
-    ) -> Result<Option<(Vec<IpNetwork>, Vec<(IpNetwork, Arc<Path>)>)>, io::Error> {
+    ) -> Result<Option<RouteChanges>, io::Error> {
         self.track_received_message(&message);
 
         // Process FSM event
@@ -401,6 +398,10 @@ impl Peer {
             BgpMessage::Open(open_msg) => {
                 // Store received OPEN for BMP PeerUp
                 self.received_open = Some(open_msg.clone());
+                // Store peer's BGP Router ID
+                self.bgp_id = Some(std::net::Ipv4Addr::from(
+                    open_msg.bgp_identifier.to_be_bytes(),
+                ));
 
                 // RFC 4271 6.8: Notify server for collision detection
                 let _ = self.server_tx.send(ServerOp::OpenReceived {
@@ -416,8 +417,8 @@ impl Peer {
                     peer_asn: open_msg.asn,
                     peer_hold_time: open_msg.hold_time,
                     peer_bgp_id: open_msg.bgp_identifier,
-                    local_asn: self.fsm.local_asn(),
-                    local_hold_time: self.fsm.local_hold_time(),
+                    local_asn: self.local_config.asn,
+                    local_hold_time: self.local_config.hold_time,
                     peer_capabilities,
                 }))
                 .await?;
@@ -527,7 +528,31 @@ mod tests {
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
     use crate::peer::fsm::BgpState;
+    use crate::rib::{Path, RouteSource};
     use std::net::Ipv4Addr;
+
+    fn test_path() -> Path {
+        Path {
+            origin: Origin::IGP,
+            as_path: vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 1,
+                asn_list: vec![65001],
+            }],
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            source: RouteSource::Local,
+            local_pref: None,
+            med: None,
+            atomic_aggregate: false,
+            aggregator: None,
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        }
+    }
 
     #[test]
     fn test_extract_capabilities() {
@@ -620,23 +645,10 @@ mod tests {
             let mut peer = create_test_peer_with_state(state).await;
             peer.config.send_notification_without_open = true;
 
+            let path = test_path();
             let update = UpdateMessage::new(
-                Origin::IGP,
-                vec![AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: 1,
-                    asn_list: vec![65001],
-                }],
-                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                &path,
                 vec![],
-                None,
-                None,
-                false,
-                None,
-                vec![],
-                vec![],
-                vec![],
-                vec![], // large_communities
                 MessageFormat {
                     use_4byte_asn: true,
                 },
@@ -671,22 +683,9 @@ mod tests {
         let mut peer = create_test_peer_with_state(BgpState::Established).await;
         peer.fsm.timers.start_hold_timer();
 
+        let path = test_path();
         let update = UpdateMessage::new(
-            Origin::IGP,
-            vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65001],
-            }],
-            NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            vec![],
-            None,
-            None,
-            false,
-            None,
-            vec![],
-            vec![],
-            vec![],
+            &path,
             vec![],
             MessageFormat {
                 use_4byte_asn: true,

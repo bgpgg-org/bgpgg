@@ -147,7 +147,7 @@ async fn test_export_policy_prefix_match() {
         // Announce all routes
         for (i, prefix) in tc.announced.iter().enumerate() {
             announce_route(
-                &mut server2,
+                &server2,
                 RouteParams {
                     prefix: prefix.to_string(),
                     next_hop: format!("192.168.1.{}", i + 1),
@@ -194,7 +194,7 @@ async fn test_export_policy_large_community_match() {
     use bgpgg::bgp::msg_update_types::LargeCommunity;
     use bgpgg::grpc::proto::{self, defined_set_config};
 
-    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add large-community-set
     server2
@@ -262,7 +262,7 @@ async fn test_export_policy_large_community_match() {
 
     // Announce route with blocked large community (should be rejected)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -274,7 +274,7 @@ async fn test_export_policy_large_community_match() {
 
     // Announce route with different large community (should propagate)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
@@ -286,7 +286,7 @@ async fn test_export_policy_large_community_match() {
 
     // Announce route with no large communities (should propagate)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.3".to_string(),
@@ -343,7 +343,7 @@ async fn test_export_policy_large_community_match() {
 async fn test_export_policy_ext_community_match() {
     use bgpgg::grpc::proto::{self, defined_set_config};
 
-    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Add ext-community-set
     server2
@@ -411,7 +411,7 @@ async fn test_export_policy_ext_community_match() {
 
     // Announce route with blocked ext community (should be rejected)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -423,7 +423,7 @@ async fn test_export_policy_ext_community_match() {
 
     // Announce route with different ext community (should propagate)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
@@ -435,7 +435,7 @@ async fn test_export_policy_ext_community_match() {
 
     // Announce route with no ext communities (should propagate)
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.3".to_string(),

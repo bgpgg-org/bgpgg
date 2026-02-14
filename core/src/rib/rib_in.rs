@@ -126,6 +126,10 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
     }
 
+    fn test_bgp_id() -> Ipv4Addr {
+        Ipv4Addr::new(192, 0, 2, 1)
+    }
+
     #[test]
     fn test_new_adj_rib_in() {
         let rib_in = AdjRibIn::new();
@@ -136,7 +140,7 @@ mod tests {
     fn test_add_route() {
         let mut rib_in = AdjRibIn::new();
         let prefix = create_test_prefix();
-        let path = create_test_path(test_peer_ip());
+        let path = create_test_path(test_peer_ip(), test_bgp_id());
 
         rib_in.add_route(prefix, path.clone());
 
@@ -157,8 +161,8 @@ mod tests {
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_ip);
-        let path2 = create_test_path(peer_ip);
+        let path1 = create_test_path(peer_ip, test_bgp_id());
+        let path2 = create_test_path(peer_ip, test_bgp_id());
 
         rib_in.add_route(prefix1, path1.clone());
         rib_in.add_route(prefix2, path2.clone());
@@ -187,8 +191,8 @@ mod tests {
         let mut rib_in = AdjRibIn::new();
         let prefix = create_test_prefix();
 
-        let path1 = create_test_path(peer_ip);
-        let path2 = create_test_path_with(peer_ip, |p| {
+        let path1 = create_test_path(peer_ip, test_bgp_id());
+        let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
@@ -221,8 +225,8 @@ mod tests {
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_ip);
-        let path2 = create_test_path(peer_ip);
+        let path1 = create_test_path(peer_ip, test_bgp_id());
+        let path2 = create_test_path(peer_ip, test_bgp_id());
 
         rib_in.add_route(prefix1, path1);
         rib_in.add_route(prefix2, path2.clone());
@@ -262,8 +266,8 @@ mod tests {
             prefix_length: 64,
         });
 
-        rib_in.add_route(ipv4_prefix, create_test_path(peer_ip));
-        rib_in.add_route(ipv6_prefix, create_test_path(peer_ip));
+        rib_in.add_route(ipv4_prefix, create_test_path(peer_ip, test_bgp_id()));
+        rib_in.add_route(ipv6_prefix, create_test_path(peer_ip, test_bgp_id()));
 
         assert_eq!(rib_in.prefix_count(), 2);
 
@@ -287,13 +291,16 @@ mod tests {
         let peer_ip = test_peer_ip();
         let mut rib_in = AdjRibIn::new();
 
-        rib_in.add_route(create_test_prefix(), create_test_path(peer_ip));
+        rib_in.add_route(
+            create_test_prefix(),
+            create_test_path(peer_ip, test_bgp_id()),
+        );
         rib_in.add_route(
             IpNetwork::V4(Ipv4Net {
                 address: Ipv4Addr::new(10, 1, 0, 0),
                 prefix_length: 24,
             }),
-            create_test_path(peer_ip),
+            create_test_path(peer_ip, test_bgp_id()),
         );
 
         assert_eq!(rib_in.get_all_routes().len(), 2);

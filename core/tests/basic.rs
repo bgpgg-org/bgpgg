@@ -21,12 +21,12 @@ use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
-    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces a route to Server1
     let server2_addr = server2.address.to_string();
     announce_and_verify_route(
-        &mut server2,
+        &server2,
         &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
@@ -60,12 +60,12 @@ async fn test_announce_withdraw() {
 
 #[tokio::test]
 async fn test_announce_withdraw_mesh() {
-    let (mut server1, server2, server3) = setup_three_meshed_servers(PeerConfig::default()).await;
+    let (server1, server2, server3) = setup_three_meshed_servers(PeerConfig::default()).await;
 
     // Server1 announces a route to both server2 and server3
     let server1_addr = server1.address.to_string();
     announce_and_verify_route(
-        &mut server1,
+        &server1,
         &[&server2, &server3],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
@@ -127,12 +127,12 @@ async fn test_announce_withdraw_mesh() {
 
 #[tokio::test]
 async fn test_announce_withdraw_four_node_mesh() {
-    let (mut server1, server2, server3, server4) =
+    let (server1, server2, server3, server4) =
         setup_four_meshed_servers(PeerConfig::default()).await;
 
     // Server1 announces a route
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -265,7 +265,7 @@ async fn test_ibgp_split_horizon() {
     // Linear topology: A--B--C (all same ASN for iBGP)
     // Tests that routes learned via iBGP are not advertised to other iBGP peers
     // iBGP: all same ASN
-    let [mut server1, server2, server3] = chain_servers(
+    let [server1, server2, server3] = chain_servers(
         [
             start_test_server(Config::new(
                 65001,
@@ -295,7 +295,7 @@ async fn test_ibgp_split_horizon() {
 
     // Server1 announces a route
     announce_route(
-        &mut server1,
+        &server1,
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -307,7 +307,7 @@ async fn test_ibgp_split_horizon() {
     // Server2 should receive the route from Server1
     // Server3 should NOT receive the route (iBGP split horizon)
     // iBGP: NEXT_HOP preserved (not rewritten)
-    poll_route_propagation(&[
+    poll_rib(&[
         (
             &server2,
             vec![Route {
@@ -348,7 +348,7 @@ async fn test_as_loop_prevention() {
     // Topology: AS1_A -> AS2 -> AS1_B (different speakers in AS1)
     // Test that when AS1_A announces a route, it propagates to AS2,
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
-    let [mut server1_a, server2, server1_b] = chain_servers(
+    let [server1_a, server2, server1_b] = chain_servers(
         [
             start_test_server(Config::new(
                 65001,
@@ -379,7 +379,7 @@ async fn test_as_loop_prevention() {
     // Server1_A announces a route to server2
     let server1_a_addr = server1_a.address.to_string();
     announce_and_verify_route(
-        &mut server1_a,
+        &server1_a,
         &[&server2],
         RouteParams {
             prefix: "10.1.0.0/24".to_string(),
@@ -444,11 +444,11 @@ async fn test_as_loop_prevention() {
 
 #[tokio::test]
 async fn test_ipv6_route_exchange() {
-    let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces both IPv4 and IPv6 routes to Server1 via gRPC
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -458,7 +458,7 @@ async fn test_ipv6_route_exchange() {
     .await;
 
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "2001:db8::/32".to_string(),
             next_hop: "2001:db8::1".to_string(),
@@ -474,7 +474,7 @@ async fn test_ipv6_route_exchange() {
     // Poll for both IPv4 and IPv6 routes to appear in Server1's RIB
     // eBGP: IPv4 next hop rewritten to sender's address
     // Cross-family (IPv6 route over IPv4 session): IPv6 next hop preserved
-    poll_route_propagation(&[(
+    poll_rib(&[(
         &server1,
         vec![
             Route {
@@ -540,12 +540,12 @@ async fn test_ipv6_nexthop_rewrite() {
     ))
     .await;
 
-    let [server1, mut server2] = chain_servers([server1, server2], PeerConfig::default()).await;
+    let [server1, server2] = chain_servers([server1, server2], PeerConfig::default()).await;
 
     // Server2 announces IPv6 route with explicit next-hop
     let server2_addr = server2.address.to_string();
     announce_and_verify_route(
-        &mut server2,
+        &server2,
         &[&server1],
         RouteParams {
             prefix: "2001:db8::/32".to_string(),
@@ -576,7 +576,7 @@ async fn test_ipv6_nexthop_rewrite() {
 }
 #[tokio::test]
 async fn test_route_advertised_when_peer_becomes_established() {
-    let mut server = start_test_server(Config::new(
+    let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -605,7 +605,7 @@ async fn test_route_advertised_when_peer_becomes_established() {
 
     // Announce route while peer is still in OpenConfirm (not Established)
     announce_route(
-        &mut server,
+        &server,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),

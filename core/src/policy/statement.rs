@@ -431,14 +431,14 @@ impl Condition {
                 MatchOptionConfig::All => set.prefixes.iter().all(|pm| pm.contains(prefix)),
                 MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
             },
-            Condition::Neighbor(neighbor) => match &path.source {
-                RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr == *neighbor,
-                RouteSource::Local => false,
-            },
+            Condition::Neighbor(neighbor) => path
+                .source
+                .peer_ip()
+                .map(|ip| ip == *neighbor)
+                .unwrap_or(false),
             Condition::NeighborSet(set, match_opt) => {
-                let peer_ip = match &path.source {
-                    RouteSource::Ebgp(addr) | RouteSource::Ibgp(addr) => *addr,
-                    RouteSource::Local => return false,
+                let Some(peer_ip) = path.source.peer_ip() else {
+                    return false;
                 };
                 match match_opt {
                     MatchOptionConfig::Any => set.neighbors.contains(&peer_ip),
@@ -509,8 +509,8 @@ impl Condition {
             },
             Condition::RouteType(route_type) => matches!(
                 (route_type, &path.source),
-                (RouteType::Ebgp, RouteSource::Ebgp(_))
-                    | (RouteType::Ibgp, RouteSource::Ibgp(_))
+                (RouteType::Ebgp, RouteSource::Ebgp { .. })
+                    | (RouteType::Ibgp, RouteSource::Ibgp { .. })
                     | (RouteType::Local, RouteSource::Local)
             ),
         }
@@ -527,20 +527,6 @@ pub fn stmt_default_local_pref(value: u32) -> Statement {
         value,
         force: false,
     })
-}
-
-/// Reject routes with local ASN in AS_PATH (AS loop prevention)
-pub fn stmt_reject_as_loop(local_asn: u32) -> Statement {
-    Statement::new()
-        .when(Condition::AsPath(local_asn))
-        .then(Action::Reject)
-}
-
-/// Reject routes learned via iBGP (for export to iBGP peers)
-pub fn stmt_reject_ibgp() -> Statement {
-    Statement::new()
-        .when(Condition::RouteType(RouteType::Ibgp))
-        .then(Action::Reject)
 }
 
 // ============================================================================
@@ -824,7 +810,6 @@ fn parse_community_value(s: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
     use crate::config::PolicyDefinitionConfig;
     use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
@@ -842,7 +827,10 @@ mod tests {
             value: 100,
             force: false,
         });
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
         assert_eq!(path.local_pref, Some(100));
     }
@@ -861,7 +849,10 @@ mod tests {
                     value: 200,
                     force: false,
                 });
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
 
         assert_eq!(statement.apply(&prefix, &mut path), Some(true));
         assert_eq!(path.local_pref, Some(200));
@@ -882,11 +873,17 @@ mod tests {
                 force: false,
             });
 
-        let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path1 = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert_eq!(statement.apply(&prefix, &mut path1), Some(true));
         assert_eq!(path1.local_pref, Some(200));
 
-        let mut path2 = create_path(RouteSource::Ebgp(test_ip(2)));
+        let mut path2 = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(2),
+            bgp_id: std::net::Ipv4Addr::new(2, 2, 2, 2),
+        });
         assert_eq!(statement.apply(&prefix, &mut path2), None);
         assert_eq!(path2.local_pref, None);
     }
@@ -899,7 +896,10 @@ mod tests {
                 force: false,
             })
             .then(Action::SetMed(None));
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         path.med = Some(100);
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
         assert_eq!(path.local_pref, Some(200));
@@ -909,21 +909,30 @@ mod tests {
     #[test]
     fn test_statement_reject() {
         let statement = Statement::new().then(Action::Reject);
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(false));
     }
 
     #[test]
     fn test_policy_accept_all() {
         let policy = Policy::new("test".to_string()).with(Statement::new().then(Action::Accept));
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert!(policy.accept(&test_prefix(), &mut path));
     }
 
     #[test]
     fn test_policy_empty_rejects() {
         let policy = Policy::new("test".to_string());
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert!(!policy.accept(&test_prefix(), &mut path));
     }
 
@@ -948,11 +957,17 @@ mod tests {
                 force: false,
             }));
 
-        let mut path1 = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path1 = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert!(policy.accept(&prefix, &mut path1));
         assert_eq!(path1.local_pref, Some(200));
 
-        let mut path2 = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path2 = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert!(policy.accept(&other_prefix, &mut path2));
         assert_eq!(path2.local_pref, Some(100));
     }
@@ -960,32 +975,12 @@ mod tests {
     #[test]
     fn test_stmt_default_local_pref() {
         let policy = Policy::new("test".to_string()).with(stmt_default_local_pref(100));
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
+        let mut path = create_path(RouteSource::Ebgp {
+            peer_ip: test_ip(1),
+            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+        });
         assert!(policy.accept(&test_prefix(), &mut path));
         assert_eq!(path.local_pref, Some(100));
-    }
-
-    #[test]
-    fn test_stmt_reject_as_loop() {
-        let policy = Policy::new("test".to_string()).with(stmt_reject_as_loop(65000));
-        let mut path = create_path(RouteSource::Ebgp(test_ip(1)));
-        path.as_path = vec![AsPathSegment {
-            segment_type: AsPathSegmentType::AsSequence,
-            segment_len: 1,
-            asn_list: vec![65000],
-        }];
-        assert!(!policy.accept(&test_prefix(), &mut path));
-    }
-
-    #[test]
-    fn test_stmt_reject_ibgp() {
-        let policy = Policy::new("test".to_string())
-            .with(stmt_reject_ibgp())
-            .with(Statement::new().then(Action::Accept));
-        let mut ibgp_path = create_path(RouteSource::Ibgp(test_ip(1)));
-        assert!(!policy.accept(&test_prefix(), &mut ibgp_path));
-        let mut ebgp_path = create_path(RouteSource::Ebgp(test_ip(1)));
-        assert!(policy.accept(&test_prefix(), &mut ebgp_path));
     }
 
     #[test]

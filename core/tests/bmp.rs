@@ -30,7 +30,7 @@ async fn test_add_bmp_server_sends_initiation() {
     let mut bmp_server = FakeBmpServer::new().await;
     let bmp_addr = bmp_server.address();
 
-    let mut server = start_test_server(test_config(65001, 1)).await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     server.client.add_bmp_server(bmp_addr, None).await.unwrap();
 
@@ -42,7 +42,7 @@ async fn test_add_bmp_server_sends_initiation() {
 
 #[tokio::test]
 async fn test_add_bmp_server_with_existing_peers() {
-    let (mut server, mut peer1, mut peer2) = setup_three_meshed_servers(PeerConfig {
+    let (mut server, peer1, peer2) = setup_three_meshed_servers(PeerConfig {
         hold_timer_secs: Some(90),
         ..Default::default()
     })
@@ -50,7 +50,7 @@ async fn test_add_bmp_server_with_existing_peers() {
 
     // Announce routes from peer1
     announce_route(
-        &mut peer1,
+        &peer1,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -61,7 +61,7 @@ async fn test_add_bmp_server_with_existing_peers() {
 
     // Announce routes from peer2
     announce_route(
-        &mut peer2,
+        &peer2,
         RouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
@@ -178,7 +178,7 @@ async fn test_add_bmp_server_with_existing_peers() {
 async fn test_peer_up_down() {
     let mut bmp_server = FakeBmpServer::new().await;
     let mut server1 = start_test_server(test_config(65001, 1)).await;
-    let mut server2 = start_test_server(test_config(65002, 2)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
 
     setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
 
@@ -218,7 +218,7 @@ async fn test_peer_up_down() {
 #[tokio::test]
 async fn test_route_monitoring_on_updates() {
     let mut bmp_server = FakeBmpServer::new().await;
-    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
+    let (mut server1, server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(90),
         ..Default::default()
     })
@@ -231,7 +231,7 @@ async fn test_route_monitoring_on_updates() {
 
     // Announce routes from server2
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -241,7 +241,7 @@ async fn test_route_monitoring_on_updates() {
     .await;
 
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -308,7 +308,7 @@ async fn test_route_monitoring_on_updates() {
 
     // Add a new route
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.2.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -383,8 +383,8 @@ async fn test_bmp_statistics() {
     use bgpgg::bmp::msg_statistics::StatType;
 
     let mut bmp_server = FakeBmpServer::new().await;
-    let mut server1 = start_test_server(test_config(65001, 1)).await;
-    let mut server2 = start_test_server(test_config(65002, 2)).await;
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
 
     // Add BMP server with statistics enabled (1 second interval)
     server1
@@ -425,7 +425,7 @@ async fn test_bmp_statistics() {
 
     // Add routes from server2
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
@@ -435,7 +435,7 @@ async fn test_bmp_statistics() {
     .await;
 
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),

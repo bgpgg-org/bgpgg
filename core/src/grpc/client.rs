@@ -138,6 +138,7 @@ fn large_community_to_proto(
 }
 
 /// Simplified wrapper around the gRPC client that hides boilerplate
+#[derive(Clone)]
 pub struct BgpClient {
     inner: BgpServiceClient<Channel>,
     /// Router ID of the BGP server this client is connected to.
@@ -326,12 +327,13 @@ impl BgpClient {
 
     /// Add a new BGP peer. Pass None for config to use all defaults.
     pub async fn add_peer(
-        &mut self,
+        &self,
         address: String,
         config: Option<SessionConfig>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .add_peer(AddPeerRequest { address, config })
             .await?
             .into_inner();
@@ -344,9 +346,10 @@ impl BgpClient {
     }
 
     /// Remove a BGP peer
-    pub async fn remove_peer(&mut self, address: String) -> Result<String, tonic::Status> {
+    pub async fn remove_peer(&self, address: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .remove_peer(RemovePeerRequest { address })
             .await?
             .into_inner();
@@ -359,16 +362,18 @@ impl BgpClient {
     }
 
     /// Disable a BGP peer (RFC 4486 Administrative Shutdown)
-    pub async fn disable_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+    pub async fn disable_peer(&self, address: String) -> Result<(), tonic::Status> {
         self.inner
+            .clone()
             .disable_peer(DisablePeerRequest { address })
             .await?;
         Ok(())
     }
 
     /// Enable a BGP peer (undo Administrative Shutdown)
-    pub async fn enable_peer(&mut self, address: String) -> Result<(), tonic::Status> {
+    pub async fn enable_peer(&self, address: String) -> Result<(), tonic::Status> {
         self.inner
+            .clone()
             .enable_peer(EnablePeerRequest { address })
             .await?;
         Ok(())
@@ -376,13 +381,14 @@ impl BgpClient {
 
     /// Reset a BGP peer with flexible reset types and AFI/SAFI support
     pub async fn reset_peer(
-        &mut self,
+        &self,
         address: String,
         reset_type: proto::ResetType,
         afi: Option<proto::Afi>,
         safi: Option<proto::Safi>,
     ) -> Result<(), tonic::Status> {
         self.inner
+            .clone()
             .reset_peer(ResetPeerRequest {
                 address,
                 reset_type: reset_type as i32,
@@ -396,7 +402,7 @@ impl BgpClient {
     /// Add a route to the global RIB
     #[allow(clippy::too_many_arguments)]
     pub async fn add_route(
-        &mut self,
+        &self,
         prefix: String,
         next_hop: String,
         origin: Origin,
@@ -407,6 +413,8 @@ impl BgpClient {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
+        originator_id: Option<String>,
+        cluster_list: Vec<String>,
     ) -> Result<String, tonic::Status> {
         // Convert u64 extended communities to proto format
         let extended_communities_proto = extended_communities
@@ -422,6 +430,7 @@ impl BgpClient {
 
         let resp = self
             .inner
+            .clone()
             .add_route(AddRouteRequest {
                 prefix,
                 next_hop,
@@ -433,6 +442,8 @@ impl BgpClient {
                 communities,
                 extended_communities: extended_communities_proto,
                 large_communities: large_communities_proto,
+                originator_id,
+                cluster_list,
             })
             .await?
             .into_inner();
@@ -447,7 +458,7 @@ impl BgpClient {
     /// Add multiple routes using streaming API for better performance
     #[allow(clippy::type_complexity)]
     pub async fn add_route_stream(
-        &mut self,
+        &self,
         routes: Vec<(
             String,
             String,
@@ -497,20 +508,28 @@ impl BgpClient {
                     communities,
                     extended_communities: extended_communities_proto,
                     large_communities: large_communities_proto,
+                    originator_id: None,
+                    cluster_list: vec![],
                 }
             },
         );
 
         let stream = tokio_stream::iter(requests);
-        let resp = self.inner.add_route_stream(stream).await?.into_inner();
+        let resp = self
+            .inner
+            .clone()
+            .add_route_stream(stream)
+            .await?
+            .into_inner();
 
         Ok(resp.count)
     }
 
     /// Remove a route from all established peers
-    pub async fn remove_route(&mut self, prefix: String) -> Result<String, tonic::Status> {
+    pub async fn remove_route(&self, prefix: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .remove_route(RemoveRouteRequest { prefix })
             .await?
             .into_inner();
@@ -540,12 +559,13 @@ impl BgpClient {
 
     /// Add a BMP server destination
     pub async fn add_bmp_server(
-        &mut self,
+        &self,
         address: String,
         statistics_timeout: Option<u64>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .add_bmp_server(AddBmpServerRequest {
                 address,
                 statistics_timeout,
@@ -561,9 +581,10 @@ impl BgpClient {
     }
 
     /// Remove a BMP server destination
-    pub async fn remove_bmp_server(&mut self, address: String) -> Result<String, tonic::Status> {
+    pub async fn remove_bmp_server(&self, address: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .remove_bmp_server(RemoveBmpServerRequest { address })
             .await?
             .into_inner();
@@ -588,12 +609,13 @@ impl BgpClient {
 
     /// Add a policy definition
     pub async fn add_policy(
-        &mut self,
+        &self,
         name: String,
         statements: Vec<StatementConfig>,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .add_policy(AddPolicyRequest { name, statements })
             .await?
             .into_inner();
@@ -618,12 +640,13 @@ impl BgpClient {
 
     /// Add a defined set
     pub async fn add_defined_set(
-        &mut self,
+        &self,
         set: DefinedSetConfig,
         replace: bool,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .add_defined_set(AddDefinedSetRequest {
                 set: Some(set),
                 replace,
@@ -654,12 +677,13 @@ impl BgpClient {
 
     /// Remove a defined set
     pub async fn remove_defined_set(
-        &mut self,
+        &self,
         set_type: String,
         name: String,
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .remove_defined_set(RemoveDefinedSetRequest {
                 set_type,
                 name,
@@ -676,9 +700,10 @@ impl BgpClient {
     }
 
     /// Remove a policy
-    pub async fn remove_policy(&mut self, name: String) -> Result<String, tonic::Status> {
+    pub async fn remove_policy(&self, name: String) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .remove_policy(RemovePolicyRequest { name })
             .await?
             .into_inner();
@@ -692,7 +717,7 @@ impl BgpClient {
 
     /// Set policy assignment for a peer
     pub async fn set_policy_assignment(
-        &mut self,
+        &self,
         peer_address: String,
         direction: String,
         policy_names: Vec<String>,
@@ -700,6 +725,7 @@ impl BgpClient {
     ) -> Result<String, tonic::Status> {
         let resp = self
             .inner
+            .clone()
             .set_policy_assignment(SetPolicyAssignmentRequest {
                 peer_address,
                 direction,

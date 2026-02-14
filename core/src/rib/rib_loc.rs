@@ -72,12 +72,11 @@ fn remove_peer_paths<K: Eq + Hash>(
     peer_ip: IpAddr,
 ) -> bool {
     if let Some(route) = table.get_mut(key) {
-        let had_path = route.paths.iter().any(|p| {
-            matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
-        });
-        route.paths.retain(|p| {
-            !matches!(&p.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
-        });
+        let had_path = route
+            .paths
+            .iter()
+            .any(|p| p.source.peer_ip() == Some(peer_ip));
+        route.paths.retain(|p| p.source.peer_ip() != Some(peer_ip));
         if route.paths.is_empty() {
             table.remove(key);
         }
@@ -102,7 +101,7 @@ fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> b
 }
 
 fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
-    matches!(&path.source, RouteSource::Ebgp(ip) | RouteSource::Ibgp(ip) if *ip == peer_ip)
+    path.source.peer_ip() == Some(peer_ip)
 }
 
 fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) {
@@ -249,6 +248,8 @@ impl LocRib {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
+        originator_id: Option<std::net::Ipv4Addr>,
+        cluster_list: Vec<std::net::Ipv4Addr>,
     ) {
         // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
         // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
@@ -267,6 +268,8 @@ impl LocRib {
             extended_communities,
             large_communities,
             unknown_attrs: vec![],
+            originator_id,
+            cluster_list,
         });
 
         self.add_route(prefix, path);
@@ -480,8 +483,16 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
     }
 
+    fn test_bgp_id() -> Ipv4Addr {
+        Ipv4Addr::new(192, 0, 2, 1)
+    }
+
     fn test_peer_ip2() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))
+    }
+
+    fn test_bgp_id2() -> Ipv4Addr {
+        Ipv4Addr::new(192, 0, 2, 2)
     }
 
     #[test]
@@ -496,7 +507,7 @@ mod tests {
         let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
-        let path = create_test_path(peer_ip);
+        let path = create_test_path(peer_ip, test_bgp_id());
 
         loc_rib.add_route(prefix, path.clone());
 
@@ -520,8 +531,8 @@ mod tests {
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_ip);
-        let path2 = create_test_path(peer_ip);
+        let path1 = create_test_path(peer_ip, test_bgp_id());
+        let path2 = create_test_path(peer_ip, test_bgp_id());
 
         loc_rib.add_route(prefix1, path1.clone());
         loc_rib.add_route(prefix2, path2.clone());
@@ -551,8 +562,8 @@ mod tests {
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
 
-        let path1 = create_test_path(peer1);
-        let path2 = create_test_path(peer2);
+        let path1 = create_test_path(peer1, test_bgp_id());
+        let path2 = create_test_path(peer2, test_bgp_id2());
 
         loc_rib.add_route(prefix, path1.clone());
         loc_rib.add_route(prefix, path2.clone());
@@ -576,8 +587,8 @@ mod tests {
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
 
-        let path1 = create_test_path(peer_ip);
-        let path2 = create_test_path_with(peer_ip, |p| {
+        let path1 = create_test_path(peer_ip, test_bgp_id());
+        let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
@@ -604,8 +615,8 @@ mod tests {
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
 
-        let path1 = create_test_path(peer1);
-        let path2 = create_test_path(peer2);
+        let path1 = create_test_path(peer1, test_bgp_id());
+        let path2 = create_test_path(peer2, test_bgp_id2());
 
         loc_rib.add_route(prefix, path1);
         loc_rib.add_route(prefix, path2.clone());
@@ -626,7 +637,7 @@ mod tests {
         let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
-        let path = create_test_path(peer_ip);
+        let path = create_test_path(peer_ip, test_bgp_id());
 
         loc_rib.add_route(prefix, path);
         loc_rib.remove_routes_from_peer(peer_ip);
@@ -651,6 +662,8 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
+            None,
             vec![],
         );
         assert_eq!(loc_rib.routes_len(), 1);
@@ -681,6 +694,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            None,
+            vec![],
         );
 
         let path = loc_rib.get_best_path(&prefix).unwrap();
@@ -701,8 +716,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         assert_eq!(loc_rib.routes_len(), 2);
         assert!(loc_rib.has_prefix(&prefix_v4));
@@ -723,8 +738,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         let count = loc_rib.iter_routes().count();
         assert_eq!(count, 2);
@@ -741,8 +756,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip));
+        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         let ipv4_routes: Vec<_> = loc_rib.iter_ipv4_unicast_routes().collect();
         assert_eq!(ipv4_routes.len(), 1);
@@ -765,8 +780,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer1));
-        loc_rib.add_route(prefix_v6, create_test_path(peer2));
+        loc_rib.add_route(prefix_v4, create_test_path(peer1, test_bgp_id()));
+        loc_rib.add_route(prefix_v6, create_test_path(peer2, test_bgp_id2()));
 
         let changed = loc_rib.remove_routes_from_peer(peer1);
 

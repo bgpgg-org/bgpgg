@@ -25,7 +25,7 @@ use std::net::Ipv4Addr;
 #[tokio::test]
 async fn test_remove_peer() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
+    let (server1, server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
     })
@@ -35,7 +35,7 @@ async fn test_remove_peer() {
     let server2_addr = server2.address.to_string();
     let peer_addr = server2_addr.clone();
     announce_and_verify_route(
-        &mut server2,
+        &server2,
         &[&server1],
         RouteParams {
             prefix: "10.0.0.0/24".to_string(),
@@ -70,7 +70,7 @@ async fn test_remove_peer() {
 #[tokio::test]
 async fn test_remove_peer_withdraw_routes() {
     let hold_timer_secs = 3;
-    let (mut server1, mut server2) = setup_two_peered_servers(PeerConfig {
+    let (server1, server2) = setup_two_peered_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
     })
@@ -78,7 +78,7 @@ async fn test_remove_peer_withdraw_routes() {
 
     // Server2 announces a route
     announce_route(
-        &mut server2,
+        &server2,
         RouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
@@ -90,7 +90,7 @@ async fn test_remove_peer_withdraw_routes() {
     let server2_addr = server2.address.to_string();
     let peer_addr = server2_addr.clone();
     announce_and_verify_route(
-        &mut server2,
+        &server2,
         &[&server1],
         RouteParams {
             prefix: "10.2.0.0/24".to_string(),
@@ -125,7 +125,7 @@ async fn test_remove_peer_withdraw_routes() {
 #[tokio::test]
 async fn test_remove_peer_four_node_mesh() {
     let hold_timer_secs = 3;
-    let (mut server1, server2, server3, mut server4) = setup_four_meshed_servers(PeerConfig {
+    let (server1, server2, server3, server4) = setup_four_meshed_servers(PeerConfig {
         hold_timer_secs: Some(hold_timer_secs),
         ..Default::default()
     })
@@ -134,7 +134,7 @@ async fn test_remove_peer_four_node_mesh() {
     // Server4 announces a route to all peers
     let server4_addr = server4.address.to_string();
     announce_and_verify_route(
-        &mut server4,
+        &server4,
         &[&server1, &server2, &server3],
         RouteParams {
             prefix: "10.4.0.0/24".to_string(),
@@ -164,7 +164,7 @@ async fn test_remove_peer_four_node_mesh() {
     // Server2 and Server3 still learn directly from Server4
     // eBGP: NEXT_HOP rewritten to router IDs
     // Use longer timeout for re-convergence after peer removal
-    poll_route_propagation_with_timeout(
+    poll_rib_with_timeout(
         &[
             (
                 &server1,
@@ -229,14 +229,14 @@ async fn test_remove_peer_four_node_mesh() {
 
 #[tokio::test]
 async fn test_manually_stopped_no_auto_reconnect() {
-    let mut server1 = start_test_server(Config::new(
+    let server1 = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let mut server2 = start_test_server(Config::new(
+    let server2 = start_test_server(Config::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -348,7 +348,7 @@ async fn test_manual_stop() {
     ];
 
     for (starting_state, delay_open_time_secs) in test_cases {
-        let mut server = start_test_server(Config::new(
+        let server = start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),

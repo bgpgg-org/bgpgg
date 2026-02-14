@@ -2,10 +2,7 @@ pub mod sets;
 pub mod statement;
 
 pub use sets::{DefinedSetType, DefinedSets};
-pub use statement::{
-    stmt_default_local_pref, stmt_reject_as_loop, stmt_reject_ibgp, CommunityOp, RouteType,
-    Statement,
-};
+pub use statement::{stmt_default_local_pref, CommunityOp, RouteType, Statement};
 
 use crate::config::{Config, PolicyDefinitionConfig};
 use crate::net::IpNetwork;
@@ -60,26 +57,19 @@ impl Policy {
         &self.statements
     }
 
-    /// Create a default inbound policy with AS loop prevention and default local pref
-    pub fn default_in(local_asn: u32) -> Self {
-        use statement::{stmt_default_local_pref, stmt_reject_as_loop, Action};
+    /// Create a default inbound policy with default local pref
+    pub fn default_in() -> Self {
+        use statement::{stmt_default_local_pref, Action};
         Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
-            .with(stmt_reject_as_loop(local_asn))
             .with(stmt_default_local_pref(100))
             .with(Statement::new().then(Action::Accept))
     }
 
-    /// Create a default outbound policy with iBGP reflection prevention
-    pub fn default_out(local_asn: u32, peer_asn: u32) -> Self {
-        use statement::{stmt_reject_ibgp, Action};
-        if local_asn == peer_asn {
-            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
-                .with(stmt_reject_ibgp())
-                .with(Statement::new().then(Action::Accept))
-        } else {
-            Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
-                .with(Statement::new().then(Action::Accept))
-        }
+    /// Create a default outbound policy
+    pub fn default_out() -> Self {
+        use statement::Action;
+        Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
+            .with(Statement::new().then(Action::Accept))
     }
 
     /// Create a policy from YAML config
@@ -181,6 +171,8 @@ pub(crate) mod test_helpers {
             extended_communities: vec![],
             large_communities: vec![],
             unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
         }
     }
 
