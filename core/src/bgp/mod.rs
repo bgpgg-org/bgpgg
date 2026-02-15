@@ -34,6 +34,12 @@ pub use msg_update_codec::merge_as_paths;
 use msg_update_types::{AttrType, PathAttrFlag};
 
 #[cfg(test)]
+pub(crate) const DEFAULT_FORMAT: msg::MessageFormat = msg::MessageFormat {
+    use_4byte_asn: true,
+    add_path: false,
+};
+
+#[cfg(test)]
 pub(crate) const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
     PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
     AttrType::Communities as u8,

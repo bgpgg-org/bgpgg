@@ -272,6 +272,7 @@ fn validate_message_type(message_type: u8) -> Result<(), ParserError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::DEFAULT_FORMAT;
     use std::io::Cursor;
 
     const MOCK_OPEN_MESSAGE: &[u8] = &[
@@ -289,16 +290,7 @@ mod tests {
     async fn test_read_open_message() {
         let stream = Cursor::new(MOCK_OPEN_MESSAGE);
 
-        match read_bgp_message(
-            stream,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .unwrap()
-        {
+        match read_bgp_message(stream, DEFAULT_FORMAT).await.unwrap() {
             BgpMessage::Open(open_message) => {
                 assert_eq!(open_message.version, 4);
                 assert_eq!(open_message.asn, 1234);
@@ -316,15 +308,7 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[0] = 0x00;
         let stream = Cursor::new(msg);
-        match read_bgp_message(
-            stream,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        {
+        match read_bgp_message(stream, DEFAULT_FORMAT).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -342,15 +326,7 @@ mod tests {
         msg[16] = 0x00;
         msg[17] = 0x12; // 18
         let stream = Cursor::new(msg);
-        match read_bgp_message(
-            stream,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        {
+        match read_bgp_message(stream, DEFAULT_FORMAT).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -368,15 +344,7 @@ mod tests {
         msg[16] = 0x10;
         msg[17] = 0x01; // 4097
         let stream = Cursor::new(msg);
-        match read_bgp_message(
-            stream,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        {
+        match read_bgp_message(stream, DEFAULT_FORMAT).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -393,15 +361,7 @@ mod tests {
         let mut msg = MOCK_OPEN_MESSAGE.to_vec();
         msg[18] = 99;
         let stream = Cursor::new(msg);
-        match read_bgp_message(
-            stream,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        {
+        match read_bgp_message(stream, DEFAULT_FORMAT).await {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,

@@ -111,7 +111,9 @@ pub fn parse_nlri_list(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, Parser
             prefix_length,
         };
 
+        // Semantic check: skip multicast prefixes (RFC 4271 Section 6.3)
         if net.is_multicast() {
+            eprintln!("Warning: ignoring multicast NLRI prefix {:?}", net);
             cursor += byte_len;
             continue;
         }

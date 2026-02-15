@@ -1101,11 +1101,8 @@ mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
-    use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
-
-    const DEFAULT_FORMAT: MessageFormat = MessageFormat {
-        use_4byte_asn: true,
-        add_path: false,
+    use crate::bgp::{
+        DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
 
     // Sample MP_REACH_NLRI for IPv4 (192.168.1.1, NLRI=10.0.0.0/8)
