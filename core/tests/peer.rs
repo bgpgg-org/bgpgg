@@ -1519,12 +1519,12 @@ async fn test_graceful_restart_reconnect() {
     // indicated R=1 (restart in progress) and thus is assumed to have lost its state.
     let route_update = peer.read_update().await;
     assert_eq!(
-        route_update.nlri_list().len(),
+        route_update.nlri_prefixes().len(),
         1,
         "Server should send retained route to restarting peer"
     );
     assert_eq!(
-        route_update.nlri_list()[0].to_string(),
+        route_update.nlri_prefixes()[0].to_string(),
         "10.0.0.0/24",
         "Server should send 10.0.0.0/24 route"
     );

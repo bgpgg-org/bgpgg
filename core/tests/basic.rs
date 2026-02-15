@@ -619,7 +619,7 @@ async fn test_route_advertised_when_peer_becomes_established() {
 
     // Read UPDATE message - route should be automatically sent when peer became Established
     let update = fake_peer.read_update().await;
-    let nlri = update.nlri_list();
+    let nlri = update.nlri_prefixes();
     assert_eq!(nlri.len(), 1, "Expected one route announcement");
     assert_eq!(
         nlri[0].to_string(),

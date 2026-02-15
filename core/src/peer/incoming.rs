@@ -211,7 +211,7 @@ impl Peer {
         &mut self,
         update_msg: &UpdateMessage,
     ) -> Result<RouteChanges, BgpError> {
-        if !self.check_max_prefix_limit(update_msg.nlri_list().len())? {
+        if !self.check_max_prefix_limit(update_msg.nlri_prefixes().len())? {
             return Ok((vec![], vec![]));
         }
 
@@ -258,12 +258,12 @@ impl Peer {
 
         // RFC 4271: AS_PATH loop prevention - return prefixes as implicit withdrawals
         if self.has_as_path_loop(&path) {
-            return Ok((vec![], update_msg.nlri_list()));
+            return Ok((vec![], update_msg.nlri_prefixes()));
         }
 
         // RFC 4456 Section 8: Route Reflector loop prevention for iBGP routes
         if self.session_type == Some(SessionType::Ibgp) && self.has_rr_loop(&path) {
-            return Ok((vec![], update_msg.nlri_list()));
+            return Ok((vec![], update_msg.nlri_prefixes()));
         }
 
         let mut announced = Vec::new();

@@ -195,7 +195,7 @@ impl UpdateMessage {
         }
     }
 
-    pub fn nlri_list(&self) -> Vec<IpNetwork> {
+    pub fn nlri_prefixes(&self) -> Vec<IpNetwork> {
         let mut nlri: Vec<IpNetwork> = self.nlri_list.iter().map(|(net, _)| *net).collect();
 
         // Add NLRI from MP_REACH_NLRI if present
@@ -1314,7 +1314,7 @@ mod tests {
         );
 
         // Verify combined NLRI (traditional 40.0.0.0/8 + MP_REACH 10.0.0.0/8)
-        let mut nlri = parsed.nlri_list();
+        let mut nlri = parsed.nlri_prefixes();
         nlri.sort_by_key(|n| match n {
             IpNetwork::V4(net) => net.address,
             IpNetwork::V6(_) => Ipv4Addr::new(0, 0, 0, 0),
@@ -1968,7 +1968,7 @@ mod tests {
         let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
         // Verify
-        assert_eq!(decoded.nlri_list(), vec![ipv6_prefix]);
+        assert_eq!(decoded.nlri_prefixes(), vec![ipv6_prefix]);
         assert_eq!(decoded.next_hop(), Some(next_hop));
         assert_eq!(decoded.origin(), Some(Origin::IGP));
         assert_eq!(decoded.local_pref(), Some(100));

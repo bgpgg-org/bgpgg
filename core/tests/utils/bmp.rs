@@ -757,7 +757,7 @@ fn validate_bmp_route_monitoring_msg(
         return false;
     }
 
-    let mut actual_nlri = actual.bgp_update().nlri_list().to_vec();
+    let mut actual_nlri = actual.bgp_update().nlri_prefixes().to_vec();
     let mut expected_nlri = expected.nlri.clone();
     actual_nlri.sort_by_key(|n| format!("{:?}", n));
     expected_nlri.sort_by_key(|n| format!("{:?}", n));

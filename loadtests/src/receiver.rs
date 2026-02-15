@@ -49,7 +49,7 @@ pub async fn run_receiver(
         .await
         {
             Ok(BgpMessage::Update(update)) => {
-                let nlri_count = update.nlri_list().len();
+                let nlri_count = update.nlri_prefixes().len();
 
                 if nlri_count > 0 {
                     let now = Instant::now();
