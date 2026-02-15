@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_addpath_backward_compat() {
+    fn test_non_addpath() {
         // Without ADD-PATH, remote_path_id is None on all paths.
         // add_route should overwrite, remove_route should remove.
         let mut rib_in = AdjRibIn::new();

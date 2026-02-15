@@ -48,6 +48,29 @@ pub struct LocRib {
 
 // Helper functions to avoid code duplication
 
+/// Insert or update a path in a route's path list.
+/// - If a matching path exists (same source, same remote_path_id) and attrs differ,
+///   replace it while inheriting the existing local_path_id.
+/// - If no match, allocate a fresh local_path_id and append.
+fn upsert_path(
+    paths: &mut Vec<Arc<Path>>,
+    mut path: Arc<Path>,
+    path_ids: &mut PathIdAllocator,
+) {
+    match paths.iter_mut().find(|p| p.matches_remote(&path)) {
+        Some(existing) => {
+            if existing.attrs != path.attrs {
+                Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
+                *existing = path;
+            }
+        }
+        None => {
+            Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
+            paths.push(path);
+        }
+    }
+}
+
 fn add_route<K: Eq + Hash>(
     table: &mut HashMap<K, Route>,
     key: K,
@@ -56,23 +79,9 @@ fn add_route<K: Eq + Hash>(
     path_ids: &mut PathIdAllocator,
 ) {
     if let Some(route) = table.get_mut(&key) {
-        if let Some(existing) = route.paths.iter_mut().find(|p| {
-            p.attrs.source == path.attrs.source && p.remote_path_id == path.remote_path_id
-        }) {
-            // Replacement: inherit existing path's local_path_id for reuse
-            Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
-            // Skip no-op replacement: if attrs are identical, keep existing Arc
-            if existing.attrs != path.attrs {
-                *existing = path;
-            }
-        } else {
-            // New path: allocate fresh ID
-            Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
-            route.paths.push(path);
-        }
+        upsert_path(&mut route.paths, path, path_ids);
         route.paths.sort_by(|a, b| b.best_path_cmp(a));
     } else {
-        // First path for prefix: allocate fresh ID
         Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
         table.insert(
             key,
@@ -1005,6 +1014,25 @@ mod tests {
         let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         assert_eq!(id1, id2, "replaced path should inherit local_path_id");
+    }
+
+    #[test]
+    fn test_identical_path_is_noop() {
+        let mut loc_rib = LocRib::new();
+        let prefix = create_test_prefix();
+        let path = create_test_path(test_peer_ip(), test_bgp_id());
+
+        loc_rib.add_route(prefix, Arc::clone(&path));
+        let stored = loc_rib.get_best_path(&prefix).unwrap();
+        let ptr_before = Arc::as_ptr(&stored);
+
+        // Re-add identical path — should not replace the Arc
+        loc_rib.add_route(prefix, Arc::clone(&path));
+        let stored = loc_rib.get_best_path(&prefix).unwrap();
+        assert!(
+            std::ptr::eq(ptr_before, Arc::as_ptr(&stored)),
+            "identical path should keep existing Arc"
+        );
     }
 
     #[test]

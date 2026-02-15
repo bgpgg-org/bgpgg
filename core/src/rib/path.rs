@@ -111,6 +111,11 @@ impl Path {
     pub fn cluster_list(&self) -> &Vec<std::net::Ipv4Addr> {
         &self.attrs.cluster_list
     }
+
+    /// Same source peer and same remote path ID (ADD-PATH identity).
+    pub fn matches_remote(&self, other: &Path) -> bool {
+        self.attrs.source == other.attrs.source && self.remote_path_id == other.remote_path_id
+    }
 }
 
 impl Path {
@@ -761,5 +766,40 @@ mod tests {
 
             assert_eq!(path1.best_path_cmp(&path2), expected, "test case: {}", name);
         }
+    }
+
+    #[test]
+    fn test_matches_remote() {
+        let path1 = make_base_path();
+        let mut path2 = make_base_path();
+
+        // Same source, same remote_path_id (both None) -> matches
+        assert!(path1.matches_remote(&path2));
+
+        // Different source -> no match
+        path2.attrs.source = RouteSource::Ebgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(2),
+        };
+        assert!(!path1.matches_remote(&path2));
+
+        // Same source, different remote_path_id -> no match
+        path2.attrs.source = path1.attrs.source;
+        path2.remote_path_id = Some(1);
+        assert!(!path1.matches_remote(&path2));
+
+        // Both have same remote_path_id -> matches
+        let mut path3 = make_base_path();
+        path3.remote_path_id = Some(5);
+        let mut path4 = make_base_path();
+        path4.remote_path_id = Some(5);
+        assert!(path3.matches_remote(&path4));
+
+        // Same remote_path_id, different source -> no match
+        path4.attrs.source = RouteSource::Ebgp {
+            peer_ip: test_ip(2),
+            bgp_id: test_bgp_id(2),
+        };
+        assert!(!path3.matches_remote(&path4));
     }
 }
