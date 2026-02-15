@@ -56,6 +56,13 @@ impl PathIdAllocator {
         (self.pos as u32) * 64 + 1
     }
 
+    /// Free multiple path IDs at once.
+    pub fn free_all(&mut self, ids: Vec<u32>) {
+        for id in ids {
+            self.free(id);
+        }
+    }
+
     /// Free a previously allocated path ID. No-op if id == 0 (sentinel).
     pub fn free(&mut self, id: u32) {
         if id == 0 {

@@ -38,7 +38,7 @@ pub struct LocRib {
     /// Track stale routes during Graceful Restart (RFC 4724)
     /// Key: (peer_ip, afi_safi), Value: set of stale prefixes
     /// Routes are marked stale when peer disconnects with GR enabled.
-    /// update_from_peer() clears refreshed prefixes from the stale set.
+    /// apply_peer_update() clears refreshed prefixes from the stale set.
     stale_routes: HashMap<(IpAddr, AfiSafi), HashSet<IpNetwork>>,
 
     /// ADD-PATH local path ID allocator (RFC 7911)
@@ -175,14 +175,10 @@ impl LocRib {
     }
 
     fn clear_peer_paths(&mut self, peer_ip: IpAddr) {
-        let freed = remove_all_peer_paths(&mut self.ipv4_unicast, peer_ip);
-        for id in freed {
-            self.path_ids.free(id);
-        }
-        let freed = remove_all_peer_paths(&mut self.ipv6_unicast, peer_ip);
-        for id in freed {
-            self.path_ids.free(id);
-        }
+        self.path_ids
+            .free_all(remove_all_peer_paths(&mut self.ipv4_unicast, peer_ip));
+        self.path_ids
+            .free_all(remove_all_peer_paths(&mut self.ipv6_unicast, peer_ip));
     }
 
     /// Remove paths from a specific peer for a given prefix.
@@ -197,9 +193,7 @@ impl LocRib {
             }),
         };
         let had_path = !freed_path_ids.is_empty();
-        for id in freed_path_ids {
-            self.path_ids.free(id);
-        }
+        self.path_ids.free_all(freed_path_ids);
         had_path
     }
 
@@ -220,7 +214,7 @@ impl LocRib {
     /// Returns (best_changed, all_affected):
     /// - best_changed: prefixes where the best path changed (for non-ADD-PATH peers)
     /// - all_affected: all prefixes touched by this update (for ADD-PATH peers)
-    pub fn update_from_peer<F>(
+    pub fn apply_peer_update<F>(
         &mut self,
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
@@ -365,9 +359,7 @@ impl LocRib {
             }),
         };
         let removed = !freed_path_ids.is_empty();
-        for id in freed_path_ids {
-            self.path_ids.free(id);
-        }
+        self.path_ids.free_all(freed_path_ids);
         removed
     }
 
@@ -482,7 +474,7 @@ impl LocRib {
     }
 
     /// Mark all routes from a peer for a specific AFI/SAFI as stale (RFC 4724 Graceful Restart)
-    /// Tracks stale prefixes. Refreshed prefixes are cleared by update_from_peer().
+    /// Tracks stale prefixes. Refreshed prefixes are cleared by apply_peer_update().
     /// Returns the count of prefixes marked as stale.
     pub fn mark_peer_routes_stale(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) -> usize {
         let prefixes: Vec<IpNetwork> = match (afi_safi.afi, afi_safi.safi) {
@@ -1108,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_from_peer_returns_all_affected() {
+    fn test_apply_peer_update_returns_all_affected() {
         let mut loc_rib = LocRib::new();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
@@ -1127,7 +1119,7 @@ mod tests {
         });
 
         let (best_changed, all_affected) =
-            loc_rib.update_from_peer(peer2, vec![], vec![(prefix, worse_path)], |_, _| true);
+            loc_rib.apply_peer_update(peer2, vec![], vec![(prefix, worse_path)], |_, _| true);
 
         // Best didn't change (peer1's path is still best)
         assert!(best_changed.is_empty(), "best should not have changed");
@@ -1163,7 +1155,7 @@ mod tests {
         let refreshed_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.attrs.med = Some(50);
         });
-        loc_rib.update_from_peer(peer_ip, vec![], vec![(prefix, refreshed_path)], |_, _| true);
+        loc_rib.apply_peer_update(peer_ip, vec![], vec![(prefix, refreshed_path)], |_, _| true);
 
         // The prefix should be cleared from the stale set
         let stale_prefixes = loc_rib

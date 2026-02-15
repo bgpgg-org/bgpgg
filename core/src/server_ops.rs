@@ -259,7 +259,7 @@ impl BgpServer {
                 let import_policies = peer.policy_in();
 
                 if !import_policies.is_empty() {
-                    let (best_changed, all_affected) = self.loc_rib.update_from_peer(
+                    let (best_changed, all_affected) = self.loc_rib.apply_peer_update(
                         peer_ip,
                         withdrawn.clone(),
                         announced.clone(),
