@@ -227,7 +227,7 @@ impl Peer {
 
         let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
 
-        let nlri_entries = update_msg.nlri_with_path_id();
+        let nlri_entries = update_msg.nlri_list();
 
         let Some(mut path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn)
         else {

@@ -209,7 +209,7 @@ impl UpdateMessage {
     }
 
     /// Returns all NLRI entries with their path identifiers (RFC 7911).
-    pub fn nlri_with_path_id(&self) -> Vec<Nlri> {
+    pub fn nlri_list(&self) -> Vec<Nlri> {
         let mut nlri = self.nlri_list.clone();
 
         for attr in &self.path_attributes {
@@ -2208,12 +2208,12 @@ mod tests {
 
         let msg = UpdateMessage::new(&path, nlri.clone(), format);
         let expected_nlri: Vec<Nlri> = nlri.into_iter().map(|net| (net, Some(42))).collect();
-        assert_eq!(msg.nlri_with_path_id(), expected_nlri);
+        assert_eq!(msg.nlri_list(), expected_nlri);
 
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
 
-        assert_eq!(decoded.nlri_with_path_id(), expected_nlri);
+        assert_eq!(decoded.nlri_list(), expected_nlri);
         assert_eq!(decoded.origin(), Some(Origin::IGP));
         assert_eq!(
             decoded.next_hop(),
@@ -2245,10 +2245,10 @@ mod tests {
     #[test]
     fn test_addpath_disabled_no_path_id() {
         let msg = UpdateMessage::new(&test_path(), vec![], DEFAULT_FORMAT);
-        assert!(msg.nlri_with_path_id().is_empty());
+        assert!(msg.nlri_list().is_empty());
 
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
-        assert!(decoded.nlri_with_path_id().is_empty());
+        assert!(decoded.nlri_list().is_empty());
     }
 }
