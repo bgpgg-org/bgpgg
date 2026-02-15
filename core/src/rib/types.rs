@@ -98,10 +98,25 @@ impl RouteSource {
 }
 
 /// Represents a route with one or more paths to a prefix
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Arc<Path>>,
+}
+
+#[cfg(test)]
+impl Route {
+    /// Compare routes by prefix and path attrs (ignoring path IDs).
+    /// For test assertions only.
+    pub fn attrs_eq(&self, other: &Route) -> bool {
+        self.prefix == other.prefix
+            && self.paths.len() == other.paths.len()
+            && self
+                .paths
+                .iter()
+                .zip(other.paths.iter())
+                .all(|(a, b)| a.attrs == b.attrs)
+    }
 }
 
 #[cfg(test)]

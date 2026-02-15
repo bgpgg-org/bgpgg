@@ -351,7 +351,7 @@ async fn verify_loc_rib(client: &mut BgpClient, expected_best_paths: &HashMap<Ip
                 }
             };
 
-            if &actual_path != expected_path {
+            if actual_path.attrs != expected_path.attrs {
                 mismatches.push(format!(
                     "Prefix {}: best path mismatch\n  Expected: {:?}\n  Got: {:?}",
                     prefix, expected_path, actual_path
@@ -779,7 +779,7 @@ async fn test_route_convergence() {
                     Ipv4Addr::new(127, 0, 0, 1),
                 );
 
-                if actual_path != expected_exported {
+                if actual_path.attrs != expected_exported.attrs {
                     mismatches.push(format!(
                         "Prefix {}: path mismatch\n  Expected: {:?}\n  Got: {:?}",
                         prefix, expected_exported, actual_path

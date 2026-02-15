@@ -580,31 +580,33 @@ mod tests {
     use crate::bgp::DEFAULT_FORMAT;
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::Ipv4Addr;
 
     fn test_path() -> Path {
         Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65001],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source: RouteSource::Local,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 

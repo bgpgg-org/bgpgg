@@ -46,61 +46,61 @@ impl UpdateMessage {
         let mut path_attributes = vec![
             PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Origin(path.origin),
+                value: PathAttrValue::Origin(path.origin()),
             },
             PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::AsPath(AsPath {
-                    segments: path.as_path.clone(),
+                    segments: path.as_path().clone(),
                 }),
             },
         ];
 
         // Traditional NEXT_HOP attribute (attr 3) - for IPv4 next hops
-        if matches!(path.next_hop, NextHopAddr::Ipv4(_)) {
+        if matches!(path.next_hop(), NextHopAddr::Ipv4(_)) {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::NextHop(path.next_hop),
+                value: PathAttrValue::NextHop(*path.next_hop()),
             });
         }
 
-        if let Some(pref) = path.local_pref {
+        if let Some(pref) = path.local_pref() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::LocalPref(pref),
             });
         }
 
-        if let Some(metric) = path.med {
+        if let Some(metric) = path.med() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::MultiExtiDisc(metric),
             });
         }
 
-        if path.atomic_aggregate {
+        if path.atomic_aggregate() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::AtomicAggregate,
             });
         }
 
-        if let Some(ref agg) = path.aggregator {
+        if let Some(ref agg) = path.aggregator() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::Aggregator(agg.clone()),
             });
         }
 
-        if !path.communities.is_empty() {
+        if !path.communities().is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Communities(path.communities.clone()),
+                value: PathAttrValue::Communities(path.communities().clone()),
             });
         }
 
         // RFC 4456: ORIGINATOR_ID is optional, non-transitive
-        if let Some(originator) = path.originator_id {
+        if let Some(originator) = path.originator_id() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::OriginatorId(originator),
@@ -108,24 +108,24 @@ impl UpdateMessage {
         }
 
         // RFC 4456: CLUSTER_LIST is optional, non-transitive
-        if !path.cluster_list.is_empty() {
+        if !path.cluster_list().is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
-                value: PathAttrValue::ClusterList(path.cluster_list.clone()),
+                value: PathAttrValue::ClusterList(path.cluster_list().clone()),
             });
         }
 
-        if !path.extended_communities.is_empty() {
+        if !path.extended_communities().is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::ExtendedCommunities(path.extended_communities.clone()),
+                value: PathAttrValue::ExtendedCommunities(path.extended_communities().clone()),
             });
         }
 
-        if !path.large_communities.is_empty() {
+        if !path.large_communities().is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::LargeCommunities(path.large_communities.clone()),
+                value: PathAttrValue::LargeCommunities(path.large_communities().clone()),
             });
         }
 
@@ -138,14 +138,14 @@ impl UpdateMessage {
                 value: PathAttrValue::MpReachNlri(MpReachNlri {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
-                    next_hop: path.next_hop,
+                    next_hop: *path.next_hop(),
                     nlri: nlri_from_prefixes(&ipv6_routes, path_id),
                 }),
             });
         }
 
         // Append unknown attributes
-        path_attributes.extend(path.unknown_attrs.clone());
+        path_attributes.extend(path.unknown_attrs().clone());
 
         UpdateMessage {
             withdrawn_routes_len: 0,
@@ -711,7 +711,7 @@ mod tests {
         DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::rib::RouteSource;
+    use crate::rib::{PathAttrs, RouteSource};
     use std::net::Ipv4Addr;
 
     /// Test helper to create a base Path with sensible defaults
@@ -719,20 +719,22 @@ mod tests {
         Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: Origin::IGP,
-            as_path: vec![],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source: RouteSource::Local,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 
@@ -1159,10 +1161,8 @@ mod tests {
 
     #[test]
     fn test_get_local_pref() {
-        let path = Path {
-            local_pref: Some(200),
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.local_pref = Some(200);
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -1173,10 +1173,8 @@ mod tests {
 
     #[test]
     fn test_get_med() {
-        let path = Path {
-            med: Some(50),
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.med = Some(50);
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         assert_eq!(msg.med(), Some(50));
 
@@ -1196,13 +1194,11 @@ mod tests {
         ];
 
         for (origin, local_pref, med, atomic_aggregate) in test_cases {
-            let path = Path {
-                origin,
-                local_pref,
-                med,
-                atomic_aggregate,
-                ..test_path()
-            };
+            let mut path = test_path();
+            path.attrs.origin = origin;
+            path.attrs.local_pref = local_pref;
+            path.attrs.med = med;
+            path.attrs.atomic_aggregate = atomic_aggregate;
             let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let bytes = msg.to_bytes();
@@ -1225,12 +1221,10 @@ mod tests {
         let originator_id = Ipv4Addr::new(192, 168, 1, 1);
         let cluster_list = vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)];
 
-        let path = Path {
-            local_pref: Some(100),
-            originator_id: Some(originator_id),
-            cluster_list: cluster_list.clone(),
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.local_pref = Some(100);
+        path.attrs.originator_id = Some(originator_id);
+        path.attrs.cluster_list = cluster_list.clone();
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let bytes = msg.to_bytes();
@@ -1866,14 +1860,12 @@ mod tests {
 
     #[test]
     fn test_update_message_get_leftmost_as() {
-        let path = Path {
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![65001, 65002],
-            }],
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![65001, 65002],
+        }];
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         assert_eq!(msg.leftmost_as(), Some(65001));
 
@@ -1989,16 +1981,14 @@ mod tests {
 
         let next_hop = NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
 
-        let path = Path {
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65002],
-            }],
-            next_hop,
-            local_pref: Some(100),
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![65002],
+        }];
+        path.attrs.next_hop = next_hop;
+        path.attrs.local_pref = Some(100);
         let msg = UpdateMessage::new(&path, vec![ipv6_prefix], DEFAULT_FORMAT);
 
         // Encode and decode
@@ -2017,15 +2007,13 @@ mod tests {
         use crate::bgp::msg_update_types::{Aggregator, AsPath};
 
         // Create an UPDATE with AS4_PATH and AS4_AGGREGATOR (protocol violation from NEW speaker)
-        let path = Path {
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65001],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![65001],
+        }];
+        path.attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
         let mut msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         // Manually add AS4_PATH and AS4_AGGREGATOR to simulate receiving from NEW speaker
@@ -2071,18 +2059,16 @@ mod tests {
     #[test]
     fn test_strip_as4_attributes_preserves_other_attributes() {
         // Create UPDATE with various attributes but no AS4 attributes
-        let path = Path {
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![65001, 65002],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-            local_pref: Some(100),
-            med: Some(50),
-            communities: vec![65001u32],
-            ..test_path()
-        };
+        let mut path = test_path();
+        path.attrs.as_path = vec![AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 2,
+            asn_list: vec![65001, 65002],
+        }];
+        path.attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
+        path.attrs.local_pref = Some(100);
+        path.attrs.med = Some(50);
+        path.attrs.communities = vec![65001u32];
         let mut msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let attr_count_before = msg.path_attributes.len();
@@ -2257,11 +2243,9 @@ mod tests {
         ];
 
         for (desc, nlri, next_hop) in cases {
-            let path = Path {
-                local_path_id: 42,
-                next_hop,
-                ..test_path()
-            };
+            let mut path = test_path();
+            path.local_path_id = 42;
+            path.attrs.next_hop = next_hop;
 
             let msg = UpdateMessage::new(&path, nlri.clone(), format);
             let expected_nlri: Vec<Nlri> = nlri

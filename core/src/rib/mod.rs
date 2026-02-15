@@ -26,5 +26,5 @@ pub mod rib_loc;
 mod types;
 
 // Re-exports
-pub use path::Path;
+pub use path::{Path, PathAttrs};
 pub use types::{Route, RouteSource};

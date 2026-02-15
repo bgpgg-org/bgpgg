@@ -29,7 +29,7 @@ pub mod types;
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -37,24 +37,26 @@ pub(crate) mod test_helpers {
         Arc::new(Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![100, 200],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp { peer_ip, bgp_id },
-            local_pref: Some(100),
-            med: Some(0),
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                source: RouteSource::Ebgp { peer_ip, bgp_id },
+                local_pref: Some(100),
+                med: Some(0),
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         })
     }
 
@@ -66,24 +68,26 @@ pub(crate) mod test_helpers {
         let mut path = Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![100, 200],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            source: RouteSource::Ebgp { peer_ip, bgp_id },
-            local_pref: Some(100),
-            med: Some(0),
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![100, 200],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                source: RouteSource::Ebgp { peer_ip, bgp_id },
+                local_pref: Some(100),
+                med: Some(0),
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         };
         f(&mut path);
         Arc::new(path)

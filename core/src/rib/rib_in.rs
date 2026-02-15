@@ -179,7 +179,7 @@ mod tests {
         let routes = rib_in.get_all_routes();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, prefix);
-        assert_eq!(routes[0].paths[0], path);
+        assert_eq!(routes[0].paths[0].attrs, path.attrs);
     }
 
     #[test]
@@ -202,7 +202,7 @@ mod tests {
         let mut routes = rib_in.get_all_routes();
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
 
-        let mut expected = vec![
+        let mut expected = [
             Route {
                 prefix: prefix1,
                 paths: vec![path1],
@@ -214,7 +214,10 @@ mod tests {
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
-        assert_eq!(routes, expected);
+        assert_eq!(routes.len(), expected.len());
+        for (route, exp) in routes.iter().zip(expected.iter()) {
+            assert!(route.attrs_eq(exp));
+        }
     }
 
     #[test]
@@ -225,7 +228,7 @@ mod tests {
 
         let path1 = create_test_path(peer_ip, test_bgp_id());
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.as_path = vec![AsPathSegment {
+            p.attrs.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
                 asn_list: vec![300, 400],
@@ -238,8 +241,8 @@ mod tests {
         let routes = rib_in.get_all_routes();
         assert_eq!(routes.len(), 1);
         assert_eq!(
-            routes[0].paths[0].as_path,
-            vec![AsPathSegment {
+            routes[0].paths[0].as_path(),
+            &vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
                 asn_list: vec![300, 400],
@@ -266,13 +269,11 @@ mod tests {
         rib_in.remove_route(prefix1, None);
 
         let routes = rib_in.get_all_routes();
-        assert_eq!(
-            routes,
-            vec![Route {
-                prefix: prefix2,
-                paths: vec![path2]
-            }]
-        );
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].attrs_eq(&Route {
+            prefix: prefix2,
+            paths: vec![path2]
+        }));
     }
 
     #[test]
@@ -351,7 +352,7 @@ mod tests {
         });
         let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(2);
-            p.as_path = vec![AsPathSegment {
+            p.attrs.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 3,
                 asn_list: vec![100, 200, 300],
@@ -373,11 +374,11 @@ mod tests {
 
         let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(1);
-            p.med = Some(10);
+            p.attrs.med = Some(10);
         });
         let path1_updated = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(1);
-            p.med = Some(20);
+            p.attrs.med = Some(20);
         });
 
         rib_in.add_route(prefix, path1);
@@ -385,7 +386,7 @@ mod tests {
 
         let routes = rib_in.get_all_routes();
         assert_eq!(routes[0].paths.len(), 1, "same path_id should replace");
-        assert_eq!(routes[0].paths[0].med, Some(20));
+        assert_eq!(routes[0].paths[0].med(), Some(20));
     }
 
     #[test]
@@ -436,7 +437,7 @@ mod tests {
 
         let path1 = create_test_path(test_peer_ip(), test_bgp_id());
         let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
-            p.med = Some(50);
+            p.attrs.med = Some(50);
         });
 
         rib_in.add_route(prefix, path1);
@@ -445,7 +446,7 @@ mod tests {
         // Should have replaced (both have remote_path_id=None)
         let routes = rib_in.get_all_routes();
         assert_eq!(routes[0].paths.len(), 1);
-        assert_eq!(routes[0].paths[0].med, Some(50));
+        assert_eq!(routes[0].paths[0].med(), Some(50));
 
         rib_in.remove_route(prefix, None);
         assert_eq!(rib_in.prefix_count(), 0);

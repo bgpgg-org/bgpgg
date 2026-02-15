@@ -75,7 +75,7 @@ impl Peer {
     /// Returns true if loop detected (route should be rejected).
     fn has_as_path_loop(&self, path: &Path) -> bool {
         let local_asn = self.local_config.asn;
-        for segment in &path.as_path {
+        for segment in path.as_path() {
             if segment.asn_list.contains(&local_asn) {
                 warn!(
                     local_asn,
@@ -93,7 +93,7 @@ impl Peer {
     fn has_rr_loop(&self, path: &Path) -> bool {
         let local_router_id = self.local_config.bgp_id;
 
-        if path.originator_id == Some(local_router_id) {
+        if path.originator_id() == Some(local_router_id) {
             warn!(
                 originator_id = %local_router_id,
                 peer = %self.addr,
@@ -102,7 +102,7 @@ impl Peer {
             return true;
         }
 
-        if path.cluster_list.contains(&self.local_config.cluster_id) {
+        if path.cluster_list().contains(&self.local_config.cluster_id) {
             warn!(
                 cluster_id = %self.local_config.cluster_id,
                 peer = %self.addr,
@@ -240,19 +240,19 @@ impl Peer {
         // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive;
         // strip on eBGP receive in case a buggy peer sent them.
         if self.session_type == Some(SessionType::Ebgp) {
-            path.originator_id = None;
-            path.cluster_list.clear();
+            path.attrs.originator_id = None;
+            path.attrs.cluster_list.clear();
         }
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
         let local_ip = self.local_config.addr.ip();
-        let is_local_nexthop = match (&path.next_hop, local_ip) {
+        let is_local_nexthop = match (&path.attrs.next_hop, local_ip) {
             (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
             (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
             _ => false,
         };
         if is_local_nexthop {
-            warn!(next_hop = %path.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
+            warn!(next_hop = %path.attrs.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
             return Ok((vec![], vec![]));
         }
 
@@ -278,7 +278,7 @@ impl Peer {
             path.remote_path_id = common_path_id;
             let path_arc = Arc::new(path);
             for entry in &nlri_entries {
-                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
                 self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
                 announced.push((entry.prefix, Arc::clone(&path_arc)));
             }
@@ -286,7 +286,7 @@ impl Peer {
             for entry in &nlri_entries {
                 path.remote_path_id = entry.path_id;
                 let path_arc = Arc::new(path.clone());
-                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
                 self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
                 announced.push((entry.prefix, path_arc));
             }
@@ -305,31 +305,33 @@ mod tests {
     use crate::net::Ipv4Net;
     use crate::peer::BgpState;
     use crate::peer::PeerCapabilities;
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_path_with_as(first_as: u32) -> Path {
         Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![first_as],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source: RouteSource::Local,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![first_as],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 
@@ -486,11 +488,8 @@ mod tests {
                         })
                     })
                     .collect();
-                let initial_update = UpdateMessage::new(
-                    &test_path_with_as(65001),
-                    initial_nlri,
-                    DEFAULT_FORMAT,
-                );
+                let initial_update =
+                    UpdateMessage::new(&test_path_with_as(65001), initial_nlri, DEFAULT_FORMAT);
                 peer.handle_update(initial_update).unwrap();
             }
 
