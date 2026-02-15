@@ -1099,9 +1099,12 @@ pub(super) fn write_path_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
+    use crate::bgp::msg_update_types::AttrType;
+    use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
 
-    const NO_ADDPATH: MessageFormat = MessageFormat {
-        use_4byte_asn: false,
+    const DEFAULT_FORMAT: MessageFormat = MessageFormat {
+        use_4byte_asn: true,
         add_path: false,
     };
 
@@ -1114,10 +1117,6 @@ mod tests {
         0x00, // Reserved
         0x08, 0x0a, // NLRI: 10.0.0.0/8
     ];
-    use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
-    use crate::bgp::msg_update_types::AttrType;
-
-    use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
 
     const PATH_ATTR_ORIGIN_EGP: &[u8] =
         &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 1];
@@ -1125,7 +1124,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_origin() {
         let (attribute_opt, offset) =
-            read_path_attribute(PATH_ATTR_ORIGIN_EGP, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_ORIGIN_EGP, DEFAULT_FORMAT).unwrap();
         let attribute = attribute_opt.unwrap();
 
         assert_eq!(
@@ -1142,7 +1141,7 @@ mod tests {
     fn test_read_path_attribute_origin_invalid_value() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1157,7 +1156,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_communities() {
         let (attr_opt, offset) =
-            read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1190,7 +1189,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, NO_ADDPATH).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = parsed_attr.value {
@@ -1227,7 +1226,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_communities_empty() {
         let (attr_opt, offset) =
-            read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1243,7 +1242,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_communities_well_known() {
         let (attr_opt, _) =
-            read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = attr.value {
@@ -1268,7 +1267,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, .. }) => {
                 assert_eq!(
                     error,
@@ -1323,7 +1322,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, NO_ADDPATH).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::ExtendedCommunities(ext_communities) = parsed_attr.value {
@@ -1337,18 +1336,22 @@ mod tests {
     const PATH_ATTR_AS_PATH: &[u8] = &[
         PathAttrFlag::TRANSITIVE,
         AttrType::AsPath as u8,
-        0x06,
+        0x0a, // 1 + 1 + 2*4 = 10 bytes (4-byte ASN)
         AsPathSegmentType::AsSet as u8,
         0x02,
         0x00,
-        0x10,
+        0x00,
+        0x00,
+        0x10, // ASN 16
+        0x00,
+        0x00,
         0x01,
-        0x12,
+        0x12, // ASN 274
     ];
 
     #[test]
     fn test_read_path_attribute_as_path() {
-        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         let segments = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
@@ -1363,7 +1366,7 @@ mod tests {
                 value: PathAttrValue::AsPath(AsPath { segments }),
             }
         );
-        assert_eq!(offset, 9);
+        assert_eq!(offset, 13);
     }
 
     #[test]
@@ -1375,7 +1378,7 @@ mod tests {
             AsPathSegmentType::AsSet as u8,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1399,7 +1402,7 @@ mod tests {
             0x10,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1415,7 +1418,7 @@ mod tests {
     fn test_read_path_attribute_as_path_empty() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1432,20 +1435,26 @@ mod tests {
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,
             AttrType::AsPath as u8,
-            0x0a,
+            0x10, // 10 + 6 = 16 bytes (4-byte ASN)
             AsPathSegmentType::AsSequence as u8,
             0x02,
             0x00,
-            0x0a,
             0x00,
-            0x14,
+            0x00,
+            0x0a, // ASN 10
+            0x00,
+            0x00,
+            0x00,
+            0x14, // ASN 20
             AsPathSegmentType::AsSet as u8,
             0x01,
             0x00,
-            0x1e,
+            0x00,
+            0x00,
+            0x1e, // ASN 30
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1467,7 +1476,7 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(offset, 13);
+        assert_eq!(offset, 19);
     }
 
     // NEXT_HOP attribute tests
@@ -1484,7 +1493,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
         let (as_path_opt, offset) =
-            read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1509,7 +1518,7 @@ mod tests {
             0x0e,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1541,7 +1550,7 @@ mod tests {
                 ip_bytes[3],
             ];
 
-            match read_path_attribute(&input, NO_ADDPATH) {
+            match read_path_attribute(&input, DEFAULT_FORMAT) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1569,7 +1578,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1592,7 +1601,7 @@ mod tests {
             0x01,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1617,7 +1626,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1640,7 +1649,7 @@ mod tests {
             0x0f,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1661,7 +1670,7 @@ mod tests {
             0x00,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1682,7 +1691,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1711,7 +1720,7 @@ mod tests {
             0x0d,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
+        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1737,7 +1746,7 @@ mod tests {
             0x0a,
         ];
 
-        match read_path_attribute(input, NO_ADDPATH) {
+        match read_path_attribute(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1752,7 +1761,7 @@ mod tests {
     #[test]
     fn test_read_path_attribute_extended_communities() {
         let (attr_opt, offset) =
-            read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, NO_ADDPATH).unwrap();
+            read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
         assert_eq!(
@@ -1781,7 +1790,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, NO_ADDPATH).unwrap();
+        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
@@ -2004,13 +2013,7 @@ mod tests {
         attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
 
         // Should fail with MalformedAttributeList
-        let result = read_path_attributes(
-            &attrs_bytes,
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        );
+        let result = read_path_attributes(&attrs_bytes, DEFAULT_FORMAT);
         assert!(result.is_err());
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(
@@ -2125,7 +2128,7 @@ mod tests {
         ];
 
         for test in tests {
-            let result = read_path_attribute(test.input, NO_ADDPATH);
+            let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
             let (attr_opt, offset) = result.unwrap();
             assert!(
@@ -2158,7 +2161,7 @@ mod tests {
             0x14, // Second ASN: 20
         ];
 
-        let result = read_path_attribute(input, NO_ADDPATH);
+        let result = read_path_attribute(input, DEFAULT_FORMAT);
         assert!(result.is_ok());
         let (attr_opt, _) = result.unwrap();
         assert!(
@@ -2178,18 +2181,20 @@ mod tests {
     #[test]
     fn test_malformed_as_path() {
         // Regular AS_PATH (well-known mandatory) should still cause errors
-        // Segment length claims 2 ASNs but we only provide data for 1
+        // Segment claims 2 ASNs but data is truncated
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,
             AttrType::AsPath as u8,
-            0x04, // Length: 4 bytes (segment header=2, 1 ASN in 2-byte format=2)
+            0x06, // Length: 6 bytes (segment header=2, 1 ASN=4)
             AsPathSegmentType::AsSequence as u8,
             0x02, // Segment length claims: 2 ASNs (but only 1 ASN worth of data follows)
+            0x00,
+            0x00,
             0x00,
             0x0a, // First ASN: 10 (second ASN missing - truncated)
         ];
 
-        let result = read_path_attribute(input, NO_ADDPATH);
+        let result = read_path_attribute(input, DEFAULT_FORMAT);
         assert!(result.is_err(), "Malformed AS_PATH should cause error");
 
         if let Err(ParserError::BgpError { error, .. }) = result {
@@ -2266,7 +2271,7 @@ mod tests {
         ];
 
         for test in tests {
-            let result = read_path_attribute(test.input, NO_ADDPATH);
+            let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
             let (attr_opt, _) = result.unwrap();
             assert!(
