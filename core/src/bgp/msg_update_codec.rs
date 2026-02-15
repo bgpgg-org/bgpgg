@@ -183,8 +183,8 @@ pub(super) fn validate_well_known_mandatory_attributes(
 }
 
 fn validate_nlri_afi(afi: &Afi, routes: &[Nlri]) -> bool {
-    for (route, _) in routes {
-        match (afi, route) {
+    for entry in routes {
+        match (afi, &entry.prefix) {
             (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
             _ => return false,
         }
@@ -925,11 +925,11 @@ pub(super) fn read_path_attributes(
 /// is prepended when present.
 pub(super) fn write_nlri_list(entries: &[Nlri]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    for (network, path_id) in entries {
-        if let Some(pid) = path_id {
+    for entry in entries {
+        if let Some(pid) = entry.path_id {
             bytes.extend_from_slice(&pid.to_be_bytes());
         }
-        match network {
+        match &entry.prefix {
             IpNetwork::V4(net) => {
                 bytes.push(net.prefix_length);
                 let octets = net.address.octets();
@@ -1847,20 +1847,20 @@ mod tests {
         use crate::net::{Ipv4Net, Ipv6Net};
         use std::net::{Ipv4Addr, Ipv6Addr};
 
-        let ipv6_route = (
-            IpNetwork::V6(Ipv6Net {
+        let ipv6_route = Nlri {
+            prefix: IpNetwork::V6(Ipv6Net {
                 address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
                 prefix_length: 64,
             }),
-            None,
-        );
-        let ipv4_route = (
-            IpNetwork::V4(Ipv4Net {
+            path_id: None,
+        };
+        let ipv4_route = Nlri {
+            prefix: IpNetwork::V4(Ipv4Net {
                 address: Ipv4Addr::new(192, 168, 1, 0),
                 prefix_length: 24,
             }),
-            None,
-        );
+            path_id: None,
+        };
 
         // AFI mismatch should fail
         assert!(!validate_nlri_afi(&Afi::Ipv4, &[ipv6_route]));
@@ -1882,13 +1882,13 @@ mod tests {
                 "without add_path",
                 MP_REACH_IPV4_SAMPLE,
                 false,
-                vec![(
-                    IpNetwork::V4(Ipv4Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
                         address: Ipv4Addr::new(10, 0, 0, 0),
                         prefix_length: 8,
                     }),
-                    None,
-                )],
+                    path_id: None,
+                }],
             ),
             (
                 "with add_path",
@@ -1902,13 +1902,13 @@ mod tests {
                     0x00, 0x00, 0x00, 0x2a, 0x08, 0x0a,
                 ],
                 true,
-                vec![(
-                    IpNetwork::V4(Ipv4Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
                         address: Ipv4Addr::new(10, 0, 0, 0),
                         prefix_length: 8,
                     }),
-                    Some(42),
-                )],
+                    path_id: Some(42),
+                }],
             ),
             (
                 "with add_path multiple NLRIs",
@@ -1925,20 +1925,20 @@ mod tests {
                 ],
                 true,
                 vec![
-                    (
-                        IpNetwork::V4(Ipv4Net {
+                    Nlri {
+                        prefix: IpNetwork::V4(Ipv4Net {
                             address: Ipv4Addr::new(10, 0, 0, 0),
                             prefix_length: 8,
                         }),
-                        Some(1),
-                    ),
-                    (
-                        IpNetwork::V4(Ipv4Net {
+                        path_id: Some(1),
+                    },
+                    Nlri {
+                        prefix: IpNetwork::V4(Ipv4Net {
                             address: Ipv4Addr::new(172, 16, 0, 0),
                             prefix_length: 16,
                         }),
-                        Some(2),
-                    ),
+                        path_id: Some(2),
+                    },
                 ],
             ),
         ];
@@ -1977,26 +1977,26 @@ mod tests {
                 // 2001:db8::/32
                 &[0x20, 0x20, 0x01, 0x0d, 0xb8],
                 false,
-                vec![(
-                    IpNetwork::V6(Ipv6Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                         prefix_length: 32,
                     }),
-                    None,
-                )],
+                    path_id: None,
+                }],
             ),
             (
                 "with add_path",
                 // path_id=100, 2001:db8::/32
                 &[0x00, 0x00, 0x00, 0x64, 0x20, 0x20, 0x01, 0x0d, 0xb8],
                 true,
-                vec![(
-                    IpNetwork::V6(Ipv6Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                         prefix_length: 32,
                     }),
-                    Some(100),
-                )],
+                    path_id: Some(100),
+                }],
             ),
         ];
 
@@ -2031,13 +2031,13 @@ mod tests {
                     0x08, 0x0a, // Withdrawn: 10.0.0.0/8
                 ],
                 false,
-                vec![(
-                    IpNetwork::V4(Ipv4Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
                         address: Ipv4Addr::new(10, 0, 0, 0),
                         prefix_length: 8,
                     }),
-                    None,
-                )],
+                    path_id: None,
+                }],
             ),
             (
                 "with add_path",
@@ -2048,13 +2048,13 @@ mod tests {
                     0x00, 0x00, 0x00, 0x05, 0x08, 0x0a,
                 ],
                 true,
-                vec![(
-                    IpNetwork::V4(Ipv4Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
                         address: Ipv4Addr::new(10, 0, 0, 0),
                         prefix_length: 8,
                     }),
-                    Some(5),
-                )],
+                    path_id: Some(5),
+                }],
             ),
             (
                 "with add_path same prefix different path_ids",
@@ -2067,20 +2067,20 @@ mod tests {
                 ],
                 true,
                 vec![
-                    (
-                        IpNetwork::V4(Ipv4Net {
+                    Nlri {
+                        prefix: IpNetwork::V4(Ipv4Net {
                             address: Ipv4Addr::new(10, 0, 0, 0),
                             prefix_length: 8,
                         }),
-                        Some(1),
-                    ),
-                    (
-                        IpNetwork::V4(Ipv4Net {
+                        path_id: Some(1),
+                    },
+                    Nlri {
+                        prefix: IpNetwork::V4(Ipv4Net {
                             address: Ipv4Addr::new(10, 0, 0, 0),
                             prefix_length: 8,
                         }),
-                        Some(2),
-                    ),
+                        path_id: Some(2),
+                    },
                 ],
             ),
         ];
@@ -2108,13 +2108,13 @@ mod tests {
                     0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
                 ],
                 false,
-                vec![(
-                    IpNetwork::V6(Ipv6Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                         prefix_length: 32,
                     }),
-                    None,
-                )],
+                    path_id: None,
+                }],
             ),
             (
                 "with add_path",
@@ -2125,13 +2125,13 @@ mod tests {
                     0x00, 0x00, 0x00, 0x07, 0x20, 0x20, 0x01, 0x0d, 0xb8,
                 ],
                 true,
-                vec![(
-                    IpNetwork::V6(Ipv6Net {
+                vec![Nlri {
+                    prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                         prefix_length: 32,
                     }),
-                    Some(7),
-                )],
+                    path_id: Some(7),
+                }],
             ),
         ];
 

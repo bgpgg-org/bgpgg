@@ -177,10 +177,10 @@ impl Peer {
     /// Process withdrawn routes from an UPDATE message
     fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
         let mut withdrawn = Vec::new();
-        for (prefix, path_id) in update_msg.withdrawn_routes() {
-            info!(prefix = ?prefix, peer_ip = %self.addr, "withdrawing route");
-            self.rib_in.remove_route(prefix, path_id);
-            withdrawn.push(prefix);
+        for entry in update_msg.withdrawn_routes() {
+            info!(prefix = ?entry.prefix, peer_ip = %self.addr, "withdrawing route");
+            self.rib_in.remove_route(entry.prefix, entry.path_id);
+            withdrawn.push(entry.prefix);
         }
         withdrawn
     }
@@ -269,24 +269,26 @@ impl Peer {
         let mut announced = Vec::new();
 
         // Check if all NLRIs share the same path_id (common case) to avoid per-NLRI cloning
-        let common_path_id = nlri_entries.first().and_then(|(_, pid)| *pid);
-        let all_same_path_id = nlri_entries.iter().all(|(_, pid)| *pid == common_path_id);
+        let common_path_id = nlri_entries.first().and_then(|entry| entry.path_id);
+        let all_same_path_id = nlri_entries
+            .iter()
+            .all(|entry| entry.path_id == common_path_id);
 
         if all_same_path_id {
             path.remote_path_id = common_path_id;
             let path_arc = Arc::new(path);
-            for (prefix, _) in &nlri_entries {
-                info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
-                self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
-                announced.push((*prefix, Arc::clone(&path_arc)));
+            for entry in &nlri_entries {
+                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
+                announced.push((entry.prefix, Arc::clone(&path_arc)));
             }
         } else {
-            for (prefix, remote_path_id) in &nlri_entries {
-                path.remote_path_id = *remote_path_id;
+            for entry in &nlri_entries {
+                path.remote_path_id = entry.path_id;
                 let path_arc = Arc::new(path.clone());
-                info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
-                self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
-                announced.push((*prefix, path_arc));
+                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
+                announced.push((entry.prefix, path_arc));
             }
         }
 

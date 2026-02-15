@@ -116,7 +116,10 @@ pub fn parse_nlri_list(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, Parser
             continue;
         }
 
-        nlri_list.push((IpNetwork::V4(net), path_id));
+        nlri_list.push(Nlri {
+            prefix: IpNetwork::V4(net),
+            path_id,
+        });
         cursor += byte_len;
     }
 
@@ -166,7 +169,10 @@ pub fn parse_nlri_v6_list(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, Par
             prefix_length,
         };
 
-        nlri_list.push((IpNetwork::V6(net), path_id));
+        nlri_list.push(Nlri {
+            prefix: IpNetwork::V6(net),
+            path_id,
+        });
         cursor += byte_len;
     }
 
@@ -201,13 +207,13 @@ mod tests {
         let data: Vec<u8> = vec![0x18, 0x0a, 0x0b, 0x0c]; // /24 prefix: 1 byte length + 3 bytes IP
 
         let result = parse_nlri_list(&data, false).unwrap();
-        let expected = vec![(
-            IpNetwork::V4(Ipv4Net {
+        let expected = vec![Nlri {
+            prefix: IpNetwork::V4(Ipv4Net {
                 address: Ipv4Addr::new(10, 11, 12, 0),
                 prefix_length: 24,
             }),
-            None,
-        )];
+            path_id: None,
+        }];
         assert_eq!(result, expected);
     }
 
@@ -220,20 +226,20 @@ mod tests {
 
         let result = parse_nlri_list(&data, false).unwrap();
         let expected = vec![
-            (
-                IpNetwork::V4(Ipv4Net {
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 12, 0),
                     prefix_length: 24,
                 }),
-                None,
-            ),
-            (
-                IpNetwork::V4(Ipv4Net {
+                path_id: None,
+            },
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 8, 0),
                     prefix_length: 21,
                 }),
-                None,
-            ),
+                path_id: None,
+            },
         ];
         assert_eq!(result, expected);
     }
@@ -299,23 +305,23 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(
             result[0],
-            (
-                IpNetwork::V4(Ipv4Net {
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 12, 0),
                     prefix_length: 24,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
         assert_eq!(
             result[1],
-            (
-                IpNetwork::V4(Ipv4Net {
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(192, 168, 1, 0),
                     prefix_length: 24,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
     }
 
@@ -351,13 +357,13 @@ mod tests {
         let data: Vec<u8> = vec![0x20, 0x20, 0x01, 0x0d, 0xb8];
 
         let result = parse_nlri_v6_list(&data, false).unwrap();
-        let expected = vec![(
-            IpNetwork::V6(Ipv6Net {
+        let expected = vec![Nlri {
+            prefix: IpNetwork::V6(Ipv6Net {
                 address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                 prefix_length: 32,
             }),
-            None,
-        )];
+            path_id: None,
+        }];
         assert_eq!(result, expected);
     }
 
@@ -376,43 +382,43 @@ mod tests {
         assert_eq!(result.len(), 4);
         assert_eq!(
             result[0],
-            (
-                IpNetwork::V6(Ipv6Net {
+            Nlri {
+                prefix: IpNetwork::V6(Ipv6Net {
                     address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
                     prefix_length: 32,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
         assert_eq!(
             result[1],
-            (
-                IpNetwork::V6(Ipv6Net {
+            Nlri {
+                prefix: IpNetwork::V6(Ipv6Net {
                     address: Ipv6Addr::new(0x2001, 0x0db8, 0x0001, 0, 0, 0, 0, 0),
                     prefix_length: 48,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
         assert_eq!(
             result[2],
-            (
-                IpNetwork::V6(Ipv6Net {
+            Nlri {
+                prefix: IpNetwork::V6(Ipv6Net {
                     address: Ipv6Addr::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 0),
                     prefix_length: 64,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
         assert_eq!(
             result[3],
-            (
-                IpNetwork::V6(Ipv6Net {
+            Nlri {
+                prefix: IpNetwork::V6(Ipv6Net {
                     address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1),
                     prefix_length: 128,
                 }),
-                None,
-            )
+                path_id: None,
+            }
         );
     }
 
@@ -468,23 +474,23 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(
             result[0],
-            (
-                IpNetwork::V4(Ipv4Net {
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 12, 0),
                     prefix_length: 24,
                 }),
-                Some(1),
-            )
+                path_id: Some(1),
+            }
         );
         assert_eq!(
             result[1],
-            (
-                IpNetwork::V4(Ipv4Net {
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(192, 168, 0, 0),
                     prefix_length: 16,
                 }),
-                Some(2),
-            )
+                path_id: Some(2),
+            }
         );
     }
 

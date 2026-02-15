@@ -81,11 +81,21 @@ pub const AS_TRANS: u16 = 23456;
 pub const MAX_2BYTE_ASN: u32 = 65535;
 
 /// A prefix with its optional ADD-PATH path identifier (RFC 7911).
-pub type Nlri = (IpNetwork, Option<u32>);
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
+pub struct Nlri {
+    pub prefix: IpNetwork,
+    pub path_id: Option<u32>,
+}
 
 /// Pair each prefix with the same path identifier.
 pub fn nlri_from_prefixes(prefixes: &[IpNetwork], path_id: Option<u32>) -> Vec<Nlri> {
-    prefixes.iter().map(|net| (*net, path_id)).collect()
+    prefixes
+        .iter()
+        .map(|net| Nlri {
+            prefix: *net,
+            path_id,
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

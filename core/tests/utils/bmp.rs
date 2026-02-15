@@ -770,7 +770,7 @@ fn validate_bmp_route_monitoring_msg(
         .bgp_update()
         .withdrawn_routes()
         .iter()
-        .map(|(net, _)| *net)
+        .map(|entry| entry.prefix)
         .collect();
     let mut expected_withdrawn_vec = expected.withdrawn.clone();
     actual_withdrawn.sort_by_key(|n| format!("{:?}", n));
