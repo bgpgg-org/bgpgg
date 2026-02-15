@@ -199,18 +199,16 @@ impl UpdateMessage {
             });
         }
 
-        let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn, path_id);
-        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
-
-        // Wrap IPv4 withdrawn routes with path_id for per-NLRI tracking
-        let ipv4_withdrawn_with_path_id: Vec<Nlri> = ipv4_withdrawn
+        let ipv4_withdrawn_nlri: Vec<Nlri> = ipv4_withdrawn
             .into_iter()
             .map(|net| (net, path_id))
             .collect();
+        let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn_nlri);
+        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
         UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
-            withdrawn_routes: ipv4_withdrawn_with_path_id,
+            withdrawn_routes: ipv4_withdrawn_nlri,
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
             nlri_list: vec![],
@@ -731,10 +729,8 @@ impl Message for UpdateMessage {
 
         let mut bytes = Vec::new();
 
-        // Withdrawn routes - extract prefixes for wire encoding
-        let withdrawn_prefixes: Vec<IpNetwork> =
-            self.withdrawn_routes.iter().map(|(net, _)| *net).collect();
-        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_prefixes, self.path_id);
+        // Withdrawn routes
+        let withdrawn_routes_bytes = write_nlri_list(&self.withdrawn_routes);
         bytes.extend_from_slice(&(withdrawn_routes_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&withdrawn_routes_bytes);
 
@@ -745,7 +741,12 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&path_attributes_bytes);
 
         // NLRI
-        let nlri_bytes = write_nlri_list(&self.nlri_list, self.path_id);
+        let nlri_entries: Vec<Nlri> = self
+            .nlri_list
+            .iter()
+            .map(|net| (*net, self.path_id))
+            .collect();
+        let nlri_bytes = write_nlri_list(&nlri_entries);
         bytes.extend_from_slice(&nlri_bytes);
 
         bytes
@@ -1384,11 +1385,11 @@ mod tests {
             prefix_length: 8,
         })];
 
-        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_prefixes, None);
         let withdrawn_routes: Vec<Nlri> = withdrawn_prefixes
             .into_iter()
             .map(|net| (net, None))
             .collect();
+        let withdrawn_routes_bytes = write_nlri_list(&withdrawn_routes);
 
         let msg = UpdateMessage {
             withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,

@@ -667,7 +667,7 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     bytes.push(0);
 
     // NLRI - each entry may have its own path_id (RFC 7911)
-    write_nlri_list_with_path_id(&mp_reach.nlri, &mut bytes);
+    bytes.extend_from_slice(&write_nlri_list(&mp_reach.nlri));
 
     bytes
 }
@@ -682,7 +682,7 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     bytes.push(mp_unreach.safi as u8);
 
     // Withdrawn routes - each entry may have its own path_id
-    write_nlri_list_with_path_id(&mp_unreach.withdrawn_routes, &mut bytes);
+    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
 
     bytes
 }
@@ -930,34 +930,10 @@ pub(super) fn read_path_attributes(
     Ok(path_attributes)
 }
 
-pub(super) fn write_nlri_list(nlri_list: &[IpNetwork], path_id: Option<u32>) -> Vec<u8> {
+/// Encode NLRI entries to wire format. Each entry's optional path_id (RFC 7911)
+/// is prepended when present.
+pub(super) fn write_nlri_list(entries: &[Nlri]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    for network in nlri_list {
-        // RFC 7911: prepend 4-byte path identifier when ADD-PATH is enabled
-        if let Some(pid) = path_id {
-            bytes.extend_from_slice(&pid.to_be_bytes());
-        }
-        match network {
-            IpNetwork::V4(net) => {
-                bytes.push(net.prefix_length);
-                let octets = net.address.octets();
-                let num_octets = net.prefix_length.div_ceil(8) as usize;
-                bytes.extend_from_slice(&octets[..num_octets]);
-            }
-            IpNetwork::V6(net) => {
-                bytes.push(net.prefix_length);
-                let octets = net.address.octets();
-                let num_octets = net.prefix_length.div_ceil(8) as usize;
-                bytes.extend_from_slice(&octets[..num_octets]);
-            }
-        }
-    }
-    bytes
-}
-
-/// Encode a list of NLRIs where each entry carries its own optional path_id (RFC 7911).
-/// Used by both MP_REACH_NLRI and MP_UNREACH_NLRI encoding.
-fn write_nlri_list_with_path_id(entries: &[Nlri], bytes: &mut Vec<u8>) {
     for (network, path_id) in entries {
         if let Some(pid) = path_id {
             bytes.extend_from_slice(&pid.to_be_bytes());
@@ -977,6 +953,7 @@ fn write_nlri_list_with_path_id(entries: &[Nlri], bytes: &mut Vec<u8>) {
             }
         }
     }
+    bytes
 }
 
 fn encode_asn(asn: u32, use_4byte_asn: bool) -> Vec<u8> {
