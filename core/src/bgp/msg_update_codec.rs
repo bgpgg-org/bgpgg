@@ -22,8 +22,7 @@ use super::msg_update_types::{
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{
-    is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_list_addpath, parse_nlri_v6_list,
-    parse_nlri_v6_list_addpath, read_u32, ParserError,
+    is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
 };
 use crate::log::warn;
 use crate::net::IpNetwork;
@@ -555,27 +554,6 @@ pub(super) fn read_attr_cluster_list(bytes: &[u8]) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-/// Parse NLRI list, wrapping each entry with its optional path_id (RFC 7911).
-/// Used by both MP_REACH_NLRI and MP_UNREACH_NLRI parsing.
-fn parse_nlri(bytes: &[u8], afi: &Afi, add_path: bool) -> Result<Vec<Nlri>, ParserError> {
-    if add_path {
-        let entries = match afi {
-            Afi::Ipv4 => parse_nlri_list_addpath(bytes)?,
-            Afi::Ipv6 => parse_nlri_v6_list_addpath(bytes)?,
-        };
-        Ok(entries
-            .into_iter()
-            .map(|(net, path_id)| (net, Some(path_id)))
-            .collect())
-    } else {
-        let prefixes = match afi {
-            Afi::Ipv4 => parse_nlri_list(bytes)?,
-            Afi::Ipv6 => parse_nlri_v6_list(bytes)?,
-        };
-        Ok(prefixes.into_iter().map(|net| (net, None)).collect())
-    }
-}
-
 pub(super) fn read_attr_mp_reach_nlri(
     bytes: &[u8],
     add_path: bool,
@@ -625,7 +603,10 @@ pub(super) fn read_attr_mp_reach_nlri(
     let cursor = HEADER_SIZE + next_hop_len;
     let nlri_bytes = &bytes[cursor + RESERVED_SIZE..];
 
-    let nlri = parse_nlri(nlri_bytes, &afi, add_path)?;
+    let nlri = match afi {
+        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
+        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
+    };
 
     Ok(MpReachNlri {
         afi,
@@ -649,7 +630,10 @@ pub(super) fn read_attr_mp_unreach_nlri(
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
 
-    let withdrawn_routes = parse_nlri(&bytes[3..], &afi, add_path)?;
+    let withdrawn_routes = match afi {
+        Afi::Ipv4 => parse_nlri_list(&bytes[3..], add_path)?,
+        Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..], add_path)?,
+    };
 
     Ok(MpUnreachNlri {
         afi,

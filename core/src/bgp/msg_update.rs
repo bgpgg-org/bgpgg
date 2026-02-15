@@ -25,7 +25,7 @@ use super::msg_update_codec::{
 };
 use super::msg_update_types::{MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN};
 use super::multiprotocol::{Afi, Safi};
-use super::utils::{parse_nlri_list, parse_nlri_list_addpath, ParserError};
+use super::utils::{parse_nlri_list, ParserError};
 use crate::net::IpNetwork;
 use crate::rib::Path;
 
@@ -573,19 +573,8 @@ impl UpdateMessage {
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
-        let (withdrawn_routes, withdrawn_path_id) = if format.add_path {
-            let entries = parse_nlri_list_addpath(&data[..withdrawn_routes_len])?;
-            let first_path_id = entries.first().map(|(_, pid)| *pid);
-            let routes: Vec<Nlri> = entries
-                .into_iter()
-                .map(|(net, pid)| (net, Some(pid)))
-                .collect();
-            (routes, first_path_id)
-        } else {
-            let prefixes = parse_nlri_list(&data[..withdrawn_routes_len])?;
-            let routes: Vec<Nlri> = prefixes.into_iter().map(|net| (net, None)).collect();
-            (routes, None)
-        };
+        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len], format.add_path)?;
+        let withdrawn_path_id = withdrawn_routes.first().and_then(|(_, pid)| *pid);
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -604,14 +593,10 @@ impl UpdateMessage {
         let (nlri_list, nlri_path_id) = match total_path_attributes_len {
             0 => (vec![], None),
             _ => {
-                if format.add_path {
-                    let entries = parse_nlri_list_addpath(&data)?;
-                    let first_path_id = entries.first().map(|(_, pid)| *pid);
-                    let prefixes = entries.into_iter().map(|(net, _)| net).collect();
-                    (prefixes, first_path_id)
-                } else {
-                    (parse_nlri_list(&data)?, None)
-                }
+                let entries = parse_nlri_list(&data, format.add_path)?;
+                let first_path_id = entries.first().and_then(|(_, pid)| *pid);
+                let prefixes = entries.into_iter().map(|(net, _)| net).collect();
+                (prefixes, first_path_id)
             }
         };
 
