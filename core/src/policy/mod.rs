@@ -159,7 +159,7 @@ pub(crate) mod test_helpers {
 
     pub fn create_path(source: RouteSource) -> Path {
         Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,

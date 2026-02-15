@@ -124,7 +124,7 @@ impl PeerRoute {
             IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
         };
         Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: self.origin,

@@ -129,7 +129,11 @@ impl UpdateMessage {
             });
         }
 
-        let path_id = format.add_path.then_some(path.local_path_id);
+        let path_id = if format.add_path {
+            path.local_path_id
+        } else {
+            None
+        };
 
         // MP_REACH_NLRI for IPv6 routes (RFC 4760)
         if !ipv6_routes.is_empty() {
@@ -717,7 +721,7 @@ mod tests {
     /// Test helper to create a base Path with sensible defaults
     fn test_path() -> Path {
         Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -2244,7 +2248,7 @@ mod tests {
 
         for (desc, nlri, next_hop) in cases {
             let mut path = test_path();
-            path.local_path_id = 42;
+            path.local_path_id = Some(42);
             path.attrs.next_hop = next_hop;
 
             let msg = UpdateMessage::new(&path, nlri.clone(), format);

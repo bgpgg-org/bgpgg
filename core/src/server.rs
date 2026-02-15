@@ -1034,7 +1034,7 @@ impl BgpServer {
 
                     // Withdraw paths in adj_rib_out but not in loc_rib
                     for pid in &adj_path_ids {
-                        if !current_paths.iter().any(|p| p.local_path_id == *pid) {
+                        if !current_paths.iter().any(|p| p.local_path_id == Some(*pid)) {
                             addpath_to_withdraw.push((*prefix, *pid));
                         }
                     }
@@ -1111,7 +1111,13 @@ impl BgpServer {
                 }
                 // Insert sent routes
                 for (prefix, path) in sent {
-                    entry.adj_rib_out.insert((prefix, path.local_path_id), path);
+                    entry.adj_rib_out.insert(
+                        (
+                            prefix,
+                            path.local_path_id.expect("loc-rib path must have ID"),
+                        ),
+                        path,
+                    );
                 }
             }
         }

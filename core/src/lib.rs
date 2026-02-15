@@ -35,7 +35,7 @@ pub(crate) mod test_helpers {
 
     pub fn create_test_path(peer_ip: IpAddr, bgp_id: Ipv4Addr) -> Arc<Path> {
         Arc::new(Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -66,7 +66,7 @@ pub(crate) mod test_helpers {
         f: impl FnOnce(&mut Path),
     ) -> Arc<Path> {
         let mut path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,

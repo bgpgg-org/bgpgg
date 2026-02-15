@@ -220,7 +220,14 @@ pub fn send_withdrawals_to_peer(
 
 /// Batching key: attributes that must match for announcements to be batched together.
 /// Includes local_path_id so ADD-PATH paths with different IDs are never merged.
-type BatchingKey = (Origin, Vec<AsPathSegment>, NextHopAddr, bool, Vec<u32>, u32);
+type BatchingKey = (
+    Origin,
+    Vec<AsPathSegment>,
+    NextHopAddr,
+    bool,
+    Vec<u32>,
+    Option<u32>,
+);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
@@ -558,7 +565,7 @@ mod tests {
 
     fn make_path(source: RouteSource, as_path: Vec<AsPathSegment>, next_hop: NextHopAddr) -> Path {
         Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -938,7 +945,7 @@ mod tests {
     #[test]
     fn test_build_export_local_pref() {
         let path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -969,7 +976,7 @@ mod tests {
     fn test_build_export_med() {
         // Route from eBGP with MED
         let ebgp_path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -1000,7 +1007,7 @@ mod tests {
 
         // Local route with MED
         let local_path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -1144,7 +1151,7 @@ mod tests {
         let non_transitive = 0x4002FDE800000064u64;
 
         let path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,

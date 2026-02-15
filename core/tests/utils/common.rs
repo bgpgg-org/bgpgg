@@ -182,8 +182,8 @@ pub struct PathParams {
     pub originator_id: Option<String>,
     /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
     pub cluster_list: Vec<String>,
-    /// RFC 7911: locally assigned path ID (0 = not allocated)
-    pub local_path_id: u32,
+    /// RFC 7911: locally assigned path ID (None = not in loc-rib)
+    pub local_path_id: Option<u32>,
     /// RFC 7911: path ID received from peer
     pub remote_path_id: Option<u32>,
 }
@@ -213,7 +213,7 @@ pub fn build_path(params: PathParams) -> Path {
 /// metadata, not BGP attributes, so tests shouldn't assert on specific values).
 fn strip_path_ids(path: &Path) -> Path {
     let mut stripped = path.clone();
-    stripped.local_path_id = 0;
+    stripped.local_path_id = None;
     stripped.remote_path_id = None;
     stripped
 }

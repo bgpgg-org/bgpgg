@@ -52,11 +52,7 @@ pub struct LocRib {
 /// - If a matching path exists (same source, same remote_path_id) and attrs differ,
 ///   replace it while inheriting the existing local_path_id.
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path(
-    paths: &mut Vec<Arc<Path>>,
-    mut path: Arc<Path>,
-    path_ids: &mut PathIdAllocator,
-) {
+fn upsert_path(paths: &mut Vec<Arc<Path>>, mut path: Arc<Path>, path_ids: &mut PathIdAllocator) {
     match paths.iter_mut().find(|p| p.matches_remote(&path)) {
         Some(existing) => {
             if existing.attrs != path.attrs {
@@ -65,7 +61,7 @@ fn upsert_path(
             }
         }
         None => {
-            Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
+            Arc::make_mut(&mut path).local_path_id = Some(path_ids.alloc());
             paths.push(path);
         }
     }
@@ -82,7 +78,7 @@ fn add_route<K: Eq + Hash>(
         upsert_path(&mut route.paths, path, path_ids);
         route.paths.sort_by(|a, b| b.best_path_cmp(a));
     } else {
-        Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
+        Arc::make_mut(&mut path).local_path_id = Some(path_ids.alloc());
         table.insert(
             key,
             Route {
@@ -104,7 +100,7 @@ fn remove_peer_paths<K: Eq + Hash>(
             .paths
             .iter()
             .filter(|p| p.attrs.source.peer_ip() == Some(peer_ip))
-            .map(|p| p.local_path_id)
+            .filter_map(|p| p.local_path_id)
             .collect();
         route
             .paths
@@ -125,7 +121,7 @@ fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> V
             .paths
             .iter()
             .filter(|p| p.attrs.source == RouteSource::Local)
-            .map(|p| p.local_path_id)
+            .filter_map(|p| p.local_path_id)
             .collect();
         route.paths.retain(|p| p.attrs.source != RouteSource::Local);
         if route.paths.is_empty() {
@@ -150,7 +146,7 @@ fn collect_peer_path_ids<K: Eq + Hash>(table: &HashMap<K, Route>, peer_ip: IpAdd
                 .paths
                 .iter()
                 .filter(move |p| is_path_from_peer(p, peer_ip))
-                .map(|p| p.local_path_id)
+                .filter_map(|p| p.local_path_id)
         })
         .collect()
 }
@@ -170,15 +166,15 @@ fn remove_paths_by_ids<K: Eq + Hash + Copy>(
         let removed: Vec<u32> = route
             .paths
             .iter()
-            .filter(|p| stale_ids.contains(&p.local_path_id))
-            .map(|p| p.local_path_id)
+            .filter(|p| p.local_path_id.is_some_and(|id| stale_ids.contains(&id)))
+            .filter_map(|p| p.local_path_id)
             .collect();
         if removed.is_empty() {
             continue;
         }
         route
             .paths
-            .retain(|p| !stale_ids.contains(&p.local_path_id));
+            .retain(|p| !p.local_path_id.is_some_and(|id| stale_ids.contains(&id)));
         freed_ids.extend(removed);
         if before != route.paths.len() {
             let best_changed = match (&old_best, route.paths.first()) {
@@ -202,7 +198,9 @@ fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: I
     for route in table.values_mut() {
         for path in route.paths.iter() {
             if is_path_from_peer(path, peer_ip) {
-                freed_ids.push(path.local_path_id);
+                if let Some(id) = path.local_path_id {
+                    freed_ids.push(id);
+                }
             }
         }
         route.paths.retain(|p| !is_path_from_peer(p, peer_ip));
@@ -343,7 +341,7 @@ impl LocRib {
                 .iter()
                 .flat_map(|prefix| self.get_all_paths(prefix))
                 .filter(|path| is_path_from_peer(path, peer_ip))
-                .map(|path| path.local_path_id)
+                .filter_map(|path| path.local_path_id)
                 .collect();
             for ((stale_ip, _), stale_ids) in self.stale_routes.iter_mut() {
                 if *stale_ip == peer_ip {
@@ -409,7 +407,7 @@ impl LocRib {
         // We store it as provided and add local_asn during export based on peer type.
         // If as_path is not empty, it's used as-is (for testing or route injection).
         let path = Arc::new(Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: crate::rib::path::PathAttrs {
                 origin,
@@ -991,7 +989,7 @@ mod tests {
 
         let stored = loc_rib.get_best_path(&prefix).unwrap();
         assert!(
-            stored.local_path_id > 0,
+            stored.local_path_id.is_some(),
             "loc-rib path should have allocated ID"
         );
     }
@@ -1024,13 +1022,13 @@ mod tests {
 
         loc_rib.add_route(prefix, Arc::clone(&path));
         let stored = loc_rib.get_best_path(&prefix).unwrap();
-        let ptr_before = Arc::as_ptr(&stored);
+        let ptr_before = Arc::as_ptr(stored);
 
         // Re-add identical path — should not replace the Arc
         loc_rib.add_route(prefix, Arc::clone(&path));
         let stored = loc_rib.get_best_path(&prefix).unwrap();
         assert!(
-            std::ptr::eq(ptr_before, Arc::as_ptr(&stored)),
+            std::ptr::eq(ptr_before, Arc::as_ptr(stored)),
             "identical path should keep existing Arc"
         );
     }
@@ -1044,10 +1042,10 @@ mod tests {
         loc_rib.add_route(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
 
         let routes = loc_rib.get_all_routes();
-        let ids: Vec<u32> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
+        let ids: Vec<Option<u32>> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1], "different sources should get different IDs");
-        assert!(ids[0] > 0 && ids[1] > 0);
+        assert!(ids[0].is_some() && ids[1].is_some());
     }
 
     #[test]
@@ -1073,7 +1071,7 @@ mod tests {
             "different remote_path_ids should coexist"
         );
 
-        let ids: Vec<u32> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
+        let ids: Vec<Option<u32>> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
         assert_ne!(ids[0], ids[1]);
     }
 
@@ -1155,7 +1153,10 @@ mod tests {
         );
 
         let routes = loc_rib.get_all_routes();
-        let mut ids: Vec<u32> = routes.iter().map(|r| r.paths[0].local_path_id).collect();
+        let mut ids: Vec<u32> = routes
+            .iter()
+            .filter_map(|r| r.paths[0].local_path_id)
+            .collect();
         ids.sort();
         assert_eq!(ids, vec![1, 2], "freed IDs should be reused");
     }
@@ -1225,7 +1226,11 @@ mod tests {
 
         // Add a route, then mark it stale (simulating GR)
         loc_rib.add_route(prefix, create_test_path(peer_ip, test_bgp_id()));
-        let stale_id = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
+        let stale_id = loc_rib
+            .get_best_path(&prefix)
+            .unwrap()
+            .local_path_id
+            .unwrap();
         let ipv4_uni = AfiSafi {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,

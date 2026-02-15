@@ -1061,7 +1061,13 @@ impl BgpServer {
                 peer.adj_rib_out
                     .retain(|(prefix, _), _| !is_target_afi(prefix));
                 for (prefix, path) in all_sent {
-                    peer.adj_rib_out.insert((prefix, path.local_path_id), path);
+                    peer.adj_rib_out.insert(
+                        (
+                            prefix,
+                            path.local_path_id.expect("loc-rib path must have ID"),
+                        ),
+                        path,
+                    );
                 }
             }
         }
@@ -2158,7 +2164,13 @@ impl BgpServer {
                 peer.adj_rib_out
                     .retain(|(prefix, _), _| !is_target_afi(prefix));
                 for (prefix, path) in all_sent {
-                    peer.adj_rib_out.insert((prefix, path.local_path_id), path);
+                    peer.adj_rib_out.insert(
+                        (
+                            prefix,
+                            path.local_path_id.expect("loc-rib path must have ID"),
+                        ),
+                        path,
+                    );
                 }
             }
         }

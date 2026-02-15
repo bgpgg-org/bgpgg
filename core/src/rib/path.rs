@@ -46,8 +46,8 @@ pub struct PathAttrs {
 /// No PartialEq: use .attrs for attribute comparison, Arc::ptr_eq() for identity.
 #[derive(Debug, Clone)]
 pub struct Path {
-    /// 0 = not allocated (adj-rib-in), >0 = loc-rib allocated by PathIdAllocator
-    pub local_path_id: u32,
+    /// None = not allocated (adj-rib-in), Some(id) = loc-rib allocated by PathIdAllocator
+    pub local_path_id: Option<u32>,
     /// Path ID received from peer (None = no ADD-PATH negotiated)
     pub remote_path_id: Option<u32>,
     /// BGP path attributes
@@ -135,7 +135,7 @@ impl Path {
         let aggregator = Self::get_aggregator(update_msg, peer_supports_4byte_asn);
 
         Some(Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin,
@@ -364,7 +364,7 @@ mod tests {
 
     fn make_base_path() -> Path {
         Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
@@ -594,7 +594,7 @@ mod tests {
 
         // Valid UPDATE with all required attrs
         let path = Path {
-            local_path_id: 0,
+            local_path_id: None,
             remote_path_id: None,
             attrs: PathAttrs {
                 origin: Origin::IGP,
