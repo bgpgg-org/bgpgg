@@ -1876,25 +1876,84 @@ mod tests {
         use crate::net::Ipv4Net;
         use std::net::Ipv4Addr;
 
-        let result = read_attr_mp_reach_nlri(MP_REACH_IPV4_SAMPLE, false).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv4);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(
-            result.next_hop,
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1))
-        );
-        assert_eq!(result.nlri.len(), 1);
-        assert_eq!(
-            result.nlri[0],
+        // (name, input, add_path, expected_nlri)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
             (
-                IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, 0, 0),
-                    prefix_length: 8,
-                }),
-                None,
-            )
-        );
+                "without add_path",
+                MP_REACH_IPV4_SAMPLE,
+                false,
+                vec![(
+                    IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    }),
+                    None,
+                )],
+            ),
+            (
+                "with add_path",
+                &[
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x04, // Next hop length = 4
+                    0xc0, 0xa8, 0x01, 0x01, // Next hop 192.168.1.1
+                    0x00, // Reserved
+                    // NLRI: path_id=42, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x2a, 0x08, 0x0a,
+                ],
+                true,
+                vec![(
+                    IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    }),
+                    Some(42),
+                )],
+            ),
+            (
+                "with add_path multiple NLRIs",
+                &[
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x04, // Next hop length = 4
+                    0xc0, 0xa8, 0x01, 0x01, // Next hop 192.168.1.1
+                    0x00, // Reserved
+                    // NLRI 1: path_id=1, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a,
+                    // NLRI 2: path_id=2, 172.16.0.0/16
+                    0x00, 0x00, 0x00, 0x02, 0x10, 0xac, 0x10,
+                ],
+                true,
+                vec![
+                    (
+                        IpNetwork::V4(Ipv4Net {
+                            address: Ipv4Addr::new(10, 0, 0, 0),
+                            prefix_length: 8,
+                        }),
+                        Some(1),
+                    ),
+                    (
+                        IpNetwork::V4(Ipv4Net {
+                            address: Ipv4Addr::new(172, 16, 0, 0),
+                            prefix_length: 16,
+                        }),
+                        Some(2),
+                    ),
+                ],
+            ),
+        ];
+
+        for (name, input, add_path, expected_nlri) in tests {
+            let result = read_attr_mp_reach_nlri(input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv4, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(
+                result.next_hop,
+                NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                "{name}"
+            );
+            assert_eq!(result.nlri, expected_nlri, "{name}");
+        }
     }
 
     #[test]
@@ -1902,35 +1961,59 @@ mod tests {
         use crate::net::Ipv6Net;
         use std::net::Ipv6Addr;
 
-        // MP_REACH_NLRI: AFI=IPv6, SAFI=1, next_hop=2001:db8::1, NLRI=2001:db8::/32
-        let input: &[u8] = &[
+        // Common IPv6 header: AFI=IPv6, SAFI=1, next_hop=2001:db8::1
+        let ipv6_header: &[u8] = &[
             0x00, 0x02, // AFI = IPv6 (2)
             0x01, // SAFI = 1 (unicast)
             0x10, // Next hop length = 16
             0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, // Next hop 2001:db8::1
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // Reserved
-            0x20, 0x20, 0x01, 0x0d, 0xb8, // NLRI: 2001:db8::/32
         ];
 
-        let result = read_attr_mp_reach_nlri(input, false).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv6);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(
-            result.next_hop,
-            NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1))
-        );
-        assert_eq!(result.nlri.len(), 1);
-        assert_eq!(
-            result.nlri[0],
+        // (name, nlri_bytes, add_path, expected_nlri)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
             (
-                IpNetwork::V6(Ipv6Net {
-                    address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
-                    prefix_length: 32,
-                }),
-                None,
-            )
-        );
+                "without add_path",
+                // 2001:db8::/32
+                &[0x20, 0x20, 0x01, 0x0d, 0xb8],
+                false,
+                vec![(
+                    IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    None,
+                )],
+            ),
+            (
+                "with add_path",
+                // path_id=100, 2001:db8::/32
+                &[0x00, 0x00, 0x00, 0x64, 0x20, 0x20, 0x01, 0x0d, 0xb8],
+                true,
+                vec![(
+                    IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    Some(100),
+                )],
+            ),
+        ];
+
+        for (name, nlri_bytes, add_path, expected_nlri) in tests {
+            let mut input = ipv6_header.to_vec();
+            input.extend_from_slice(nlri_bytes);
+
+            let result = read_attr_mp_reach_nlri(&input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv6, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(
+                result.next_hop,
+                NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+                "{name}"
+            );
+            assert_eq!(result.nlri, expected_nlri, "{name}");
+        }
     }
 
     #[test]
@@ -1938,28 +2021,77 @@ mod tests {
         use crate::net::Ipv4Net;
         use std::net::Ipv4Addr;
 
-        // MP_UNREACH_NLRI: AFI=IPv4, SAFI=1, withdrawn=10.0.0.0/8
-        let input: &[u8] = &[
-            0x00, 0x01, // AFI = IPv4 (1)
-            0x01, // SAFI = 1 (unicast)
-            0x08, 0x0a, // Withdrawn: 10.0.0.0/8
+        // (name, input, add_path, expected_withdrawn)
+        let tests: Vec<(&str, Vec<u8>, bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    0x08, 0x0a, // Withdrawn: 10.0.0.0/8
+                ],
+                false,
+                vec![(
+                    IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    }),
+                    None,
+                )],
+            ),
+            (
+                "with add_path",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    // path_id=5, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x05, 0x08, 0x0a,
+                ],
+                true,
+                vec![(
+                    IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    }),
+                    Some(5),
+                )],
+            ),
+            (
+                "with add_path same prefix different path_ids",
+                vec![
+                    0x00, 0x01, // AFI = IPv4
+                    0x01, // SAFI = unicast
+                    // path_id=1, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a,
+                    // path_id=2, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x02, 0x08, 0x0a,
+                ],
+                true,
+                vec![
+                    (
+                        IpNetwork::V4(Ipv4Net {
+                            address: Ipv4Addr::new(10, 0, 0, 0),
+                            prefix_length: 8,
+                        }),
+                        Some(1),
+                    ),
+                    (
+                        IpNetwork::V4(Ipv4Net {
+                            address: Ipv4Addr::new(10, 0, 0, 0),
+                            prefix_length: 8,
+                        }),
+                        Some(2),
+                    ),
+                ],
+            ),
         ];
 
-        let result = read_attr_mp_unreach_nlri(input, false).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv4);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(result.withdrawn_routes.len(), 1);
-        assert_eq!(
-            result.withdrawn_routes[0],
-            (
-                IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, 0, 0),
-                    prefix_length: 8,
-                }),
-                None,
-            )
-        );
+        for (name, input, add_path, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(&input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv4, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");
+        }
     }
 
     #[test]
@@ -1967,28 +2099,49 @@ mod tests {
         use crate::net::Ipv6Net;
         use std::net::Ipv6Addr;
 
-        // MP_UNREACH_NLRI: AFI=IPv6, SAFI=1, withdrawn=2001:db8::/32
-        let input: &[u8] = &[
-            0x00, 0x02, // AFI = IPv6 (2)
-            0x01, // SAFI = 1 (unicast)
-            0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
+        // (name, input, add_path, expected_withdrawn)
+        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+            (
+                "without add_path",
+                &[
+                    0x00, 0x02, // AFI = IPv6
+                    0x01, // SAFI = unicast
+                    0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
+                ],
+                false,
+                vec![(
+                    IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    None,
+                )],
+            ),
+            (
+                "with add_path",
+                &[
+                    0x00, 0x02, // AFI = IPv6
+                    0x01, // SAFI = unicast
+                    // path_id=7, 2001:db8::/32
+                    0x00, 0x00, 0x00, 0x07, 0x20, 0x20, 0x01, 0x0d, 0xb8,
+                ],
+                true,
+                vec![(
+                    IpNetwork::V6(Ipv6Net {
+                        address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                        prefix_length: 32,
+                    }),
+                    Some(7),
+                )],
+            ),
         ];
 
-        let result = read_attr_mp_unreach_nlri(input, false).unwrap();
-
-        assert_eq!(result.afi, Afi::Ipv6);
-        assert_eq!(result.safi, Safi::Unicast);
-        assert_eq!(result.withdrawn_routes.len(), 1);
-        assert_eq!(
-            result.withdrawn_routes[0],
-            (
-                IpNetwork::V6(Ipv6Net {
-                    address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
-                    prefix_length: 32,
-                }),
-                None,
-            )
-        );
+        for (name, input, add_path, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(input, add_path).unwrap();
+            assert_eq!(result.afi, Afi::Ipv6, "{name}");
+            assert_eq!(result.safi, Safi::Unicast, "{name}");
+            assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");
+        }
     }
 
     #[test]
