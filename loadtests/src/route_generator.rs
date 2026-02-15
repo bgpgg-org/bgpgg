@@ -1,6 +1,6 @@
 use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
-use bgpgg::rib::{Path, RouteSource};
+use bgpgg::rib::{Path, PathAttrs, RouteSource};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -126,20 +126,22 @@ impl PeerRoute {
         Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin: self.origin,
-            as_path: as_path_segments,
-            next_hop: NextHopAddr::Ipv4(next_hop),
-            source: RouteSource::Ebgp { peer_ip, bgp_id },
-            local_pref: Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
-            med: self.med,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: self.communities.clone(),
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            attrs: PathAttrs {
+                origin: self.origin,
+                as_path: as_path_segments,
+                next_hop: NextHopAddr::Ipv4(next_hop),
+                source: RouteSource::Ebgp { peer_ip, bgp_id },
+                local_pref: Some(100), // eBGP routes get LOCAL_PREF 100 in loc-rib
+                med: self.med,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: self.communities.clone(),
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 }

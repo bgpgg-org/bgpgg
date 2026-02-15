@@ -98,7 +98,7 @@ impl RouteSource {
 }
 
 /// Represents a route with one or more paths to a prefix
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Arc<Path>>,

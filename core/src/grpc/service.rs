@@ -73,13 +73,13 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
         .paths
         .into_iter()
         .map(|path| ProtoPath {
-            origin: match path.origin {
+            origin: match path.origin() {
                 Origin::IGP => 0,
                 Origin::EGP => 1,
                 Origin::INCOMPLETE => 2,
             },
             as_path: path
-                .as_path
+                .as_path()
                 .iter()
                 .filter_map(|segment| {
                     // Filter out confederation segments per RFC 5065 (not exposed externally)
@@ -98,17 +98,17 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            next_hop: path.next_hop.to_string(),
+            next_hop: path.next_hop().to_string(),
             peer_address: path
-                .source
+                .source()
                 .peer_ip()
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| LOCAL_ROUTE_SOURCE_STR.to_string()),
-            local_pref: path.local_pref,
-            med: path.med,
-            atomic_aggregate: path.atomic_aggregate,
+            local_pref: path.local_pref(),
+            med: path.med(),
+            atomic_aggregate: path.atomic_aggregate(),
             unknown_attributes: path
-                .unknown_attrs
+                .unknown_attrs()
                 .iter()
                 .filter_map(|attr| {
                     if let PathAttrValue::Unknown {
@@ -127,19 +127,23 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            communities: path.communities.clone(),
+            communities: path.communities().clone(),
             extended_communities: path
-                .extended_communities
+                .extended_communities()
                 .iter()
                 .map(|&ec| u64_to_proto_extcomm(ec))
                 .collect(),
             large_communities: path
-                .large_communities
+                .large_communities()
                 .iter()
                 .map(internal_to_proto_large_community)
                 .collect(),
-            originator_id: path.originator_id.map(|id| id.to_string()),
-            cluster_list: path.cluster_list.iter().map(|id| id.to_string()).collect(),
+            originator_id: path.originator_id().map(|id| id.to_string()),
+            cluster_list: path
+                .cluster_list()
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
             local_path_id: path.local_path_id,
             remote_path_id: path.remote_path_id,
         })

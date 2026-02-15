@@ -56,14 +56,15 @@ fn add_route<K: Eq + Hash>(
     path_ids: &mut PathIdAllocator,
 ) {
     if let Some(route) = table.get_mut(&key) {
-        if let Some(existing) = route
-            .paths
-            .iter_mut()
-            .find(|p| p.source == path.source && p.remote_path_id == path.remote_path_id)
-        {
-            // Replacement: inherit existing path's local_path_id
+        if let Some(existing) = route.paths.iter_mut().find(|p| {
+            p.attrs.source == path.attrs.source && p.remote_path_id == path.remote_path_id
+        }) {
+            // Replacement: inherit existing path's local_path_id for reuse
             Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
-            *existing = path;
+            // Skip no-op replacement: if attrs are identical, keep existing Arc
+            if existing.attrs != path.attrs {
+                *existing = path;
+            }
         } else {
             // New path: allocate fresh ID
             Arc::make_mut(&mut path).local_path_id = path_ids.alloc();
@@ -93,10 +94,12 @@ fn remove_peer_paths<K: Eq + Hash>(
         let freed_ids: Vec<u32> = route
             .paths
             .iter()
-            .filter(|p| p.source.peer_ip() == Some(peer_ip))
+            .filter(|p| p.attrs.source.peer_ip() == Some(peer_ip))
             .map(|p| p.local_path_id)
             .collect();
-        route.paths.retain(|p| p.source.peer_ip() != Some(peer_ip));
+        route
+            .paths
+            .retain(|p| p.attrs.source.peer_ip() != Some(peer_ip));
         if route.paths.is_empty() {
             table.remove(key);
         }
@@ -112,10 +115,10 @@ fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> V
         let freed_ids: Vec<u32> = route
             .paths
             .iter()
-            .filter(|p| p.source == RouteSource::Local)
+            .filter(|p| p.attrs.source == RouteSource::Local)
             .map(|p| p.local_path_id)
             .collect();
-        route.paths.retain(|p| p.source != RouteSource::Local);
+        route.paths.retain(|p| p.attrs.source != RouteSource::Local);
         if route.paths.is_empty() {
             table.remove(key);
         }
@@ -126,7 +129,7 @@ fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> V
 }
 
 fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
-    path.source.peer_ip() == Some(peer_ip)
+    path.attrs.source.peer_ip() == Some(peer_ip)
 }
 
 /// Collect local_path_ids for all paths from a peer in a table.
@@ -387,20 +390,22 @@ impl LocRib {
         let path = Arc::new(Path {
             local_path_id: 0,
             remote_path_id: None,
-            origin,
-            as_path,
-            next_hop,
-            source: RouteSource::Local,
-            local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
-            med,
-            atomic_aggregate,
-            aggregator: None,
-            communities,
-            extended_communities,
-            large_communities,
-            unknown_attrs: vec![],
-            originator_id,
-            cluster_list,
+            attrs: crate::rib::path::PathAttrs {
+                origin,
+                as_path,
+                next_hop,
+                source: RouteSource::Local,
+                local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
+                med,
+                atomic_aggregate,
+                aggregator: None,
+                communities,
+                extended_communities,
+                large_communities,
+                unknown_attrs: vec![],
+                originator_id,
+                cluster_list,
+            },
         });
 
         self.add_route(prefix, path);
@@ -718,10 +723,10 @@ mod tests {
         assert_eq!(routes[0].prefix, prefix);
 
         let mut paths = routes[0].paths.clone();
-        paths.sort_by_key(|p| format!("{:?}", p.source));
+        paths.sort_by_key(|p| format!("{:?}", p.source()));
 
         let mut expected_paths = vec![path1, path2];
-        expected_paths.sort_by_key(|p| format!("{:?}", p.source));
+        expected_paths.sort_by_key(|p| format!("{:?}", p.source()));
 
         assert_eq!(paths, expected_paths);
     }
@@ -734,7 +739,7 @@ mod tests {
 
         let path1 = create_test_path(peer_ip, test_bgp_id());
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.as_path = vec![AsPathSegment {
+            p.attrs.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
                 asn_list: vec![300, 400],
@@ -844,7 +849,7 @@ mod tests {
         );
 
         let path = loc_rib.get_best_path(&prefix).unwrap();
-        assert_eq!(path.local_pref, Some(200));
+        assert_eq!(path.local_pref(), Some(200));
     }
 
     #[test]
@@ -973,7 +978,7 @@ mod tests {
 
         // Replace with updated path (same source, same remote_path_id=None)
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.med = Some(50);
+            p.attrs.med = Some(50);
         });
         loc_rib.add_route(prefix, path2);
         let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
@@ -1138,7 +1143,7 @@ mod tests {
 
         // Now announce from peer2 with a worse path (longer AS path)
         let worse_path = create_test_path_with(peer2, test_bgp_id2(), |p| {
-            p.as_path = vec![AsPathSegment {
+            p.attrs.as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 3,
                 asn_list: vec![100, 200, 300],
@@ -1181,7 +1186,7 @@ mod tests {
 
         // Peer reconnects and re-sends the same route (replacement inherits stale ID)
         let refreshed_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.med = Some(50);
+            p.attrs.med = Some(50);
         });
         loc_rib.update_from_peer(peer_ip, vec![], vec![(prefix, refreshed_path)], |_, _| true);
 

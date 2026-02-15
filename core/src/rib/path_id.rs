@@ -15,13 +15,14 @@
 /// Bitmap allocator for ADD-PATH local path IDs.
 ///
 /// Each bit represents one ID. IDs are 1-based (0 is reserved as sentinel
-/// for unallocated paths in adj-rib-in). Scans from word 0 on every alloc;
-/// the bitmap is small enough (~12KB for 800k paths) to fit in L2 cache
-/// and `trailing_ones()` compiles to a single TZCNT instruction.
+/// for unallocated paths in adj-rib-in). `pos` tracks the lowest word that
+/// might have a free bit, so sequential allocation is O(1).
+/// `trailing_ones()` compiles to a single TZCNT instruction.
 ///
 /// Auto-grows when all bits are set. Free is O(1).
 pub struct PathIdAllocator {
     bits: Vec<u64>,
+    pos: usize,
 }
 
 impl Default for PathIdAllocator {
@@ -32,23 +33,27 @@ impl Default for PathIdAllocator {
 
 impl PathIdAllocator {
     pub fn new() -> Self {
-        PathIdAllocator { bits: Vec::new() }
+        PathIdAllocator {
+            bits: Vec::new(),
+            pos: 0,
+        }
     }
 
     /// Allocate the next available path ID (1-based). Auto-grows if full.
     pub fn alloc(&mut self) -> u32 {
-        for idx in 0..self.bits.len() {
+        for idx in self.pos..self.bits.len() {
             let word = self.bits[idx];
             if word != u64::MAX {
                 let bit = word.trailing_ones();
                 self.bits[idx] |= 1 << bit;
+                self.pos = idx;
                 return (idx as u32) * 64 + bit + 1;
             }
         }
         // All full or empty: grow by one word
         self.bits.push(1);
-        let idx = self.bits.len() - 1;
-        (idx as u32) * 64 + 1
+        self.pos = self.bits.len() - 1;
+        (self.pos as u32) * 64 + 1
     }
 
     /// Free a previously allocated path ID. No-op if id == 0 (sentinel).
@@ -61,6 +66,9 @@ impl PathIdAllocator {
         let bit_idx = id % 64;
         if word_idx < self.bits.len() {
             self.bits[word_idx] &= !(1u64 << bit_idx);
+            if word_idx < self.pos {
+                self.pos = word_idx;
+            }
         }
     }
 }
