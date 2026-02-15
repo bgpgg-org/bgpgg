@@ -51,7 +51,7 @@ pub struct LocRib {
 /// - If a matching path exists (same source, same remote_path_id) and attrs differ,
 ///   replace it while inheriting the existing local_path_id.
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path_in_table<K: Eq + Hash>(
+fn upsert_path<K: Eq + Hash>(
     table: &mut HashMap<K, Route>,
     key: K,
     prefix: IpNetwork,
@@ -79,48 +79,28 @@ fn upsert_path_in_table<K: Eq + Hash>(
     route.paths.sort_by(|a, b| b.best_path_cmp(a));
 }
 
-/// Remove paths from a peer and return their local_path_ids for freeing.
-fn remove_peer_paths<K: Eq + Hash>(
+/// Remove paths matching a predicate and return their freed local_path_ids.
+fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
     table: &mut HashMap<K, Route>,
     key: &K,
-    peer_ip: IpAddr,
+    should_remove: F,
 ) -> Vec<u32> {
-    if let Some(route) = table.get_mut(key) {
-        let freed_ids: Vec<u32> = route
-            .paths
-            .iter()
-            .filter(|p| p.attrs.source.peer_ip() == Some(peer_ip))
-            .filter_map(|p| p.local_path_id)
-            .collect();
-        route
-            .paths
-            .retain(|p| p.attrs.source.peer_ip() != Some(peer_ip));
-        if route.paths.is_empty() {
-            table.remove(key);
-        }
-        freed_ids
-    } else {
-        Vec::new()
-    }
-}
+    let Some(route) = table.get_mut(key) else {
+        return Vec::new();
+    };
+    let freed_path_ids: Vec<u32> = route
+        .paths
+        .iter()
+        .filter(|p| should_remove(p))
+        .filter_map(|p| p.local_path_id)
+        .collect();
+    route.paths.retain(|p| !should_remove(p));
 
-/// Remove local paths and return their local_path_ids for freeing.
-fn remove_local_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, key: &K) -> Vec<u32> {
-    if let Some(route) = table.get_mut(key) {
-        let freed_ids: Vec<u32> = route
-            .paths
-            .iter()
-            .filter(|p| p.attrs.source == RouteSource::Local)
-            .filter_map(|p| p.local_path_id)
-            .collect();
-        route.paths.retain(|p| p.attrs.source != RouteSource::Local);
-        if route.paths.is_empty() {
-            table.remove(key);
-        }
-        freed_ids
-    } else {
-        Vec::new()
+    if route.paths.is_empty() {
+        table.remove(key);
     }
+
+    freed_path_ids
 }
 
 fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
@@ -141,32 +121,32 @@ fn collect_peer_prefixes<K: Eq + Hash>(
 
 /// Remove all paths from a peer and return their local_path_ids for freeing.
 fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> Vec<u32> {
-    let mut freed_ids = Vec::new();
+    let mut freed_path_ids = Vec::new();
     for route in table.values_mut() {
-        for path in route.paths.iter() {
-            if is_path_from_peer(path, peer_ip) {
-                if let Some(id) = path.local_path_id {
-                    freed_ids.push(id);
-                }
-            }
-        }
+        freed_path_ids.extend(
+            route
+                .paths
+                .iter()
+                .filter(|p| is_path_from_peer(p, peer_ip))
+                .filter_map(|p| p.local_path_id),
+        );
         route.paths.retain(|p| !is_path_from_peer(p, peer_ip));
     }
     table.retain(|_, route| !route.paths.is_empty());
-    freed_ids
+    freed_path_ids
 }
 
 impl LocRib {
     fn upsert_path(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         match prefix {
-            IpNetwork::V4(v4_prefix) => upsert_path_in_table(
+            IpNetwork::V4(v4_prefix) => upsert_path(
                 &mut self.ipv4_unicast,
                 v4_prefix,
                 prefix,
                 path,
                 &mut self.path_ids,
             ),
-            IpNetwork::V6(v6_prefix) => upsert_path_in_table(
+            IpNetwork::V6(v6_prefix) => upsert_path(
                 &mut self.ipv6_unicast,
                 v6_prefix,
                 prefix,
@@ -208,16 +188,16 @@ impl LocRib {
     /// Remove paths from a specific peer for a given prefix.
     /// Returns true if a path was actually removed.
     fn remove_peer_path(&mut self, prefix: IpNetwork, peer_ip: IpAddr) -> bool {
-        let freed_ids = match prefix {
-            IpNetwork::V4(v4_prefix) => {
-                remove_peer_paths(&mut self.ipv4_unicast, &v4_prefix, peer_ip)
-            }
-            IpNetwork::V6(v6_prefix) => {
-                remove_peer_paths(&mut self.ipv6_unicast, &v6_prefix, peer_ip)
-            }
+        let freed_path_ids = match prefix {
+            IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, |p| {
+                is_path_from_peer(p, peer_ip)
+            }),
+            IpNetwork::V6(v6_prefix) => remove_paths(&mut self.ipv6_unicast, &v6_prefix, |p| {
+                is_path_from_peer(p, peer_ip)
+            }),
         };
-        let had_path = !freed_ids.is_empty();
-        for id in freed_ids {
+        let had_path = !freed_path_ids.is_empty();
+        for id in freed_path_ids {
             self.path_ids.free(id);
         }
         had_path
@@ -376,12 +356,16 @@ impl LocRib {
     pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
         info!(prefix = ?prefix, "removing local route from Loc-RIB");
 
-        let freed_ids = match prefix {
-            IpNetwork::V4(v4_prefix) => remove_local_paths(&mut self.ipv4_unicast, &v4_prefix),
-            IpNetwork::V6(v6_prefix) => remove_local_paths(&mut self.ipv6_unicast, &v6_prefix),
+        let freed_path_ids = match prefix {
+            IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, |p| {
+                p.attrs.source == RouteSource::Local
+            }),
+            IpNetwork::V6(v6_prefix) => remove_paths(&mut self.ipv6_unicast, &v6_prefix, |p| {
+                p.attrs.source == RouteSource::Local
+            }),
         };
-        let removed = !freed_ids.is_empty();
-        for id in freed_ids {
+        let removed = !freed_path_ids.is_empty();
+        for id in freed_path_ids {
             self.path_ids.free(id);
         }
         removed
