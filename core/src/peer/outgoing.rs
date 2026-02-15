@@ -208,6 +208,7 @@ pub fn send_withdrawals_to_peer(
             use_4byte_asn: peer_supports_4byte_asn,
             add_path: false,
         },
+        None,
     );
     let serialized = withdraw_msg.serialize();
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
@@ -446,7 +447,7 @@ pub fn send_addpath_withdrawals_to_peer(
     }
 
     for (path_id, prefixes) in by_path_id {
-        let withdraw_msg = UpdateMessage::new_withdraw_with_path_id(
+        let withdraw_msg = UpdateMessage::new_withdraw(
             prefixes.clone(),
             MessageFormat {
                 use_4byte_asn: peer_supports_4byte_asn,

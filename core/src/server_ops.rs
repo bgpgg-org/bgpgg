@@ -1409,6 +1409,7 @@ impl BgpServer {
                     use_4byte_asn,
                     add_path: false,
                 },
+                None,
             );
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,

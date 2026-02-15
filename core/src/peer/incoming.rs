@@ -227,9 +227,11 @@ impl Peer {
 
         let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
 
+        let nlri_entries = update_msg.nlri_with_path_id();
+
         let Some(mut path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn)
         else {
-            if !update_msg.nlri_list().is_empty() {
+            if !nlri_entries.is_empty() {
                 warn!(peer_ip = %self.addr, "UPDATE has NLRI but missing required attributes, skipping announcements");
             }
             return Ok((vec![], vec![]));
@@ -264,14 +266,28 @@ impl Peer {
             return Ok((vec![], update_msg.nlri_list()));
         }
 
-        // Wrap path in Arc once
-        let path_arc = Arc::new(path);
-
         let mut announced = Vec::new();
-        for prefix in update_msg.nlri_list() {
-            info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
-            self.rib_in.add_route(prefix, Arc::clone(&path_arc));
-            announced.push((prefix, Arc::clone(&path_arc)));
+
+        // Check if all NLRIs share the same path_id (common case) to avoid per-NLRI cloning
+        let common_path_id = nlri_entries.first().and_then(|(_, pid)| *pid);
+        let all_same_path_id = nlri_entries.iter().all(|(_, pid)| *pid == common_path_id);
+
+        if all_same_path_id {
+            path.remote_path_id = common_path_id;
+            let path_arc = Arc::new(path);
+            for (prefix, _) in &nlri_entries {
+                info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
+                announced.push((*prefix, Arc::clone(&path_arc)));
+            }
+        } else {
+            for (prefix, remote_path_id) in &nlri_entries {
+                path.remote_path_id = *remote_path_id;
+                let path_arc = Arc::new(path.clone());
+                info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
+                self.rib_in.add_route(*prefix, Arc::clone(&path_arc));
+                announced.push((*prefix, path_arc));
+            }
         }
 
         Ok((announced, vec![]))

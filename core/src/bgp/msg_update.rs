@@ -23,7 +23,9 @@ use super::msg_update_codec::{
     read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
-use super::msg_update_types::{MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN};
+use super::msg_update_types::{
+    nlri_from_prefixes, MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN,
+};
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{parse_nlri_list, ParserError};
 use crate::net::IpNetwork;
@@ -127,6 +129,8 @@ impl UpdateMessage {
             });
         }
 
+        let path_id = format.add_path.then_some(path.local_path_id);
+
         // MP_REACH_NLRI for IPv6 routes (RFC 4760)
         if !ipv6_routes.is_empty() {
             path_attributes.push(PathAttribute {
@@ -135,14 +139,7 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     next_hop: path.next_hop,
-                    nlri: {
-                        let pid = if format.add_path {
-                            Some(path.local_path_id)
-                        } else {
-                            None
-                        };
-                        ipv6_routes.iter().map(|net| (*net, pid)).collect()
-                    },
+                    nlri: nlri_from_prefixes(&ipv6_routes, path_id),
                 }),
             });
         }
@@ -152,28 +149,19 @@ impl UpdateMessage {
 
         let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
-        let path_id = if format.add_path {
-            Some(path.local_path_id)
-        } else {
-            None
-        };
+        let ipv4_nlri = nlri_from_prefixes(&ipv4_routes, path_id);
 
         UpdateMessage {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
             total_path_attributes_len: path_attributes_bytes.len() as u16,
             path_attributes,
-            nlri_list: ipv4_routes,
+            nlri_list: ipv4_nlri,
             format,
-            path_id,
         }
     }
 
-    pub fn new_withdraw(withdrawn_routes: Vec<IpNetwork>, format: MessageFormat) -> Self {
-        Self::new_withdraw_with_path_id(withdrawn_routes, format, None)
-    }
-
-    pub fn new_withdraw_with_path_id(
+    pub fn new_withdraw(
         withdrawn_routes: Vec<IpNetwork>,
         format: MessageFormat,
         path_id: Option<u32>,
@@ -187,8 +175,7 @@ impl UpdateMessage {
 
         // MP_UNREACH_NLRI for IPv6 withdrawals (RFC 4760)
         if !ipv6_withdrawn.is_empty() {
-            let withdrawn_with_path_id: Vec<Nlri> =
-                ipv6_withdrawn.iter().map(|net| (*net, path_id)).collect();
+            let withdrawn_with_path_id = nlri_from_prefixes(&ipv6_withdrawn, path_id);
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
@@ -199,10 +186,7 @@ impl UpdateMessage {
             });
         }
 
-        let ipv4_withdrawn_nlri: Vec<Nlri> = ipv4_withdrawn
-            .into_iter()
-            .map(|net| (net, path_id))
-            .collect();
+        let ipv4_withdrawn_nlri = nlri_from_prefixes(&ipv4_withdrawn, path_id);
         let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn_nlri);
         let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
@@ -213,17 +197,29 @@ impl UpdateMessage {
             path_attributes,
             nlri_list: vec![],
             format,
-            path_id,
         }
     }
 
     pub fn nlri_list(&self) -> Vec<IpNetwork> {
-        let mut nlri = self.nlri_list.clone();
+        let mut nlri: Vec<IpNetwork> = self.nlri_list.iter().map(|(net, _)| *net).collect();
 
         // Add NLRI from MP_REACH_NLRI if present
         for attr in &self.path_attributes {
             if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
                 nlri.extend(mp_reach.nlri.iter().map(|(net, _)| *net));
+            }
+        }
+
+        nlri
+    }
+
+    /// Returns all NLRI entries with their path identifiers (RFC 7911).
+    pub fn nlri_with_path_id(&self) -> Vec<Nlri> {
+        let mut nlri = self.nlri_list.clone();
+
+        for attr in &self.path_attributes {
+            if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
+                nlri.extend(mp_reach.nlri.iter().cloned());
             }
         }
 
@@ -536,21 +532,6 @@ impl UpdateMessage {
         self.format.use_4byte_asn
     }
 
-    /// RFC 7911: Get the path identifier from ADD-PATH encoding.
-    /// Checks both the IPv4 NLRI path_id and MP_REACH_NLRI path_id.
-    pub fn path_id(&self) -> Option<u32> {
-        if self.path_id.is_some() {
-            return self.path_id;
-        }
-        // Fall back to MP_REACH_NLRI path_id from first NLRI entry
-        for attr in &self.path_attributes {
-            if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
-                return mp_reach.nlri.first().and_then(|(_, pid)| *pid);
-            }
-        }
-        None
-    }
-
     pub fn from_bytes(bytes: Vec<u8>, use_4byte_asn: bool) -> Result<Self, ParserError> {
         Self::from_bytes_with_format(
             bytes,
@@ -572,7 +553,6 @@ impl UpdateMessage {
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
         let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len], format.add_path)?;
-        let withdrawn_path_id = withdrawn_routes.first().and_then(|(_, pid)| *pid);
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -588,18 +568,10 @@ impl UpdateMessage {
         let path_attributes = read_path_attributes(&data[..total_path_attributes_len], format)?;
         data = data[total_path_attributes_len..].to_vec();
 
-        let (nlri_list, nlri_path_id) = match total_path_attributes_len {
-            0 => (vec![], None),
-            _ => {
-                let entries = parse_nlri_list(&data, format.add_path)?;
-                let first_path_id = entries.first().and_then(|(_, pid)| *pid);
-                let prefixes = entries.into_iter().map(|(net, _)| net).collect();
-                (prefixes, first_path_id)
-            }
+        let nlri_list: Vec<Nlri> = match total_path_attributes_len {
+            0 => vec![],
+            _ => parse_nlri_list(&data, format.add_path)?,
         };
-
-        // Use NLRI path_id if available, otherwise use withdrawn path_id
-        let path_id = nlri_path_id.or(withdrawn_path_id);
 
         validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
 
@@ -610,7 +582,6 @@ impl UpdateMessage {
             path_attributes,
             nlri_list,
             format,
-            path_id,
         })
     }
 
@@ -651,7 +622,6 @@ impl UpdateMessage {
                 path_attributes: Vec::new(),
                 nlri_list: Vec::new(),
                 format,
-                path_id: None,
             }
         } else {
             // All other AFI/SAFI: MP_UNREACH_NLRI with empty withdrawn routes
@@ -669,7 +639,6 @@ impl UpdateMessage {
                 }],
                 nlri_list: Vec::new(),
                 format,
-                path_id: None,
             }
         }
     }
@@ -682,11 +651,9 @@ pub struct UpdateMessage {
     withdrawn_routes: Vec<Nlri>,
     total_path_attributes_len: u16,
     path_attributes: Vec<PathAttribute>,
-    nlri_list: Vec<IpNetwork>,
+    nlri_list: Vec<Nlri>,
     /// Message encoding format based on negotiated capabilities
     format: MessageFormat,
-    /// RFC 7911: Path Identifier for ADD-PATH (same for all NLRIs in this message)
-    path_id: Option<u32>,
 }
 
 impl Message for UpdateMessage {
@@ -741,12 +708,7 @@ impl Message for UpdateMessage {
         bytes.extend_from_slice(&path_attributes_bytes);
 
         // NLRI
-        let nlri_entries: Vec<Nlri> = self
-            .nlri_list
-            .iter()
-            .map(|net| (*net, self.path_id))
-            .collect();
-        let nlri_bytes = write_nlri_list(&nlri_entries);
+        let nlri_bytes = write_nlri_list(&self.nlri_list);
         bytes.extend_from_slice(&nlri_bytes);
 
         bytes
@@ -940,7 +902,6 @@ mod tests {
             ],
             total_path_attributes_len: 24,
             format: DEFAULT_FORMAT,
-            path_id: None,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -966,14 +927,14 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                IpNetwork::V4(Ipv4Net {
+                (IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 15, 0),
                     prefix_length: 24,
-                }),
-                IpNetwork::V4(Ipv4Net {
+                }), None),
+                (IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 16, 0),
                     prefix_length: 24,
-                }),
+                }), None),
             ],
         }
     );
@@ -998,7 +959,6 @@ mod tests {
             withdrawn_routes: vec![],
             total_path_attributes_len: 24,
             format: DEFAULT_FORMAT,
-            path_id: None,
             path_attributes: vec![
                 PathAttribute {
                     flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
@@ -1024,10 +984,10 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                IpNetwork::V4(Ipv4Net {
+                (IpNetwork::V4(Ipv4Net {
                     address: Ipv4Addr::new(10, 11, 15, 0),
                     prefix_length: 24,
-                }),
+                }), None),
             ],
         }
     );
@@ -1058,7 +1018,6 @@ mod tests {
             ],
             total_path_attributes_len: 0,
             format: DEFAULT_FORMAT,
-            path_id: None,
             path_attributes: vec![],
             nlri_list: vec![],
         }
@@ -1159,7 +1118,7 @@ mod tests {
             }),
         ];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone(), DEFAULT_FORMAT);
+        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone(), DEFAULT_FORMAT, None);
 
         // Verify message structure
         let expected_withdrawn: Vec<Nlri> =
@@ -1184,7 +1143,7 @@ mod tests {
             prefix_length: 24,
         })];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes, DEFAULT_FORMAT);
+        let message = UpdateMessage::new_withdraw(withdrawn_routes, DEFAULT_FORMAT, None);
 
         // Serialize the message - created with use_4byte_asn=true
         let serialized = message.serialize();
@@ -1340,10 +1299,13 @@ mod tests {
             address: Ipv4Addr::new(30, 0, 0, 0),
             prefix_length: 8,
         })];
-        let nlri_list = vec![IpNetwork::V4(Ipv4Net {
-            address: Ipv4Addr::new(40, 0, 0, 0),
-            prefix_length: 8,
-        })];
+        let nlri_list: Vec<Nlri> = vec![(
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(40, 0, 0, 0),
+                prefix_length: 8,
+            }),
+            None,
+        )];
 
         let withdrawn_routes: Vec<Nlri> = withdrawn_prefixes
             .into_iter()
@@ -1358,7 +1320,6 @@ mod tests {
             path_attributes,
             nlri_list,
             format: DEFAULT_FORMAT,
-            path_id: None,
         };
 
         let bytes = msg.to_bytes();
@@ -1450,7 +1411,6 @@ mod tests {
             path_attributes,
             nlri_list: vec![],
             format: DEFAULT_FORMAT,
-            path_id: None,
         };
 
         let bytes = msg.to_bytes();
@@ -2132,7 +2092,6 @@ mod tests {
                     path_attributes: vec![],
                     nlri_list: vec![],
                     format,
-                    path_id: None,
                 },
                 true,
             ),
@@ -2152,7 +2111,6 @@ mod tests {
                     }],
                     nlri_list: vec![],
                     format,
-                    path_id: None,
                 },
                 true,
             ),
@@ -2163,12 +2121,14 @@ mod tests {
                     withdrawn_routes: vec![],
                     total_path_attributes_len: 0,
                     path_attributes: vec![],
-                    nlri_list: vec![IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    })],
+                    nlri_list: vec![(
+                        IpNetwork::V4(Ipv4Net {
+                            address: Ipv4Addr::new(10, 0, 0, 0),
+                            prefix_length: 8,
+                        }),
+                        None,
+                    )],
                     format,
-                    path_id: None,
                 },
                 false,
             ),
@@ -2265,13 +2225,13 @@ mod tests {
         ];
 
         let msg = UpdateMessage::new(&path, nlri.clone(), format);
-        assert_eq!(msg.path_id(), Some(42));
+        let expected_nlri: Vec<Nlri> = nlri.into_iter().map(|net| (net, Some(42))).collect();
+        assert_eq!(msg.nlri_with_path_id(), expected_nlri);
 
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
 
-        assert_eq!(decoded.path_id(), Some(42));
-        assert_eq!(decoded.nlri_list, nlri);
+        assert_eq!(decoded.nlri_with_path_id(), expected_nlri);
         assert_eq!(decoded.origin(), Some(Origin::IGP));
         assert_eq!(
             decoded.next_hop(),
@@ -2291,11 +2251,10 @@ mod tests {
             prefix_length: 24,
         })];
 
-        let msg = UpdateMessage::new_withdraw_with_path_id(withdrawn.clone(), format, Some(7));
+        let msg = UpdateMessage::new_withdraw(withdrawn.clone(), format, Some(7));
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
 
-        assert_eq!(decoded.path_id(), Some(7));
         let expected_withdrawn: Vec<Nlri> =
             withdrawn.into_iter().map(|net| (net, Some(7))).collect();
         assert_eq!(decoded.withdrawn_routes, expected_withdrawn);
@@ -2303,13 +2262,11 @@ mod tests {
 
     #[test]
     fn test_addpath_disabled_no_path_id() {
-        let format = DEFAULT_FORMAT;
-
-        let msg = UpdateMessage::new(&test_path(), vec![], format);
-        assert_eq!(msg.path_id(), None);
+        let msg = UpdateMessage::new(&test_path(), vec![], DEFAULT_FORMAT);
+        assert!(msg.nlri_with_path_id().is_empty());
 
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes(bytes, true).unwrap();
-        assert_eq!(decoded.path_id(), None);
+        assert!(decoded.nlri_with_path_id().is_empty());
     }
 }

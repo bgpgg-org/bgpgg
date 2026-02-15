@@ -2062,8 +2062,7 @@ mod tests {
                     0x00, 0x01, // AFI = IPv4
                     0x01, // SAFI = unicast
                     // path_id=1, 10.0.0.0/8
-                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a,
-                    // path_id=2, 10.0.0.0/8
+                    0x00, 0x00, 0x00, 0x01, 0x08, 0x0a, // path_id=2, 10.0.0.0/8
                     0x00, 0x00, 0x00, 0x02, 0x08, 0x0a,
                 ],
                 true,

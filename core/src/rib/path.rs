@@ -105,7 +105,7 @@ impl Path {
 
         Some(Path {
             local_path_id: 0,
-            remote_path_id: update_msg.path_id(),
+            remote_path_id: None,
             origin,
             as_path,
             next_hop,
@@ -610,6 +610,7 @@ mod tests {
                 use_4byte_asn: false,
                 add_path: false,
             },
+            None,
         );
         assert!(Path::from_update_msg(&empty_update, source, false).is_none());
     }

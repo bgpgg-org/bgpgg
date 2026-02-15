@@ -102,6 +102,7 @@ mod tests {
                 use_4byte_asn: true,
                 add_path: false,
             },
+            None,
         );
 
         let msg = RouteMonitoringMessage::new(

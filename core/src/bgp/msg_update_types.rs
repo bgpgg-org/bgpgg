@@ -83,6 +83,11 @@ pub const MAX_2BYTE_ASN: u32 = 65535;
 /// A prefix with its optional ADD-PATH path identifier (RFC 7911).
 pub type Nlri = (IpNetwork, Option<u32>);
 
+/// Pair each prefix with the same path identifier.
+pub fn nlri_from_prefixes(prefixes: &[IpNetwork], path_id: Option<u32>) -> Vec<Nlri> {
+    prefixes.iter().map(|net| (*net, path_id)).collect()
+}
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpReachNlri {
     pub afi: Afi,
