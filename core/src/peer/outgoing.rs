@@ -567,6 +567,7 @@ mod tests {
         Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path,
@@ -947,6 +948,7 @@ mod tests {
         let path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
@@ -978,6 +980,7 @@ mod tests {
         let ebgp_path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
@@ -1009,6 +1012,7 @@ mod tests {
         let local_path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
@@ -1153,6 +1157,7 @@ mod tests {
         let path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],

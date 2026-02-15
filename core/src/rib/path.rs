@@ -52,6 +52,8 @@ pub struct Path {
     pub remote_path_id: Option<u32>,
     /// BGP path attributes
     pub attrs: PathAttrs,
+    /// RFC 4724: Marked stale during Graceful Restart, cleared on replacement
+    pub stale: bool,
 }
 
 impl Path {
@@ -137,6 +139,7 @@ impl Path {
         Some(Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin,
                 as_path,
@@ -366,6 +369,7 @@ mod tests {
         Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
@@ -596,6 +600,7 @@ mod tests {
         let path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {

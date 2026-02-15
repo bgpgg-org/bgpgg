@@ -145,6 +145,7 @@ pub fn create_update_message(
     let path = Path {
         local_path_id: None,
         remote_path_id: None,
+        stale: false,
         attrs: PathAttrs {
             origin,
             as_path: as_path_segments,
@@ -277,6 +278,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
     Ok(Path {
         local_path_id: None,
         remote_path_id: None,
+        stale: false,
         attrs: PathAttrs {
             origin,
             as_path,

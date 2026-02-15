@@ -37,6 +37,7 @@ pub(crate) mod test_helpers {
         Arc::new(Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
@@ -68,6 +69,7 @@ pub(crate) mod test_helpers {
         let mut path = Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {

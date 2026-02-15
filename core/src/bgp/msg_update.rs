@@ -723,6 +723,7 @@ mod tests {
         Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],

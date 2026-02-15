@@ -126,6 +126,7 @@ impl PeerRoute {
         Path {
             local_path_id: None,
             remote_path_id: None,
+            stale: false,
             attrs: PathAttrs {
                 origin: self.origin,
                 as_path: as_path_segments,
