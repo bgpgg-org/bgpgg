@@ -136,7 +136,7 @@ impl BgpMessage {
                 Ok(BgpMessage::Open(message))
             }
             MessageType::Update => {
-                let message = UpdateMessage::from_bytes_with_format(bytes, format)?;
+                let message = UpdateMessage::from_bytes(bytes, format)?;
                 Ok(BgpMessage::Update(message))
             }
             MessageType::Keepalive => Ok(BgpMessage::Keepalive(KeepaliveMessage {})),

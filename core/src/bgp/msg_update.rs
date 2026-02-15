@@ -147,16 +147,13 @@ impl UpdateMessage {
         // Append unknown attributes
         path_attributes.extend(path.unknown_attrs.clone());
 
-        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
-
-        let ipv4_nlri = nlri_from_prefixes(&ipv4_routes, path_id);
-
         UpdateMessage {
             withdrawn_routes_len: 0,
             withdrawn_routes: vec![],
-            total_path_attributes_len: path_attributes_bytes.len() as u16,
+            total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
+                .len() as u16,
             path_attributes,
-            nlri_list: ipv4_nlri,
+            nlri_list: nlri_from_prefixes(&ipv4_routes, path_id),
             format,
         }
     }
@@ -175,25 +172,23 @@ impl UpdateMessage {
 
         // MP_UNREACH_NLRI for IPv6 withdrawals (RFC 4760)
         if !ipv6_withdrawn.is_empty() {
-            let withdrawn_with_path_id = nlri_from_prefixes(&ipv6_withdrawn, path_id);
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
                 value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
-                    withdrawn_routes: withdrawn_with_path_id,
+                    withdrawn_routes: nlri_from_prefixes(&ipv6_withdrawn, path_id),
                 }),
             });
         }
 
-        let ipv4_withdrawn_nlri = nlri_from_prefixes(&ipv4_withdrawn, path_id);
-        let withdrawn_routes_bytes = write_nlri_list(&ipv4_withdrawn_nlri);
-        let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
+        let withdrawn_routes = nlri_from_prefixes(&ipv4_withdrawn, path_id);
 
         UpdateMessage {
-            withdrawn_routes_len: withdrawn_routes_bytes.len() as u16,
-            withdrawn_routes: ipv4_withdrawn_nlri,
-            total_path_attributes_len: path_attributes_bytes.len() as u16,
+            withdrawn_routes_len: write_nlri_list(&withdrawn_routes).len() as u16,
+            total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
+                .len() as u16,
+            withdrawn_routes,
             path_attributes,
             nlri_list: vec![],
             format,
@@ -532,20 +527,7 @@ impl UpdateMessage {
         self.format.use_4byte_asn
     }
 
-    pub fn from_bytes(bytes: Vec<u8>, use_4byte_asn: bool) -> Result<Self, ParserError> {
-        Self::from_bytes_with_format(
-            bytes,
-            MessageFormat {
-                use_4byte_asn,
-                add_path: false,
-            },
-        )
-    }
-
-    pub fn from_bytes_with_format(
-        bytes: Vec<u8>,
-        format: MessageFormat,
-    ) -> Result<Self, ParserError> {
+    pub fn from_bytes(bytes: Vec<u8>, format: MessageFormat) -> Result<Self, ParserError> {
         let body_length = bytes.len();
         let mut data = bytes;
 
@@ -862,7 +844,7 @@ mod tests {
         ($name: ident, $input: expr, expected $expected:expr) => {
             #[test]
             fn $name() {
-                let message = UpdateMessage::from_bytes($input, true).unwrap();
+                let message = UpdateMessage::from_bytes($input, DEFAULT_FORMAT).unwrap();
                 assert_eq!(message, $expected)
             }
         };
@@ -1077,7 +1059,7 @@ mod tests {
     #[test]
     fn test_update_message_encode_decode() {
         // Decode the message
-        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), true).unwrap();
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), DEFAULT_FORMAT).unwrap();
 
         // Encode it back
         let encoded = message.to_bytes();
@@ -1089,7 +1071,7 @@ mod tests {
     #[test]
     fn test_update_message_serialize() {
         // Decode the message
-        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), true).unwrap();
+        let message = UpdateMessage::from_bytes(INPUT_BODY.to_vec(), DEFAULT_FORMAT).unwrap();
 
         // Serialize it (includes BGP header)
         let serialized = message.serialize();
@@ -1222,7 +1204,7 @@ mod tests {
             let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let bytes = msg.to_bytes();
-            let parsed = UpdateMessage::from_bytes(bytes, true).unwrap();
+            let parsed = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
             assert_eq!(parsed.origin(), Some(origin));
             assert_eq!(parsed.as_path(), Some(vec![]));
@@ -1250,7 +1232,7 @@ mod tests {
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let bytes = msg.to_bytes();
-        let parsed = UpdateMessage::from_bytes(bytes, true).unwrap();
+        let parsed = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
         assert_eq!(parsed.originator_id(), Some(originator_id));
         assert_eq!(parsed.cluster_list(), Some(cluster_list));
@@ -1323,7 +1305,7 @@ mod tests {
         };
 
         let bytes = msg.to_bytes();
-        let parsed = UpdateMessage::from_bytes(bytes, true).unwrap();
+        let parsed = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
         // Verify MP_REACH_NLRI was preserved
         assert_eq!(
@@ -1414,7 +1396,7 @@ mod tests {
         };
 
         let bytes = msg.to_bytes();
-        let result = UpdateMessage::from_bytes(bytes, true);
+        let result = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT);
 
         // Should fail with MalformedAttributeList
         assert!(result.is_err());
@@ -1440,7 +1422,7 @@ mod tests {
                   // Check: 4 + 100 + 4 = 108 > 8, should error
         ];
 
-        match UpdateMessage::from_bytes(input.to_vec(), true) {
+        match UpdateMessage::from_bytes(input.to_vec(), DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1706,7 +1688,7 @@ mod tests {
         ];
 
         for (name, input, expected_missing_type) in test_cases {
-            match UpdateMessage::from_bytes(input, true) {
+            match UpdateMessage::from_bytes(input, DEFAULT_FORMAT) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1725,7 +1707,7 @@ mod tests {
     fn test_no_missing_well_known_attribute_without_nlri() {
         let input = build_update_body(&[], &[]);
 
-        let result = UpdateMessage::from_bytes(input, true);
+        let result = UpdateMessage::from_bytes(input, DEFAULT_FORMAT);
         assert!(result.is_ok());
     }
 
@@ -1866,7 +1848,7 @@ mod tests {
         // Two ORIGIN attributes in the same UPDATE message
         let input = build_update_body(&[PATH_ATTR_ORIGIN_IGP, PATH_ATTR_ORIGIN_IGP], &[]);
 
-        match UpdateMessage::from_bytes(input, true) {
+        match UpdateMessage::from_bytes(input, DEFAULT_FORMAT) {
             Err(ParserError::BgpError { error, .. }) => {
                 assert_eq!(
                     error,
@@ -1889,7 +1871,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body, true).unwrap();
+        let msg = UpdateMessage::from_bytes(body, DEFAULT_FORMAT).unwrap();
 
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert_eq!(msg.communities(), Some(vec![0x00010064, 0xFFFFFF01]));
@@ -1918,7 +1900,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body, true).unwrap();
+        let msg = UpdateMessage::from_bytes(body, DEFAULT_FORMAT).unwrap();
 
         assert_eq!(msg.communities(), None);
     }
@@ -1935,7 +1917,7 @@ mod tests {
             NLRI_SINGLE,
         );
 
-        let msg = UpdateMessage::from_bytes(body, true).unwrap();
+        let msg = UpdateMessage::from_bytes(body, DEFAULT_FORMAT).unwrap();
 
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert_eq!(
@@ -1983,7 +1965,7 @@ mod tests {
 
         // Encode and decode
         let bytes = msg.to_bytes();
-        let decoded = UpdateMessage::from_bytes(bytes, true).unwrap();
+        let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
         // Verify
         assert_eq!(decoded.nlri_list(), vec![ipv6_prefix]);
@@ -2229,7 +2211,7 @@ mod tests {
         assert_eq!(msg.nlri_with_path_id(), expected_nlri);
 
         let bytes = msg.to_bytes();
-        let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
+        let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
 
         assert_eq!(decoded.nlri_with_path_id(), expected_nlri);
         assert_eq!(decoded.origin(), Some(Origin::IGP));
@@ -2253,7 +2235,7 @@ mod tests {
 
         let msg = UpdateMessage::new_withdraw(withdrawn.clone(), format, Some(7));
         let bytes = msg.to_bytes();
-        let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
+        let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
 
         let expected_withdrawn: Vec<Nlri> =
             withdrawn.into_iter().map(|net| (net, Some(7))).collect();
@@ -2266,7 +2248,7 @@ mod tests {
         assert!(msg.nlri_with_path_id().is_empty());
 
         let bytes = msg.to_bytes();
-        let decoded = UpdateMessage::from_bytes(bytes, true).unwrap();
+        let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
         assert!(decoded.nlri_with_path_id().is_empty());
     }
 }

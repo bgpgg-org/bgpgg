@@ -15,7 +15,7 @@
 //! BMP testing utilities
 
 use super::common::TestServer;
-use bgpgg::bgp::msg::BGP_HEADER_SIZE_BYTES;
+use bgpgg::bgp::msg::{MessageFormat, BGP_HEADER_SIZE_BYTES};
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bmp::msg::BmpMessage;
@@ -318,7 +318,14 @@ impl FakeBmpServer {
         let bgp_msg_offset = PEER_HEADER_SIZE;
         let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
         // BMP uses 4-byte ASN encoding per RFC 7854
-        let bgp_update = UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec(), true).unwrap();
+        let bgp_update = UpdateMessage::from_bytes(
+            body[bgp_body_offset..].to_vec(),
+            MessageFormat {
+                use_4byte_asn: true,
+                add_path: false,
+            },
+        )
+        .unwrap();
 
         RouteMonitoringMessage {
             peer_header,
@@ -616,8 +623,14 @@ impl FakeBmpServer {
         let peer_header = parse_peer_header(body);
         let bgp_msg_offset = PEER_HEADER_SIZE;
         let bgp_body_offset = bgp_msg_offset + BGP_HEADER_SIZE_BYTES;
-        let bgp_update =
-            UpdateMessage::from_bytes(body[bgp_body_offset..].to_vec(), false).unwrap();
+        let bgp_update = UpdateMessage::from_bytes(
+            body[bgp_body_offset..].to_vec(),
+            MessageFormat {
+                use_4byte_asn: false,
+                add_path: false,
+            },
+        )
+        .unwrap();
 
         RouteMonitoringMessage {
             peer_header,
