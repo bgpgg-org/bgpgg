@@ -648,10 +648,9 @@ impl Peer {
             }
 
             // Create EOR message
-            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
             let format = MessageFormat {
-                use_4byte_asn,
-                add_path: false,
+                use_4byte_asn: self.capabilities.supports_four_octet_asn(),
+                add_path: self.capabilities.add_path_send_negotiated(afi_safi),
             };
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 

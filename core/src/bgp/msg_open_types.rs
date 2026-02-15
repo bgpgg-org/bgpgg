@@ -26,6 +26,15 @@ pub enum AddPathMode {
 }
 
 impl AddPathMode {
+    pub fn from_flags(send: bool, receive: bool) -> Option<Self> {
+        match (send, receive) {
+            (true, true) => Some(AddPathMode::Both),
+            (true, false) => Some(AddPathMode::Send),
+            (false, true) => Some(AddPathMode::Receive),
+            (false, false) => None,
+        }
+    }
+
     pub fn can_send(self) -> bool {
         matches!(self, AddPathMode::Send | AddPathMode::Both)
     }
