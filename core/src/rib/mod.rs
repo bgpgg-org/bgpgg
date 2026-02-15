@@ -27,4 +27,5 @@ mod types;
 
 // Re-exports
 pub use path::{Path, PathAttrs};
+pub use rib_loc::RouteDelta;
 pub use types::{Route, RouteSource};

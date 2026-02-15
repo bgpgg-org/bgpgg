@@ -27,7 +27,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, Route};
+use crate::rib::{Path, Route, RouteDelta};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -259,7 +259,7 @@ impl BgpServer {
                 let import_policies = peer.policy_in();
 
                 if !import_policies.is_empty() {
-                    let (best_changed, all_affected) = self.loc_rib.apply_peer_update(
+                    let delta = self.loc_rib.apply_peer_update(
                         peer_ip,
                         withdrawn.clone(),
                         announced.clone(),
@@ -279,9 +279,8 @@ impl BgpServer {
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
-                    if !best_changed.is_empty() || !all_affected.is_empty() {
-                        self.propagate_routes(best_changed, all_affected, Some(peer_ip))
-                            .await;
+                    if !delta.best_changed.is_empty() || !delta.changed.is_empty() {
+                        self.propagate_routes(delta, Some(peer_ip)).await;
                     }
 
                     // BMP: Send route monitoring for this update
@@ -392,8 +391,10 @@ impl BgpServer {
                     let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
                     if !changed_prefixes.is_empty() {
                         self.propagate_routes(
-                            changed_prefixes.clone(),
-                            changed_prefixes,
+                            RouteDelta {
+                                best_changed: changed_prefixes.clone(),
+                                changed: changed_prefixes,
+                            },
                             Some(peer_ip),
                         )
                         .await;
@@ -433,8 +434,10 @@ impl BgpServer {
                 // Propagate withdrawals if any routes were removed
                 if !all_changed_prefixes.is_empty() {
                     self.propagate_routes(
-                        all_changed_prefixes.clone(),
-                        all_changed_prefixes,
+                        RouteDelta {
+                            best_changed: all_changed_prefixes.clone(),
+                            changed: all_changed_prefixes,
+                        },
                         Some(peer_ip),
                     )
                     .await;
@@ -449,8 +452,10 @@ impl BgpServer {
                 // Propagate withdrawals if any routes were removed
                 if !changed_prefixes.is_empty() {
                     self.propagate_routes(
-                        changed_prefixes.clone(),
-                        changed_prefixes,
+                        RouteDelta {
+                            best_changed: changed_prefixes.clone(),
+                            changed: changed_prefixes,
+                        },
                         Some(peer_ip),
                     )
                     .await;
@@ -609,8 +614,14 @@ impl BgpServer {
             }
 
             if !all_changed.is_empty() {
-                self.propagate_routes(all_changed.clone(), all_changed, Some(peer_ip))
-                    .await;
+                self.propagate_routes(
+                    RouteDelta {
+                        best_changed: all_changed.clone(),
+                        changed: all_changed,
+                    },
+                    Some(peer_ip),
+                )
+                .await;
             }
         }
 
@@ -622,8 +633,14 @@ impl BgpServer {
             .collect();
 
         if !all_prefixes.is_empty() {
-            self.propagate_routes(all_prefixes.clone(), all_prefixes, None)
-                .await;
+            self.propagate_routes(
+                RouteDelta {
+                    best_changed: all_prefixes.clone(),
+                    changed: all_prefixes,
+                },
+                None,
+            )
+            .await;
         }
 
         // Signal that loc-rib has been sent for all negotiated AFI/SAFIs
@@ -738,8 +755,10 @@ impl BgpServer {
 
         // Propagate route changes (withdrawals or new best paths) to all remaining peers
         self.propagate_routes(
-            changed_prefixes.clone(),
-            changed_prefixes,
+            RouteDelta {
+                best_changed: changed_prefixes.clone(),
+                changed: changed_prefixes,
+            },
             None, // Don't exclude any peer since the removed peer is already gone
         )
         .await;
@@ -1109,8 +1128,14 @@ impl BgpServer {
         );
 
         // Propagate to all peers using the common propagation logic
-        self.propagate_routes(vec![prefix], vec![prefix], None)
-            .await;
+        self.propagate_routes(
+            RouteDelta {
+                best_changed: vec![prefix],
+                changed: vec![prefix],
+            },
+            None,
+        )
+        .await;
 
         let _ = response.send(Ok(()));
     }
@@ -1130,8 +1155,14 @@ impl BgpServer {
             // Propagate to all peers using the common propagation logic
             // This will automatically send withdrawal if no alternate path exists,
             // or announce the new best path if an alternate path is available
-            self.propagate_routes(vec![prefix], vec![prefix], None)
-                .await;
+            self.propagate_routes(
+                RouteDelta {
+                    best_changed: vec![prefix],
+                    changed: vec![prefix],
+                },
+                None,
+            )
+            .await;
         }
 
         let _ = response.send(Ok(()));

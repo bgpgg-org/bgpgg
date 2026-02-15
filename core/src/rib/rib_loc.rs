@@ -18,6 +18,14 @@ use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::path_id::PathIdAllocator;
 use crate::rib::{Path, Route, RouteSource};
+
+/// Result of applying a peer update to the Loc-RIB.
+pub struct RouteDelta {
+    /// Prefixes where the best path changed (for non-ADD-PATH peers)
+    pub best_changed: Vec<IpNetwork>,
+    /// All prefixes with any path added or removed (for ADD-PATH peers)
+    pub changed: Vec<IpNetwork>,
+}
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::IpAddr;
@@ -211,16 +219,13 @@ impl LocRib {
 
     /// Update Loc-RIB from delta changes (withdrawn and announced routes)
     /// Applies import policy (via closure) before adding routes
-    /// Returns (best_changed, all_affected):
-    /// - best_changed: prefixes where the best path changed (for non-ADD-PATH peers)
-    /// - all_affected: all prefixes touched by this update (for ADD-PATH peers)
     pub fn apply_peer_update<F>(
         &mut self,
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
         announced: Vec<(IpNetwork, Arc<Path>)>,
         import_policy: F,
-    ) -> (Vec<IpNetwork>, Vec<IpNetwork>)
+    ) -> RouteDelta
     where
         F: Fn(&IpNetwork, &mut Path) -> bool,
     {
@@ -280,7 +285,10 @@ impl LocRib {
             })
             .cloned()
             .collect();
-        (best_changed, affected)
+        RouteDelta {
+            best_changed,
+            changed: affected,
+        }
     }
 }
 
@@ -1100,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_peer_update_returns_all_affected() {
+    fn test_apply_peer_update_returns_changed() {
         let mut loc_rib = LocRib::new();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
@@ -1118,17 +1126,16 @@ mod tests {
             }];
         });
 
-        let (best_changed, all_affected) =
+        let delta =
             loc_rib.apply_peer_update(peer2, vec![], vec![(prefix, worse_path)], |_, _| true);
 
         // Best didn't change (peer1's path is still best)
-        assert!(best_changed.is_empty(), "best should not have changed");
-        // But the prefix IS affected (new path added)
-        assert_eq!(
-            all_affected,
-            vec![prefix],
-            "prefix should be in all_affected"
+        assert!(
+            delta.best_changed.is_empty(),
+            "best should not have changed"
         );
+        // But the prefix IS affected (new path added)
+        assert_eq!(delta.changed, vec![prefix], "prefix should be in changed");
         // Both paths should exist
         assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
     }

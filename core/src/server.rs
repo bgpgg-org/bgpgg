@@ -31,7 +31,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{Path, Route};
+use crate::rib::{Path, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -921,16 +921,12 @@ impl BgpServer {
     /// Propagate route changes to all established peers (except the originating peer)
     /// If originating_peer is None, propagates to all peers (used for locally originated routes)
     ///
-    /// - best_changed: prefixes where the best path changed (for non-ADD-PATH peers)
-    /// - all_affected: all prefixes touched (for ADD-PATH peers who need non-best path changes)
-    ///
     /// RFC 4456 Route Reflector filtering is handled by compute_routes_for_peer based on:
     /// - path.source.is_rr_client(): whether source peer was an RR client
     /// - rr_client: whether peer is an RR client
     pub(crate) async fn propagate_routes(
         &mut self,
-        best_changed: Vec<IpNetwork>,
-        all_affected: Vec<IpNetwork>,
+        delta: RouteDelta,
         originating_peer: Option<IpAddr>,
     ) {
         let local_asn = self.config.asn;
@@ -940,7 +936,7 @@ impl BgpServer {
         let mut to_announce = Vec::new();
         let mut to_withdraw = Vec::new();
 
-        for prefix in &best_changed {
+        for prefix in &delta.best_changed {
             if let Some(best_path) = self.loc_rib.get_best_path(prefix) {
                 to_announce.push((*prefix, best_path.clone()));
             } else {
@@ -1016,7 +1012,7 @@ impl BgpServer {
                 let mut addpath_to_announce = Vec::new();
                 let mut addpath_to_withdraw = Vec::new();
 
-                for prefix in &all_affected {
+                for prefix in &delta.changed {
                     let current_paths = self.loc_rib.get_all_paths(prefix);
 
                     // Collect adj_rib_out path IDs for this prefix
