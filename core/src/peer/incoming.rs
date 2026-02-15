@@ -299,8 +299,8 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::MessageFormat;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
+    use crate::bgp::DEFAULT_FORMAT;
     use crate::config::MaxPrefixSetting;
     use crate::net::Ipv4Net;
     use crate::peer::BgpState;
@@ -387,14 +387,7 @@ mod tests {
             peer.asn = Some(peer_asn);
 
             let path = test_path_with_as(first_as);
-            let update = UpdateMessage::new(
-                &path,
-                vec![],
-                MessageFormat {
-                    use_4byte_asn: false,
-                    add_path: false,
-                },
-            );
+            let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let result = peer.handle_update(update);
             assert_eq!(
@@ -496,10 +489,7 @@ mod tests {
                 let initial_update = UpdateMessage::new(
                     &test_path_with_as(65001),
                     initial_nlri,
-                    MessageFormat {
-                        use_4byte_asn: false,
-                        add_path: false,
-                    },
+                    DEFAULT_FORMAT,
                 );
                 peer.handle_update(initial_update).unwrap();
             }
@@ -513,14 +503,7 @@ mod tests {
                 })
                 .collect();
 
-            let update = UpdateMessage::new(
-                &test_path_with_as(65001),
-                nlri,
-                MessageFormat {
-                    use_4byte_asn: false,
-                    add_path: false,
-                },
-            );
+            let update = UpdateMessage::new(&test_path_with_as(65001), nlri, DEFAULT_FORMAT);
 
             let result = peer.handle_update(update);
             assert_eq!(result.is_ok(), expected_ok, "{}", desc);

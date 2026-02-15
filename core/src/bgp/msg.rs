@@ -32,6 +32,13 @@ pub struct MessageFormat {
     pub add_path: bool,
 }
 
+/// Format for parsing OPEN messages, before capabilities are negotiated.
+/// OPEN always uses 2-byte ASN (RFC 6793) and no ADD-PATH.
+pub const PRE_OPEN_FORMAT: MessageFormat = MessageFormat {
+    use_4byte_asn: false,
+    add_path: false,
+};
+
 // BGP header marker (16 bytes of 0xFF)
 pub const BGP_MARKER: [u8; 16] = [0xff; 16];
 

@@ -324,7 +324,7 @@ impl Ord for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::MessageFormat;
+    use crate::bgp::DEFAULT_FORMAT;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -586,14 +586,7 @@ mod tests {
             originator_id: None,
             cluster_list: vec![],
         };
-        let update = UpdateMessage::new(
-            &path,
-            vec![],
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        );
+        let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         let path = Path::from_update_msg(&update, source, false);
         assert!(path.is_some());
         let path = path.unwrap();
@@ -604,14 +597,7 @@ mod tests {
         assert!(path.atomic_aggregate);
 
         // Missing required attrs -> None
-        let empty_update = UpdateMessage::new_withdraw(
-            vec![],
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-            None,
-        );
+        let empty_update = UpdateMessage::new_withdraw(vec![], DEFAULT_FORMAT, None);
         assert!(Path::from_update_msg(&empty_update, source, false).is_none());
     }
 

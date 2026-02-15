@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message, MessageFormat};
+use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
@@ -712,43 +712,36 @@ impl Peer {
     /// OPEN message to reduce resource consumption from connection collisions.
     async fn handle_delay_open_message(&mut self, result: Option<Result<Vec<u8>, ParserError>>) {
         match result {
-            Some(Ok(bytes)) => {
-                // RFC 6793: OPEN messages always use 2-byte ASN encoding
-                let pre_open_format = MessageFormat {
-                    use_4byte_asn: false,
-                    add_path: false,
-                };
-                match Self::parse_bgp_message(&bytes, pre_open_format) {
-                    Ok(BgpMessage::Open(open)) => {
-                        debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
-                        self.fsm.timers.stop_delay_open_timer();
-                        let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
-                            peer_asn: open.asn,
-                            peer_hold_time: open.hold_time,
-                            local_asn: self.local_config.asn,
-                            local_hold_time: self.local_config.hold_time,
-                            peer_capabilities: PeerCapabilities::default(),
-                            peer_bgp_id: open.bgp_identifier,
-                        });
-                        if let Err(e) = self.process_event(&event).await {
-                            error!(peer_ip = %self.addr, error = %e, "failed to send response to OPEN");
-                            self.disconnect(true, PeerDownReason::LocalNoNotification(event));
-                        }
-                    }
-                    Ok(BgpMessage::Notification(notif)) => {
-                        self.handle_notification_received(&notif).await;
-                    }
-                    Ok(_) => {
-                        error!(peer_ip = %self.addr, "unexpected message while waiting for DelayOpen");
-                        self.disconnect(true, PeerDownReason::RemoteNoNotification);
-                    }
-                    Err(e) => {
-                        debug!(peer_ip = %self.addr, error = ?e, "parse error while waiting for DelayOpen");
-                        let event = Self::parse_error_to_fsm_event(&e);
-                        self.try_process_event(&event).await;
+            Some(Ok(bytes)) => match Self::parse_bgp_message(&bytes, PRE_OPEN_FORMAT) {
+                Ok(BgpMessage::Open(open)) => {
+                    debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
+                    self.fsm.timers.stop_delay_open_timer();
+                    let event = FsmEvent::BgpOpenWithDelayOpenTimer(BgpOpenParams {
+                        peer_asn: open.asn,
+                        peer_hold_time: open.hold_time,
+                        local_asn: self.local_config.asn,
+                        local_hold_time: self.local_config.hold_time,
+                        peer_capabilities: PeerCapabilities::default(),
+                        peer_bgp_id: open.bgp_identifier,
+                    });
+                    if let Err(e) = self.process_event(&event).await {
+                        error!(peer_ip = %self.addr, error = %e, "failed to send response to OPEN");
+                        self.disconnect(true, PeerDownReason::LocalNoNotification(event));
                     }
                 }
-            }
+                Ok(BgpMessage::Notification(notif)) => {
+                    self.handle_notification_received(&notif).await;
+                }
+                Ok(_) => {
+                    error!(peer_ip = %self.addr, "unexpected message while waiting for DelayOpen");
+                    self.disconnect(true, PeerDownReason::RemoteNoNotification);
+                }
+                Err(e) => {
+                    debug!(peer_ip = %self.addr, error = ?e, "parse error while waiting for DelayOpen");
+                    let event = Self::parse_error_to_fsm_event(&e);
+                    self.try_process_event(&event).await;
+                }
+            },
             Some(Err(e)) => {
                 // Header validation error from read task
                 debug!(peer_ip = %self.addr, error = %e, "connection error while waiting for DelayOpen");
