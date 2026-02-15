@@ -37,14 +37,20 @@ pub async fn bgp_handshake(
     stream.write_all(&open.serialize()).await?;
 
     // Read peer's OPEN (use_4byte_asn=true since we advertised the capability)
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to read OPEN: {:?}", e),
-            )
-        })?;
+    let msg = bgpgg::bgp::msg::read_bgp_message(
+        &mut *stream,
+        MessageFormat {
+            use_4byte_asn: true,
+            add_path: false,
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to read OPEN: {:?}", e),
+        )
+    })?;
 
     match msg {
         BgpMessage::Open(peer_open) => {
@@ -68,14 +74,20 @@ pub async fn bgp_handshake(
     stream.write_all(&keepalive.serialize()).await?;
 
     // Read peer's KEEPALIVE (use_4byte_asn=true for consistency)
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to read KEEPALIVE: {:?}", e),
-            )
-        })?;
+    let msg = bgpgg::bgp::msg::read_bgp_message(
+        &mut *stream,
+        MessageFormat {
+            use_4byte_asn: true,
+            add_path: false,
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to read KEEPALIVE: {:?}", e),
+        )
+    })?;
 
     match msg {
         BgpMessage::Keepalive(_) => Ok(()),

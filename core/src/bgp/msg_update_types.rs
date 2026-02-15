@@ -86,13 +86,16 @@ pub struct MpReachNlri {
     pub safi: Safi,
     pub next_hop: NextHopAddr,
     pub nlri: Vec<IpNetwork>,
+    /// RFC 7911: Path identifier shared by all NLRIs in this attribute
+    pub path_id: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
-    pub withdrawn_routes: Vec<IpNetwork>,
+    /// Each withdrawal carries its own optional path_id for ADD-PATH
+    pub withdrawn_routes: Vec<(IpNetwork, Option<u32>)>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

@@ -217,8 +217,9 @@ pub fn send_withdrawals_to_peer(
     }
 }
 
-/// Batching key: attributes that must match for announcements to be batched together
-type BatchingKey = (Origin, Vec<AsPathSegment>, NextHopAddr, bool, Vec<u32>);
+/// Batching key: attributes that must match for announcements to be batched together.
+/// Includes local_path_id so ADD-PATH paths with different IDs are never merged.
+type BatchingKey = (Origin, Vec<AsPathSegment>, NextHopAddr, bool, Vec<u32>, u32);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
@@ -234,6 +235,7 @@ pub(crate) fn batch_announcements_by_path(
             path.next_hop,
             path.atomic_aggregate,
             path.communities.clone(),
+            path.local_path_id,
         );
         let batch = batches.entry(key).or_insert_with(|| AnnouncementBatch {
             path: Arc::clone(path),

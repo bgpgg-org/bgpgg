@@ -16,6 +16,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::{Path, Route};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 
 /// Adj-RIB-In: Per-peer input routing table
@@ -31,24 +32,8 @@ pub struct AdjRibIn {
 impl AdjRibIn {
     pub fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         match prefix {
-            IpNetwork::V4(net) => {
-                self.ipv4_unicast.insert(
-                    net,
-                    Route {
-                        prefix,
-                        paths: vec![path],
-                    },
-                );
-            }
-            IpNetwork::V6(net) => {
-                self.ipv6_unicast.insert(
-                    net,
-                    Route {
-                        prefix,
-                        paths: vec![path],
-                    },
-                );
-            }
+            IpNetwork::V4(net) => Self::add_to_table(&mut self.ipv4_unicast, net, prefix, path),
+            IpNetwork::V6(net) => Self::add_to_table(&mut self.ipv6_unicast, net, prefix, path),
         }
     }
 
@@ -84,13 +69,60 @@ impl AdjRibIn {
         }
     }
 
-    pub fn remove_route(&mut self, prefix: IpNetwork) {
+    pub fn remove_route(&mut self, prefix: IpNetwork, remote_path_id: Option<u32>) {
         match prefix {
             IpNetwork::V4(net) => {
-                self.ipv4_unicast.remove(&net);
+                Self::remove_from_table(&mut self.ipv4_unicast, &net, remote_path_id)
             }
             IpNetwork::V6(net) => {
-                self.ipv6_unicast.remove(&net);
+                Self::remove_from_table(&mut self.ipv6_unicast, &net, remote_path_id)
+            }
+        }
+    }
+
+    /// Add or replace a path in a table. Matches by remote_path_id:
+    /// - If a path with the same remote_path_id exists, replace it
+    /// - Otherwise, add a new path
+    ///
+    /// Without ADD-PATH, remote_path_id is None on both sides -> one path per prefix.
+    fn add_to_table<K: Eq + Hash>(
+        table: &mut HashMap<K, Route>,
+        key: K,
+        prefix: IpNetwork,
+        path: Arc<Path>,
+    ) {
+        if let Some(route) = table.get_mut(&key) {
+            if let Some(existing) = route
+                .paths
+                .iter_mut()
+                .find(|p| p.remote_path_id == path.remote_path_id)
+            {
+                *existing = path;
+            } else {
+                route.paths.push(path);
+            }
+        } else {
+            table.insert(
+                key,
+                Route {
+                    prefix,
+                    paths: vec![path],
+                },
+            );
+        }
+    }
+
+    /// Remove a path by remote_path_id. Removes the Route entry if no paths remain.
+    /// Without ADD-PATH, remote_path_id is None -> removes the single path.
+    fn remove_from_table<K: Eq + Hash>(
+        table: &mut HashMap<K, Route>,
+        key: &K,
+        remote_path_id: Option<u32>,
+    ) {
+        if let Some(route) = table.get_mut(key) {
+            route.paths.retain(|p| p.remote_path_id != remote_path_id);
+            if route.paths.is_empty() {
+                table.remove(key);
             }
         }
     }
@@ -231,7 +263,7 @@ mod tests {
         rib_in.add_route(prefix1, path1);
         rib_in.add_route(prefix2, path2.clone());
 
-        rib_in.remove_route(prefix1);
+        rib_in.remove_route(prefix1, None);
 
         let routes = rib_in.get_all_routes();
         assert_eq!(
@@ -248,7 +280,7 @@ mod tests {
         let mut rib_in = AdjRibIn::new();
         let prefix = create_test_prefix();
 
-        rib_in.remove_route(prefix);
+        rib_in.remove_route(prefix, None);
         assert_eq!(rib_in.get_all_routes().len(), 0);
     }
 
@@ -307,5 +339,115 @@ mod tests {
 
         rib_in.clear();
         assert_eq!(rib_in.get_all_routes().len(), 0);
+    }
+
+    #[test]
+    fn test_addpath_multiple_paths_coexist() {
+        let mut rib_in = AdjRibIn::new();
+        let prefix = create_test_prefix();
+
+        let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(1);
+        });
+        let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(2);
+            p.as_path = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 3,
+                asn_list: vec![100, 200, 300],
+            }];
+        });
+
+        rib_in.add_route(prefix, path1);
+        rib_in.add_route(prefix, path2);
+
+        let routes = rib_in.get_all_routes();
+        assert_eq!(routes.len(), 1, "same prefix should be one Route");
+        assert_eq!(routes[0].paths.len(), 2, "two paths should coexist");
+    }
+
+    #[test]
+    fn test_addpath_replace_by_remote_path_id() {
+        let mut rib_in = AdjRibIn::new();
+        let prefix = create_test_prefix();
+
+        let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(1);
+            p.med = Some(10);
+        });
+        let path1_updated = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(1);
+            p.med = Some(20);
+        });
+
+        rib_in.add_route(prefix, path1);
+        rib_in.add_route(prefix, path1_updated);
+
+        let routes = rib_in.get_all_routes();
+        assert_eq!(routes[0].paths.len(), 1, "same path_id should replace");
+        assert_eq!(routes[0].paths[0].med, Some(20));
+    }
+
+    #[test]
+    fn test_addpath_withdraw_one_path() {
+        let mut rib_in = AdjRibIn::new();
+        let prefix = create_test_prefix();
+
+        let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(1);
+        });
+        let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(2);
+        });
+
+        rib_in.add_route(prefix, path1);
+        rib_in.add_route(prefix, path2);
+        assert_eq!(rib_in.get_all_routes()[0].paths.len(), 2);
+
+        // Withdraw path_id=1, path_id=2 should remain
+        rib_in.remove_route(prefix, Some(1));
+        let routes = rib_in.get_all_routes();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].paths.len(), 1);
+        assert_eq!(routes[0].paths[0].remote_path_id, Some(2));
+    }
+
+    #[test]
+    fn test_addpath_withdraw_all_removes_entry() {
+        let mut rib_in = AdjRibIn::new();
+        let prefix = create_test_prefix();
+
+        let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.remote_path_id = Some(1);
+        });
+
+        rib_in.add_route(prefix, path1);
+        rib_in.remove_route(prefix, Some(1));
+
+        assert_eq!(rib_in.prefix_count(), 0, "entry should be removed");
+    }
+
+    #[test]
+    fn test_non_addpath_backward_compat() {
+        // Without ADD-PATH, remote_path_id is None on all paths.
+        // add_route should overwrite, remove_route should remove.
+        let mut rib_in = AdjRibIn::new();
+        let prefix = create_test_prefix();
+
+        let path1 = create_test_path(test_peer_ip(), test_bgp_id());
+        let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
+            p.med = Some(50);
+        });
+
+        rib_in.add_route(prefix, path1);
+        rib_in.add_route(prefix, path2);
+
+        // Should have replaced (both have remote_path_id=None)
+        let routes = rib_in.get_all_routes();
+        assert_eq!(routes[0].paths.len(), 1);
+        assert_eq!(routes[0].paths[0].med, Some(50));
+
+        rib_in.remove_route(prefix, None);
+        assert_eq!(rib_in.prefix_count(), 0);
     }
 }

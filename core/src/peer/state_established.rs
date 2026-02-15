@@ -14,10 +14,10 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
-use crate::bgp::msg::Message;
+use crate::bgp::msg::{Message, MessageFormat};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_route_refresh::RouteRefreshMessage;
-use crate::bgp::multiprotocol::AfiSafi;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, error, info, warn};
 use crate::types::PeerDownReason;
 use std::mem;
@@ -134,9 +134,15 @@ impl Peer {
                 result = conn.msg_rx.recv() => {
                     match result {
                         Some(Ok(bytes)) => {
-                            // Parse bytes using negotiated 4-byte ASN capability
-                            let use_4byte_asn = self.capabilities.supports_four_octet_asn();
-                            match Self::parse_bgp_message(&bytes, use_4byte_asn) {
+                            // Construct MessageFormat from negotiated capabilities
+                            let ipv4_uni = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+                            let ipv6_uni = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+                            let format = MessageFormat {
+                                use_4byte_asn: self.capabilities.supports_four_octet_asn(),
+                                add_path: self.capabilities.add_path_receive_negotiated(&ipv4_uni)
+                                    || self.capabilities.add_path_receive_negotiated(&ipv6_uni),
+                            };
+                            match Self::parse_bgp_message(&bytes, format) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");

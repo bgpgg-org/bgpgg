@@ -753,7 +753,12 @@ fn validate_bmp_route_monitoring_msg(
         return false;
     }
 
-    let mut actual_withdrawn = actual.bgp_update().withdrawn_routes().to_vec();
+    let mut actual_withdrawn: Vec<IpNetwork> = actual
+        .bgp_update()
+        .withdrawn_routes()
+        .iter()
+        .map(|(net, _)| *net)
+        .collect();
     let mut expected_withdrawn_vec = expected.withdrawn.clone();
     actual_withdrawn.sort_by_key(|n| format!("{:?}", n));
     expected_withdrawn_vec.sort_by_key(|n| format!("{:?}", n));

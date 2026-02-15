@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message};
+use crate::bgp::msg::{BgpMessage, Message, MessageFormat};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
@@ -676,18 +676,17 @@ impl Peer {
     ///
     /// # Arguments
     /// * `bytes` - Complete BGP message including header
-    /// * `use_4byte_asn` - Whether to use 4-byte ASN encoding
+    /// * `format` - Message encoding format based on negotiated capabilities
     ///
-    /// # Note on use_4byte_asn during OPEN exchange
-    /// During OPEN message exchange, `use_4byte_asn` MUST be `false` because:
+    /// # Note on format during OPEN exchange
+    /// During OPEN message exchange, `format` MUST have `use_4byte_asn: false` because:
     /// - RFC 6793: OPEN messages always use 2-byte ASN encoding
     /// - If peer ASN > 65535, OPEN uses AS_TRANS (23456) and real ASN goes in capability
     /// - Only after OPEN negotiation can we determine if peer supports 4-byte ASNs
-    /// - After negotiation, set `use_4byte_asn = negotiated_capabilities.supports_four_octet_asn()`
-    fn parse_bgp_message(bytes: &[u8], use_4byte_asn: bool) -> Result<BgpMessage, ParserError> {
+    fn parse_bgp_message(bytes: &[u8], format: MessageFormat) -> Result<BgpMessage, ParserError> {
         let message_type = bytes[18];
         let body = bytes[19..].to_vec();
-        BgpMessage::from_bytes(message_type, body, use_4byte_asn)
+        BgpMessage::from_bytes(message_type, body, format)
     }
 
     /// Convert BGP parse error to FSM event for error handling.
@@ -716,7 +715,11 @@ impl Peer {
         match result {
             Some(Ok(bytes)) => {
                 // RFC 6793: OPEN messages always use 2-byte ASN encoding
-                match Self::parse_bgp_message(&bytes, false) {
+                let pre_open_format = MessageFormat {
+                    use_4byte_asn: false,
+                    add_path: false,
+                };
+                match Self::parse_bgp_message(&bytes, pre_open_format) {
                     Ok(BgpMessage::Open(open)) => {
                         debug!(peer_ip = %self.addr, "OPEN received while DelayOpen running");
                         self.fsm.timers.stop_delay_open_timer();

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
 pub(crate) const BGP_VERSION: u8 = 4;
 
 /// RFC 7911: ADD-PATH send/receive mode per AFI/SAFI
@@ -313,8 +315,6 @@ impl Capability {
 
     /// Extract ADD-PATH capability info if this is an AddPath capability
     pub(crate) fn as_add_path(&self) -> Option<AddPathCapability> {
-        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-
         if !matches!(self.code, BgpCapabiltyCode::AddPath) {
             return None;
         }
@@ -342,8 +342,6 @@ impl Capability {
 
     /// Extract Graceful Restart capability info if this is a GracefulRestart capability
     pub(crate) fn as_graceful_restart(&self) -> Option<GracefulRestartCapability> {
-        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-
         if !matches!(self.code, BgpCapabiltyCode::GracefulRestart)
             || self.val.len() < Self::GR_RESTART_HEADER_LEN
         {

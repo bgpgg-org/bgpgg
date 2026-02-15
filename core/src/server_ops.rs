@@ -1006,6 +1006,13 @@ impl BgpServer {
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
 
+            let afi_safi = AfiSafi::new(afi, safi);
+            let add_path_send = conn
+                .capabilities
+                .as_ref()
+                .map(|caps| caps.add_path_send_negotiated(&afi_safi))
+                .unwrap_or(false);
+
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
             let local_next_hop = conn
@@ -1014,64 +1021,22 @@ impl BgpServer {
                 .map(|conn_info| conn_info.local_address)
                 .unwrap_or(self.local_addr);
 
-            let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-            let mut total_sent = 0;
+            // Collect routes: all paths for ADD-PATH peers, best-only otherwise
+            let routes: Vec<(IpNetwork, Arc<Path>)> = match (afi, add_path_send) {
+                (Afi::Ipv4, true) => self.loc_rib.iter_ipv4_unicast_all_paths().collect(),
+                (Afi::Ipv4, false) => self.loc_rib.iter_ipv4_unicast_routes().collect(),
+                (Afi::Ipv6, true) => self.loc_rib.iter_ipv6_unicast_all_paths().collect(),
+                (Afi::Ipv6, false) => self.loc_rib.iter_ipv6_unicast_routes().collect(),
+            };
+
             let mut all_sent = Vec::new();
+            let mut total_sent = 0;
 
-            match afi {
-                Afi::Ipv4 => {
-                    for route in self.loc_rib.iter_ipv4_unicast_routes() {
-                        chunk.push(route);
-                        if chunk.len() >= CHUNK_SIZE {
-                            let sent = send_announcements_to_peer(
-                                peer_ip,
-                                peer_tx,
-                                &chunk,
-                                self.config.asn,
-                                peer_asn,
-                                local_next_hop,
-                                export_policies,
-                                peer_supports_4byte_asn,
-                                rr_client,
-                                cluster_id,
-                                false,
-                            );
-                            all_sent.extend(sent);
-                            total_sent += chunk.len();
-                            chunk.clear();
-                        }
-                    }
-                }
-                Afi::Ipv6 => {
-                    for route in self.loc_rib.iter_ipv6_unicast_routes() {
-                        chunk.push(route);
-                        if chunk.len() >= CHUNK_SIZE {
-                            let sent = send_announcements_to_peer(
-                                peer_ip,
-                                peer_tx,
-                                &chunk,
-                                self.config.asn,
-                                peer_asn,
-                                local_next_hop,
-                                export_policies,
-                                peer_supports_4byte_asn,
-                                rr_client,
-                                cluster_id,
-                                false,
-                            );
-                            all_sent.extend(sent);
-                            total_sent += chunk.len();
-                            chunk.clear();
-                        }
-                    }
-                }
-            }
-
-            if !chunk.is_empty() {
+            for chunk in routes.chunks(CHUNK_SIZE) {
                 let sent = send_announcements_to_peer(
                     peer_ip,
                     peer_tx,
-                    &chunk,
+                    chunk,
                     self.config.asn,
                     peer_asn,
                     local_next_hop,
@@ -1079,7 +1044,7 @@ impl BgpServer {
                     peer_supports_4byte_asn,
                     rr_client,
                     cluster_id,
-                    false,
+                    add_path_send,
                 );
                 all_sent.extend(sent);
                 total_sent += chunk.len();
@@ -2137,8 +2102,13 @@ impl BgpServer {
                 .map(|caps| caps.supports_four_octet_asn())
                 .unwrap_or(false);
 
-            let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-            let mut total_sent = 0;
+            let afi_safi = AfiSafi::new(afi, safi);
+            let add_path_send = conn
+                .capabilities
+                .as_ref()
+                .map(|caps| caps.add_path_send_negotiated(&afi_safi))
+                .unwrap_or(false);
+
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
             let local_next_hop = conn
@@ -2147,66 +2117,22 @@ impl BgpServer {
                 .map(|conn_info| conn_info.local_address)
                 .unwrap_or(self.local_addr);
 
+            // Collect routes: all paths for ADD-PATH peers, best-only otherwise
+            let routes: Vec<(IpNetwork, Arc<Path>)> = match (afi, add_path_send) {
+                (Afi::Ipv4, true) => self.loc_rib.iter_ipv4_unicast_all_paths().collect(),
+                (Afi::Ipv4, false) => self.loc_rib.iter_ipv4_unicast_routes().collect(),
+                (Afi::Ipv6, true) => self.loc_rib.iter_ipv6_unicast_all_paths().collect(),
+                (Afi::Ipv6, false) => self.loc_rib.iter_ipv6_unicast_routes().collect(),
+            };
+
             let mut all_sent = Vec::new();
+            let mut total_sent = 0;
 
-            // Process in chunks
-            match afi {
-                Afi::Ipv4 => {
-                    for route in self.loc_rib.iter_ipv4_unicast_routes() {
-                        chunk.push(route);
-
-                        if chunk.len() >= CHUNK_SIZE {
-                            let sent = send_announcements_to_peer(
-                                peer_ip,
-                                peer_tx,
-                                &chunk,
-                                self.config.asn,
-                                peer_asn,
-                                local_next_hop,
-                                export_policies,
-                                peer_supports_4byte_asn,
-                                rr_client,
-                                cluster_id,
-                                false,
-                            );
-                            all_sent.extend(sent);
-                            total_sent += chunk.len();
-                            chunk.clear();
-                        }
-                    }
-                }
-                Afi::Ipv6 => {
-                    for route in self.loc_rib.iter_ipv6_unicast_routes() {
-                        chunk.push(route);
-
-                        if chunk.len() >= CHUNK_SIZE {
-                            let sent = send_announcements_to_peer(
-                                peer_ip,
-                                peer_tx,
-                                &chunk,
-                                self.config.asn,
-                                peer_asn,
-                                local_next_hop,
-                                export_policies,
-                                peer_supports_4byte_asn,
-                                rr_client,
-                                cluster_id,
-                                false,
-                            );
-                            all_sent.extend(sent);
-                            total_sent += chunk.len();
-                            chunk.clear();
-                        }
-                    }
-                }
-            }
-
-            // Send remaining routes
-            if !chunk.is_empty() {
+            for chunk in routes.chunks(CHUNK_SIZE) {
                 let sent = send_announcements_to_peer(
                     peer_ip,
                     peer_tx,
-                    &chunk,
+                    chunk,
                     self.config.asn,
                     peer_asn,
                     local_next_hop,
@@ -2214,7 +2140,7 @@ impl BgpServer {
                     peer_supports_4byte_asn,
                     rr_client,
                     cluster_id,
-                    false,
+                    add_path_send,
                 );
                 all_sent.extend(sent);
                 total_sent += chunk.len();

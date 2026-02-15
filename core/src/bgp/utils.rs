@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg_notification::{BgpError, UpdateMessageError};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -26,8 +27,6 @@ fn validate_and_calculate_byte_len(
     max_prefix_len: u8,
     remaining_bytes: usize,
 ) -> Result<usize, ParserError> {
-    use super::msg_notification::{BgpError, UpdateMessageError};
-
     // Check prefix length before calculating byte_len
     if prefix_length > max_prefix_len {
         return Err(ParserError::BgpError {
@@ -70,8 +69,6 @@ impl Error for ParserError {}
 
 /// RFC 7911: Parse NLRI list with 4-byte path identifiers prepended to each entry
 pub fn parse_nlri_list_addpath(bytes: &[u8]) -> Result<Vec<(IpNetwork, u32)>, ParserError> {
-    use super::msg_notification::{BgpError, UpdateMessageError};
-
     let mut cursor = 0;
     let mut nlri_list = Vec::new();
 
@@ -152,6 +149,50 @@ pub fn parse_nlri_list(bytes: &[u8]) -> Result<Vec<IpNetwork>, ParserError> {
         }
 
         nlri_list.push(IpNetwork::V4(net));
+        cursor += byte_len;
+    }
+
+    Ok(nlri_list)
+}
+
+/// RFC 7911: Parse IPv6 NLRI list with 4-byte path identifiers prepended to each entry
+pub fn parse_nlri_v6_list_addpath(bytes: &[u8]) -> Result<Vec<(IpNetwork, u32)>, ParserError> {
+    let mut cursor = 0;
+    let mut nlri_list = Vec::new();
+
+    while cursor < bytes.len() {
+        if cursor + 4 > bytes.len() {
+            return Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
+                data: Vec::new(),
+            });
+        }
+        let path_id = u32::from_be_bytes([
+            bytes[cursor],
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+        ]);
+        cursor += 4;
+
+        let prefix_length = bytes[cursor];
+        cursor += 1;
+
+        let byte_len = validate_and_calculate_byte_len(
+            prefix_length,
+            MAX_IPV6_PREFIX_LEN,
+            bytes.len() - cursor,
+        )?;
+
+        let mut ip_buffer = [0; 16];
+        ip_buffer[..byte_len].copy_from_slice(&bytes[cursor..(byte_len + cursor)]);
+
+        let net = Ipv6Net {
+            address: Ipv6Addr::from(ip_buffer),
+            prefix_length,
+        };
+
+        nlri_list.push((IpNetwork::V6(net), path_id));
         cursor += byte_len;
     }
 

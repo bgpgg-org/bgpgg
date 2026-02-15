@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
@@ -20,7 +21,8 @@ use super::msg_update_types::{
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{
-    is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
+    is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_list_addpath, parse_nlri_v6_list,
+    parse_nlri_v6_list_addpath, read_u32, ParserError,
 };
 use crate::log::warn;
 use crate::net::IpNetwork;
@@ -182,6 +184,16 @@ pub(super) fn validate_well_known_mandatory_attributes(
 
 fn validate_nlri_afi(afi: &Afi, routes: &[IpNetwork]) -> bool {
     for route in routes {
+        match (afi, route) {
+            (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn validate_nlri_afi_with_path_id(afi: &Afi, routes: &[(IpNetwork, Option<u32>)]) -> bool {
+    for (route, _) in routes {
         match (afi, route) {
             (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
             _ => return false,
@@ -552,7 +564,10 @@ pub(super) fn read_attr_cluster_list(bytes: &[u8]) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, ParserError> {
+pub(super) fn read_attr_mp_reach_nlri(
+    bytes: &[u8],
+    add_path: bool,
+) -> Result<MpReachNlri, ParserError> {
     // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
     const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
     const RESERVED_SIZE: usize = 1;
@@ -596,11 +611,23 @@ pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, Parse
     };
 
     let cursor = HEADER_SIZE + next_hop_len;
+    let nlri_bytes = &bytes[cursor + RESERVED_SIZE..];
 
-    // Parse NLRI (skip 1 reserved byte)
-    let nlri = match afi {
-        Afi::Ipv4 => parse_nlri_list(&bytes[cursor + RESERVED_SIZE..])?,
-        Afi::Ipv6 => parse_nlri_v6_list(&bytes[cursor + RESERVED_SIZE..])?,
+    // RFC 7911: Parse NLRI with or without path identifiers
+    let (nlri, path_id) = if add_path {
+        let entries = match afi {
+            Afi::Ipv4 => parse_nlri_list_addpath(nlri_bytes)?,
+            Afi::Ipv6 => parse_nlri_v6_list_addpath(nlri_bytes)?,
+        };
+        let first_path_id = entries.first().map(|(_, pid)| *pid);
+        let prefixes = entries.into_iter().map(|(net, _)| net).collect();
+        (prefixes, first_path_id)
+    } else {
+        let prefixes = match afi {
+            Afi::Ipv4 => parse_nlri_list(nlri_bytes)?,
+            Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes)?,
+        };
+        (prefixes, None)
     };
 
     Ok(MpReachNlri {
@@ -608,10 +635,14 @@ pub(super) fn read_attr_mp_reach_nlri(bytes: &[u8]) -> Result<MpReachNlri, Parse
         safi,
         next_hop,
         nlri,
+        path_id,
     })
 }
 
-pub(super) fn read_attr_mp_unreach_nlri(bytes: &[u8]) -> Result<MpUnreachNlri, ParserError> {
+pub(super) fn read_attr_mp_unreach_nlri(
+    bytes: &[u8],
+    add_path: bool,
+) -> Result<MpUnreachNlri, ParserError> {
     if bytes.len() < 3 {
         return Err(ParserError::BgpError {
             error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
@@ -622,9 +653,22 @@ pub(super) fn read_attr_mp_unreach_nlri(bytes: &[u8]) -> Result<MpUnreachNlri, P
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
 
-    let withdrawn_routes = match afi {
-        Afi::Ipv4 => parse_nlri_list(&bytes[3..])?,
-        Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..])?,
+    // RFC 7911: Each withdrawal carries its own path_id when ADD-PATH is enabled
+    let withdrawn_routes = if add_path {
+        let entries = match afi {
+            Afi::Ipv4 => parse_nlri_list_addpath(&bytes[3..])?,
+            Afi::Ipv6 => parse_nlri_v6_list_addpath(&bytes[3..])?,
+        };
+        entries
+            .into_iter()
+            .map(|(net, pid)| (net, Some(pid)))
+            .collect()
+    } else {
+        let prefixes = match afi {
+            Afi::Ipv4 => parse_nlri_list(&bytes[3..])?,
+            Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..])?,
+        };
+        prefixes.into_iter().map(|net| (net, None)).collect()
     };
 
     Ok(MpUnreachNlri {
@@ -659,7 +703,7 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     bytes.push(0);
 
     // NLRI
-    let nlri_bytes = write_nlri_list(&mp_reach.nlri, None);
+    let nlri_bytes = write_nlri_list(&mp_reach.nlri, mp_reach.path_id);
     bytes.extend_from_slice(&nlri_bytes);
 
     bytes
@@ -674,15 +718,43 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     // SAFI (1 byte)
     bytes.push(mp_unreach.safi as u8);
 
-    // Withdrawn routes
-    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes, None));
+    // Withdrawn routes - each entry may have its own path_id
+    for (network, path_id) in &mp_unreach.withdrawn_routes {
+        if let Some(pid) = path_id {
+            bytes.extend_from_slice(&pid.to_be_bytes());
+        }
+        match network {
+            IpNetwork::V4(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+            IpNetwork::V6(net) => {
+                bytes.push(net.prefix_length);
+                let octets = net.address.octets();
+                let num_octets = net.prefix_length.div_ceil(8) as usize;
+                bytes.extend_from_slice(&octets[..num_octets]);
+            }
+        }
+    }
 
     bytes
 }
 
+/// Convenience wrapper for tests: parse a single path attribute without ADD-PATH
+#[cfg(test)]
 pub(super) fn read_path_attribute(
     bytes: &[u8],
     use_4byte_asn: bool,
+) -> Result<(Option<PathAttribute>, u8), ParserError> {
+    read_path_attribute_full(bytes, use_4byte_asn, false)
+}
+
+pub(super) fn read_path_attribute_full(
+    bytes: &[u8],
+    use_4byte_asn: bool,
+    add_path: bool,
 ) -> Result<(Option<PathAttribute>, u8), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
@@ -785,7 +857,7 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::ClusterList(cluster_list)
                 }
                 AttrType::MpReachNlri => {
-                    let mp_reach = read_attr_mp_reach_nlri(attr_data)?;
+                    let mp_reach = read_attr_mp_reach_nlri(attr_data, add_path)?;
                     // Validate routes match declared AFI
                     if !validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) {
                         return Err(optional_attribute_error(attr_bytes));
@@ -793,9 +865,12 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::MpReachNlri(mp_reach)
                 }
                 AttrType::MpUnreachNlri => {
-                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data)?;
+                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data, add_path)?;
                     // Validate routes match declared AFI
-                    if !validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) {
+                    if !validate_nlri_afi_with_path_id(
+                        &mp_unreach.afi,
+                        &mp_unreach.withdrawn_routes,
+                    ) {
                         return Err(optional_attribute_error(attr_bytes));
                     }
                     PathAttrValue::MpUnreachNlri(mp_unreach)
@@ -863,14 +938,15 @@ pub(super) fn read_path_attribute(
 
 pub(super) fn read_path_attributes(
     bytes: &[u8],
-    use_4byte_asn: bool,
+    format: MessageFormat,
 ) -> Result<Vec<PathAttribute>, ParserError> {
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
     let mut seen_type_codes: HashSet<u8> = HashSet::new();
 
     while cursor < bytes.len() {
-        let (attribute_opt, offset) = read_path_attribute(&bytes[cursor..], use_4byte_asn)?;
+        let (attribute_opt, offset) =
+            read_path_attribute_full(&bytes[cursor..], format.use_4byte_asn, format.add_path)?;
         let offset_usize = offset as usize;
 
         if let Some(attribute) = attribute_opt {
@@ -1844,7 +1920,7 @@ mod tests {
         use crate::net::Ipv4Net;
         use std::net::Ipv4Addr;
 
-        let result = read_attr_mp_reach_nlri(MP_REACH_IPV4_SAMPLE).unwrap();
+        let result = read_attr_mp_reach_nlri(MP_REACH_IPV4_SAMPLE, false).unwrap();
 
         assert_eq!(result.afi, Afi::Ipv4);
         assert_eq!(result.safi, Safi::Unicast);
@@ -1852,6 +1928,7 @@ mod tests {
             result.next_hop,
             NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1))
         );
+        assert_eq!(result.path_id, None);
         assert_eq!(result.nlri.len(), 1);
         assert_eq!(
             result.nlri[0],
@@ -1877,7 +1954,7 @@ mod tests {
             0x20, 0x20, 0x01, 0x0d, 0xb8, // NLRI: 2001:db8::/32
         ];
 
-        let result = read_attr_mp_reach_nlri(input).unwrap();
+        let result = read_attr_mp_reach_nlri(input, false).unwrap();
 
         assert_eq!(result.afi, Afi::Ipv6);
         assert_eq!(result.safi, Safi::Unicast);
@@ -1907,17 +1984,20 @@ mod tests {
             0x08, 0x0a, // Withdrawn: 10.0.0.0/8
         ];
 
-        let result = read_attr_mp_unreach_nlri(input).unwrap();
+        let result = read_attr_mp_unreach_nlri(input, false).unwrap();
 
         assert_eq!(result.afi, Afi::Ipv4);
         assert_eq!(result.safi, Safi::Unicast);
         assert_eq!(result.withdrawn_routes.len(), 1);
         assert_eq!(
             result.withdrawn_routes[0],
-            IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            })
+            (
+                IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix_length: 8,
+                }),
+                None,
+            )
         );
     }
 
@@ -1933,17 +2013,20 @@ mod tests {
             0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
         ];
 
-        let result = read_attr_mp_unreach_nlri(input).unwrap();
+        let result = read_attr_mp_unreach_nlri(input, false).unwrap();
 
         assert_eq!(result.afi, Afi::Ipv6);
         assert_eq!(result.safi, Safi::Unicast);
         assert_eq!(result.withdrawn_routes.len(), 1);
         assert_eq!(
             result.withdrawn_routes[0],
-            IpNetwork::V6(Ipv6Net {
-                address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
-                prefix_length: 32,
-            })
+            (
+                IpNetwork::V6(Ipv6Net {
+                    address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+                    prefix_length: 32,
+                }),
+                None,
+            )
         );
     }
 
@@ -1969,7 +2052,13 @@ mod tests {
         attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
 
         // Should fail with MalformedAttributeList
-        let result = read_path_attributes(&attrs_bytes, false);
+        let result = read_path_attributes(
+            &attrs_bytes,
+            MessageFormat {
+                use_4byte_asn: false,
+                add_path: false,
+            },
+        );
         assert!(result.is_err());
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(

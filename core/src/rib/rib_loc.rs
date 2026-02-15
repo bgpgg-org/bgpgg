@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
+use crate::bgp::multiprotocol::{Afi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::path_id::PathIdAllocator;
@@ -37,8 +38,8 @@ pub struct LocRib {
     /// Track stale routes during Graceful Restart (RFC 4724)
     /// Key: (peer_ip, afi_safi), Value: set of stale local_path_ids
     /// Routes are marked stale when peer disconnects with GR enabled.
-    /// Per-path tracking: new/replaced paths get fresh IDs and are never stale.
-    /// At EOR sweep, stale IDs that were already replaced are freed no-ops.
+    /// Replaced paths inherit stale IDs (for ADD-PATH stability), so
+    /// update_from_peer() clears refreshed IDs from the stale set.
     stale_routes: HashMap<(IpAddr, crate::bgp::multiprotocol::AfiSafi), HashSet<u32>>,
 
     /// ADD-PATH local path ID allocator (RFC 7911)
@@ -319,6 +320,24 @@ impl LocRib {
             }
         }
 
+        // During GR: replacements inherit stale local_path_ids.
+        // Clear them so the EOR sweep doesn't remove refreshed paths.
+        if self.has_stale_routes_for_peer(peer_ip) {
+            let refreshed_ids: Vec<u32> = affected
+                .iter()
+                .flat_map(|prefix| self.get_all_paths(prefix))
+                .filter(|path| is_path_from_peer(path, peer_ip))
+                .map(|path| path.local_path_id)
+                .collect();
+            for ((stale_ip, _), stale_ids) in self.stale_routes.iter_mut() {
+                if *stale_ip == peer_ip {
+                    for id in &refreshed_ids {
+                        stale_ids.remove(id);
+                    }
+                }
+            }
+        }
+
         let best_changed = affected
             .iter()
             .filter(|p| old_best.get(p).unwrap() != &self.get_best_path(p).map(Arc::clone))
@@ -488,16 +507,34 @@ impl LocRib {
         })
     }
 
+    /// Get all paths from IPv4 Unicast table (for ADD-PATH resend)
+    pub fn iter_ipv4_unicast_all_paths(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
+        self.ipv4_unicast.values().flat_map(|route| {
+            route
+                .paths
+                .iter()
+                .map(move |path| (route.prefix, Arc::clone(path)))
+        })
+    }
+
+    /// Get all paths from IPv6 Unicast table (for ADD-PATH resend)
+    pub fn iter_ipv6_unicast_all_paths(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
+        self.ipv6_unicast.values().flat_map(|route| {
+            route
+                .paths
+                .iter()
+                .map(move |path| (route.prefix, Arc::clone(path)))
+        })
+    }
+
     /// Mark all routes from a peer for a specific AFI/SAFI as stale (RFC 4724 Graceful Restart)
-    /// Tracks stale local_path_ids. New/replaced paths get fresh IDs, so they're never stale.
+    /// Tracks stale local_path_ids. Refreshed IDs are cleared by update_from_peer().
     /// Returns the count of path IDs marked as stale.
     pub fn mark_peer_routes_stale(
         &mut self,
         peer_ip: IpAddr,
         afi_safi: crate::bgp::multiprotocol::AfiSafi,
     ) -> usize {
-        use crate::bgp::multiprotocol::{Afi, Safi};
-
         let path_ids: Vec<u32> = match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => collect_peer_path_ids(&self.ipv4_unicast, peer_ip),
             (Afi::Ipv6, Safi::Unicast) => collect_peer_path_ids(&self.ipv6_unicast, peer_ip),
@@ -537,7 +574,6 @@ impl LocRib {
 
         let mut changed_prefixes = Vec::new();
 
-        use crate::bgp::multiprotocol::{Afi, Safi};
         match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => {
                 let (freed, changed) = remove_paths_by_ids(&mut self.ipv4_unicast, &stale_ids);
@@ -583,6 +619,7 @@ impl LocRib {
 mod tests {
     use super::*;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
+    use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
     use crate::net::{Ipv4Net, Ipv6Net};
     use crate::test_helpers::*;
     use std::net::Ipv6Addr;
@@ -1121,5 +1158,50 @@ mod tests {
         );
         // Both paths should exist
         assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
+    }
+
+    #[test]
+    fn test_stale_id_cleared_on_replacement() {
+        let mut loc_rib = LocRib::new();
+        let peer_ip = test_peer_ip();
+        let prefix = create_test_prefix();
+
+        // Add a route, then mark it stale (simulating GR)
+        loc_rib.add_route(prefix, create_test_path(peer_ip, test_bgp_id()));
+        let stale_id = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
+        let ipv4_uni = AfiSafi {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        };
+        loc_rib.mark_peer_routes_stale(peer_ip, ipv4_uni);
+        assert!(
+            loc_rib.has_stale_routes_for_peer(peer_ip),
+            "should have stale routes"
+        );
+
+        // Peer reconnects and re-sends the same route (replacement inherits stale ID)
+        let refreshed_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.med = Some(50);
+        });
+        loc_rib.update_from_peer(peer_ip, vec![], vec![(prefix, refreshed_path)], |_, _| true);
+
+        // The inherited ID should be cleared from the stale set
+        let stale_ids = loc_rib
+            .stale_routes
+            .get(&(peer_ip, ipv4_uni))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !stale_ids.contains(&stale_id),
+            "refreshed path's ID should be cleared from stale set"
+        );
+
+        // EOR sweep should NOT remove the refreshed path
+        let changed = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
+        assert!(changed.is_empty(), "no paths should be removed");
+        assert!(
+            loc_rib.get_best_path(&prefix).is_some(),
+            "refreshed path should survive EOR sweep"
+        );
     }
 }

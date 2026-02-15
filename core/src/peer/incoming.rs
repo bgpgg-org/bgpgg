@@ -177,9 +177,9 @@ impl Peer {
     /// Process withdrawn routes from an UPDATE message
     fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
         let mut withdrawn = Vec::new();
-        for prefix in update_msg.withdrawn_routes() {
+        for (prefix, path_id) in update_msg.withdrawn_routes() {
             info!(prefix = ?prefix, peer_ip = %self.addr, "withdrawing route");
-            self.rib_in.remove_route(prefix);
+            self.rib_in.remove_route(prefix, path_id);
             withdrawn.push(prefix);
         }
         withdrawn
