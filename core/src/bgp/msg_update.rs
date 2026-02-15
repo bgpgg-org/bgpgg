@@ -756,11 +756,17 @@ impl Message for UpdateMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::MessageFormat;
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_codec::{
         read_path_attribute, write_path_attribute, write_path_attributes,
     };
     use crate::bgp::msg_update_types::{AttrType, MpReachNlri, MpUnreachNlri};
+
+    const NO_ADDPATH: MessageFormat = MessageFormat {
+        use_4byte_asn: false,
+        add_path: false,
+    };
     use crate::bgp::multiprotocol::{Afi, Safi};
     use crate::bgp::{PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO};
     use crate::net::{IpNetwork, Ipv4Net};
@@ -1564,7 +1570,7 @@ mod tests {
             let mut input = vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, false, false) {
+            match read_path_attribute(&input, NO_ADDPATH) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1614,7 +1620,7 @@ mod tests {
             let mut input = vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, false, false) {
+            match read_path_attribute(&input, NO_ADDPATH) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1659,7 +1665,7 @@ mod tests {
             let mut input = vec![wrong_flags, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, false, false) {
+            match read_path_attribute(&input, NO_ADDPATH) {
                 Err(ParserError::BgpError { error, data }) => {
                     assert_eq!(
                         error,
@@ -1689,7 +1695,7 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, false, false) {
+        match read_path_attribute(input, NO_ADDPATH) {
             Err(ParserError::BgpError { error, data }) => {
                 assert_eq!(
                     error,
@@ -1723,7 +1729,7 @@ mod tests {
             0x0d,
         ];
 
-        let (attr_opt, offset) = read_path_attribute(input, false, false).unwrap();
+        let (attr_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
         let attr = attr_opt.unwrap();
         assert_eq!(
             attr.flags.0,
@@ -1744,7 +1750,7 @@ mod tests {
             0x01,
         ];
 
-        let (attr_opt, offset) = read_path_attribute(input, false, false).unwrap();
+        let (attr_opt, offset) = read_path_attribute(input, NO_ADDPATH).unwrap();
         let attr = attr_opt.unwrap();
         assert_eq!(attr.flags.0, PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL);
         assert_eq!(offset, 7);
@@ -1826,7 +1832,7 @@ mod tests {
         let mut input = vec![flags, attr_type, attr_len];
         input.extend_from_slice(&attr_value);
 
-        let result = read_path_attribute(&input, false, false);
+        let result = read_path_attribute(&input, NO_ADDPATH);
 
         match result {
             Err(ParserError::BgpError { error, data }) => {
@@ -1863,7 +1869,7 @@ mod tests {
             let mut input = vec![input_flags, attr_type, attr_value.len() as u8];
             input.extend_from_slice(&attr_value);
 
-            let (attr_opt, offset) = read_path_attribute(&input, false, false).unwrap();
+            let (attr_opt, offset) = read_path_attribute(&input, NO_ADDPATH).unwrap();
             let attr = attr_opt.unwrap();
 
             assert_eq!(
@@ -1881,7 +1887,7 @@ mod tests {
 
             // Roundtrip test
             let output = write_path_attribute(&attr, false);
-            let (parsed_attr_opt, _) = read_path_attribute(&output, false, false).unwrap();
+            let (parsed_attr_opt, _) = read_path_attribute(&output, NO_ADDPATH).unwrap();
             let parsed_attr = parsed_attr_opt.unwrap();
             assert_eq!(parsed_attr, attr);
         }
