@@ -51,8 +51,19 @@ pub struct LocRib {
 /// - If a matching path exists (same source, same remote_path_id) and attrs differ,
 ///   replace it while inheriting the existing local_path_id.
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path(paths: &mut Vec<Arc<Path>>, mut path: Arc<Path>, path_ids: &mut PathIdAllocator) {
-    match paths.iter_mut().find(|p| p.matches_remote(&path)) {
+fn upsert_path_in_table<K: Eq + Hash>(
+    table: &mut HashMap<K, Route>,
+    key: K,
+    prefix: IpNetwork,
+    mut path: Arc<Path>,
+    path_ids: &mut PathIdAllocator,
+) {
+    let route = table.entry(key).or_insert_with(|| Route {
+        prefix,
+        paths: vec![],
+    });
+
+    match route.paths.iter_mut().find(|p| p.matches_remote(&path)) {
         Some(existing) => {
             if existing.attrs != path.attrs {
                 Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
@@ -61,31 +72,11 @@ fn upsert_path(paths: &mut Vec<Arc<Path>>, mut path: Arc<Path>, path_ids: &mut P
         }
         None => {
             Arc::make_mut(&mut path).local_path_id = Some(path_ids.alloc());
-            paths.push(path);
+            route.paths.push(path);
         }
     }
-}
 
-fn add_route<K: Eq + Hash>(
-    table: &mut HashMap<K, Route>,
-    key: K,
-    prefix: IpNetwork,
-    mut path: Arc<Path>,
-    path_ids: &mut PathIdAllocator,
-) {
-    if let Some(route) = table.get_mut(&key) {
-        upsert_path(&mut route.paths, path, path_ids);
-        route.paths.sort_by(|a, b| b.best_path_cmp(a));
-    } else {
-        Arc::make_mut(&mut path).local_path_id = Some(path_ids.alloc());
-        table.insert(
-            key,
-            Route {
-                prefix,
-                paths: vec![path],
-            },
-        );
-    }
+    route.paths.sort_by(|a, b| b.best_path_cmp(a));
 }
 
 /// Remove paths from a peer and return their local_path_ids for freeing.
@@ -166,16 +157,16 @@ fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: I
 }
 
 impl LocRib {
-    fn add_route(&mut self, prefix: IpNetwork, path: Arc<Path>) {
+    fn upsert_path(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         match prefix {
-            IpNetwork::V4(v4_prefix) => add_route(
+            IpNetwork::V4(v4_prefix) => upsert_path_in_table(
                 &mut self.ipv4_unicast,
                 v4_prefix,
                 prefix,
                 path,
                 &mut self.path_ids,
             ),
-            IpNetwork::V6(v6_prefix) => add_route(
+            IpNetwork::V6(v6_prefix) => upsert_path_in_table(
                 &mut self.ipv6_unicast,
                 v6_prefix,
                 prefix,
@@ -283,7 +274,7 @@ impl LocRib {
             let mut path = (*path_arc).clone();
             if import_policy(&prefix, &mut path) {
                 info!(prefix = ?prefix, peer_ip = %peer_ip, "adding route to Loc-RIB");
-                self.add_route(prefix, Arc::new(path));
+                self.upsert_path(prefix, Arc::new(path));
             } else {
                 debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
                 self.remove_peer_path(prefix, peer_ip);
@@ -377,7 +368,7 @@ impl LocRib {
             },
         });
 
-        self.add_route(prefix, path);
+        self.upsert_path(prefix, path);
     }
 
     /// Remove a locally originated route
@@ -626,13 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn test_add_route() {
+    fn test_upsert_path() {
         let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip, test_bgp_id());
 
-        loc_rib.add_route(prefix, path.clone());
+        loc_rib.upsert_path(prefix, path.clone());
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
@@ -656,8 +647,8 @@ mod tests {
         let path1 = create_test_path(peer_ip, test_bgp_id());
         let path2 = create_test_path(peer_ip, test_bgp_id());
 
-        loc_rib.add_route(prefix1, path1.clone());
-        loc_rib.add_route(prefix2, path2.clone());
+        loc_rib.upsert_path(prefix1, path1.clone());
+        loc_rib.upsert_path(prefix2, path2.clone());
 
         let mut routes = loc_rib.get_all_routes();
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
@@ -690,8 +681,8 @@ mod tests {
         let path1 = create_test_path(peer1, test_bgp_id());
         let path2 = create_test_path(peer2, test_bgp_id2());
 
-        loc_rib.add_route(prefix, path1.clone());
-        loc_rib.add_route(prefix, path2.clone());
+        loc_rib.upsert_path(prefix, path1.clone());
+        loc_rib.upsert_path(prefix, path2.clone());
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
@@ -710,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_route_same_peer_updates_path() {
+    fn test_upsert_path_same_peer_updates_path() {
         let mut loc_rib = LocRib::new();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
@@ -724,8 +715,8 @@ mod tests {
             }];
         });
 
-        loc_rib.add_route(prefix, path1);
-        loc_rib.add_route(prefix, Arc::clone(&path2));
+        loc_rib.upsert_path(prefix, path1);
+        loc_rib.upsert_path(prefix, Arc::clone(&path2));
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
@@ -745,8 +736,8 @@ mod tests {
         let path1 = create_test_path(peer1, test_bgp_id());
         let path2 = create_test_path(peer2, test_bgp_id2());
 
-        loc_rib.add_route(prefix, path1);
-        loc_rib.add_route(prefix, path2.clone());
+        loc_rib.upsert_path(prefix, path1);
+        loc_rib.upsert_path(prefix, path2.clone());
 
         loc_rib.remove_routes_from_peer(peer1);
 
@@ -765,7 +756,7 @@ mod tests {
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip, test_bgp_id());
 
-        loc_rib.add_route(prefix, path);
+        loc_rib.upsert_path(prefix, path);
         loc_rib.remove_routes_from_peer(peer_ip);
 
         assert!(loc_rib.get_all_routes().is_empty());
@@ -842,8 +833,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         assert_eq!(loc_rib.routes_len(), 2);
         assert!(loc_rib.has_prefix(&prefix_v4));
@@ -864,8 +855,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         let count = loc_rib.iter_routes().count();
         assert_eq!(count, 2);
@@ -882,8 +873,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
-        loc_rib.add_route(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
         let ipv4_routes: Vec<_> = loc_rib.iter_ipv4_unicast_routes().collect();
         assert_eq!(ipv4_routes.len(), 1);
@@ -906,8 +897,8 @@ mod tests {
             prefix_length: 32,
         });
 
-        loc_rib.add_route(prefix_v4, create_test_path(peer1, test_bgp_id()));
-        loc_rib.add_route(prefix_v6, create_test_path(peer2, test_bgp_id2()));
+        loc_rib.upsert_path(prefix_v4, create_test_path(peer1, test_bgp_id()));
+        loc_rib.upsert_path(prefix_v6, create_test_path(peer2, test_bgp_id2()));
 
         let changed = loc_rib.remove_routes_from_peer(peer1);
 
@@ -933,7 +924,7 @@ mod tests {
         let prefix = create_test_prefix();
         let path = create_test_path(test_peer_ip(), test_bgp_id());
 
-        loc_rib.add_route(prefix, path);
+        loc_rib.upsert_path(prefix, path);
 
         let stored = loc_rib.get_best_path(&prefix).unwrap();
         assert!(
@@ -949,14 +940,14 @@ mod tests {
         let peer_ip = test_peer_ip();
 
         // Add initial path
-        loc_rib.add_route(prefix, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         let id1 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         // Replace with updated path (same source, same remote_path_id=None)
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.attrs.med = Some(50);
         });
-        loc_rib.add_route(prefix, path2);
+        loc_rib.upsert_path(prefix, path2);
         let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         assert_eq!(id1, id2, "replaced path should inherit local_path_id");
@@ -968,12 +959,12 @@ mod tests {
         let prefix = create_test_prefix();
         let path = create_test_path(test_peer_ip(), test_bgp_id());
 
-        loc_rib.add_route(prefix, Arc::clone(&path));
+        loc_rib.upsert_path(prefix, Arc::clone(&path));
         let stored = loc_rib.get_best_path(&prefix).unwrap();
         let ptr_before = Arc::as_ptr(stored);
 
         // Re-add identical path — should not replace the Arc
-        loc_rib.add_route(prefix, Arc::clone(&path));
+        loc_rib.upsert_path(prefix, Arc::clone(&path));
         let stored = loc_rib.get_best_path(&prefix).unwrap();
         assert!(
             std::ptr::eq(ptr_before, Arc::as_ptr(stored)),
@@ -986,8 +977,8 @@ mod tests {
         let mut loc_rib = LocRib::new();
         let prefix = create_test_prefix();
 
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
 
         let routes = loc_rib.get_all_routes();
         let ids: Vec<Option<u32>> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
@@ -1004,13 +995,13 @@ mod tests {
 
         // Add path with remote_path_id=None (no ADD-PATH)
         let path1 = create_test_path(peer_ip, test_bgp_id());
-        loc_rib.add_route(prefix, path1);
+        loc_rib.upsert_path(prefix, path1);
 
         // Add path from same source with remote_path_id=Some(42) (ADD-PATH)
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.remote_path_id = Some(42);
         });
-        loc_rib.add_route(prefix, path2);
+        loc_rib.upsert_path(prefix, path2);
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(
@@ -1029,14 +1020,14 @@ mod tests {
         let prefix = create_test_prefix();
         let peer_ip = test_peer_ip();
 
-        loc_rib.add_route(prefix, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         let id1 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         // Remove peer path -> frees the ID
         loc_rib.remove_routes_from_peer(peer_ip);
 
         // Add a new path -> should reuse the freed ID
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
         let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         assert_eq!(id1, id2, "freed ID should be reused");
@@ -1066,7 +1057,7 @@ mod tests {
         loc_rib.remove_local_route(prefix);
 
         // Add another route -> should reuse the freed ID
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
         let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
         assert_eq!(id1, id2, "freed local route ID should be reused");
@@ -1078,11 +1069,11 @@ mod tests {
         let peer_ip = test_peer_ip();
 
         // Add paths to two different prefixes
-        loc_rib.add_route(
+        loc_rib.upsert_path(
             create_test_prefix_n(0),
             create_test_path(peer_ip, test_bgp_id()),
         );
-        loc_rib.add_route(
+        loc_rib.upsert_path(
             create_test_prefix_n(1),
             create_test_path(peer_ip, test_bgp_id()),
         );
@@ -1091,11 +1082,11 @@ mod tests {
         loc_rib.remove_routes_from_peer(peer_ip);
 
         // Add two new paths -> should reuse IDs 1 and 2
-        loc_rib.add_route(
+        loc_rib.upsert_path(
             create_test_prefix_n(2),
             create_test_path(test_peer_ip2(), test_bgp_id2()),
         );
-        loc_rib.add_route(
+        loc_rib.upsert_path(
             create_test_prefix_n(3),
             create_test_path(test_peer_ip2(), test_bgp_id2()),
         );
@@ -1118,11 +1109,11 @@ mod tests {
         assert!(loc_rib.get_all_paths(&prefix).is_empty());
 
         // One path
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip(), test_bgp_id()));
         assert_eq!(loc_rib.get_all_paths(&prefix).len(), 1);
 
         // Two paths from different peers
-        loc_rib.add_route(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
+        loc_rib.upsert_path(prefix, create_test_path(test_peer_ip2(), test_bgp_id2()));
         let paths = loc_rib.get_all_paths(&prefix);
         assert_eq!(paths.len(), 2);
         // Paths should be sorted (best first)
@@ -1140,7 +1131,7 @@ mod tests {
         let prefix = create_test_prefix();
 
         // Add a route from peer1 (the best)
-        loc_rib.add_route(prefix, create_test_path(peer1, test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(peer1, test_bgp_id()));
 
         // Now announce from peer2 with a worse path (longer AS path)
         let worse_path = create_test_path_with(peer2, test_bgp_id2(), |p| {
@@ -1173,7 +1164,7 @@ mod tests {
         let prefix = create_test_prefix();
 
         // Add a route, then mark it stale (simulating GR)
-        loc_rib.add_route(prefix, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         let ipv4_uni = AfiSafi {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
