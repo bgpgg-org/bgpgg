@@ -80,22 +80,22 @@ pub mod attr_type_code {
 pub const AS_TRANS: u16 = 23456;
 pub const MAX_2BYTE_ASN: u32 = 65535;
 
+/// A prefix with its optional ADD-PATH path identifier (RFC 7911).
+pub type Nlri = (IpNetwork, Option<u32>);
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpReachNlri {
     pub afi: Afi,
     pub safi: Safi,
     pub next_hop: NextHopAddr,
-    pub nlri: Vec<IpNetwork>,
-    /// RFC 7911: Path identifier shared by all NLRIs in this attribute
-    pub path_id: Option<u32>,
+    pub nlri: Vec<Nlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
-    /// Each withdrawal carries its own optional path_id for ADD-PATH
-    pub withdrawn_routes: Vec<(IpNetwork, Option<u32>)>,
+    pub withdrawn_routes: Vec<Nlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

@@ -23,7 +23,7 @@ use super::msg_update_codec::{
     read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
-use super::msg_update_types::{MpReachNlri, MpUnreachNlri, AS_TRANS, MAX_2BYTE_ASN};
+use super::msg_update_types::{MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN};
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{parse_nlri_list, parse_nlri_list_addpath, ParserError};
 use crate::net::IpNetwork;
@@ -135,11 +135,13 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     next_hop: path.next_hop,
-                    nlri: ipv6_routes,
-                    path_id: if format.add_path {
-                        Some(path.local_path_id)
-                    } else {
-                        None
+                    nlri: {
+                        let pid = if format.add_path {
+                            Some(path.local_path_id)
+                        } else {
+                            None
+                        };
+                        ipv6_routes.iter().map(|net| (*net, pid)).collect()
                     },
                 }),
             });
@@ -185,7 +187,7 @@ impl UpdateMessage {
 
         // MP_UNREACH_NLRI for IPv6 withdrawals (RFC 4760)
         if !ipv6_withdrawn.is_empty() {
-            let withdrawn_with_path_id: Vec<(IpNetwork, Option<u32>)> =
+            let withdrawn_with_path_id: Vec<Nlri> =
                 ipv6_withdrawn.iter().map(|net| (*net, path_id)).collect();
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
@@ -201,7 +203,7 @@ impl UpdateMessage {
         let path_attributes_bytes = write_path_attributes(&path_attributes, format.use_4byte_asn);
 
         // Wrap IPv4 withdrawn routes with path_id for per-NLRI tracking
-        let ipv4_withdrawn_with_path_id: Vec<(IpNetwork, Option<u32>)> = ipv4_withdrawn
+        let ipv4_withdrawn_with_path_id: Vec<Nlri> = ipv4_withdrawn
             .into_iter()
             .map(|net| (net, path_id))
             .collect();
@@ -223,14 +225,14 @@ impl UpdateMessage {
         // Add NLRI from MP_REACH_NLRI if present
         for attr in &self.path_attributes {
             if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
-                nlri.extend(mp_reach.nlri.clone());
+                nlri.extend(mp_reach.nlri.iter().map(|(net, _)| *net));
             }
         }
 
         nlri
     }
 
-    pub fn withdrawn_routes(&self) -> Vec<(IpNetwork, Option<u32>)> {
+    pub fn withdrawn_routes(&self) -> Vec<Nlri> {
         let mut withdrawn = self.withdrawn_routes.clone();
 
         // Add withdrawn routes from MP_UNREACH_NLRI if present
@@ -542,12 +544,10 @@ impl UpdateMessage {
         if self.path_id.is_some() {
             return self.path_id;
         }
-        // Fall back to MP_REACH_NLRI path_id for IPv6 routes
+        // Fall back to MP_REACH_NLRI path_id from first NLRI entry
         for attr in &self.path_attributes {
             if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
-                if mp_reach.path_id.is_some() {
-                    return mp_reach.path_id;
-                }
+                return mp_reach.nlri.first().and_then(|(_, pid)| *pid);
             }
         }
         None
@@ -576,15 +576,14 @@ impl UpdateMessage {
         let (withdrawn_routes, withdrawn_path_id) = if format.add_path {
             let entries = parse_nlri_list_addpath(&data[..withdrawn_routes_len])?;
             let first_path_id = entries.first().map(|(_, pid)| *pid);
-            let routes: Vec<(IpNetwork, Option<u32>)> = entries
+            let routes: Vec<Nlri> = entries
                 .into_iter()
                 .map(|(net, pid)| (net, Some(pid)))
                 .collect();
             (routes, first_path_id)
         } else {
             let prefixes = parse_nlri_list(&data[..withdrawn_routes_len])?;
-            let routes: Vec<(IpNetwork, Option<u32>)> =
-                prefixes.into_iter().map(|net| (net, None)).collect();
+            let routes: Vec<Nlri> = prefixes.into_iter().map(|net| (net, None)).collect();
             (routes, None)
         };
         data = data[withdrawn_routes_len..].to_vec();
@@ -697,7 +696,7 @@ impl UpdateMessage {
 pub struct UpdateMessage {
     withdrawn_routes_len: u16,
     /// Each withdrawn route carries its own optional path_id for ADD-PATH
-    withdrawn_routes: Vec<(IpNetwork, Option<u32>)>,
+    withdrawn_routes: Vec<Nlri>,
     total_path_attributes_len: u16,
     path_attributes: Vec<PathAttribute>,
     nlri_list: Vec<IpNetwork>,
@@ -810,11 +809,13 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-            nlri: vec![IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            })],
-            path_id: None,
+            nlri: vec![(
+                IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix_length: 8,
+                }),
+                None,
+            )],
         }
     }
 
@@ -1167,7 +1168,7 @@ mod tests {
         );
 
         // Verify message structure
-        let expected_withdrawn: Vec<(IpNetwork, Option<u32>)> =
+        let expected_withdrawn: Vec<Nlri> =
             withdrawn_routes.iter().map(|net| (*net, None)).collect();
         assert_eq!(message.withdrawn_routes, expected_withdrawn);
         assert_eq!(message.path_attributes, vec![]);
@@ -1399,7 +1400,7 @@ mod tests {
         })];
 
         let withdrawn_routes_bytes = write_nlri_list(&withdrawn_prefixes, None);
-        let withdrawn_routes: Vec<(IpNetwork, Option<u32>)> = withdrawn_prefixes
+        let withdrawn_routes: Vec<Nlri> = withdrawn_prefixes
             .into_iter()
             .map(|net| (net, None))
             .collect();
@@ -2393,7 +2394,7 @@ mod tests {
         let decoded = UpdateMessage::from_bytes_with_format(bytes, format).unwrap();
 
         assert_eq!(decoded.path_id(), Some(7));
-        let expected_withdrawn: Vec<(IpNetwork, Option<u32>)> =
+        let expected_withdrawn: Vec<Nlri> =
             withdrawn.into_iter().map(|net| (net, Some(7))).collect();
         assert_eq!(decoded.withdrawn_routes, expected_withdrawn);
     }
