@@ -303,8 +303,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
         add_path_send: match cfg.add_path_send {
             Some(0) => crate::config::AddPathSend::Disabled,
-            Some(1) => crate::config::AddPathSend::All,
-            Some(n) => crate::config::AddPathSend::Best(n),
+            Some(_) => crate::config::AddPathSend::All,
             None => defaults.add_path_send,
         },
         add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),

@@ -77,9 +77,6 @@ pub enum AddPathSend {
     Disabled,
     /// Send all paths for each prefix
     All,
-    /// Send up to N best paths for each prefix
-    #[serde(rename = "best")]
-    Best(u32),
 }
 
 /// Peer configuration in YAML config file.

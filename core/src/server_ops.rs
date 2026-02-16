@@ -363,16 +363,9 @@ impl BgpServer {
                     // No withdrawals are propagated (RFC 4724 Section 4.1)
                 } else if was_established {
                     // Only propagate withdrawals if the disconnected connection was Established
-                    let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
-                    if !changed_prefixes.is_empty() {
-                        self.propagate_routes(
-                            RouteDelta {
-                                best_changed: changed_prefixes.clone(),
-                                changed: changed_prefixes,
-                            },
-                            Some(peer_ip),
-                        )
-                        .await;
+                    let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
+                    if !delta.best_changed.is_empty() || !delta.changed.is_empty() {
+                        self.propagate_routes(delta, Some(peer_ip)).await;
                     }
                 }
 
@@ -724,17 +717,10 @@ impl BgpServer {
         self.peers.remove(&peer_ip);
 
         // Notify Loc-RIB to remove routes from this peer
-        let changed_prefixes = self.loc_rib.remove_routes_from_peer(peer_ip);
+        let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
 
         // Propagate route changes (withdrawals or new best paths) to all remaining peers
-        self.propagate_routes(
-            RouteDelta {
-                best_changed: changed_prefixes.clone(),
-                changed: changed_prefixes,
-            },
-            None, // Don't exclude any peer since the removed peer is already gone
-        )
-        .await;
+        self.propagate_routes(delta, None).await;
 
         let _ = response.send(Ok(()));
     }

@@ -363,21 +363,28 @@ impl<A: PathIdAllocator> LocRib<A> {
         removed
     }
 
-    /// Remove all routes from a peer. Returns prefixes where best path changed.
-    pub fn remove_routes_from_peer(&mut self, peer_ip: IpAddr) -> Vec<IpNetwork> {
-        let prefixes = self.get_prefixes_from_peer(peer_ip);
+    /// Remove all routes from a peer. Returns a RouteDelta with best_changed
+    /// (prefixes where best path changed) and changed (all affected prefixes).
+    pub fn remove_routes_from_peer(&mut self, peer_ip: IpAddr) -> RouteDelta {
+        let changed = self.get_prefixes_from_peer(peer_ip);
 
-        let old_best: HashMap<IpNetwork, Arc<Path>> = prefixes
+        let old_best: HashMap<IpNetwork, Arc<Path>> = changed
             .iter()
             .filter_map(|p| self.get_best_path(p).map(|best| (*p, Arc::clone(best))))
             .collect();
 
         self.clear_peer_paths(peer_ip);
 
-        prefixes
-            .into_iter()
+        let best_changed = changed
+            .iter()
             .filter(|p| self.best_path_changed(p, old_best.get(p)))
-            .collect()
+            .cloned()
+            .collect();
+
+        RouteDelta {
+            best_changed,
+            changed,
+        }
     }
 
     pub fn routes_len(&self) -> usize {
@@ -856,10 +863,12 @@ mod tests {
         loc_rib.upsert_path(prefix_v4, create_test_path(peer1, test_bgp_id()));
         loc_rib.upsert_path(prefix_v6, create_test_path(peer2, test_bgp_id2()));
 
-        let changed = loc_rib.remove_routes_from_peer(peer1);
+        let delta = loc_rib.remove_routes_from_peer(peer1);
 
-        assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0], prefix_v4);
+        assert_eq!(delta.best_changed.len(), 1);
+        assert_eq!(delta.best_changed[0], prefix_v4);
+        assert_eq!(delta.changed.len(), 1);
+        assert_eq!(delta.changed[0], prefix_v4);
         assert!(!loc_rib.has_prefix(&prefix_v4));
         assert!(loc_rib.has_prefix(&prefix_v6));
     }
