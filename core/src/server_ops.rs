@@ -566,32 +566,21 @@ impl BgpServer {
             self.propagate_routes(delta, Some(peer_ip)).await;
         }
 
-        // Propagate all routes from loc-rib to newly established peer
-        let all_prefixes: Vec<_> = self
-            .loc_rib
-            .iter_routes()
-            .map(|route| route.prefix)
-            .collect();
-
-        if !all_prefixes.is_empty() {
-            self.propagate_routes(
-                RouteDelta {
-                    best_changed: all_prefixes.clone(),
-                    changed: all_prefixes,
-                },
-                None,
-            )
-            .await;
+        // Send full loc-rib to the newly established peer
+        let negotiated_afi_safis = capabilities
+            .as_ref()
+            .map(|caps| caps.afi_safis())
+            .unwrap_or_else(|| vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]);
+        for afi_safi in &negotiated_afi_safis {
+            self.resend_routes_to_peer(peer_ip, afi_safi.afi, afi_safi.safi);
         }
 
         // Signal that loc-rib has been sent for all negotiated AFI/SAFIs
         if let Some(peer_tx) = peer_tx {
-            if let Some(caps) = capabilities {
-                for afi_safi in &caps.multiprotocol {
-                    let _ = peer_tx.send(PeerOp::LocalRibSent {
-                        afi_safi: *afi_safi,
-                    });
-                }
+            for afi_safi in &negotiated_afi_safis {
+                let _ = peer_tx.send(PeerOp::LocalRibSent {
+                    afi_safi: *afi_safi,
+                });
             }
         }
     }

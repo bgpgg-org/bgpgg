@@ -16,7 +16,7 @@ use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
-use crate::bgp::multiprotocol::AfiSafi;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info};
@@ -101,6 +101,16 @@ impl PeerCapabilities {
                     .any(|(as_, mode)| as_ == afi_safi && mode.can_send())
             })
             .unwrap_or(false)
+    }
+
+    /// Negotiated AFI/SAFIs. RFC 4760: if multiprotocol is not negotiated,
+    /// IPv4 Unicast is assumed.
+    pub fn afi_safis(&self) -> Vec<AfiSafi> {
+        if self.multiprotocol.is_empty() {
+            vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]
+        } else {
+            self.multiprotocol.iter().copied().collect()
+        }
     }
 
     /// Check if ADD-PATH receive is negotiated for a specific AFI/SAFI
