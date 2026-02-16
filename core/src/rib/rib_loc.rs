@@ -126,6 +126,60 @@ fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: I
     freed_path_ids
 }
 
+fn mark_stale_in_table<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> usize {
+    let mut count = 0;
+    for route in table.values_mut() {
+        for path in &mut route.paths {
+            if is_path_from_peer(path, peer_ip) {
+                Arc::make_mut(path).stale = true;
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn sweep_stale_in_table<K: Eq + Hash + Copy>(
+    table: &mut HashMap<K, Route>,
+    peer_ip: IpAddr,
+) -> (Vec<IpNetwork>, Vec<u32>) {
+    let mut stale_entries: Vec<(K, IpNetwork)> = Vec::new();
+    for (key, route) in table.iter() {
+        if route
+            .paths
+            .iter()
+            .any(|p| is_path_from_peer(p, peer_ip) && p.stale)
+        {
+            stale_entries.push((*key, route.prefix));
+        }
+    }
+
+    let mut freed_path_ids = Vec::new();
+    let mut changed_prefixes = Vec::new();
+
+    for (key, prefix) in stale_entries {
+        let old_best = table
+            .get(&key)
+            .and_then(|r| r.paths.first())
+            .map(Arc::clone);
+
+        let freed = remove_paths(table, &key, |p| is_path_from_peer(p, peer_ip) && p.stale);
+        freed_path_ids.extend(freed);
+
+        let new_best = table.get(&key).and_then(|r| r.paths.first());
+
+        let best_changed = match (old_best.as_ref(), new_best) {
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            (None, None) => false,
+            _ => true,
+        };
+        if best_changed {
+            changed_prefixes.push(prefix);
+        }
+    }
+    (changed_prefixes, freed_path_ids)
+}
+
 impl LocRib {
     fn upsert_path(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         match prefix {
@@ -434,22 +488,6 @@ impl LocRib {
     /// `stale = false`, so upsert_path naturally clears staleness.
     /// Returns the count of paths marked as stale.
     pub fn mark_peer_routes_stale(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) -> usize {
-        fn mark_stale_in_table<K: Eq + Hash>(
-            table: &mut HashMap<K, Route>,
-            peer_ip: IpAddr,
-        ) -> usize {
-            let mut count = 0;
-            for route in table.values_mut() {
-                for path in &mut route.paths {
-                    if is_path_from_peer(path, peer_ip) {
-                        Arc::make_mut(path).stale = true;
-                        count += 1;
-                    }
-                }
-            }
-            count
-        }
-
         let count = match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => mark_stale_in_table(&mut self.ipv4_unicast, peer_ip),
             (Afi::Ipv6, Safi::Unicast) => mark_stale_in_table(&mut self.ipv6_unicast, peer_ip),
@@ -471,47 +509,6 @@ impl LocRib {
         peer_ip: IpAddr,
         afi_safi: AfiSafi,
     ) -> Vec<IpNetwork> {
-        fn sweep_stale_in_table<K: Eq + Hash + Copy>(
-            table: &mut HashMap<K, Route>,
-            peer_ip: IpAddr,
-        ) -> (Vec<IpNetwork>, Vec<u32>) {
-            let mut stale_entries: Vec<(K, IpNetwork)> = Vec::new();
-            for (key, route) in table.iter() {
-                if route
-                    .paths
-                    .iter()
-                    .any(|p| is_path_from_peer(p, peer_ip) && p.stale)
-                {
-                    stale_entries.push((*key, route.prefix));
-                }
-            }
-
-            let mut freed_path_ids = Vec::new();
-            let mut changed_prefixes = Vec::new();
-
-            for (key, prefix) in stale_entries {
-                let old_best = table
-                    .get(&key)
-                    .and_then(|r| r.paths.first())
-                    .map(Arc::clone);
-
-                let freed = remove_paths(table, &key, |p| is_path_from_peer(p, peer_ip) && p.stale);
-                freed_path_ids.extend(freed);
-
-                let new_best = table.get(&key).and_then(|r| r.paths.first());
-
-                let best_changed = match (old_best.as_ref(), new_best) {
-                    (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-                    (None, None) => false,
-                    _ => true,
-                };
-                if best_changed {
-                    changed_prefixes.push(prefix);
-                }
-            }
-            (changed_prefixes, freed_path_ids)
-        }
-
         let (changed_prefixes, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv4_unicast, peer_ip),
             (Afi::Ipv6, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv6_unicast, peer_ip),
