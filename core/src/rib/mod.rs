@@ -17,15 +17,17 @@
 //! This module implements BGP's RIB components:
 //! - Adj-RIB-In: Per-peer input tables storing routes received from peers (owned by Peer)
 //! - Loc-RIB: Local routing table containing best paths (owned by BgpServer)
-//! - Adj-RIB-Out: Computed dynamically on-demand (not stored)
+//! - Adj-RIB-Out: Per-peer output tables tracking routes exported to peers
 
 mod path;
 pub mod path_id;
 pub mod rib_in;
 pub mod rib_loc;
+pub mod rib_out;
 mod types;
 
 // Re-exports
 pub use path::{Path, PathAttrs};
 pub use rib_loc::RouteDelta;
+pub use rib_out::{AdjRibOut, PendingRibUpdate};
 pub use types::{PrefixPath, Route, RouteSource};

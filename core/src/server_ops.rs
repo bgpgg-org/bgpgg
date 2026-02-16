@@ -27,7 +27,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, PathAttrs, PrefixPath, Route};
+use crate::rib::{PathAttrs, PrefixPath, Route};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -35,7 +35,6 @@ use crate::server::{
 };
 use crate::types::PeerDownReason;
 use regex::Regex;
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -981,7 +980,7 @@ impl BgpServer {
 
             info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
 
-            peer_info.replace_adj_rib_out(afi, all_sent);
+            peer_info.adj_rib_out.replace_afi(afi, all_sent);
         }
     }
 
@@ -1103,7 +1102,7 @@ impl BgpServer {
         let result = match rib_type_enum {
             RibType::Global => Ok(self.loc_rib.get_all_routes()),
             RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
-            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+            RibType::AdjOut => self.get_adj_rib_out(peer_address),
         };
 
         let _ = response.send(result);
@@ -1125,7 +1124,7 @@ impl BgpServer {
         let routes = match rib_type_enum {
             RibType::Global => Ok(self.loc_rib.get_all_routes()),
             RibType::AdjIn => self.get_adj_rib_in(peer_address).await,
-            RibType::AdjOut => self.compute_adj_rib_out(peer_address),
+            RibType::AdjOut => self.get_adj_rib_out(peer_address),
         };
 
         if let Ok(routes) = routes {
@@ -1168,7 +1167,7 @@ impl BgpServer {
         rx.await.map_err(|_| "peer task closed".to_string())
     }
 
-    fn compute_adj_rib_out(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+    fn get_adj_rib_out(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
         let peer_addr = peer_address
             .ok_or("peer_address required for ADJ_OUT".to_string())?
             .parse::<IpAddr>()
@@ -1179,19 +1178,7 @@ impl BgpServer {
             .get(&peer_addr)
             .ok_or(format!("peer {} not found", peer_addr))?;
 
-        // Read directly from adj_rib_out (empty if peer isn't established)
-        let mut routes_map: HashMap<IpNetwork, Vec<Arc<Path>>> = HashMap::new();
-        for ((prefix, _path_id), path) in &peer_info.adj_rib_out {
-            routes_map
-                .entry(*prefix)
-                .or_default()
-                .push(Arc::clone(path));
-        }
-
-        Ok(routes_map
-            .into_iter()
-            .map(|(prefix, paths)| Route { prefix, paths })
-            .collect())
+        Ok(peer_info.adj_rib_out.get_routes())
     }
 
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
@@ -2023,7 +2010,7 @@ impl BgpServer {
 
             info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
 
-            peer_info.replace_adj_rib_out(afi, all_sent);
+            peer_info.adj_rib_out.replace_afi(afi, all_sent);
         }
     }
 }

@@ -31,7 +31,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteDelta};
+use crate::rib::{AdjRibOut, PathAttrs, PendingRibUpdate, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -420,8 +420,7 @@ pub struct PeerInfo {
     /// Incoming connection slot (peer initiated)
     pub incoming: Option<ConnectionState>,
     /// Per-peer adj-rib-out: tracks routes actually exported to this peer.
-    /// Key: (prefix, local_path_id), Value: the exported path (post-policy).
-    pub adj_rib_out: HashMap<(IpNetwork, u32), Arc<Path>>,
+    pub adj_rib_out: AdjRibOut,
 }
 
 impl PeerInfo {
@@ -443,7 +442,7 @@ impl PeerInfo {
             config,
             outgoing,
             incoming,
-            adj_rib_out: HashMap::new(),
+            adj_rib_out: AdjRibOut::new(),
         }
     }
 
@@ -517,25 +516,6 @@ impl PeerInfo {
 
     pub fn policy_out(&self) -> &[Arc<Policy>] {
         &self.export_policies
-    }
-
-    /// Replace adj_rib_out entries for a given AFI with newly sent routes.
-    pub fn replace_adj_rib_out(&mut self, afi: Afi, sent: Vec<PrefixPath>) {
-        let is_target_afi = |prefix: &IpNetwork| match afi {
-            Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
-            Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
-        };
-        self.adj_rib_out
-            .retain(|(prefix, _), _| !is_target_afi(prefix));
-        for (prefix, path) in sent {
-            self.adj_rib_out.insert(
-                (
-                    prefix,
-                    path.local_path_id.expect("loc-rib path must have ID"),
-                ),
-                path,
-            );
-        }
     }
 }
 
@@ -966,14 +946,7 @@ impl BgpServer {
         }
 
         // Collect per-peer adj_rib_out updates so we can apply them after immutable iteration.
-        // Each entry: (peer_addr, routes_sent, prefixes_withdrawn_fully, per_path_id_withdrawn)
-        #[allow(clippy::type_complexity)]
-        let mut adj_rib_updates: Vec<(
-            IpAddr,
-            Vec<PrefixPath>,
-            Vec<IpNetwork>,
-            Vec<(IpNetwork, u32)>,
-        )> = Vec::new();
+        let mut adj_rib_updates: Vec<PendingRibUpdate> = Vec::new();
 
         // Send updates to all established peers (except the originating peer)
         for (peer_addr, entry) in self.peers.iter() {
@@ -1020,12 +993,7 @@ impl BgpServer {
                     let current_paths = self.loc_rib.get_all_paths(prefix);
 
                     // Collect adj_rib_out path IDs for this prefix
-                    let adj_path_ids: Vec<u32> = entry
-                        .adj_rib_out
-                        .keys()
-                        .filter(|(p, _)| p == prefix)
-                        .map(|(_, pid)| *pid)
-                        .collect();
+                    let adj_path_ids = entry.adj_rib_out.path_ids_for_prefix(prefix);
 
                     // Announce all current paths (re-announce = implicit replace)
                     for path in &current_paths {
@@ -1065,12 +1033,17 @@ impl BgpServer {
                     true, // add_path
                 );
 
-                adj_rib_updates.push((*peer_addr, sent, Vec::new(), addpath_to_withdraw));
+                adj_rib_updates.push(PendingRibUpdate {
+                    peer_addr: *peer_addr,
+                    sent,
+                    withdrawn_prefixes: Vec::new(),
+                    withdrawn_path_ids: addpath_to_withdraw,
+                });
             } else {
                 // Non-ADD-PATH peer: use best_changed (original behavior)
                 let peer_withdrawals: Vec<IpNetwork> = to_withdraw
                     .iter()
-                    .filter(|prefix| entry.adj_rib_out.keys().any(|(p, _)| p == *prefix))
+                    .filter(|prefix| entry.adj_rib_out.has_prefix(prefix))
                     .cloned()
                     .collect();
 
@@ -1094,31 +1067,19 @@ impl BgpServer {
                     false, // add_path
                 );
 
-                adj_rib_updates.push((*peer_addr, sent, peer_withdrawals, Vec::new()));
+                adj_rib_updates.push(PendingRibUpdate {
+                    peer_addr: *peer_addr,
+                    sent,
+                    withdrawn_prefixes: peer_withdrawals,
+                    withdrawn_path_ids: Vec::new(),
+                });
             }
         }
 
         // Update adj_rib_out for each peer (mutable access)
-        for (peer_addr, sent, withdrawn_prefixes, withdrawn_path_ids) in adj_rib_updates {
-            if let Some(entry) = self.peers.get_mut(&peer_addr) {
-                // Remove fully withdrawn prefixes (non-ADD-PATH)
-                for prefix in &withdrawn_prefixes {
-                    entry.adj_rib_out.retain(|(p, _), _| p != prefix);
-                }
-                // Remove per-path-id withdrawals (ADD-PATH)
-                for (prefix, pid) in &withdrawn_path_ids {
-                    entry.adj_rib_out.remove(&(*prefix, *pid));
-                }
-                // Insert sent routes
-                for (prefix, path) in sent {
-                    entry.adj_rib_out.insert(
-                        (
-                            prefix,
-                            path.local_path_id.expect("loc-rib path must have ID"),
-                        ),
-                        path,
-                    );
-                }
+        for update in adj_rib_updates {
+            if let Some(entry) = self.peers.get_mut(&update.peer_addr) {
+                entry.adj_rib_out.apply_pending(update);
             }
         }
     }
