@@ -484,28 +484,36 @@ impl<A: PathIdAllocator> LocRib<A> {
         count
     }
 
-    /// Remove all stale paths from a peer for a specific AFI/SAFI.
+    /// Remove all stale paths from a peer for the given AFI/SAFIs.
     /// Removes paths where `is_path_from_peer && path.stale`.
-    pub fn remove_peer_routes_stale(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) -> RouteDelta {
-        let (delta, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
-            (Afi::Ipv4, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv4_unicast, peer_ip),
-            (Afi::Ipv6, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv6_unicast, peer_ip),
-            _ => (
-                RouteDelta {
-                    best_changed: Vec::new(),
-                    changed: Vec::new(),
-                },
-                Vec::new(),
-            ),
+    pub fn remove_peer_routes_stale(
+        &mut self,
+        peer_ip: IpAddr,
+        afi_safis: &[AfiSafi],
+    ) -> RouteDelta {
+        let mut combined = RouteDelta {
+            best_changed: Vec::new(),
+            changed: Vec::new(),
         };
 
-        if !freed_path_ids.is_empty() {
-            info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = freed_path_ids.len(),
-                  "removed stale paths after GR timer expiry/EOR");
-            self.path_ids.free_all(freed_path_ids);
+        for afi_safi in afi_safis {
+            let (delta, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
+                (Afi::Ipv4, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv4_unicast, peer_ip),
+                (Afi::Ipv6, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv6_unicast, peer_ip),
+                _ => continue,
+            };
+
+            if !freed_path_ids.is_empty() {
+                info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = freed_path_ids.len(),
+                      "removed stale paths after GR timer expiry/EOR");
+                self.path_ids.free_all(freed_path_ids);
+            }
+
+            combined.best_changed.extend(delta.best_changed);
+            combined.changed.extend(delta.changed);
         }
 
-        delta
+        combined
     }
 
     /// Get all AFI/SAFIs that have stale paths for a peer
@@ -1145,7 +1153,7 @@ mod tests {
         assert!(!loc_rib.get_best_path(&prefix).unwrap().stale);
 
         // EOR sweep should NOT remove the refreshed path
-        let delta = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
+        let delta = loc_rib.remove_peer_routes_stale(peer_ip, &[ipv4_uni]);
         assert!(!delta.has_changes(), "no paths should be removed");
         assert!(
             loc_rib.get_best_path(&prefix).is_some(),
@@ -1197,7 +1205,7 @@ mod tests {
         assert_eq!(stale_count, 1);
 
         // EOR sweep: removes stale path_id=2, keeps path_id=1
-        let delta = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
+        let delta = loc_rib.remove_peer_routes_stale(peer_ip, &[ipv4_uni]);
 
         let remaining = loc_rib.get_all_paths(&prefix);
         assert_eq!(remaining.len(), 1);

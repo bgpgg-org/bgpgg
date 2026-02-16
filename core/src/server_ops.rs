@@ -393,26 +393,21 @@ impl BgpServer {
 
                 // Remove stale routes for all AFI/SAFIs that have stale routes
                 // (the stale flag was set at disconnect time based on GR capabilities)
-                let mut combined = RouteDelta {
-                    best_changed: Vec::new(),
-                    changed: Vec::new(),
-                };
-                for afi_safi in self.loc_rib.stale_afi_safis(peer_ip) {
-                    let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
-                    combined.best_changed.extend(delta.best_changed);
-                    combined.changed.extend(delta.changed);
-                }
+                let stale_afi_safis = self.loc_rib.stale_afi_safis(peer_ip);
+                let delta = self
+                    .loc_rib
+                    .remove_peer_routes_stale(peer_ip, &stale_afi_safis);
 
                 // Propagate withdrawals if any routes were removed
-                if combined.has_changes() {
-                    self.propagate_routes(combined, Some(peer_ip)).await;
+                if delta.has_changes() {
+                    self.propagate_routes(delta, Some(peer_ip)).await;
                 }
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
 
                 // Remove stale routes for this specific AFI/SAFI
-                let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
 
                 // Propagate withdrawals if any routes were removed
                 if delta.has_changes() {
@@ -563,19 +558,12 @@ impl BgpServer {
             None => self.loc_rib.stale_afi_safis(peer_ip),
         };
 
-        let mut combined = RouteDelta {
-            best_changed: Vec::new(),
-            changed: Vec::new(),
-        };
-        for afi_safi in afi_safis_to_clear {
-            info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
-            let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
-            combined.best_changed.extend(delta.best_changed);
-            combined.changed.extend(delta.changed);
-        }
+        let delta = self
+            .loc_rib
+            .remove_peer_routes_stale(peer_ip, &afi_safis_to_clear);
 
-        if combined.has_changes() {
-            self.propagate_routes(combined, Some(peer_ip)).await;
+        if delta.has_changes() {
+            self.propagate_routes(delta, Some(peer_ip)).await;
         }
 
         // Propagate all routes from loc-rib to newly established peer
