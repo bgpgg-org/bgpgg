@@ -23,7 +23,7 @@ use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
-use crate::rib::{Path, RouteSource};
+use crate::rib::{Path, PrefixPath, RouteSource};
 
 #[cfg(test)]
 use crate::policy::Policy;
@@ -232,7 +232,7 @@ type BatchingKey = (
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
 pub(crate) fn batch_announcements_by_path(
-    to_announce: &[(IpNetwork, Arc<Path>)],
+    to_announce: &[PrefixPath],
 ) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
@@ -335,7 +335,7 @@ fn build_export_next_hop(
 /// - Route from non-client -> reflect to clients only
 /// - Sets ORIGINATOR_ID and prepends cluster_id to CLUSTER_LIST when reflecting
 pub fn compute_routes_for_peer(
-    to_announce: &[(IpNetwork, Arc<Path>)],
+    to_announce: &[PrefixPath],
     local_asn: u32,
     peer_asn: u32,
     local_next_hop: IpAddr,
@@ -479,7 +479,7 @@ pub fn send_addpath_withdrawals_to_peer(
 pub fn send_announcements_to_peer(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
-    to_announce: &[(IpNetwork, Arc<Path>)],
+    to_announce: &[PrefixPath],
     local_asn: u32,
     peer_asn: u32,
     local_next_hop: IpAddr,
@@ -488,7 +488,7 @@ pub fn send_announcements_to_peer(
     rr_client: bool,
     cluster_id: std::net::Ipv4Addr,
     add_path: bool,
-) -> Vec<(IpNetwork, Arc<Path>)> {
+) -> Vec<PrefixPath> {
     if to_announce.is_empty() {
         return Vec::new();
     }
@@ -508,7 +508,7 @@ pub fn send_announcements_to_peer(
     }
 
     // Convert back to Arc<Path> for batching
-    let filtered_arc: Vec<(IpNetwork, Arc<Path>)> = filtered
+    let filtered_arc: Vec<PrefixPath> = filtered
         .into_iter()
         .map(|(prefix, path)| (prefix, Arc::new(path)))
         .collect();

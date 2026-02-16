@@ -17,7 +17,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::path_id::PathIdAllocator;
-use crate::rib::{Path, Route, RouteSource};
+use crate::rib::{Path, PrefixPath, Route, RouteSource};
 
 /// Result of applying a peer update to the Loc-RIB.
 pub struct RouteDelta {
@@ -205,7 +205,7 @@ impl LocRib {
         &mut self,
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, Arc<Path>)>,
+        announced: Vec<PrefixPath>,
         import_policy: F,
     ) -> RouteDelta
     where
@@ -401,44 +401,32 @@ impl LocRib {
         }
     }
 
-    /// Get all routes from IPv4 Unicast table as iterator (zero-copy)
-    pub fn iter_ipv4_unicast_routes(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
-        self.ipv4_unicast.values().filter_map(|route| {
-            route
-                .paths
-                .first()
-                .map(|path| (route.prefix, Arc::clone(path)))
-        })
-    }
-
-    /// Get all routes from IPv6 Unicast table as iterator (zero-copy)
-    pub fn iter_ipv6_unicast_routes(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
-        self.ipv6_unicast.values().filter_map(|route| {
-            route
-                .paths
-                .first()
-                .map(|path| (route.prefix, Arc::clone(path)))
-        })
-    }
-
-    /// Get all paths from IPv4 Unicast table (for ADD-PATH resend)
-    pub fn iter_ipv4_unicast_all_paths(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
-        self.ipv4_unicast.values().flat_map(|route| {
-            route
-                .paths
-                .iter()
-                .map(move |path| (route.prefix, Arc::clone(path)))
-        })
-    }
-
-    /// Get all paths from IPv6 Unicast table (for ADD-PATH resend)
-    pub fn iter_ipv6_unicast_all_paths(&self) -> impl Iterator<Item = (IpNetwork, Arc<Path>)> + '_ {
-        self.ipv6_unicast.values().flat_map(|route| {
-            route
-                .paths
-                .iter()
-                .map(move |path| (route.prefix, Arc::clone(path)))
-        })
+    /// Get paths for an AFI. If `all_paths` is true, returns every path
+    /// (ADD-PATH); otherwise returns only the best path per prefix.
+    pub fn get_paths(&self, afi: Afi, all_paths: bool) -> Vec<PrefixPath> {
+        let routes: Box<dyn Iterator<Item = &Route>> = match afi {
+            Afi::Ipv4 => Box::new(self.ipv4_unicast.values()),
+            Afi::Ipv6 => Box::new(self.ipv6_unicast.values()),
+        };
+        if all_paths {
+            routes
+                .flat_map(|route| {
+                    route
+                        .paths
+                        .iter()
+                        .map(move |path| (route.prefix, Arc::clone(path)))
+                })
+                .collect()
+        } else {
+            routes
+                .filter_map(|route| {
+                    route
+                        .paths
+                        .first()
+                        .map(|path| (route.prefix, Arc::clone(path)))
+                })
+                .collect()
+        }
     }
 
     /// Mark all paths from a peer for a specific AFI/SAFI as stale (RFC 4724 Graceful Restart).
@@ -867,11 +855,11 @@ mod tests {
         loc_rib.upsert_path(prefix_v4, create_test_path(peer_ip, test_bgp_id()));
         loc_rib.upsert_path(prefix_v6, create_test_path(peer_ip, test_bgp_id()));
 
-        let ipv4_routes: Vec<_> = loc_rib.iter_ipv4_unicast_routes().collect();
+        let ipv4_routes = loc_rib.get_paths(Afi::Ipv4, false);
         assert_eq!(ipv4_routes.len(), 1);
         assert_eq!(ipv4_routes[0].0, prefix_v4);
 
-        let ipv6_routes: Vec<_> = loc_rib.iter_ipv6_unicast_routes().collect();
+        let ipv6_routes = loc_rib.get_paths(Afi::Ipv6, false);
         assert_eq!(ipv6_routes.len(), 1);
         assert_eq!(ipv6_routes[0].0, prefix_v6);
     }

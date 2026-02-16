@@ -27,7 +27,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, Route, RouteDelta};
+use crate::rib::{Path, PrefixPath, Route, RouteDelta};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -1041,12 +1041,7 @@ impl BgpServer {
                 .unwrap_or(self.local_addr);
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
-            let routes: Vec<(IpNetwork, Arc<Path>)> = match (afi, add_path_send) {
-                (Afi::Ipv4, true) => self.loc_rib.iter_ipv4_unicast_all_paths().collect(),
-                (Afi::Ipv4, false) => self.loc_rib.iter_ipv4_unicast_routes().collect(),
-                (Afi::Ipv6, true) => self.loc_rib.iter_ipv6_unicast_all_paths().collect(),
-                (Afi::Ipv6, false) => self.loc_rib.iter_ipv6_unicast_routes().collect(),
-            };
+            let routes = self.loc_rib.get_paths(afi, add_path_send);
 
             let mut all_sent = Vec::new();
             let mut total_sent = 0;
@@ -1429,7 +1424,7 @@ impl BgpServer {
         peer_as: u32,
         peer_bgp_id: u32,
         withdrawn: &[IpNetwork],
-        announced: &[(IpNetwork, Arc<Path>)],
+        announced: &[PrefixPath],
     ) {
         // Determine if peer supports 4-byte ASN to mirror actual BGP encoding
         let use_4byte_asn = self
@@ -2009,7 +2004,7 @@ fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
 /// Convert routes to UpdateMessages, batching by shared path attributes
 fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<UpdateMessage> {
     // Convert routes to (prefix, path) tuples for batching
-    let announcements: Vec<(IpNetwork, Arc<Path>)> = routes
+    let announcements: Vec<PrefixPath> = routes
         .iter()
         .flat_map(|route| {
             route
@@ -2156,12 +2151,7 @@ impl BgpServer {
                 .unwrap_or(self.local_addr);
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
-            let routes: Vec<(IpNetwork, Arc<Path>)> = match (afi, add_path_send) {
-                (Afi::Ipv4, true) => self.loc_rib.iter_ipv4_unicast_all_paths().collect(),
-                (Afi::Ipv4, false) => self.loc_rib.iter_ipv4_unicast_routes().collect(),
-                (Afi::Ipv6, true) => self.loc_rib.iter_ipv6_unicast_all_paths().collect(),
-                (Afi::Ipv6, false) => self.loc_rib.iter_ipv6_unicast_routes().collect(),
-            };
+            let routes = self.loc_rib.get_paths(afi, add_path_send);
 
             let mut all_sent = Vec::new();
             let mut total_sent = 0;

@@ -22,14 +22,14 @@ use crate::config::PeerConfig;
 use crate::log::{debug, error, info};
 use crate::net::IpNetwork;
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::{Path, Route};
+use crate::rib::{PrefixPath, Route};
 use crate::server::{ConnectionType, ServerOp};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Error};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
@@ -138,7 +138,7 @@ pub struct LocalConfig {
 }
 
 /// (announced routes, withdrawn prefixes)
-pub(super) type RouteChanges = (Vec<(IpNetwork, Arc<Path>)>, Vec<IpNetwork>);
+pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<IpNetwork>);
 
 mod fsm;
 mod incoming;

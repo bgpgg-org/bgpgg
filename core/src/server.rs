@@ -31,7 +31,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{Path, Route, RouteDelta};
+use crate::rib::{Path, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -284,7 +284,7 @@ pub enum ServerOp {
     PeerUpdate {
         peer_ip: IpAddr,
         withdrawn: Vec<IpNetwork>,
-        announced: Vec<(IpNetwork, Arc<Path>)>,
+        announced: Vec<PrefixPath>,
     },
     PeerDisconnected {
         peer_ip: IpAddr,
@@ -949,7 +949,7 @@ impl BgpServer {
         #[allow(clippy::type_complexity)]
         let mut adj_rib_updates: Vec<(
             IpAddr,
-            Vec<(IpNetwork, Arc<Path>)>,
+            Vec<PrefixPath>,
             Vec<IpNetwork>,
             Vec<(IpNetwork, u32)>,
         )> = Vec::new();
