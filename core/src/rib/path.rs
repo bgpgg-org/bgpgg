@@ -637,7 +637,7 @@ mod tests {
         assert!(path.atomic_aggregate());
 
         // Missing required attrs -> None
-        let empty_update = UpdateMessage::new_withdraw(vec![], DEFAULT_FORMAT, None);
+        let empty_update = UpdateMessage::new_withdraw(vec![], DEFAULT_FORMAT);
         assert!(Path::from_update_msg(&empty_update, source, false).is_none());
     }
 

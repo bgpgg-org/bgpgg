@@ -15,6 +15,7 @@
 use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::msg_update_types::Nlri;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
@@ -956,11 +957,16 @@ impl BgpServer {
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
             let routes = self.loc_rib.get_paths(afi, add_path_send);
 
+            let format = MessageFormat {
+                use_4byte_asn: ctx.peer_supports_4byte_asn,
+                add_path: add_path_send,
+            };
+
             let mut all_sent = Vec::new();
             let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(&ctx, chunk, add_path_send);
+                let sent = send_announcements_to_peer(&ctx, chunk, format);
                 all_sent.extend(sent);
                 total_sent += chunk.len();
             }
@@ -1260,7 +1266,14 @@ impl BgpServer {
 
         // Send withdrawals if any
         if !withdrawn.is_empty() {
-            let update = UpdateMessage::new_withdraw(withdrawn.to_vec(), format, None);
+            let nlri: Vec<Nlri> = withdrawn
+                .iter()
+                .map(|prefix| Nlri {
+                    prefix: *prefix,
+                    path_id: None,
+                })
+                .collect();
+            let update = UpdateMessage::new_withdraw(nlri, format);
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
@@ -1968,11 +1981,16 @@ impl BgpServer {
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
             let routes = self.loc_rib.get_paths(afi, add_path_send);
 
+            let format = MessageFormat {
+                use_4byte_asn: ctx.peer_supports_4byte_asn,
+                add_path: add_path_send,
+            };
+
             let mut all_sent = Vec::new();
             let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(&ctx, chunk, add_path_send);
+                let sent = send_announcements_to_peer(&ctx, chunk, format);
                 all_sent.extend(sent);
                 total_sent += chunk.len();
             }

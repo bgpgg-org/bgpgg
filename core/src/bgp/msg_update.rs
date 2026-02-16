@@ -162,15 +162,11 @@ impl UpdateMessage {
         }
     }
 
-    pub fn new_withdraw(
-        withdrawn_routes: Vec<IpNetwork>,
-        format: MessageFormat,
-        path_id: Option<u32>,
-    ) -> Self {
+    pub fn new_withdraw(withdrawn: Vec<Nlri>, format: MessageFormat) -> Self {
         // Partition withdrawals by address family
-        let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn_routes
+        let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn
             .into_iter()
-            .partition(|p| matches!(p, IpNetwork::V4(_)));
+            .partition(|nlri| matches!(nlri.prefix, IpNetwork::V4(_)));
 
         let mut path_attributes = vec![];
 
@@ -181,12 +177,12 @@ impl UpdateMessage {
                 value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
-                    withdrawn_routes: nlri_from_prefixes(&ipv6_withdrawn, path_id),
+                    withdrawn_routes: ipv6_withdrawn,
                 }),
             });
         }
 
-        let withdrawn_routes = nlri_from_prefixes(&ipv4_withdrawn, path_id);
+        let withdrawn_routes = ipv4_withdrawn;
 
         UpdateMessage {
             withdrawn_routes_len: write_nlri_list(&withdrawn_routes).len() as u16,
@@ -1093,28 +1089,27 @@ mod tests {
     #[test]
     fn test_new_withdraw() {
         // Create a withdraw message with multiple prefixes
-        let withdrawn_routes = vec![
-            IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 24,
-            }),
-            IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(192, 168, 1, 0),
-                prefix_length: 24,
-            }),
+        let withdrawn: Vec<Nlri> = vec![
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix_length: 24,
+                }),
+                path_id: None,
+            },
+            Nlri {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(192, 168, 1, 0),
+                    prefix_length: 24,
+                }),
+                path_id: None,
+            },
         ];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes.clone(), DEFAULT_FORMAT, None);
+        let message = UpdateMessage::new_withdraw(withdrawn.clone(), DEFAULT_FORMAT);
 
         // Verify message structure
-        let expected_withdrawn: Vec<Nlri> = withdrawn_routes
-            .iter()
-            .map(|net| Nlri {
-                prefix: *net,
-                path_id: None,
-            })
-            .collect();
-        assert_eq!(message.withdrawn_routes, expected_withdrawn);
+        assert_eq!(message.withdrawn_routes, withdrawn);
         assert_eq!(message.path_attributes, vec![]);
         assert_eq!(message.nlri_list, vec![]);
         assert_eq!(message.total_path_attributes_len, 0);
@@ -1129,12 +1124,15 @@ mod tests {
     #[test]
     fn test_new_withdraw_serialization() {
         // Create a withdraw message
-        let withdrawn_routes = vec![IpNetwork::V4(Ipv4Net {
-            address: Ipv4Addr::new(10, 0, 0, 0),
-            prefix_length: 24,
-        })];
+        let withdrawn = vec![Nlri {
+            prefix: IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            }),
+            path_id: None,
+        }];
 
-        let message = UpdateMessage::new_withdraw(withdrawn_routes, DEFAULT_FORMAT, None);
+        let message = UpdateMessage::new_withdraw(withdrawn, DEFAULT_FORMAT);
 
         // Serialize the message - created with use_4byte_asn=true
         let serialized = message.serialize();
@@ -2297,19 +2295,19 @@ mod tests {
             ),
         ];
 
-        for (desc, withdrawn) in cases {
-            let msg = UpdateMessage::new_withdraw(withdrawn.clone(), format, Some(7));
-            let bytes = msg.to_bytes();
-            let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
-
-            let expected_withdrawn: Vec<Nlri> = withdrawn
-                .into_iter()
-                .map(|net| Nlri {
-                    prefix: net,
+        for (desc, prefixes) in cases {
+            let withdrawn: Vec<Nlri> = prefixes
+                .iter()
+                .map(|prefix| Nlri {
+                    prefix: *prefix,
                     path_id: Some(7),
                 })
                 .collect();
-            assert_eq!(decoded.withdrawn_routes(), expected_withdrawn, "{}", desc);
+            let msg = UpdateMessage::new_withdraw(withdrawn.clone(), format);
+            let bytes = msg.to_bytes();
+            let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
+
+            assert_eq!(decoded.withdrawn_routes(), withdrawn, "{}", desc);
         }
     }
 

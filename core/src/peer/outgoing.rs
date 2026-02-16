@@ -17,7 +17,7 @@
 use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
-use crate::bgp::msg_update_types::{NextHopAddr, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
+use crate::bgp::msg_update_types::{NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
@@ -205,30 +205,24 @@ pub fn build_export_extended_communities(path: &Path, local_asn: u32, peer_asn: 
     }
 }
 
-/// Send withdrawal messages to a peer
-pub fn send_withdrawals_to_peer(
+/// Send withdrawal messages to a peer.
+fn send_withdrawals(
     peer_addr: IpAddr,
     peer_tx: &mpsc::UnboundedSender<PeerOp>,
-    to_withdraw: &[IpNetwork],
-    peer_supports_4byte_asn: bool,
+    withdrawn: Vec<Nlri>,
+    format: MessageFormat,
 ) {
-    if to_withdraw.is_empty() {
+    if withdrawn.is_empty() {
         return;
     }
 
-    let withdraw_msg = UpdateMessage::new_withdraw(
-        to_withdraw.to_vec(),
-        MessageFormat {
-            use_4byte_asn: peer_supports_4byte_asn,
-            add_path: false,
-        },
-        None,
-    );
+    let count = withdrawn.len();
+    let withdraw_msg = UpdateMessage::new_withdraw(withdrawn, format);
     let serialized = withdraw_msg.serialize();
     if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
-        error!(%peer_addr, error = %e, "failed to send WITHDRAW to peer");
+        error!(%peer_addr, error = %e, "failed to send withdrawals to peer");
     } else {
-        info!(count = to_withdraw.len(), %peer_addr, "propagated withdrawals to peer");
+        info!(count, %peer_addr, "propagated withdrawals to peer");
     }
 }
 
@@ -478,52 +472,6 @@ pub fn build_addpath_updates(
     (to_announce, to_withdraw)
 }
 
-/// Filter withdrawals to only prefixes present in this peer's adj-rib-out.
-pub fn build_best_withdrawals(
-    to_withdraw: &[IpNetwork],
-    adj_rib_out: &AdjRibOut,
-) -> Vec<IpNetwork> {
-    to_withdraw
-        .iter()
-        .filter(|prefix| adj_rib_out.has_prefix(prefix))
-        .cloned()
-        .collect()
-}
-
-/// Send per-path-id withdrawal messages to an ADD-PATH peer
-pub fn send_addpath_withdrawals_to_peer(
-    peer_addr: IpAddr,
-    peer_tx: &mpsc::UnboundedSender<PeerOp>,
-    to_withdraw: &[(IpNetwork, u32)],
-    peer_supports_4byte_asn: bool,
-) {
-    if to_withdraw.is_empty() {
-        return;
-    }
-
-    // Group by path_id for efficient encoding (each path_id gets its own UPDATE)
-    let mut by_path_id: HashMap<u32, Vec<IpNetwork>> = HashMap::new();
-    for (prefix, path_id) in to_withdraw {
-        by_path_id.entry(*path_id).or_default().push(*prefix);
-    }
-
-    for (path_id, prefixes) in by_path_id {
-        let withdraw_msg = UpdateMessage::new_withdraw(
-            prefixes.clone(),
-            MessageFormat {
-                use_4byte_asn: peer_supports_4byte_asn,
-                add_path: true,
-            },
-            Some(path_id),
-        );
-        let serialized = withdraw_msg.serialize();
-        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
-            error!(%peer_addr, error = %e, "failed to send ADD-PATH WITHDRAW to peer");
-        } else {
-            info!(count = prefixes.len(), path_id, %peer_addr, "propagated ADD-PATH withdrawals to peer");
-        }
-    }
-}
 
 /// Send route announcements to a peer.
 /// Batches prefixes that share the same path attributes into single UPDATE messages.
@@ -531,7 +479,7 @@ pub fn send_addpath_withdrawals_to_peer(
 pub fn send_announcements_to_peer(
     ctx: &PeerExportContext,
     to_announce: &[PrefixPath],
-    add_path: bool,
+    format: MessageFormat,
 ) -> Vec<PrefixPath> {
     if to_announce.is_empty() {
         return Vec::new();
@@ -566,10 +514,7 @@ pub fn send_announcements_to_peer(
         let update_msg = UpdateMessage::new(
             &batch.path,
             batch.prefixes.clone(),
-            MessageFormat {
-                use_4byte_asn: ctx.peer_supports_4byte_asn,
-                add_path,
-            },
+            format,
         );
 
         // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
@@ -600,20 +545,25 @@ pub fn propagate_routes_to_peer(
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
+    let format = MessageFormat {
+        use_4byte_asn: ctx.peer_supports_4byte_asn,
+        add_path: ctx.add_path_send,
+    };
+
     if ctx.add_path_send {
         let (addpath_to_announce, addpath_to_withdraw) =
             build_addpath_updates(all_changed, loc_rib, adj_rib_out);
 
-        if !addpath_to_withdraw.is_empty() {
-            send_addpath_withdrawals_to_peer(
-                ctx.peer_addr,
-                ctx.peer_tx,
-                &addpath_to_withdraw,
-                ctx.peer_supports_4byte_asn,
-            );
-        }
+        let withdrawn: Vec<Nlri> = addpath_to_withdraw
+            .iter()
+            .map(|(prefix, path_id)| Nlri {
+                prefix: *prefix,
+                path_id: Some(*path_id),
+            })
+            .collect();
+        send_withdrawals(ctx.peer_addr, ctx.peer_tx, withdrawn, format);
 
-        let sent = send_announcements_to_peer(ctx, &addpath_to_announce, true);
+        let sent = send_announcements_to_peer(ctx, &addpath_to_announce, format);
 
         for (prefix, path_id) in &addpath_to_withdraw {
             adj_rib_out.remove_path(prefix, *path_id);
@@ -622,16 +572,22 @@ pub fn propagate_routes_to_peer(
             adj_rib_out.insert(prefix, path);
         }
     } else {
-        let peer_withdrawals = build_best_withdrawals(to_withdraw, adj_rib_out);
+        let peer_withdrawals: Vec<IpNetwork> = to_withdraw
+            .iter()
+            .filter(|prefix| adj_rib_out.has_prefix(prefix))
+            .cloned()
+            .collect();
 
-        send_withdrawals_to_peer(
-            ctx.peer_addr,
-            ctx.peer_tx,
-            &peer_withdrawals,
-            ctx.peer_supports_4byte_asn,
-        );
+        let withdrawn: Vec<Nlri> = peer_withdrawals
+            .iter()
+            .map(|prefix| Nlri {
+                prefix: *prefix,
+                path_id: None,
+            })
+            .collect();
+        send_withdrawals(ctx.peer_addr, ctx.peer_tx, withdrawn, format);
 
-        let sent = send_announcements_to_peer(ctx, to_announce, false);
+        let sent = send_announcements_to_peer(ctx, to_announce, format);
 
         for prefix in &peer_withdrawals {
             adj_rib_out.remove_prefix(prefix);
@@ -1184,7 +1140,14 @@ mod tests {
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
             add_path_send: false,
         };
-        send_announcements_to_peer(&ctx, &routes, false);
+        send_announcements_to_peer(
+            &ctx,
+            &routes,
+            MessageFormat {
+                use_4byte_asn: false,
+                add_path: false,
+            },
+        );
 
         // Verify no message was sent
         assert!(
