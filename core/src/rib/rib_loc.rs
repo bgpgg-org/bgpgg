@@ -30,6 +30,12 @@ pub struct RouteDelta {
     pub changed: Vec<IpNetwork>,
 }
 
+impl RouteDelta {
+    pub fn has_changes(&self) -> bool {
+        !self.best_changed.is_empty() || !self.changed.is_empty()
+    }
+}
+
 #[cfg(test)]
 use std::net::Ipv4Addr;
 
@@ -141,7 +147,7 @@ fn mark_stale_in_table<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpA
 fn sweep_stale_in_table<K: Eq + Hash + Copy>(
     table: &mut HashMap<K, Route>,
     peer_ip: IpAddr,
-) -> (Vec<IpNetwork>, Vec<u32>) {
+) -> (RouteDelta, Vec<u32>) {
     let mut stale_entries: Vec<(K, IpNetwork)> = Vec::new();
     for (key, route) in table.iter() {
         if route
@@ -154,7 +160,8 @@ fn sweep_stale_in_table<K: Eq + Hash + Copy>(
     }
 
     let mut freed_path_ids = Vec::new();
-    let mut changed_prefixes = Vec::new();
+    let mut best_changed = Vec::new();
+    let mut changed = Vec::new();
 
     for (key, prefix) in stale_entries {
         let old_best = table
@@ -165,18 +172,25 @@ fn sweep_stale_in_table<K: Eq + Hash + Copy>(
         let freed = remove_paths(table, &key, |p| is_path_from_peer(p, peer_ip) && p.stale);
         freed_path_ids.extend(freed);
 
-        let new_best = table.get(&key).and_then(|r| r.paths.first());
+        changed.push(prefix);
 
-        let best_changed = match (old_best.as_ref(), new_best) {
+        let new_best = table.get(&key).and_then(|r| r.paths.first());
+        let best_did_change = match (old_best.as_ref(), new_best) {
             (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
             (None, None) => false,
             _ => true,
         };
-        if best_changed {
-            changed_prefixes.push(prefix);
+        if best_did_change {
+            best_changed.push(prefix);
         }
     }
-    (changed_prefixes, freed_path_ids)
+    (
+        RouteDelta {
+            best_changed,
+            changed,
+        },
+        freed_path_ids,
+    )
 }
 
 impl<A: PathIdAllocator> LocRib<A> {
@@ -472,16 +486,17 @@ impl<A: PathIdAllocator> LocRib<A> {
 
     /// Remove all stale paths from a peer for a specific AFI/SAFI.
     /// Removes paths where `is_path_from_peer && path.stale`.
-    /// Returns prefixes where the best path changed.
-    pub fn remove_peer_routes_stale(
-        &mut self,
-        peer_ip: IpAddr,
-        afi_safi: AfiSafi,
-    ) -> Vec<IpNetwork> {
-        let (changed_prefixes, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
+    pub fn remove_peer_routes_stale(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) -> RouteDelta {
+        let (delta, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv4_unicast, peer_ip),
             (Afi::Ipv6, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv6_unicast, peer_ip),
-            _ => (Vec::new(), Vec::new()),
+            _ => (
+                RouteDelta {
+                    best_changed: Vec::new(),
+                    changed: Vec::new(),
+                },
+                Vec::new(),
+            ),
         };
 
         if !freed_path_ids.is_empty() {
@@ -490,7 +505,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             self.path_ids.free_all(freed_path_ids);
         }
 
-        changed_prefixes
+        delta
     }
 
     /// Get all AFI/SAFIs that have stale paths for a peer
@@ -1130,8 +1145,8 @@ mod tests {
         assert!(!loc_rib.get_best_path(&prefix).unwrap().stale);
 
         // EOR sweep should NOT remove the refreshed path
-        let changed = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
-        assert!(changed.is_empty(), "no paths should be removed");
+        let delta = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
+        assert!(!delta.has_changes(), "no paths should be removed");
         assert!(
             loc_rib.get_best_path(&prefix).is_some(),
             "refreshed path should survive EOR sweep"
@@ -1182,13 +1197,42 @@ mod tests {
         assert_eq!(stale_count, 1);
 
         // EOR sweep: removes stale path_id=2, keeps path_id=1
-        let changed = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
+        let delta = loc_rib.remove_peer_routes_stale(peer_ip, ipv4_uni);
 
         let remaining = loc_rib.get_all_paths(&prefix);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].remote_path_id, Some(1));
         assert!(!remaining[0].stale);
         // Best path changed (stale best was removed)
-        assert!(!changed.is_empty());
+        assert!(!delta.best_changed.is_empty());
+        // The prefix was also affected
+        assert!(!delta.changed.is_empty());
+    }
+
+    #[test]
+    fn test_route_delta_has_changes() {
+        let cases = vec![
+            ("empty", vec![], vec![], false),
+            (
+                "best_changed only",
+                vec![create_test_prefix()],
+                vec![],
+                true,
+            ),
+            ("changed only", vec![], vec![create_test_prefix()], true),
+            (
+                "both",
+                vec![create_test_prefix()],
+                vec![create_test_prefix()],
+                true,
+            ),
+        ];
+        for (desc, best_changed, changed, expected) in cases {
+            let delta = RouteDelta {
+                best_changed,
+                changed,
+            };
+            assert_eq!(delta.has_changes(), expected, "{desc}");
+        }
     }
 }

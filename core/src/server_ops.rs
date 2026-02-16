@@ -254,7 +254,7 @@ impl BgpServer {
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
-                    if !delta.best_changed.is_empty() || !delta.changed.is_empty() {
+                    if delta.has_changes() {
                         self.propagate_routes(delta, Some(peer_ip)).await;
                     }
 
@@ -364,7 +364,7 @@ impl BgpServer {
                 } else if was_established {
                     // Only propagate withdrawals if the disconnected connection was Established
                     let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
-                    if !delta.best_changed.is_empty() || !delta.changed.is_empty() {
+                    if delta.has_changes() {
                         self.propagate_routes(delta, Some(peer_ip)).await;
                     }
                 }
@@ -393,40 +393,30 @@ impl BgpServer {
 
                 // Remove stale routes for all AFI/SAFIs that have stale routes
                 // (the stale flag was set at disconnect time based on GR capabilities)
-                let mut all_changed_prefixes = Vec::new();
+                let mut combined = RouteDelta {
+                    best_changed: Vec::new(),
+                    changed: Vec::new(),
+                };
                 for afi_safi in self.loc_rib.stale_afi_safis(peer_ip) {
-                    let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
-                    all_changed_prefixes.extend(changed);
+                    let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                    combined.best_changed.extend(delta.best_changed);
+                    combined.changed.extend(delta.changed);
                 }
 
                 // Propagate withdrawals if any routes were removed
-                if !all_changed_prefixes.is_empty() {
-                    self.propagate_routes(
-                        RouteDelta {
-                            best_changed: all_changed_prefixes.clone(),
-                            changed: all_changed_prefixes,
-                        },
-                        Some(peer_ip),
-                    )
-                    .await;
+                if combined.has_changes() {
+                    self.propagate_routes(combined, Some(peer_ip)).await;
                 }
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
 
                 // Remove stale routes for this specific AFI/SAFI
-                let changed_prefixes = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+                let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
 
                 // Propagate withdrawals if any routes were removed
-                if !changed_prefixes.is_empty() {
-                    self.propagate_routes(
-                        RouteDelta {
-                            best_changed: changed_prefixes.clone(),
-                            changed: changed_prefixes,
-                        },
-                        Some(peer_ip),
-                    )
-                    .await;
+                if delta.has_changes() {
+                    self.propagate_routes(delta, Some(peer_ip)).await;
                 }
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
@@ -573,22 +563,19 @@ impl BgpServer {
             None => self.loc_rib.stale_afi_safis(peer_ip),
         };
 
-        let mut all_changed = Vec::new();
+        let mut combined = RouteDelta {
+            best_changed: Vec::new(),
+            changed: Vec::new(),
+        };
         for afi_safi in afi_safis_to_clear {
             info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
-            let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
-            all_changed.extend(changed);
+            let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+            combined.best_changed.extend(delta.best_changed);
+            combined.changed.extend(delta.changed);
         }
 
-        if !all_changed.is_empty() {
-            self.propagate_routes(
-                RouteDelta {
-                    best_changed: all_changed.clone(),
-                    changed: all_changed,
-                },
-                Some(peer_ip),
-            )
-            .await;
+        if combined.has_changes() {
+            self.propagate_routes(combined, Some(peer_ip)).await;
         }
 
         // Propagate all routes from loc-rib to newly established peer
