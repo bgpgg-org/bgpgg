@@ -918,7 +918,7 @@ impl BgpServer {
     }
 
     fn resend_routes_to_peer(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
-        let Some(peer_info) = self.peers.get(&peer_ip) else {
+        let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             warn!(%peer_ip, "SOFT_OUT for unknown peer");
             return;
         };
@@ -981,9 +981,7 @@ impl BgpServer {
 
             info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
 
-            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.replace_adj_rib_out(afi, all_sent);
-            }
+            peer_info.replace_adj_rib_out(afi, all_sent);
         }
     }
 
@@ -1953,7 +1951,7 @@ impl BgpServer {
         info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
 
         // Get peer info
-        let Some(peer_info) = self.peers.get(&peer_ip) else {
+        let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             warn!(%peer_ip, "ROUTE_REFRESH from unknown peer");
             return;
         };
@@ -2025,9 +2023,7 @@ impl BgpServer {
 
             info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
 
-            if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                peer.replace_adj_rib_out(afi, all_sent);
-            }
+            peer_info.replace_adj_rib_out(afi, all_sent);
         }
     }
 }
