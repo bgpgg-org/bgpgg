@@ -567,37 +567,35 @@ impl BgpServer {
 
         // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
         // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
-        if self.loc_rib.has_stale_paths_for_peer(peer_ip) {
-            let gr_cap = capabilities
-                .as_ref()
-                .and_then(|c| c.graceful_restart.as_ref());
-            let afi_safis_to_clear: Vec<_> = match gr_cap {
-                Some(cap) => self
-                    .loc_rib
-                    .stale_afi_safis(peer_ip)
-                    .into_iter()
-                    .filter(|afi_safi| cap.should_clear_stale(*afi_safi))
-                    .collect(),
-                None => self.loc_rib.stale_afi_safis(peer_ip),
-            };
+        let gr_cap = capabilities
+            .as_ref()
+            .and_then(|c| c.graceful_restart.as_ref());
+        let afi_safis_to_clear: Vec<_> = match gr_cap {
+            Some(cap) => self
+                .loc_rib
+                .stale_afi_safis(peer_ip)
+                .into_iter()
+                .filter(|afi_safi| cap.should_clear_stale(*afi_safi))
+                .collect(),
+            None => self.loc_rib.stale_afi_safis(peer_ip),
+        };
 
-            let mut all_changed = Vec::new();
-            for afi_safi in afi_safis_to_clear {
-                info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
-                let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
-                all_changed.extend(changed);
-            }
+        let mut all_changed = Vec::new();
+        for afi_safi in afi_safis_to_clear {
+            info!(%peer_ip, %afi_safi, "F-bit not set, immediately clearing stale routes");
+            let changed = self.loc_rib.remove_peer_routes_stale(peer_ip, afi_safi);
+            all_changed.extend(changed);
+        }
 
-            if !all_changed.is_empty() {
-                self.propagate_routes(
-                    RouteDelta {
-                        best_changed: all_changed.clone(),
-                        changed: all_changed,
-                    },
-                    Some(peer_ip),
-                )
-                .await;
-            }
+        if !all_changed.is_empty() {
+            self.propagate_routes(
+                RouteDelta {
+                    best_changed: all_changed.clone(),
+                    changed: all_changed,
+                },
+                Some(peer_ip),
+            )
+            .await;
         }
 
         // Propagate all routes from loc-rib to newly established peer

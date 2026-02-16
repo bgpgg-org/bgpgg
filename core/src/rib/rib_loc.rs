@@ -17,6 +17,10 @@ use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+use std::net::IpAddr;
+use std::sync::Arc;
 
 /// Result of applying a peer update to the Loc-RIB.
 pub struct RouteDelta {
@@ -25,10 +29,6 @@ pub struct RouteDelta {
     /// All prefixes with any path added or removed (for ADD-PATH peers)
     pub changed: Vec<IpNetwork>,
 }
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::net::IpAddr;
-use std::sync::Arc;
 
 #[cfg(test)]
 use std::net::Ipv4Addr;
@@ -265,12 +265,10 @@ impl<A: PathIdAllocator> LocRib<A> {
         F: Fn(&IpNetwork, &mut Path) -> bool,
     {
         // Collect affected prefixes and snapshot old best BEFORE mutations
-        let mut affected: Vec<IpNetwork> = withdrawn.clone();
-        for (prefix, _) in &announced {
-            if !affected.contains(prefix) {
-                affected.push(*prefix);
-            }
-        }
+        let mut affected_set: HashSet<IpNetwork> = HashSet::new();
+        affected_set.extend(withdrawn.iter().copied());
+        affected_set.extend(announced.iter().map(|(prefix, _)| *prefix));
+        let affected: Vec<IpNetwork> = affected_set.into_iter().collect();
         let old_best: HashMap<IpNetwork, Arc<Path>> = affected
             .iter()
             .filter_map(|p| self.get_best_path(p).map(|best| (*p, Arc::clone(best))))
@@ -395,42 +393,28 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
     }
 
+    fn get_route(&self, prefix: &IpNetwork) -> Option<&Route> {
+        match prefix {
+            IpNetwork::V4(v4) => self.ipv4_unicast.get(v4),
+            IpNetwork::V6(v6) => self.ipv6_unicast.get(v6),
+        }
+    }
+
     /// Get the best path for a specific prefix, if any
     pub fn get_best_path(&self, prefix: &IpNetwork) -> Option<&Arc<Path>> {
-        match prefix {
-            IpNetwork::V4(v4_prefix) => self
-                .ipv4_unicast
-                .get(v4_prefix)
-                .and_then(|route| route.paths.first()),
-            IpNetwork::V6(v6_prefix) => self
-                .ipv6_unicast
-                .get(v6_prefix)
-                .and_then(|route| route.paths.first()),
-        }
+        self.get_route(prefix).and_then(|r| r.paths.first())
     }
 
     /// Get all paths for a specific prefix (for ADD-PATH propagation)
     pub fn get_all_paths(&self, prefix: &IpNetwork) -> Vec<Arc<Path>> {
-        match prefix {
-            IpNetwork::V4(v4_prefix) => self
-                .ipv4_unicast
-                .get(v4_prefix)
-                .map(|r| r.paths.clone())
-                .unwrap_or_default(),
-            IpNetwork::V6(v6_prefix) => self
-                .ipv6_unicast
-                .get(v6_prefix)
-                .map(|r| r.paths.clone())
-                .unwrap_or_default(),
-        }
+        self.get_route(prefix)
+            .map(|r| r.paths.clone())
+            .unwrap_or_default()
     }
 
     /// Check if a prefix exists in Loc-RIB
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
-        match prefix {
-            IpNetwork::V4(v4_prefix) => self.ipv4_unicast.contains_key(v4_prefix),
-            IpNetwork::V6(v6_prefix) => self.ipv6_unicast.contains_key(v6_prefix),
-        }
+        self.get_route(prefix).is_some()
     }
 
     /// Get paths for an AFI. If `all_paths` is true, returns every path
@@ -500,17 +484,6 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
 
         changed_prefixes
-    }
-
-    /// Check if a peer has any stale paths (is in GR restart mode)
-    pub fn has_stale_paths_for_peer(&self, peer_ip: IpAddr) -> bool {
-        let has_stale = |route: &Route| {
-            route
-                .paths
-                .iter()
-                .any(|p| is_path_from_peer(p, peer_ip) && p.stale)
-        };
-        self.ipv4_unicast.values().any(has_stale) || self.ipv6_unicast.values().any(has_stale)
     }
 
     /// Get all AFI/SAFIs that have stale paths for a peer
@@ -935,8 +908,14 @@ mod tests {
         loc_rib.upsert_path(prefix, path2);
         let after = loc_rib.get_best_path(&prefix).unwrap();
 
-        assert_eq!(id1, after.local_path_id, "replaced path should inherit local_path_id");
-        assert!(!Arc::ptr_eq(&before, after), "path should be replaced, not reused");
+        assert_eq!(
+            id1, after.local_path_id,
+            "replaced path should inherit local_path_id"
+        );
+        assert!(
+            !Arc::ptr_eq(&before, after),
+            "path should be replaced, not reused"
+        );
     }
 
     #[test]
@@ -1127,7 +1106,7 @@ mod tests {
         // Add a route, then mark it stale (simulating GR)
         loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         loc_rib.mark_peer_routes_stale(peer_ip, ipv4_uni);
-        assert!(loc_rib.has_stale_paths_for_peer(peer_ip));
+        assert!(!loc_rib.stale_afi_safis(peer_ip).is_empty());
 
         // Verify the path is marked stale
         assert!(loc_rib.get_best_path(&prefix).unwrap().stale);
