@@ -345,7 +345,8 @@ impl<A: PathIdAllocator> LocRib<A> {
     }
 
     /// Add a locally originated route
-    pub fn add_local_route(&mut self, prefix: IpNetwork, path_attrs: PathAttrs) {
+    pub fn add_local_route(&mut self, prefix: IpNetwork, path_attrs: PathAttrs) -> RouteDelta {
+        let old_best = self.get_best_path(&prefix).map(Arc::clone);
         let path = Arc::new(Path {
             local_path_id: None,
             remote_path_id: None,
@@ -357,13 +358,22 @@ impl<A: PathIdAllocator> LocRib<A> {
             },
         });
         self.upsert_path(prefix, path);
+        let best_changed = if self.best_path_changed(&prefix, old_best.as_ref()) {
+            vec![prefix]
+        } else {
+            vec![]
+        };
+        RouteDelta {
+            best_changed,
+            changed: vec![prefix],
+        }
     }
 
     /// Remove a locally originated route
-    /// Returns true if a route was actually removed.
-    pub fn remove_local_route(&mut self, prefix: IpNetwork) -> bool {
+    pub fn remove_local_route(&mut self, prefix: IpNetwork) -> RouteDelta {
         info!(prefix = ?prefix, "removing local route from Loc-RIB");
 
+        let old_best = self.get_best_path(&prefix).map(Arc::clone);
         let freed_path_ids = match prefix {
             IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, |p| {
                 p.attrs.source == RouteSource::Local
@@ -372,9 +382,22 @@ impl<A: PathIdAllocator> LocRib<A> {
                 p.attrs.source == RouteSource::Local
             }),
         };
-        let removed = !freed_path_ids.is_empty();
+        if freed_path_ids.is_empty() {
+            return RouteDelta {
+                best_changed: vec![],
+                changed: vec![],
+            };
+        }
         self.path_ids.free_all(freed_path_ids);
-        removed
+        let best_changed = if self.best_path_changed(&prefix, old_best.as_ref()) {
+            vec![prefix]
+        } else {
+            vec![]
+        };
+        RouteDelta {
+            best_changed,
+            changed: vec![prefix],
+        }
     }
 
     /// Remove all routes from a peer. Returns a RouteDelta with best_changed
@@ -767,12 +790,12 @@ mod tests {
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
 
-        assert!(loc_rib.remove_local_route(prefix));
+        assert!(loc_rib.remove_local_route(prefix).has_changes());
         assert_eq!(loc_rib.routes_len(), 0);
         assert!(!loc_rib.has_prefix(&prefix));
 
-        // Removing again should return false
-        assert!(!loc_rib.remove_local_route(prefix));
+        // Removing again should return no changes
+        assert!(!loc_rib.remove_local_route(prefix).has_changes());
     }
 
     #[test]

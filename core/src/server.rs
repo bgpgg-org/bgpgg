@@ -518,6 +518,25 @@ impl PeerInfo {
     pub fn policy_out(&self) -> &[Arc<Policy>] {
         &self.export_policies
     }
+
+    /// Replace adj_rib_out entries for a given AFI with newly sent routes.
+    pub fn replace_adj_rib_out(&mut self, afi: Afi, sent: Vec<PrefixPath>) {
+        let is_target_afi = |prefix: &IpNetwork| match afi {
+            Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
+            Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
+        };
+        self.adj_rib_out
+            .retain(|(prefix, _), _| !is_target_afi(prefix));
+        for (prefix, path) in sent {
+            self.adj_rib_out.insert(
+                (
+                    prefix,
+                    path.local_path_id.expect("loc-rib path must have ID"),
+                ),
+                path,
+            );
+        }
+    }
 }
 
 pub struct BgpServer {

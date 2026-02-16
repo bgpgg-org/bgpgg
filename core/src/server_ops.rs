@@ -27,7 +27,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteDelta};
+use crate::rib::{Path, PathAttrs, PrefixPath, Route};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -981,23 +981,8 @@ impl BgpServer {
 
             info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
 
-            // Update adj_rib_out: clear old entries for this AFI, insert new
             if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                let is_target_afi = |prefix: &IpNetwork| match afi {
-                    Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
-                    Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
-                };
-                peer.adj_rib_out
-                    .retain(|(prefix, _), _| !is_target_afi(prefix));
-                for (prefix, path) in all_sent {
-                    peer.adj_rib_out.insert(
-                        (
-                            prefix,
-                            path.local_path_id.expect("loc-rib path must have ID"),
-                        ),
-                        path,
-                    );
-                }
+                peer.replace_adj_rib_out(afi, all_sent);
             }
         }
     }
@@ -1010,17 +995,11 @@ impl BgpServer {
     ) {
         info!(?prefix, next_hop = ?attrs.next_hop, "adding route via request");
 
-        self.loc_rib.add_local_route(prefix, attrs);
+        let delta = self.loc_rib.add_local_route(prefix, attrs);
 
-        // Propagate to all peers using the common propagation logic
-        self.propagate_routes(
-            RouteDelta {
-                best_changed: vec![prefix],
-                changed: vec![prefix],
-            },
-            None,
-        )
-        .await;
+        if delta.has_changes() {
+            self.propagate_routes(delta, None).await;
+        }
 
         let _ = response.send(Ok(()));
     }
@@ -1032,22 +1011,10 @@ impl BgpServer {
     ) {
         info!(?prefix, "removing route via request");
 
-        // Remove local route from Loc-RIB
-        let removed = self.loc_rib.remove_local_route(prefix);
+        let delta = self.loc_rib.remove_local_route(prefix);
 
-        // Only propagate if something was actually removed
-        if removed {
-            // Propagate to all peers using the common propagation logic
-            // This will automatically send withdrawal if no alternate path exists,
-            // or announce the new best path if an alternate path is available
-            self.propagate_routes(
-                RouteDelta {
-                    best_changed: vec![prefix],
-                    changed: vec![prefix],
-                },
-                None,
-            )
-            .await;
+        if delta.has_changes() {
+            self.propagate_routes(delta, None).await;
         }
 
         let _ = response.send(Ok(()));
@@ -2058,23 +2025,8 @@ impl BgpServer {
 
             info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
 
-            // Update adj_rib_out: clear old entries for this AFI, insert new
             if let Some(peer) = self.peers.get_mut(&peer_ip) {
-                let is_target_afi = |prefix: &IpNetwork| match afi {
-                    Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
-                    Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
-                };
-                peer.adj_rib_out
-                    .retain(|(prefix, _), _| !is_target_afi(prefix));
-                for (prefix, path) in all_sent {
-                    peer.adj_rib_out.insert(
-                        (
-                            prefix,
-                            path.local_path_id.expect("loc-rib path must have ID"),
-                        ),
-                        path,
-                    );
-                }
+                peer.replace_adj_rib_out(afi, all_sent);
             }
         }
     }
