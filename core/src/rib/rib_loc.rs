@@ -218,9 +218,9 @@ impl LocRib {
                 affected.push(*prefix);
             }
         }
-        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = affected
+        let old_best: HashMap<IpNetwork, Arc<Path>> = affected
             .iter()
-            .map(|p| (*p, self.get_best_path(p).map(Arc::clone)))
+            .filter_map(|p| self.get_best_path(p).map(|best| (*p, Arc::clone(best))))
             .collect();
 
         // Process withdrawals
@@ -244,15 +244,7 @@ impl LocRib {
 
         let best_changed = affected
             .iter()
-            .filter(|p| {
-                let old = old_best.get(p).unwrap().as_ref();
-                let new = self.get_best_path(p);
-                match (old, new) {
-                    (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-                    (None, None) => false,
-                    _ => true,
-                }
-            })
+            .filter(|p| self.best_path_changed(p, old_best.get(p)))
             .cloned()
             .collect();
         RouteDelta {
@@ -345,32 +337,30 @@ impl LocRib {
     pub fn remove_routes_from_peer(&mut self, peer_ip: IpAddr) -> Vec<IpNetwork> {
         let prefixes = self.get_prefixes_from_peer(peer_ip);
 
-        let old_best: HashMap<IpNetwork, Option<Arc<Path>>> = prefixes
+        let old_best: HashMap<IpNetwork, Arc<Path>> = prefixes
             .iter()
-            .map(|p| (*p, self.get_best_path(p).map(Arc::clone)))
+            .filter_map(|p| self.get_best_path(p).map(|best| (*p, Arc::clone(best))))
             .collect();
 
         self.clear_peer_paths(peer_ip);
 
-        old_best
+        prefixes
             .into_iter()
-            .filter_map(|(prefix, old)| {
-                let best_changed = match (old.as_ref(), self.get_best_path(&prefix)) {
-                    (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-                    (None, None) => false,
-                    _ => true,
-                };
-                if best_changed {
-                    Some(prefix)
-                } else {
-                    None
-                }
-            })
+            .filter(|p| self.best_path_changed(p, old_best.get(p)))
             .collect()
     }
 
     pub fn routes_len(&self) -> usize {
         self.ipv4_unicast.len() + self.ipv6_unicast.len()
+    }
+
+    /// Returns true if the best path for a prefix differs from the old snapshot.
+    fn best_path_changed(&self, prefix: &IpNetwork, old: Option<&Arc<Path>>) -> bool {
+        match (old, self.get_best_path(prefix)) {
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            (None, None) => false,
+            _ => true,
+        }
     }
 
     /// Get the best path for a specific prefix, if any
