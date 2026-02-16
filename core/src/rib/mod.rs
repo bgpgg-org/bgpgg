@@ -29,5 +29,5 @@ mod types;
 // Re-exports
 pub use path::{Path, PathAttrs};
 pub use rib_loc::RouteDelta;
-pub use rib_out::{AdjRibOut, PendingRibUpdate};
+pub use rib_out::AdjRibOut;
 pub use types::{PrefixPath, Route, RouteSource};

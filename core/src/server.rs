@@ -30,7 +30,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{AdjRibOut, PathAttrs, PendingRibUpdate, PrefixPath, Route, RouteDelta};
+use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -954,11 +954,10 @@ impl BgpServer {
             }
         }
 
-        // Collect per-peer adj_rib_out updates so we can apply them after immutable iteration.
-        let mut adj_rib_updates: Vec<PendingRibUpdate> = Vec::new();
+        let local_addr = self.local_addr;
+        let loc_rib = &self.loc_rib;
 
-        // Send updates to all established peers (except the originating peer)
-        for (peer_addr, entry) in self.peers.iter() {
+        for (peer_addr, entry) in self.peers.iter_mut() {
             let Some(conn) = entry.established_conn() else {
                 continue;
             };
@@ -967,53 +966,50 @@ impl BgpServer {
                 continue;
             }
 
-            let Some(peer_tx) = &conn.peer_tx else {
+            let Some(peer_tx) = conn.peer_tx.clone() else {
                 continue;
             };
 
-            let export_policies = entry.policy_out();
+            let peer_asn = conn.asn.unwrap_or(local_asn);
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(local_addr);
+            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
+            let add_path_send = conn
+                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
+            let rr_client = entry.config.rr_client;
+
+            let export_policies = entry.policy_out().to_vec();
             if export_policies.is_empty() {
                 error!(peer_ip = %peer_addr, "export policies not set for established peer");
                 continue;
             }
 
-            let add_path_send = conn
-                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
-
+            // conn/entry borrows released - ctx owns cloned values
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
-                peer_tx,
+                peer_tx: &peer_tx,
                 local_asn,
-                peer_asn: conn.asn.unwrap_or(local_asn),
-                local_next_hop: conn
-                    .conn_info
-                    .as_ref()
-                    .map(|conn_info| conn_info.local_address)
-                    .unwrap_or(self.local_addr),
-                export_policies,
-                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
-                rr_client: entry.config.rr_client,
+                peer_asn,
+                local_next_hop,
+                export_policies: &export_policies,
+                peer_supports_4byte_asn,
+                rr_client,
                 cluster_id,
                 add_path_send,
             };
 
-            let update = propagate_routes_to_peer(
+            propagate_routes_to_peer(
                 &ctx,
                 &to_announce,
                 &to_withdraw,
                 &delta.changed,
-                &self.loc_rib,
-                &entry.adj_rib_out,
+                loc_rib,
+                &mut entry.adj_rib_out,
             );
-            adj_rib_updates.push(update);
-        }
-
-        // Update adj_rib_out for each peer (mutable access)
-        for update in adj_rib_updates {
-            if let Some(entry) = self.peers.get_mut(&update.peer_addr) {
-                entry.adj_rib_out.apply_pending(update);
-            }
         }
     }
 }

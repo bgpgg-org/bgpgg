@@ -24,7 +24,7 @@ use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{AdjRibOut, Path, PendingRibUpdate, PrefixPath, RouteSource};
+use crate::rib::{AdjRibOut, Path, PrefixPath, RouteSource};
 
 #[cfg(test)]
 use crate::policy::Policy;
@@ -590,16 +590,16 @@ pub fn send_announcements_to_peer(
     filtered_arc
 }
 
-/// Propagate routes to a peer. For ADD-PATH peers, diffs all paths against
-/// adj-rib-out. For non-ADD-PATH peers, sends best-path announcements and withdrawals.
+/// Export paths to a peer and update adj-rib-out. For ADD-PATH peers, diffs all
+/// paths against adj-rib-out. For non-ADD-PATH peers, sends best-path only.
 pub fn propagate_routes_to_peer(
     ctx: &PeerExportContext,
     to_announce: &[PrefixPath],
     to_withdraw: &[IpNetwork],
     all_changed: &[IpNetwork],
     loc_rib: &LocRib,
-    adj_rib_out: &AdjRibOut,
-) -> PendingRibUpdate {
+    adj_rib_out: &mut AdjRibOut,
+) {
     if ctx.add_path_send {
         let (addpath_to_announce, addpath_to_withdraw) =
             build_addpath_updates(all_changed, loc_rib, adj_rib_out);
@@ -615,11 +615,11 @@ pub fn propagate_routes_to_peer(
 
         let sent = send_announcements_to_peer(ctx, &addpath_to_announce, true);
 
-        PendingRibUpdate {
-            peer_addr: ctx.peer_addr,
-            sent,
-            withdrawn_prefixes: Vec::new(),
-            withdrawn_path_ids: addpath_to_withdraw,
+        for (prefix, path_id) in &addpath_to_withdraw {
+            adj_rib_out.remove_path(prefix, *path_id);
+        }
+        for (prefix, path) in sent {
+            adj_rib_out.insert(prefix, path);
         }
     } else {
         let peer_withdrawals = build_best_withdrawals(to_withdraw, adj_rib_out);
@@ -633,11 +633,11 @@ pub fn propagate_routes_to_peer(
 
         let sent = send_announcements_to_peer(ctx, to_announce, false);
 
-        PendingRibUpdate {
-            peer_addr: ctx.peer_addr,
-            sent,
-            withdrawn_prefixes: peer_withdrawals,
-            withdrawn_path_ids: Vec::new(),
+        for prefix in &peer_withdrawals {
+            adj_rib_out.remove_prefix(prefix);
+        }
+        for (prefix, path) in sent {
+            adj_rib_out.insert(prefix, path);
         }
     }
 }

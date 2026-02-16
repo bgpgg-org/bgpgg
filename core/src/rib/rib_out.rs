@@ -16,19 +16,7 @@ use crate::bgp::multiprotocol::Afi;
 use crate::net::IpNetwork;
 use crate::rib::{Path, PrefixPath, Route};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
-
-/// Deferred adj-rib-out mutations collected during immutable peer iteration.
-pub struct PendingRibUpdate {
-    pub peer_addr: IpAddr,
-    /// Routes successfully sent (post-policy).
-    pub sent: Vec<PrefixPath>,
-    /// Prefixes fully withdrawn (non-ADD-PATH).
-    pub withdrawn_prefixes: Vec<IpNetwork>,
-    /// Per-path-id withdrawals (ADD-PATH).
-    pub withdrawn_path_ids: Vec<(IpNetwork, u32)>,
-}
 
 /// Adj-RIB-Out: Per-peer output routing table
 ///
@@ -92,19 +80,6 @@ impl AdjRibOut {
     /// Check if any route exists for the given prefix.
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
         self.routes.keys().any(|(p, _)| p == prefix)
-    }
-
-    /// Apply a batch of deferred updates: withdrawals then announcements.
-    pub fn apply_pending(&mut self, update: PendingRibUpdate) {
-        for prefix in &update.withdrawn_prefixes {
-            self.remove_prefix(prefix);
-        }
-        for (prefix, pid) in &update.withdrawn_path_ids {
-            self.remove_path(prefix, *pid);
-        }
-        for (prefix, path) in update.sent {
-            self.insert(prefix, path);
-        }
     }
 
     /// Get all routes grouped by prefix, suitable for gRPC responses.
