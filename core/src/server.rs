@@ -930,6 +930,10 @@ impl BgpServer {
         delta: RouteDelta,
         originating_peer: Option<IpAddr>,
     ) {
+        if !delta.has_changes() {
+            return;
+        }
+
         let local_asn = self.config.asn;
         let cluster_id = self.config.cluster_id();
 

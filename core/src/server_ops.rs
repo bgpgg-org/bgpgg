@@ -253,9 +253,7 @@ impl BgpServer {
                     info!(%peer_ip, "UPDATE processing complete");
 
                     // Propagate changed routes to other peers
-                    if delta.has_changes() {
-                        self.propagate_routes(delta, Some(peer_ip)).await;
-                    }
+                    self.propagate_routes(delta, Some(peer_ip)).await;
 
                     // BMP: Send route monitoring for this update
                     if let (Some(asn), Some(bgp_id)) = (peer_asn, peer_bgp_id) {
@@ -363,9 +361,7 @@ impl BgpServer {
                 } else if was_established {
                     // Only propagate withdrawals if the disconnected connection was Established
                     let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
-                    if delta.has_changes() {
-                        self.propagate_routes(delta, Some(peer_ip)).await;
-                    }
+                    self.propagate_routes(delta, Some(peer_ip)).await;
                 }
 
                 // BMP: Peer Down notification (only if session reached ESTABLISHED)
@@ -398,9 +394,7 @@ impl BgpServer {
                     .remove_peer_routes_stale(peer_ip, &stale_afi_safis);
 
                 // Propagate withdrawals if any routes were removed
-                if delta.has_changes() {
-                    self.propagate_routes(delta, Some(peer_ip)).await;
-                }
+                self.propagate_routes(delta, Some(peer_ip)).await;
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
@@ -409,9 +403,7 @@ impl BgpServer {
                 let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
 
                 // Propagate withdrawals if any routes were removed
-                if delta.has_changes() {
-                    self.propagate_routes(delta, Some(peer_ip)).await;
-                }
+                self.propagate_routes(delta, Some(peer_ip)).await;
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
                 if let Some(peer) = self.peers.get(&peer_ip) {
@@ -561,9 +553,7 @@ impl BgpServer {
             .loc_rib
             .remove_peer_routes_stale(peer_ip, &afi_safis_to_clear);
 
-        if delta.has_changes() {
-            self.propagate_routes(delta, Some(peer_ip)).await;
-        }
+        self.propagate_routes(delta, Some(peer_ip)).await;
 
         // Send full loc-rib to the newly established peer
         let negotiated_afi_safis = capabilities
@@ -993,10 +983,7 @@ impl BgpServer {
         info!(?prefix, next_hop = ?attrs.next_hop, "adding route via request");
 
         let delta = self.loc_rib.add_local_route(prefix, attrs);
-
-        if delta.has_changes() {
-            self.propagate_routes(delta, None).await;
-        }
+        self.propagate_routes(delta, None).await;
 
         let _ = response.send(Ok(()));
     }
@@ -1009,10 +996,7 @@ impl BgpServer {
         info!(?prefix, "removing route via request");
 
         let delta = self.loc_rib.remove_local_route(prefix);
-
-        if delta.has_changes() {
-            self.propagate_routes(delta, None).await;
-        }
+        self.propagate_routes(delta, None).await;
 
         let _ = response.send(Ok(()));
     }
