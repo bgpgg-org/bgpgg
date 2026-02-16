@@ -24,7 +24,7 @@ use crate::log::{error, info};
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::outgoing::{
-    propagate_addpath_to_peer, propagate_best_to_peer, should_propagate_to_peer, PeerExportContext,
+    propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
 };
 use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
@@ -977,6 +977,10 @@ impl BgpServer {
                 continue;
             }
 
+            let add_path_send = conn
+                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
+
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx,
@@ -991,17 +995,17 @@ impl BgpServer {
                 peer_supports_4byte_asn: conn.supports_four_octet_asn(),
                 rr_client: entry.config.rr_client,
                 cluster_id,
+                add_path_send,
             };
 
-            let add_path_send = conn
-                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
-
-            let update = if add_path_send {
-                propagate_addpath_to_peer(&ctx, &delta.changed, &self.loc_rib, &entry.adj_rib_out)
-            } else {
-                propagate_best_to_peer(&ctx, &to_announce, &to_withdraw, &entry.adj_rib_out)
-            };
+            let update = propagate_routes_to_peer(
+                &ctx,
+                &to_announce,
+                &to_withdraw,
+                &delta.changed,
+                &self.loc_rib,
+                &entry.adj_rib_out,
+            );
             adj_rib_updates.push(update);
         }
 

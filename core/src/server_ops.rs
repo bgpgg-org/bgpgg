@@ -950,6 +950,7 @@ impl BgpServer {
                 peer_supports_4byte_asn: conn.supports_four_octet_asn(),
                 rr_client: peer_info.config.rr_client,
                 cluster_id: self.config.cluster_id(),
+                add_path_send,
             };
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
@@ -1961,6 +1962,7 @@ impl BgpServer {
                 peer_supports_4byte_asn: conn.supports_four_octet_asn(),
                 rr_client: peer_info.config.rr_client,
                 cluster_id: self.config.cluster_id(),
+                add_path_send,
             };
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise

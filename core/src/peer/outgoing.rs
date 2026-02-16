@@ -53,6 +53,7 @@ pub struct PeerExportContext<'a> {
     pub peer_supports_4byte_asn: bool,
     pub rr_client: bool,
     pub cluster_id: Ipv4Addr,
+    pub add_path_send: bool,
 }
 
 /// Check if a route should be filtered based on well-known communities
@@ -589,60 +590,55 @@ pub fn send_announcements_to_peer(
     filtered_arc
 }
 
-/// Propagate routes to an ADD-PATH peer: diff all paths against adj-rib-out,
-/// send per-path-id withdrawals, then send announcements.
-pub fn propagate_addpath_to_peer(
-    ctx: &PeerExportContext,
-    changed: &[IpNetwork],
-    loc_rib: &LocRib,
-    adj_rib_out: &AdjRibOut,
-) -> PendingRibUpdate {
-    let (addpath_to_announce, addpath_to_withdraw) =
-        build_addpath_updates(changed, loc_rib, adj_rib_out);
-
-    if !addpath_to_withdraw.is_empty() {
-        send_addpath_withdrawals_to_peer(
-            ctx.peer_addr,
-            ctx.peer_tx,
-            &addpath_to_withdraw,
-            ctx.peer_supports_4byte_asn,
-        );
-    }
-
-    let sent = send_announcements_to_peer(ctx, &addpath_to_announce, true);
-
-    PendingRibUpdate {
-        peer_addr: ctx.peer_addr,
-        sent,
-        withdrawn_prefixes: Vec::new(),
-        withdrawn_path_ids: addpath_to_withdraw,
-    }
-}
-
-/// Propagate best-path routes to a non-ADD-PATH peer: filter withdrawals
-/// against adj-rib-out, send withdrawals, then send announcements.
-pub fn propagate_best_to_peer(
+/// Propagate routes to a peer. For ADD-PATH peers, diffs all paths against
+/// adj-rib-out. For non-ADD-PATH peers, sends best-path announcements and withdrawals.
+pub fn propagate_routes_to_peer(
     ctx: &PeerExportContext,
     to_announce: &[PrefixPath],
     to_withdraw: &[IpNetwork],
+    all_changed: &[IpNetwork],
+    loc_rib: &LocRib,
     adj_rib_out: &AdjRibOut,
 ) -> PendingRibUpdate {
-    let peer_withdrawals = build_best_withdrawals(to_withdraw, adj_rib_out);
+    if ctx.add_path_send {
+        let (addpath_to_announce, addpath_to_withdraw) =
+            build_addpath_updates(all_changed, loc_rib, adj_rib_out);
 
-    send_withdrawals_to_peer(
-        ctx.peer_addr,
-        ctx.peer_tx,
-        &peer_withdrawals,
-        ctx.peer_supports_4byte_asn,
-    );
+        if !addpath_to_withdraw.is_empty() {
+            send_addpath_withdrawals_to_peer(
+                ctx.peer_addr,
+                ctx.peer_tx,
+                &addpath_to_withdraw,
+                ctx.peer_supports_4byte_asn,
+            );
+        }
 
-    let sent = send_announcements_to_peer(ctx, to_announce, false);
+        let sent = send_announcements_to_peer(ctx, &addpath_to_announce, true);
 
-    PendingRibUpdate {
-        peer_addr: ctx.peer_addr,
-        sent,
-        withdrawn_prefixes: peer_withdrawals,
-        withdrawn_path_ids: Vec::new(),
+        PendingRibUpdate {
+            peer_addr: ctx.peer_addr,
+            sent,
+            withdrawn_prefixes: Vec::new(),
+            withdrawn_path_ids: addpath_to_withdraw,
+        }
+    } else {
+        let peer_withdrawals = build_best_withdrawals(to_withdraw, adj_rib_out);
+
+        send_withdrawals_to_peer(
+            ctx.peer_addr,
+            ctx.peer_tx,
+            &peer_withdrawals,
+            ctx.peer_supports_4byte_asn,
+        );
+
+        let sent = send_announcements_to_peer(ctx, to_announce, false);
+
+        PendingRibUpdate {
+            peer_addr: ctx.peer_addr,
+            sent,
+            withdrawn_prefixes: peer_withdrawals,
+            withdrawn_path_ids: Vec::new(),
+        }
     }
 }
 
@@ -1186,6 +1182,7 @@ mod tests {
             peer_supports_4byte_asn: false,
             rr_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
+            add_path_send: false,
         };
         send_announcements_to_peer(&ctx, &routes, false);
 
