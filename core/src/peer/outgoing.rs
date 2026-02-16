@@ -23,14 +23,14 @@ use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
-use crate::rib::{Path, PrefixPath, RouteSource};
+use crate::rib::rib_loc::LocRib;
+use crate::rib::{AdjRibOut, Path, PendingRibUpdate, PrefixPath, RouteSource};
 
 #[cfg(test)]
 use crate::policy::Policy;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-#[cfg(test)]
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -40,6 +40,19 @@ use tokio::sync::mpsc;
 pub struct AnnouncementBatch {
     pub path: Arc<Path>,
     pub prefixes: Vec<IpNetwork>,
+}
+
+/// Bundles per-peer parameters needed for route export
+pub struct PeerExportContext<'a> {
+    pub peer_addr: IpAddr,
+    pub peer_tx: &'a mpsc::UnboundedSender<PeerOp>,
+    pub local_asn: u32,
+    pub peer_asn: u32,
+    pub local_next_hop: IpAddr,
+    pub export_policies: &'a [Arc<crate::policy::Policy>],
+    pub peer_supports_4byte_asn: bool,
+    pub rr_client: bool,
+    pub cluster_id: Ipv4Addr,
 }
 
 /// Check if a route should be filtered based on well-known communities
@@ -435,6 +448,47 @@ fn apply_rr_attributes(path: &mut Path, cluster_id: std::net::Ipv4Addr) {
     path.attrs.cluster_list.insert(0, cluster_id);
 }
 
+/// Compute ADD-PATH diff: compare loc-rib paths against adj-rib-out for changed prefixes.
+/// Returns (to_announce, to_withdraw) where withdrawals are (prefix, path_id) pairs for
+/// paths present in adj-rib-out but no longer in loc-rib.
+pub fn build_addpath_updates(
+    changed: &[IpNetwork],
+    loc_rib: &LocRib,
+    adj_rib_out: &AdjRibOut,
+) -> (Vec<PrefixPath>, Vec<(IpNetwork, u32)>) {
+    let mut to_announce = Vec::new();
+    let mut to_withdraw = Vec::new();
+
+    for prefix in changed {
+        let current_paths = loc_rib.get_all_paths(prefix);
+        let adj_path_ids = adj_rib_out.path_ids_for_prefix(prefix);
+
+        for path in &current_paths {
+            to_announce.push((*prefix, Arc::clone(path)));
+        }
+
+        for pid in &adj_path_ids {
+            if !current_paths.iter().any(|p| p.local_path_id == Some(*pid)) {
+                to_withdraw.push((*prefix, *pid));
+            }
+        }
+    }
+
+    (to_announce, to_withdraw)
+}
+
+/// Filter withdrawals to only prefixes present in this peer's adj-rib-out.
+pub fn build_best_withdrawals(
+    to_withdraw: &[IpNetwork],
+    adj_rib_out: &AdjRibOut,
+) -> Vec<IpNetwork> {
+    to_withdraw
+        .iter()
+        .filter(|prefix| adj_rib_out.has_prefix(prefix))
+        .cloned()
+        .collect()
+}
+
 /// Send per-path-id withdrawal messages to an ADD-PATH peer
 pub fn send_addpath_withdrawals_to_peer(
     peer_addr: IpAddr,
@@ -473,18 +527,9 @@ pub fn send_addpath_withdrawals_to_peer(
 /// Send route announcements to a peer.
 /// Batches prefixes that share the same path attributes into single UPDATE messages.
 /// Returns the list of (prefix, exported_path) actually sent (post-policy).
-#[allow(clippy::too_many_arguments)]
 pub fn send_announcements_to_peer(
-    peer_addr: IpAddr,
-    peer_tx: &mpsc::UnboundedSender<PeerOp>,
+    ctx: &PeerExportContext,
     to_announce: &[PrefixPath],
-    local_asn: u32,
-    peer_asn: u32,
-    local_next_hop: IpAddr,
-    export_policies: &[Arc<crate::policy::Policy>],
-    peer_supports_4byte_asn: bool,
-    rr_client: bool,
-    cluster_id: std::net::Ipv4Addr,
     add_path: bool,
 ) -> Vec<PrefixPath> {
     if to_announce.is_empty() {
@@ -493,12 +538,12 @@ pub fn send_announcements_to_peer(
 
     let filtered = compute_routes_for_peer(
         to_announce,
-        local_asn,
-        peer_asn,
-        local_next_hop,
-        export_policies,
-        rr_client,
-        cluster_id,
+        ctx.local_asn,
+        ctx.peer_asn,
+        ctx.local_next_hop,
+        ctx.export_policies,
+        ctx.rr_client,
+        ctx.cluster_id,
     );
 
     if filtered.is_empty() {
@@ -515,13 +560,13 @@ pub fn send_announcements_to_peer(
 
     // Send one UPDATE message per unique set of path attributes
     for batch in batches {
-        debug!(%peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
+        debug!(peer_addr = %ctx.peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
 
         let update_msg = UpdateMessage::new(
             &batch.path,
             batch.prefixes.clone(),
             MessageFormat {
-                use_4byte_asn: peer_supports_4byte_asn,
+                use_4byte_asn: ctx.peer_supports_4byte_asn,
                 add_path,
             },
         );
@@ -530,18 +575,75 @@ pub fn send_announcements_to_peer(
         // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            warn!(%peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
+            warn!(peer_addr = %ctx.peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
             continue;
         }
 
-        if let Err(e) = peer_tx.send(PeerOp::SendUpdate(serialized)) {
-            error!(%peer_addr, error = %e, "failed to send UPDATE to peer");
+        if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
+            error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send UPDATE to peer");
         } else {
-            info!(count = batch.prefixes.len(), %peer_addr, "propagated routes to peer");
+            info!(count = batch.prefixes.len(), peer_addr = %ctx.peer_addr, "propagated routes to peer");
         }
     }
 
     filtered_arc
+}
+
+/// Propagate routes to an ADD-PATH peer: diff all paths against adj-rib-out,
+/// send per-path-id withdrawals, then send announcements.
+pub fn propagate_addpath_to_peer(
+    ctx: &PeerExportContext,
+    changed: &[IpNetwork],
+    loc_rib: &LocRib,
+    adj_rib_out: &AdjRibOut,
+) -> PendingRibUpdate {
+    let (addpath_to_announce, addpath_to_withdraw) =
+        build_addpath_updates(changed, loc_rib, adj_rib_out);
+
+    if !addpath_to_withdraw.is_empty() {
+        send_addpath_withdrawals_to_peer(
+            ctx.peer_addr,
+            ctx.peer_tx,
+            &addpath_to_withdraw,
+            ctx.peer_supports_4byte_asn,
+        );
+    }
+
+    let sent = send_announcements_to_peer(ctx, &addpath_to_announce, true);
+
+    PendingRibUpdate {
+        peer_addr: ctx.peer_addr,
+        sent,
+        withdrawn_prefixes: Vec::new(),
+        withdrawn_path_ids: addpath_to_withdraw,
+    }
+}
+
+/// Propagate best-path routes to a non-ADD-PATH peer: filter withdrawals
+/// against adj-rib-out, send withdrawals, then send announcements.
+pub fn propagate_best_to_peer(
+    ctx: &PeerExportContext,
+    to_announce: &[PrefixPath],
+    to_withdraw: &[IpNetwork],
+    adj_rib_out: &AdjRibOut,
+) -> PendingRibUpdate {
+    let peer_withdrawals = build_best_withdrawals(to_withdraw, adj_rib_out);
+
+    send_withdrawals_to_peer(
+        ctx.peer_addr,
+        ctx.peer_tx,
+        &peer_withdrawals,
+        ctx.peer_supports_4byte_asn,
+    );
+
+    let sent = send_announcements_to_peer(ctx, to_announce, false);
+
+    PendingRibUpdate {
+        peer_addr: ctx.peer_addr,
+        sent,
+        withdrawn_prefixes: peer_withdrawals,
+        withdrawn_path_ids: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1074,19 +1176,18 @@ mod tests {
 
         // Send announcements - should skip due to size
         let policies = vec![policy];
-        send_announcements_to_peer(
+        let ctx = PeerExportContext {
             peer_addr,
-            &tx,
-            &routes,
-            65000,
-            65001,
-            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            &policies,
-            false,
-            false, // rr_client
-            Ipv4Addr::new(1, 1, 1, 1),
-            false, // add_path
-        );
+            peer_tx: &tx,
+            local_asn: 65000,
+            peer_asn: 65001,
+            local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            export_policies: &policies,
+            peer_supports_4byte_asn: false,
+            rr_client: false,
+            cluster_id: Ipv4Addr::new(1, 1, 1, 1),
+        };
+        send_announcements_to_peer(&ctx, &routes, false);
 
         // Verify no message was sent
         assert!(

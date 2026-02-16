@@ -20,7 +20,9 @@ use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
-use crate::peer::outgoing::{batch_announcements_by_path, send_announcements_to_peer};
+use crate::peer::outgoing::{
+    batch_announcements_by_path, send_announcements_to_peer, PeerExportContext,
+};
 use crate::peer::{BgpState, PeerOp};
 use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
@@ -931,18 +933,24 @@ impl BgpServer {
         const CHUNK_SIZE: usize = 10_000;
 
         if let Some(peer_tx) = &conn.peer_tx {
-            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
-
             let afi_safi = AfiSafi::new(afi, safi);
             let add_path_send = conn.add_path_send_negotiated(&afi_safi);
 
-            let cluster_id = self.config.cluster_id();
-            let rr_client = peer_info.config.rr_client;
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(self.local_addr);
+            let ctx = PeerExportContext {
+                peer_addr: peer_ip,
+                peer_tx,
+                local_asn: self.config.asn,
+                peer_asn,
+                local_next_hop: conn
+                    .conn_info
+                    .as_ref()
+                    .map(|conn_info| conn_info.local_address)
+                    .unwrap_or(self.local_addr),
+                export_policies,
+                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                rr_client: peer_info.config.rr_client,
+                cluster_id: self.config.cluster_id(),
+            };
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
             let routes = self.loc_rib.get_paths(afi, add_path_send);
@@ -951,19 +959,7 @@ impl BgpServer {
             let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(
-                    peer_ip,
-                    peer_tx,
-                    chunk,
-                    self.config.asn,
-                    peer_asn,
-                    local_next_hop,
-                    export_policies,
-                    peer_supports_4byte_asn,
-                    rr_client,
-                    cluster_id,
-                    add_path_send,
-                );
+                let sent = send_announcements_to_peer(&ctx, chunk, add_path_send);
                 all_sent.extend(sent);
                 total_sent += chunk.len();
             }
@@ -1948,18 +1944,24 @@ impl BgpServer {
         info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
 
         if let Some(peer_tx) = &conn.peer_tx {
-            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
-
             let afi_safi = AfiSafi::new(afi, safi);
             let add_path_send = conn.add_path_send_negotiated(&afi_safi);
 
-            let cluster_id = self.config.cluster_id();
-            let rr_client = peer_info.config.rr_client;
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(self.local_addr);
+            let ctx = PeerExportContext {
+                peer_addr: peer_ip,
+                peer_tx,
+                local_asn: self.config.asn,
+                peer_asn,
+                local_next_hop: conn
+                    .conn_info
+                    .as_ref()
+                    .map(|conn_info| conn_info.local_address)
+                    .unwrap_or(self.local_addr),
+                export_policies,
+                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                rr_client: peer_info.config.rr_client,
+                cluster_id: self.config.cluster_id(),
+            };
 
             // Collect routes: all paths for ADD-PATH peers, best-only otherwise
             let routes = self.loc_rib.get_paths(afi, add_path_send);
@@ -1968,19 +1970,7 @@ impl BgpServer {
             let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(
-                    peer_ip,
-                    peer_tx,
-                    chunk,
-                    self.config.asn,
-                    peer_asn,
-                    local_next_hop,
-                    export_policies,
-                    peer_supports_4byte_asn,
-                    rr_client,
-                    cluster_id,
-                    add_path_send,
-                );
+                let sent = send_announcements_to_peer(&ctx, chunk, add_path_send);
                 all_sent.extend(sent);
                 total_sent += chunk.len();
             }

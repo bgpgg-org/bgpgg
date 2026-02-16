@@ -24,8 +24,7 @@ use crate::log::{error, info};
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::outgoing::{
-    send_addpath_withdrawals_to_peer, send_announcements_to_peer, send_withdrawals_to_peer,
-    should_propagate_to_peer,
+    propagate_addpath_to_peer, propagate_best_to_peer, should_propagate_to_peer, PeerExportContext,
 };
 use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
@@ -972,118 +971,38 @@ impl BgpServer {
                 continue;
             };
 
-            let peer_asn = conn.asn.unwrap_or(local_asn);
-            let rr_client = entry.config.rr_client;
-
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(self.local_addr);
-
             let export_policies = entry.policy_out();
             if export_policies.is_empty() {
                 error!(peer_ip = %peer_addr, "export policies not set for established peer");
                 continue;
             }
 
-            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
+            let ctx = PeerExportContext {
+                peer_addr: *peer_addr,
+                peer_tx,
+                local_asn,
+                peer_asn: conn.asn.unwrap_or(local_asn),
+                local_next_hop: conn
+                    .conn_info
+                    .as_ref()
+                    .map(|conn_info| conn_info.local_address)
+                    .unwrap_or(self.local_addr),
+                export_policies,
+                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                rr_client: entry.config.rr_client,
+                cluster_id,
+            };
 
-            // Check ADD-PATH send negotiation
             let add_path_send = conn
                 .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
                 || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
 
-            if add_path_send {
-                // ADD-PATH peer: diff all paths against adj_rib_out
-                let mut addpath_to_announce = Vec::new();
-                let mut addpath_to_withdraw = Vec::new();
-
-                for prefix in &delta.changed {
-                    let current_paths = self.loc_rib.get_all_paths(prefix);
-
-                    // Collect adj_rib_out path IDs for this prefix
-                    let adj_path_ids = entry.adj_rib_out.path_ids_for_prefix(prefix);
-
-                    // Announce all current paths (re-announce = implicit replace)
-                    for path in &current_paths {
-                        addpath_to_announce.push((*prefix, path.clone()));
-                    }
-
-                    // Withdraw paths in adj_rib_out but not in loc_rib
-                    for pid in &adj_path_ids {
-                        if !current_paths.iter().any(|p| p.local_path_id == Some(*pid)) {
-                            addpath_to_withdraw.push((*prefix, *pid));
-                        }
-                    }
-                }
-
-                // Send ADD-PATH withdrawals (per path_id)
-                if !addpath_to_withdraw.is_empty() {
-                    send_addpath_withdrawals_to_peer(
-                        *peer_addr,
-                        peer_tx,
-                        &addpath_to_withdraw,
-                        peer_supports_4byte_asn,
-                    );
-                }
-
-                // Send ADD-PATH announcements
-                let sent = send_announcements_to_peer(
-                    *peer_addr,
-                    peer_tx,
-                    &addpath_to_announce,
-                    local_asn,
-                    peer_asn,
-                    local_next_hop,
-                    export_policies,
-                    peer_supports_4byte_asn,
-                    rr_client,
-                    cluster_id,
-                    true, // add_path
-                );
-
-                adj_rib_updates.push(PendingRibUpdate {
-                    peer_addr: *peer_addr,
-                    sent,
-                    withdrawn_prefixes: Vec::new(),
-                    withdrawn_path_ids: addpath_to_withdraw,
-                });
+            let update = if add_path_send {
+                propagate_addpath_to_peer(&ctx, &delta.changed, &self.loc_rib, &entry.adj_rib_out)
             } else {
-                // Non-ADD-PATH peer: use best_changed (original behavior)
-                let peer_withdrawals: Vec<IpNetwork> = to_withdraw
-                    .iter()
-                    .filter(|prefix| entry.adj_rib_out.has_prefix(prefix))
-                    .cloned()
-                    .collect();
-
-                send_withdrawals_to_peer(
-                    *peer_addr,
-                    peer_tx,
-                    &peer_withdrawals,
-                    peer_supports_4byte_asn,
-                );
-                let sent = send_announcements_to_peer(
-                    *peer_addr,
-                    peer_tx,
-                    &to_announce,
-                    local_asn,
-                    peer_asn,
-                    local_next_hop,
-                    export_policies,
-                    peer_supports_4byte_asn,
-                    rr_client,
-                    cluster_id,
-                    false, // add_path
-                );
-
-                adj_rib_updates.push(PendingRibUpdate {
-                    peer_addr: *peer_addr,
-                    sent,
-                    withdrawn_prefixes: peer_withdrawals,
-                    withdrawn_path_ids: Vec::new(),
-                });
-            }
+                propagate_best_to_peer(&ctx, &to_announce, &to_withdraw, &entry.adj_rib_out)
+            };
+            adj_rib_updates.push(update);
         }
 
         // Update adj_rib_out for each peer (mutable access)
