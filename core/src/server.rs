@@ -970,18 +970,6 @@ impl BgpServer {
                 continue;
             };
 
-            let peer_asn = conn.asn.unwrap_or(local_asn);
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(local_addr);
-            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
-            let add_path_send = conn
-                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
-            let rr_client = entry.config.rr_client;
-
             let export_policies = entry.policy_out().to_vec();
             if export_policies.is_empty() {
                 error!(peer_ip = %peer_addr, "export policies not set for established peer");
@@ -993,13 +981,19 @@ impl BgpServer {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
                 local_asn,
-                peer_asn,
-                local_next_hop,
+                peer_asn: conn.asn.unwrap_or(local_asn),
+                local_next_hop: conn
+                    .conn_info
+                    .as_ref()
+                    .map(|conn_info| conn_info.local_address)
+                    .unwrap_or(local_addr),
                 export_policies: &export_policies,
-                peer_supports_4byte_asn,
-                rr_client,
+                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                rr_client: entry.config.rr_client,
                 cluster_id,
-                add_path_send,
+                add_path_send: conn
+                    .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                    || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
             };
 
             propagate_routes_to_peer(
