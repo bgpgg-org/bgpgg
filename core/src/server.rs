@@ -390,6 +390,18 @@ impl ConnectionState {
             capabilities: None,
         }
     }
+
+    pub fn supports_four_octet_asn(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.supports_four_octet_asn())
+    }
+
+    pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_send_negotiated(afi_safi))
+    }
 }
 
 /// Peer configuration and state stored in server's HashMap.
@@ -973,29 +985,12 @@ impl BgpServer {
                 continue;
             }
 
-            let peer_supports_4byte_asn = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| caps.supports_four_octet_asn())
-                .unwrap_or(false);
+            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
 
             // Check ADD-PATH send negotiation
             let add_path_send = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| {
-                    let ipv4_uni = AfiSafi {
-                        afi: Afi::Ipv4,
-                        safi: Safi::Unicast,
-                    };
-                    let ipv6_uni = AfiSafi {
-                        afi: Afi::Ipv6,
-                        safi: Safi::Unicast,
-                    };
-                    caps.add_path_send_negotiated(&ipv4_uni)
-                        || caps.add_path_send_negotiated(&ipv6_uni)
-                })
-                .unwrap_or(false);
+                .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast));
 
             if add_path_send {
                 // ADD-PATH peer: diff all paths against adj_rib_out

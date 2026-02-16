@@ -942,18 +942,10 @@ impl BgpServer {
         const CHUNK_SIZE: usize = 10_000;
 
         if let Some(peer_tx) = &conn.peer_tx {
-            let peer_supports_4byte_asn = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| caps.supports_four_octet_asn())
-                .unwrap_or(false);
+            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
 
             let afi_safi = AfiSafi::new(afi, safi);
-            let add_path_send = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| caps.add_path_send_negotiated(&afi_safi))
-                .unwrap_or(false);
+            let add_path_send = conn.add_path_send_negotiated(&afi_safi);
 
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
@@ -2027,18 +2019,10 @@ impl BgpServer {
         info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
 
         if let Some(peer_tx) = &conn.peer_tx {
-            let peer_supports_4byte_asn = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| caps.supports_four_octet_asn())
-                .unwrap_or(false);
+            let peer_supports_4byte_asn = conn.supports_four_octet_asn();
 
             let afi_safi = AfiSafi::new(afi, safi);
-            let add_path_send = conn
-                .capabilities
-                .as_ref()
-                .map(|caps| caps.add_path_send_negotiated(&afi_safi))
-                .unwrap_or(false);
+            let add_path_send = conn.add_path_send_negotiated(&afi_safi);
 
             let cluster_id = self.config.cluster_id();
             let rr_client = peer_info.config.rr_client;
