@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub trait PathIdAllocator {
+    fn alloc(&mut self) -> u32;
+    fn free(&mut self, id: u32);
+    fn free_all(&mut self, ids: Vec<u32>);
+}
+
 /// Bitmap allocator for ADD-PATH local path IDs.
 ///
 /// Each bit represents one ID. IDs are 1-based (0 is reserved as sentinel
@@ -20,27 +26,28 @@
 /// `trailing_ones()` compiles to a single TZCNT instruction.
 ///
 /// Auto-grows when all bits are set. Free is O(1).
-pub struct PathIdAllocator {
+pub struct BitmapPathIdAllocator {
     bits: Vec<u64>,
     pos: usize,
 }
 
-impl Default for PathIdAllocator {
+impl Default for BitmapPathIdAllocator {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PathIdAllocator {
+impl BitmapPathIdAllocator {
     pub fn new() -> Self {
-        PathIdAllocator {
+        BitmapPathIdAllocator {
             bits: Vec::new(),
             pos: 0,
         }
     }
+}
 
-    /// Allocate the next available path ID (1-based). Auto-grows if full.
-    pub fn alloc(&mut self) -> u32 {
+impl PathIdAllocator for BitmapPathIdAllocator {
+    fn alloc(&mut self) -> u32 {
         for idx in self.pos..self.bits.len() {
             let word = self.bits[idx];
             if word != u64::MAX {
@@ -56,15 +63,13 @@ impl PathIdAllocator {
         (self.pos as u32) * 64 + 1
     }
 
-    /// Free multiple path IDs at once.
-    pub fn free_all(&mut self, ids: Vec<u32>) {
+    fn free_all(&mut self, ids: Vec<u32>) {
         for id in ids {
             self.free(id);
         }
     }
 
-    /// Free a previously allocated path ID. No-op if id == 0 (sentinel).
-    pub fn free(&mut self, id: u32) {
+    fn free(&mut self, id: u32) {
         if id == 0 {
             return;
         }
@@ -97,7 +102,7 @@ mod tests {
         ];
 
         for (name, ops, expected) in tests {
-            let mut alloc = PathIdAllocator::new();
+            let mut alloc = BitmapPathIdAllocator::new();
             let mut results = Vec::new();
             for op in &ops {
                 if *op == "a" {
@@ -114,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_grow_past_first_word() {
-        let mut alloc = PathIdAllocator::new();
+        let mut alloc = BitmapPathIdAllocator::new();
         // Fill 64 IDs (one full word)
         for expected in 1..=64 {
             assert_eq!(alloc.alloc(), expected);
@@ -126,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_free_enables_reuse_from_earlier_word() {
-        let mut alloc = PathIdAllocator::new();
+        let mut alloc = BitmapPathIdAllocator::new();
         // Alloc 65 IDs (spans 2 words)
         for _ in 0..65 {
             alloc.alloc();

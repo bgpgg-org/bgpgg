@@ -214,10 +214,7 @@ mod tests {
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
-        assert_eq!(routes.len(), expected.len());
-        for (route, exp) in routes.iter().zip(expected.iter()) {
-            assert!(route.attrs_eq(exp));
-        }
+        assert_eq!(routes, expected);
     }
 
     #[test]
@@ -270,10 +267,13 @@ mod tests {
 
         let routes = rib_in.get_all_routes();
         assert_eq!(routes.len(), 1);
-        assert!(routes[0].attrs_eq(&Route {
-            prefix: prefix2,
-            paths: vec![path2]
-        }));
+        assert_eq!(
+            routes[0],
+            Route {
+                prefix: prefix2,
+                paths: vec![path2]
+            }
+        );
     }
 
     #[test]

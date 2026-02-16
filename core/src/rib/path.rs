@@ -43,8 +43,9 @@ pub struct PathAttrs {
 }
 
 /// Represents a BGP path with allocation metadata and attributes.
-/// No PartialEq: use .attrs for attribute comparison, Arc::ptr_eq() for identity.
+/// Production code should compare .attrs (not full path) to avoid unnecessary churn.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Path {
     /// None = not allocated (adj-rib-in), Some(id) = loc-rib allocated by PathIdAllocator
     pub local_path_id: Option<u32>,

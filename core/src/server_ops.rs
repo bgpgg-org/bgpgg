@@ -592,7 +592,7 @@ impl BgpServer {
 
         // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
         // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
-        if self.loc_rib.has_stale_routes_for_peer(peer_ip) {
+        if self.loc_rib.has_stale_paths_for_peer(peer_ip) {
             let gr_cap = capabilities
                 .as_ref()
                 .and_then(|c| c.graceful_restart.as_ref());

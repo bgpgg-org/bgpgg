@@ -29,9 +29,32 @@ pub mod types;
 pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
+    use crate::rib::path_id::PathIdAllocator;
     use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
+
+    /// Simple sequential path ID allocator for tests. Starts at 1, increments.
+    /// Free is a no-op — tests don't need ID reuse.
+    pub struct SeqPathIdAllocator {
+        next: u32,
+    }
+
+    impl SeqPathIdAllocator {
+        pub fn new() -> Self {
+            Self { next: 1 }
+        }
+    }
+
+    impl PathIdAllocator for SeqPathIdAllocator {
+        fn alloc(&mut self) -> u32 {
+            let id = self.next;
+            self.next += 1;
+            id
+        }
+        fn free(&mut self, _id: u32) {}
+        fn free_all(&mut self, _ids: Vec<u32>) {}
+    }
 
     pub fn create_test_path(peer_ip: IpAddr, bgp_id: Ipv4Addr) -> Arc<Path> {
         Arc::new(Path {

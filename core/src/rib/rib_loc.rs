@@ -16,7 +16,7 @@ use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
-use crate::rib::path_id::PathIdAllocator;
+use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::{Path, PrefixPath, Route, RouteSource};
 
 /// Result of applying a peer update to the Loc-RIB.
@@ -38,13 +38,13 @@ use std::net::Ipv4Addr;
 ///
 /// Contains the best paths selected after applying import policies
 /// and the BGP best path selection algorithm.
-pub struct LocRib {
+pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
     // Per-AFI/SAFI tables
     ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
     ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
 
     /// ADD-PATH local path ID allocator (RFC 7911)
-    path_ids: PathIdAllocator,
+    path_ids: A,
 }
 
 // Helper functions to avoid code duplication
@@ -53,12 +53,12 @@ pub struct LocRib {
 /// - If a matching path exists (same source, same remote_path_id) and attrs differ,
 ///   replace it while inheriting the existing local_path_id.
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path<K: Eq + Hash>(
+fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
     table: &mut HashMap<K, Route>,
     key: K,
     prefix: IpNetwork,
     mut path: Arc<Path>,
-    path_ids: &mut PathIdAllocator,
+    path_ids: &mut A,
 ) {
     let route = table.entry(key).or_insert_with(|| Route {
         prefix,
@@ -180,7 +180,7 @@ fn sweep_stale_in_table<K: Eq + Hash + Copy>(
     (changed_prefixes, freed_path_ids)
 }
 
-impl LocRib {
+impl<A: PathIdAllocator> LocRib<A> {
     fn upsert_path(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         match prefix {
             IpNetwork::V4(v4_prefix) => upsert_path(
@@ -319,7 +319,17 @@ impl LocRib {
         LocRib {
             ipv4_unicast: HashMap::new(),
             ipv6_unicast: HashMap::new(),
-            path_ids: PathIdAllocator::new(),
+            path_ids: BitmapPathIdAllocator::new(),
+        }
+    }
+}
+
+impl<A: PathIdAllocator> LocRib<A> {
+    pub fn with_path_ids(path_ids: A) -> Self {
+        LocRib {
+            ipv4_unicast: HashMap::new(),
+            ipv6_unicast: HashMap::new(),
+            path_ids,
         }
     }
 
@@ -525,7 +535,7 @@ impl LocRib {
     }
 
     /// Check if a peer has any stale paths (is in GR restart mode)
-    pub fn has_stale_routes_for_peer(&self, peer_ip: IpAddr) -> bool {
+    pub fn has_stale_paths_for_peer(&self, peer_ip: IpAddr) -> bool {
         let has_stale = |route: &Route| {
             route
                 .paths
@@ -594,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_upsert_path() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::with_path_ids(SeqPathIdAllocator::new());
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip, test_bgp_id());
@@ -603,15 +613,21 @@ mod tests {
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
-        assert!(routes[0].attrs_eq(&Route {
-            prefix,
-            paths: vec![path]
-        }));
+        let expected_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.local_path_id = Some(1);
+        });
+        assert_eq!(
+            routes[0],
+            Route {
+                prefix,
+                paths: vec![expected_path]
+            }
+        );
     }
 
     #[test]
     fn test_add_multiple_routes_different_prefixes() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::with_path_ids(SeqPathIdAllocator::new());
         let peer_ip = test_peer_ip();
 
         let prefix1 = create_test_prefix();
@@ -620,31 +636,31 @@ mod tests {
             prefix_length: 24,
         });
 
-        let path1 = create_test_path(peer_ip, test_bgp_id());
-        let path2 = create_test_path(peer_ip, test_bgp_id());
-
-        loc_rib.upsert_path(prefix1, path1.clone());
-        loc_rib.upsert_path(prefix2, path2.clone());
+        loc_rib.upsert_path(prefix1, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(prefix2, create_test_path(peer_ip, test_bgp_id()));
 
         let mut routes = loc_rib.get_all_routes();
         routes.sort_by_key(|r| format!("{:?}", r.prefix));
 
+        let expected_path1 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.local_path_id = Some(1);
+        });
+        let expected_path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.local_path_id = Some(2);
+        });
         let mut expected = [
             Route {
                 prefix: prefix1,
-                paths: vec![path1],
+                paths: vec![expected_path1],
             },
             Route {
                 prefix: prefix2,
-                paths: vec![path2],
+                paths: vec![expected_path2],
             },
         ];
         expected.sort_by_key(|r| format!("{:?}", r.prefix));
 
-        assert_eq!(routes.len(), expected.len());
-        for (route, exp) in routes.iter().zip(expected.iter()) {
-            assert!(route.attrs_eq(exp));
-        }
+        assert_eq!(routes, expected);
     }
 
     #[test]
@@ -678,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_upsert_path_same_peer_updates_path() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::with_path_ids(SeqPathIdAllocator::new());
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
 
@@ -696,15 +712,26 @@ mod tests {
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
-        assert!(routes[0].attrs_eq(&Route {
-            prefix,
-            paths: vec![path2]
-        }));
+        let expected_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.local_path_id = Some(1);
+            p.attrs.as_path = vec![AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: 2,
+                asn_list: vec![300, 400],
+            }];
+        });
+        assert_eq!(
+            routes[0],
+            Route {
+                prefix,
+                paths: vec![expected_path]
+            }
+        );
     }
 
     #[test]
     fn test_remove_routes_from_peer() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::with_path_ids(SeqPathIdAllocator::new());
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
@@ -719,10 +746,16 @@ mod tests {
 
         let routes = loc_rib.get_all_routes();
         assert_eq!(routes.len(), 1);
-        assert!(routes[0].attrs_eq(&Route {
-            prefix,
-            paths: vec![path2]
-        }));
+        let expected_path = create_test_path_with(peer2, test_bgp_id2(), |p| {
+            p.local_path_id = Some(2);
+        });
+        assert_eq!(
+            routes[0],
+            Route {
+                prefix,
+                paths: vec![expected_path]
+            }
+        );
     }
 
     #[test]
@@ -1145,7 +1178,7 @@ mod tests {
         // Add a route, then mark it stale (simulating GR)
         loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         loc_rib.mark_peer_routes_stale(peer_ip, ipv4_uni);
-        assert!(loc_rib.has_stale_routes_for_peer(peer_ip));
+        assert!(loc_rib.has_stale_paths_for_peer(peer_ip));
 
         // Verify the path is marked stale
         assert!(loc_rib.get_best_path(&prefix).unwrap().stale);
