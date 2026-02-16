@@ -1252,23 +1252,18 @@ impl BgpServer {
         withdrawn: &[IpNetwork],
         announced: &[PrefixPath],
     ) {
-        // Determine if peer supports 4-byte ASN to mirror actual BGP encoding
-        let use_4byte_asn = self
-            .peers
-            .get(&peer_ip)
-            .map(peer_supports_4byte_asn)
-            .unwrap_or(true); // Default to true if peer not found
+        // Mirror the actual BGP session encoding
+        let peer_info = self.peers.get(&peer_ip);
+        let use_4byte_asn = peer_info.map(peer_supports_4byte_asn).unwrap_or(true);
+        let add_path = peer_info.map(peer_add_path_received).unwrap_or(false);
+        let format = MessageFormat {
+            use_4byte_asn,
+            add_path,
+        };
 
         // Send withdrawals if any
         if !withdrawn.is_empty() {
-            let update = UpdateMessage::new_withdraw(
-                withdrawn.to_vec(),
-                MessageFormat {
-                    use_4byte_asn,
-                    add_path: false,
-                },
-                None,
-            );
+            let update = UpdateMessage::new_withdraw(withdrawn.to_vec(), format, None);
             self.broadcast_bmp(BmpOp::RouteMonitoring {
                 peer_ip,
                 peer_as,
@@ -1281,14 +1276,7 @@ impl BgpServer {
         if !announced.is_empty() {
             let batches = batch_announcements_by_path(announced);
             for batch in batches {
-                let update = UpdateMessage::new(
-                    &batch.path,
-                    batch.prefixes,
-                    MessageFormat {
-                        use_4byte_asn,
-                        add_path: false,
-                    },
-                );
+                let update = UpdateMessage::new(&batch.path, batch.prefixes, format);
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
                     peer_ip,
                     peer_as,
@@ -1827,8 +1815,19 @@ fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
         .unwrap_or(true) // Default to true if not negotiated (BMP is newer protocol)
 }
 
+/// Determine if peer session uses ADD-PATH (peer sends us path_ids)
+fn peer_add_path_received(peer_info: &PeerInfo) -> bool {
+    peer_info
+        .established_conn()
+        .map(|conn| {
+            conn.add_path_receive_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                || conn.add_path_receive_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast))
+        })
+        .unwrap_or(false)
+}
+
 /// Convert routes to UpdateMessages, batching by shared path attributes
-fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<UpdateMessage> {
+fn routes_to_update_messages(routes: &[Route], format: MessageFormat) -> Vec<UpdateMessage> {
     // Convert routes to (prefix, path) tuples for batching
     let announcements: Vec<PrefixPath> = routes
         .iter()
@@ -1846,16 +1845,7 @@ fn routes_to_update_messages(routes: &[Route], use_4byte_asn: bool) -> Vec<Updat
     // Convert each batch to an UpdateMessage
     batches
         .into_iter()
-        .map(|batch| {
-            UpdateMessage::new(
-                &batch.path,
-                batch.prefixes,
-                MessageFormat {
-                    use_4byte_asn,
-                    add_path: false,
-                },
-            )
-        })
+        .map(|batch| UpdateMessage::new(&batch.path, batch.prefixes, format))
         .collect()
 }
 
@@ -1901,8 +1891,11 @@ async fn send_initial_bmp_state_to_task(
         };
         if let (Some(asn), Some(bgp_id), Some(peer_tx)) = (conn.asn, conn.bgp_id, &conn.peer_tx) {
             if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
-                let use_4byte_asn = peer_supports_4byte_asn(peer_info);
-                let updates = routes_to_update_messages(&routes, use_4byte_asn);
+                let format = MessageFormat {
+                    use_4byte_asn: peer_supports_4byte_asn(peer_info),
+                    add_path: peer_add_path_received(peer_info),
+                };
+                let updates = routes_to_update_messages(&routes, format);
                 for update in updates {
                     let _ = task_tx.send(Arc::new(BmpOp::RouteMonitoring {
                         peer_ip,

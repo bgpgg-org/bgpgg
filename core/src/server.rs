@@ -402,6 +402,12 @@ impl ConnectionState {
             .as_ref()
             .is_some_and(|caps| caps.add_path_send_negotiated(afi_safi))
     }
+
+    pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_receive_negotiated(afi_safi))
+    }
 }
 
 /// Peer configuration and state stored in server's HashMap.
