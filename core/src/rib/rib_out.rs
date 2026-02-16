@@ -21,9 +21,9 @@ use std::sync::Arc;
 /// Adj-RIB-Out: Per-peer output routing table
 ///
 /// Tracks routes actually exported to a specific BGP peer.
-/// Key: (prefix, local_path_id), Value: the exported path (post-policy).
+/// Keyed by prefix, then by local_path_id within each prefix.
 pub struct AdjRibOut {
-    routes: HashMap<(IpNetwork, u32), Arc<Path>>,
+    routes: HashMap<IpNetwork, HashMap<u32, Arc<Path>>>,
 }
 
 impl AdjRibOut {
@@ -37,27 +37,32 @@ impl AdjRibOut {
     /// The path must have a local_path_id assigned.
     pub fn insert(&mut self, prefix: IpNetwork, path: Arc<Path>) {
         let path_id = path.local_path_id.expect("loc-rib path must have ID");
-        self.routes.insert((prefix, path_id), path);
+        self.routes.entry(prefix).or_default().insert(path_id, path);
     }
 
     /// Remove all routes for a given prefix (used for non-ADD-PATH withdrawals).
     pub fn remove_prefix(&mut self, prefix: &IpNetwork) {
-        self.routes.retain(|(p, _), _| p != prefix);
+        self.routes.remove(prefix);
     }
 
     /// Remove a specific path by prefix and path_id (used for ADD-PATH withdrawals).
     pub fn remove_path(&mut self, prefix: &IpNetwork, path_id: u32) {
-        self.routes.remove(&(*prefix, path_id));
+        if let Some(paths) = self.routes.get_mut(prefix) {
+            paths.remove(&path_id);
+            if paths.is_empty() {
+                self.routes.remove(prefix);
+            }
+        }
     }
 
     /// Replace all entries for a given AFI with newly sent routes.
     /// Removes existing entries matching the AFI, then inserts the new ones.
     pub fn replace_afi(&mut self, afi: Afi, sent: Vec<PrefixPath>) {
-        let is_target_afi = |prefix: &IpNetwork| match afi {
-            Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
-            Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
-        };
-        self.routes.retain(|(prefix, _), _| !is_target_afi(prefix));
+        self.routes.retain(|prefix, _| match afi {
+            Afi::Ipv4 => !matches!(prefix, IpNetwork::V4(_)),
+            Afi::Ipv6 => !matches!(prefix, IpNetwork::V6(_)),
+        });
+
         for (prefix, path) in sent {
             self.insert(prefix, path);
         }
@@ -71,29 +76,24 @@ impl AdjRibOut {
     /// Get all path_ids for a given prefix.
     pub fn path_ids_for_prefix(&self, prefix: &IpNetwork) -> Vec<u32> {
         self.routes
-            .keys()
-            .filter(|(p, _)| p == prefix)
-            .map(|(_, pid)| *pid)
-            .collect()
+            .get(prefix)
+            .map(|paths| paths.keys().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Check if any route exists for the given prefix.
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
-        self.routes.keys().any(|(p, _)| p == prefix)
+        self.routes.contains_key(prefix)
     }
 
     /// Get all routes grouped by prefix, suitable for gRPC responses.
     pub fn get_routes(&self) -> Vec<Route> {
-        let mut routes_map: HashMap<IpNetwork, Vec<Arc<Path>>> = HashMap::new();
-        for ((prefix, _path_id), path) in &self.routes {
-            routes_map
-                .entry(*prefix)
-                .or_default()
-                .push(Arc::clone(path));
-        }
-        routes_map
-            .into_iter()
-            .map(|(prefix, paths)| Route { prefix, paths })
+        self.routes
+            .iter()
+            .map(|(prefix, paths)| Route {
+                prefix: *prefix,
+                paths: paths.values().cloned().collect(),
+            })
             .collect()
     }
 }

@@ -1266,4 +1266,52 @@ mod tests {
             assert_eq!(delta.has_changes(), expected, "{desc}");
         }
     }
+
+    /// Regression test: when a better path (lower bgp_id) arrives after a worse one,
+    /// best_changed must include the prefix so adj-rib-out gets updated.
+    #[test]
+    fn test_best_changed_detects_better_path_from_second_peer() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let prefix = create_test_prefix();
+
+        // Peer with higher bgp_id (worse) sends first
+        let peer_high = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+        let bgp_id_high = Ipv4Addr::new(127, 0, 0, 4);
+        let path_high = create_test_path(peer_high, bgp_id_high);
+
+        let delta1 = loc_rib.apply_peer_update(
+            peer_high,
+            vec![],
+            vec![(prefix, path_high)],
+            |_prefix, _path| true,
+        );
+        assert!(
+            delta1.best_changed.contains(&prefix),
+            "first path should trigger best_changed"
+        );
+
+        // Peer with lower bgp_id (better) sends second
+        let peer_low = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let bgp_id_low = Ipv4Addr::new(127, 0, 0, 1);
+        let path_low = create_test_path(peer_low, bgp_id_low);
+
+        let delta2 = loc_rib.apply_peer_update(
+            peer_low,
+            vec![],
+            vec![(prefix, path_low)],
+            |_prefix, _path| true,
+        );
+        assert!(
+            delta2.best_changed.contains(&prefix),
+            "better path from second peer must trigger best_changed"
+        );
+
+        // Verify the best path is from the lower bgp_id peer
+        let best = loc_rib.get_best_path(&prefix).unwrap();
+        assert_eq!(
+            best.source().peer_ip(),
+            Some(peer_low),
+            "best path should be from peer with lower bgp_id"
+        );
+    }
 }

@@ -17,7 +17,9 @@
 use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
-use crate::bgp::msg_update_types::{NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
+use crate::bgp::msg_update_types::{
+    NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
+};
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
@@ -472,7 +474,6 @@ pub fn build_addpath_updates(
     (to_announce, to_withdraw)
 }
 
-
 /// Send route announcements to a peer.
 /// Batches prefixes that share the same path attributes into single UPDATE messages.
 /// Returns the list of (prefix, exported_path) actually sent (post-policy).
@@ -511,11 +512,7 @@ pub fn send_announcements_to_peer(
     for batch in batches {
         debug!(peer_addr = %ctx.peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
 
-        let update_msg = UpdateMessage::new(
-            &batch.path,
-            batch.prefixes.clone(),
-            format,
-        );
+        let update_msg = UpdateMessage::new(&batch.path, batch.prefixes.clone(), format);
 
         // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
         // RFC 4271 Section 9.2: Check message size before sending
@@ -593,6 +590,9 @@ pub fn propagate_routes_to_peer(
             adj_rib_out.remove_prefix(prefix);
         }
         for (prefix, path) in sent {
+            // Non-ADD-PATH: one path per prefix. Remove stale entry (different
+            // local_path_id) before inserting the replacement.
+            adj_rib_out.remove_prefix(&prefix);
             adj_rib_out.insert(prefix, path);
         }
     }

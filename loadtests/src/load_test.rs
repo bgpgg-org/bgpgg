@@ -422,8 +422,7 @@ impl BgpggProcess {
         config_file.write_all(yaml.as_bytes())?;
         config_file.flush()?;
 
-        // Spawn bgpggd binary
-        let process = Command::new("../target/debug/bgpggd")
+        let process = Command::new("../target/release/bgpggd")
             .arg("--config")
             .arg(config_file.path())
             .spawn()?;
@@ -795,6 +794,7 @@ async fn test_route_convergence() {
             for mismatch in mismatches.iter().take(5) {
                 tracing::error!("  {}", mismatch);
             }
+
             bgpgg.kill();
             panic!("Verification failed for peer {}", i);
         }
