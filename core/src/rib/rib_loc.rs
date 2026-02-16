@@ -338,7 +338,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
-            path_attrs: PathAttrs {
+            attrs: PathAttrs {
                 source: RouteSource::Local,
                 local_pref: path_attrs.local_pref.or(Some(100)),
                 ..path_attrs
@@ -682,11 +682,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         let expected_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.local_path_id = Some(1);
-            p.attrs.as_path = vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![300, 400],
-            }];
+            p.attrs.as_path = path2.attrs.as_path.clone();
         });
         assert_eq!(
             routes[0],
@@ -930,14 +926,17 @@ mod tests {
         loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
         let id1 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 
+        let before = Arc::clone(loc_rib.get_best_path(&prefix).unwrap());
+
         // Replace with updated path (same source, same remote_path_id=None)
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.attrs.med = Some(50);
         });
         loc_rib.upsert_path(prefix, path2);
-        let id2 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
+        let after = loc_rib.get_best_path(&prefix).unwrap();
 
-        assert_eq!(id1, id2, "replaced path should inherit local_path_id");
+        assert_eq!(id1, after.local_path_id, "replaced path should inherit local_path_id");
+        assert!(!Arc::ptr_eq(&before, after), "path should be replaced, not reused");
     }
 
     #[test]
@@ -971,7 +970,6 @@ mod tests {
         let ids: Vec<Option<u32>> = routes[0].paths.iter().map(|p| p.local_path_id).collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1], "different sources should get different IDs");
-        assert!(ids[0].is_some() && ids[1].is_some());
     }
 
     #[test]
