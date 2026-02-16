@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
-use crate::rib::{Path, PrefixPath, Route, RouteSource};
+use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
 
 /// Result of applying a peer update to the Loc-RIB.
 pub struct RouteDelta {
@@ -334,48 +333,17 @@ impl<A: PathIdAllocator> LocRib<A> {
     }
 
     /// Add a locally originated route
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_local_route(
-        &mut self,
-        prefix: IpNetwork,
-        next_hop: NextHopAddr,
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        originator_id: Option<std::net::Ipv4Addr>,
-        cluster_list: Vec<std::net::Ipv4Addr>,
-    ) {
-        // RFC 4271 Section 5.1.2: when originating a route (as_path is empty),
-        // AS_PATH is empty when sent to iBGP peers, or [local_asn] when sent to eBGP peers.
-        // We store it as provided and add local_asn during export based on peer type.
-        // If as_path is not empty, it's used as-is (for testing or route injection).
+    pub fn add_local_route(&mut self, prefix: IpNetwork, path_attrs: PathAttrs) {
         let path = Arc::new(Path {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
-            attrs: crate::rib::path::PathAttrs {
-                origin,
-                as_path,
-                next_hop,
+            path_attrs: PathAttrs {
                 source: RouteSource::Local,
-                local_pref: local_pref.or(Some(100)), // Default to 100 if not provided
-                med,
-                atomic_aggregate,
-                aggregator: None,
-                communities,
-                extended_communities,
-                large_communities,
-                unknown_attrs: vec![],
-                originator_id,
-                cluster_list,
+                local_pref: path_attrs.local_pref.or(Some(100)),
+                ..path_attrs
             },
         });
-
         self.upsert_path(prefix, path);
     }
 
@@ -573,7 +541,7 @@ impl<A: PathIdAllocator> LocRib<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType};
+    use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::net::{Ipv4Net, Ipv6Net};
     use crate::test_helpers::*;
     use std::cmp::Ordering;
@@ -780,17 +748,22 @@ mod tests {
 
         loc_rib.add_local_route(
             prefix,
-            NextHopAddr::Ipv4(next_hop),
-            Origin::IGP,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            vec![],
+            PathAttrs {
+                next_hop: NextHopAddr::Ipv4(next_hop),
+                origin: Origin::IGP,
+                as_path: vec![],
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         );
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_prefix(&prefix));
@@ -811,17 +784,22 @@ mod tests {
 
         loc_rib.add_local_route(
             prefix,
-            NextHopAddr::Ipv4(next_hop),
-            Origin::IGP,
-            vec![],
-            Some(200), // Custom LOCAL_PREF
-            None,
-            false,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            vec![],
+            PathAttrs {
+                next_hop: NextHopAddr::Ipv4(next_hop),
+                origin: Origin::IGP,
+                as_path: vec![],
+                source: RouteSource::Local,
+                local_pref: Some(200),
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         );
 
         let path = loc_rib.get_best_path(&prefix).unwrap();
@@ -1049,17 +1027,22 @@ mod tests {
 
         loc_rib.add_local_route(
             prefix,
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-            Origin::IGP,
-            vec![],
-            None,
-            None,
-            false,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            vec![],
+            PathAttrs {
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                origin: Origin::IGP,
+                as_path: vec![],
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         );
         let id1 = loc_rib.get_best_path(&prefix).unwrap().local_path_id;
 

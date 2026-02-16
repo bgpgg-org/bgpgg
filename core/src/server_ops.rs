@@ -14,7 +14,7 @@
 
 use crate::bgp::msg::MessageFormat;
 use crate::bgp::msg_notification::CeaseSubcode;
-use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
+use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
@@ -27,7 +27,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
-use crate::rib::{Path, PrefixPath, Route, RouteDelta};
+use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteDelta};
 use crate::server::PolicyDirection;
 use crate::server::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionInfo, ConnectionType,
@@ -73,35 +73,10 @@ impl BgpServer {
             }
             MgmtOp::AddRoute {
                 prefix,
-                next_hop,
-                origin,
-                as_path,
-                local_pref,
-                med,
-                atomic_aggregate,
-                communities,
-                extended_communities,
-                large_communities,
-                originator_id,
-                cluster_list,
+                attrs,
                 response,
             } => {
-                self.handle_add_route(
-                    prefix,
-                    next_hop,
-                    origin,
-                    as_path,
-                    local_pref,
-                    med,
-                    atomic_aggregate,
-                    communities,
-                    extended_communities,
-                    large_communities,
-                    originator_id,
-                    cluster_list,
-                    response,
-                )
-                .await;
+                self.handle_add_route(prefix, attrs, response).await;
             }
             MgmtOp::RemoveRoute { prefix, response } => {
                 self.handle_remove_route(prefix, response).await;
@@ -1087,40 +1062,15 @@ impl BgpServer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn handle_add_route(
         &mut self,
         prefix: IpNetwork,
-        next_hop: NextHopAddr,
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        originator_id: Option<std::net::Ipv4Addr>,
-        cluster_list: Vec<std::net::Ipv4Addr>,
+        attrs: PathAttrs,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(?prefix, ?next_hop, "adding route via request");
+        info!(?prefix, next_hop = ?attrs.next_hop, "adding route via request");
 
-        // Add route to Loc-RIB (locally originated if as_path is empty, otherwise with specified AS_PATH)
-        self.loc_rib.add_local_route(
-            prefix,
-            next_hop,
-            origin,
-            as_path,
-            local_pref,
-            med,
-            atomic_aggregate,
-            communities,
-            extended_communities,
-            large_communities,
-            originator_id,
-            cluster_list,
-        );
+        self.loc_rib.add_local_route(prefix, attrs);
 
         // Propagate to all peers using the common propagation logic
         self.propagate_routes(

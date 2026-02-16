@@ -15,7 +15,7 @@
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::{AsPathSegment, NextHopAddr, Origin, UpdateMessage};
+use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
@@ -31,7 +31,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{Path, PrefixPath, Route, RouteDelta};
+use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
 use std::collections::HashMap;
 use std::io;
@@ -154,17 +154,7 @@ pub enum MgmtOp {
     },
     AddRoute {
         prefix: IpNetwork,
-        next_hop: NextHopAddr,
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        originator_id: Option<std::net::Ipv4Addr>,
-        cluster_list: Vec<std::net::Ipv4Addr>,
+        attrs: PathAttrs,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {

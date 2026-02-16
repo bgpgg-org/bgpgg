@@ -18,6 +18,7 @@ use crate::bgp::msg_update::{
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
+use crate::rib::PathAttrs;
 use crate::server::{AdminState, MgmtOp};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
@@ -654,17 +655,22 @@ impl BgpService for BgpGrpcService {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
             prefix,
-            next_hop,
-            origin,
-            as_path,
-            local_pref: req.local_pref,
-            med: req.med,
-            atomic_aggregate: req.atomic_aggregate,
-            communities: req.communities,
-            extended_communities,
-            large_communities,
-            originator_id,
-            cluster_list,
+            attrs: PathAttrs {
+                origin,
+                as_path,
+                next_hop,
+                source: crate::rib::RouteSource::Local,
+                local_pref: req.local_pref,
+                med: req.med,
+                atomic_aggregate: req.atomic_aggregate,
+                aggregator: None,
+                communities: req.communities,
+                extended_communities,
+                large_communities,
+                unknown_attrs: vec![],
+                originator_id,
+                cluster_list,
+            },
             response: tx,
         };
 
@@ -746,17 +752,22 @@ impl BgpService for BgpGrpcService {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
                 prefix,
-                next_hop,
-                origin,
-                as_path,
-                local_pref: req.local_pref,
-                med: req.med,
-                atomic_aggregate: req.atomic_aggregate,
-                communities: req.communities,
-                extended_communities,
-                large_communities,
-                originator_id,
-                cluster_list,
+                attrs: PathAttrs {
+                    origin,
+                    as_path,
+                    next_hop,
+                    source: crate::rib::RouteSource::Local,
+                    local_pref: req.local_pref,
+                    med: req.med,
+                    atomic_aggregate: req.atomic_aggregate,
+                    aggregator: None,
+                    communities: req.communities,
+                    extended_communities,
+                    large_communities,
+                    unknown_attrs: vec![],
+                    originator_id,
+                    cluster_list,
+                },
                 response: tx,
             };
 
