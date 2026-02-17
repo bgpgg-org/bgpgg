@@ -268,28 +268,12 @@ impl Peer {
 
         let mut announced = Vec::new();
 
-        // Check if all NLRIs share the same path_id (common case) to avoid per-NLRI cloning
-        let common_path_id = nlri_list.first().and_then(|entry| entry.path_id);
-        let all_same_path_id = nlri_list
-            .iter()
-            .all(|entry| entry.path_id == common_path_id);
-
-        if all_same_path_id {
-            path.remote_path_id = common_path_id;
-            let path_arc = Arc::new(path);
-            for entry in &nlri_list {
-                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
-                self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
-                announced.push((entry.prefix, Arc::clone(&path_arc)));
-            }
-        } else {
-            for entry in &nlri_list {
-                path.remote_path_id = entry.path_id;
-                let path_arc = Arc::new(path.clone());
-                info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
-                self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
-                announced.push((entry.prefix, path_arc));
-            }
+        for entry in &nlri_list {
+            path.remote_path_id = entry.path_id;
+            let path_arc = Arc::new(path.clone());
+            info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
+            self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
+            announced.push((entry.prefix, path_arc));
         }
 
         Ok((announced, vec![]))
