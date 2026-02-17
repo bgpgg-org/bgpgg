@@ -15,6 +15,7 @@
 use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
+use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
@@ -665,8 +666,6 @@ impl Peer {
     /// it completes the initial routing update for an address family after the BGP session
     /// is established." This helps routing convergence in general, not just for GR.
     async fn send_eor_markers(&mut self, afi_safis: &[AfiSafi]) -> Result<(), io::Error> {
-        use crate::bgp::msg_update::UpdateMessage;
-
         let conn = self
             .conn
             .as_mut()
