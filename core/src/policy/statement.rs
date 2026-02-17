@@ -334,7 +334,7 @@ impl Action {
             Action::Accept => true,
             Action::Reject => false,
             Action::SetLocalPref { value, force } => {
-                if *force || path.attrs.local_pref.is_none() {
+                if *force || path.local_pref().is_none() {
                     path.attrs.local_pref = Some(*value);
                 }
                 true
@@ -347,7 +347,7 @@ impl Action {
                 match op {
                     CommunityOp::Add(to_add) => {
                         for &comm in to_add {
-                            if !path.attrs.communities.contains(&comm) {
+                            if !path.communities().contains(&comm) {
                                 path.attrs.communities.push(comm);
                             }
                         }
@@ -367,7 +367,7 @@ impl Action {
                 match op {
                     ExtCommunityOp::Add(to_add) => {
                         for &ec in to_add {
-                            if !path.attrs.extended_communities.contains(&ec) {
+                            if !path.extended_communities().contains(&ec) {
                                 path.attrs.extended_communities.push(ec);
                             }
                         }
@@ -387,7 +387,7 @@ impl Action {
                 match op {
                     LargeCommunityOp::Add(to_add) => {
                         for &lc in to_add {
-                            if !path.attrs.large_communities.contains(&lc) {
+                            if !path.large_communities().contains(&lc) {
                                 path.attrs.large_communities.push(lc);
                             }
                         }
@@ -437,13 +437,12 @@ impl Condition {
                 MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
             },
             Condition::Neighbor(neighbor) => path
-                .attrs
-                .source
+                .source()
                 .peer_ip()
                 .map(|ip| ip == *neighbor)
                 .unwrap_or(false),
             Condition::NeighborSet(set, match_opt) => {
-                let Some(peer_ip) = path.attrs.source.peer_ip() else {
+                let Some(peer_ip) = path.source().peer_ip() else {
                     return false;
                 };
                 match match_opt {
@@ -453,15 +452,13 @@ impl Condition {
                 }
             }
             Condition::AsPath(asn) => path
-                .attrs
-                .as_path
+                .as_path()
                 .iter()
                 .flat_map(|segment| segment.asn_list.iter())
                 .any(|&path_asn| path_asn == *asn),
             Condition::AsPathSet(set, match_opt) => {
                 let as_path_str = path
-                    .attrs
-                    .as_path
+                    .as_path()
                     .iter()
                     .flat_map(|segment| segment.asn_list.iter())
                     .map(|asn| asn.to_string())
@@ -475,60 +472,51 @@ impl Condition {
                     }
                 }
             }
-            Condition::Community(community) => path.attrs.communities.contains(community),
+            Condition::Community(community) => path.communities().contains(community),
             Condition::CommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
-                    .attrs
-                    .communities
+                    .communities()
                     .iter()
                     .any(|c| set.communities.contains(c)),
                 MatchOptionConfig::All => path
-                    .attrs
-                    .communities
+                    .communities()
                     .iter()
                     .all(|c| set.communities.contains(c)),
                 MatchOptionConfig::Invert => !path
-                    .attrs
-                    .communities
+                    .communities()
                     .iter()
                     .any(|c| set.communities.contains(c)),
             },
             Condition::ExtCommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
-                    .attrs
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .any(|ec| set.ext_communities.contains(ec)),
                 MatchOptionConfig::All => path
-                    .attrs
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .all(|ec| set.ext_communities.contains(ec)),
                 MatchOptionConfig::Invert => !path
-                    .attrs
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .any(|ec| set.ext_communities.contains(ec)),
             },
             Condition::LargeCommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
-                    .attrs
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .any(|lc| set.large_communities.contains(lc)),
                 MatchOptionConfig::All => path
-                    .attrs
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .all(|lc| set.large_communities.contains(lc)),
                 MatchOptionConfig::Invert => !path
-                    .attrs
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .any(|lc| set.large_communities.contains(lc)),
             },
             Condition::RouteType(route_type) => matches!(
-                (route_type, &path.attrs.source),
+                (route_type, path.source()),
                 (RouteType::Ebgp, RouteSource::Ebgp { .. })
                     | (RouteType::Ibgp, RouteSource::Ibgp { .. })
                     | (RouteType::Local, RouteSource::Local)
