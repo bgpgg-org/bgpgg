@@ -121,6 +121,14 @@ impl PeerCapabilities {
         }
     }
 
+    /// Build MessageFormat for encoding outgoing messages to this peer
+    pub fn send_format(&self, afi_safi: &AfiSafi) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_four_octet_asn(),
+            add_path: self.add_path_send_negotiated(afi_safi),
+        }
+    }
+
     /// Check if ADD-PATH receive is negotiated for a specific AFI/SAFI
     pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
         self.add_path
@@ -657,7 +665,6 @@ impl Peer {
     /// it completes the initial routing update for an address family after the BGP session
     /// is established." This helps routing convergence in general, not just for GR.
     async fn send_eor_markers(&mut self, afi_safis: &[AfiSafi]) -> Result<(), io::Error> {
-        use crate::bgp::msg::MessageFormat;
         use crate::bgp::msg_update::UpdateMessage;
 
         let conn = self
@@ -682,10 +689,7 @@ impl Peer {
             }
 
             // Create EOR message
-            let format = MessageFormat {
-                use_4byte_asn: self.capabilities.supports_four_octet_asn(),
-                add_path: self.capabilities.add_path_send_negotiated(afi_safi),
-            };
+            let format = self.capabilities.send_format(afi_safi);
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 
             // Send EOR

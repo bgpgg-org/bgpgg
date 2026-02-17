@@ -1829,9 +1829,7 @@ fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
 fn peer_add_path_received(peer_info: &PeerInfo) -> bool {
     peer_info
         .established_conn()
-        .map(|conn| {
-            conn.add_path_receive()
-        })
+        .map(|conn| conn.add_path_receive())
         .unwrap_or(false)
 }
 
