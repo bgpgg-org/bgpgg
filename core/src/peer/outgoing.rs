@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 
 /// A batch of route announcements sharing the same path attributes
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct AnnouncementBatch {
     pub path: Arc<Path>,
     pub prefixes: Vec<IpNetwork>,
@@ -766,23 +767,22 @@ mod tests {
             (p3, Arc::clone(&path_a)),
         ];
 
-        let actual = batch_announcements_by_path(&announcements);
+        let mut actual = batch_announcements_by_path(&announcements);
+        actual.sort_by_key(|batch| batch.prefixes.len());
 
-        assert_eq!(actual.len(), 2);
-
-        // Find batch with path_a (comparing path attrs)
-        let batch_a = actual
-            .iter()
-            .find(|b| b.path.attrs == path_a.attrs)
-            .unwrap();
-        assert_eq!(batch_a.prefixes, vec![p1, p3]);
-
-        // Find batch with path_b (comparing path attrs)
-        let batch_b = actual
-            .iter()
-            .find(|b| b.path.attrs == path_b.attrs)
-            .unwrap();
-        assert_eq!(batch_b.prefixes, vec![p2]);
+        assert_eq!(
+            actual,
+            vec![
+                AnnouncementBatch {
+                    path: Arc::clone(&path_b),
+                    prefixes: vec![p2],
+                },
+                AnnouncementBatch {
+                    path: Arc::clone(&path_a),
+                    prefixes: vec![p1, p3],
+                },
+            ]
+        );
     }
 
     #[test]
