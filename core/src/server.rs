@@ -407,6 +407,18 @@ impl ConnectionState {
             .as_ref()
             .is_some_and(|caps| caps.add_path_receive_negotiated(afi_safi))
     }
+
+    pub fn add_path_send(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_send())
+    }
+
+    pub fn add_path_receive(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.add_path_receive())
+    }
 }
 
 /// Peer configuration and state stored in server's HashMap.
@@ -991,9 +1003,7 @@ impl BgpServer {
                 peer_supports_4byte_asn: conn.supports_four_octet_asn(),
                 rr_client: entry.config.rr_client,
                 cluster_id,
-                add_path_send: conn
-                    .add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                    || conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
+                add_path_send: conn.add_path_send(),
             };
 
             propagate_routes_to_peer(

@@ -113,6 +113,14 @@ impl PeerCapabilities {
         }
     }
 
+    /// Build MessageFormat for parsing incoming messages from this peer
+    pub fn receive_format(&self) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_four_octet_asn(),
+            add_path: self.add_path_receive(),
+        }
+    }
+
     /// Check if ADD-PATH receive is negotiated for a specific AFI/SAFI
     pub fn add_path_receive_negotiated(&self, afi_safi: &AfiSafi) -> bool {
         self.add_path
@@ -122,6 +130,22 @@ impl PeerCapabilities {
                     .iter()
                     .any(|(as_, mode)| as_ == afi_safi && mode.can_receive())
             })
+            .unwrap_or(false)
+    }
+
+    /// Check if ADD-PATH send is negotiated for any AFI/SAFI
+    pub fn add_path_send(&self) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| ap.entries.iter().any(|(_, mode)| mode.can_send()))
+            .unwrap_or(false)
+    }
+
+    /// Check if ADD-PATH receive is negotiated for any AFI/SAFI
+    pub fn add_path_receive(&self) -> bool {
+        self.add_path
+            .as_ref()
+            .map(|ap| ap.entries.iter().any(|(_, mode)| mode.can_receive()))
             .unwrap_or(false)
     }
 }

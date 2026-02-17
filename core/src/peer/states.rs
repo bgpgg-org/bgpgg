@@ -15,7 +15,7 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::PeerCapabilities;
 use super::{Peer, PeerError, PeerOp, TcpConnection};
-use crate::bgp::msg::{Message, MessageFormat};
+use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::log::{debug, error, info};
 use crate::server::{AdminState, ServerOp};
@@ -47,15 +47,11 @@ impl Peer {
                 result = conn.msg_rx.recv() => {
                     match result {
                         Some(Ok(bytes)) => {
-                            // Pre-Established: ADD-PATH not yet negotiated
-                            let format = MessageFormat {
-                                use_4byte_asn: self.capabilities.supports_four_octet_asn(),
-                                add_path: false,
-                            };
+                            let format = self.capabilities.receive_format();
                             let message_type = bytes[18]; // Type is in header byte 18
                             let body = bytes[19..].to_vec(); // Body starts after header
 
-                            match crate::bgp::msg::BgpMessage::from_bytes(message_type, body, format) {
+                            match BgpMessage::from_bytes(message_type, body, format) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");

@@ -1830,8 +1830,7 @@ fn peer_add_path_received(peer_info: &PeerInfo) -> bool {
     peer_info
         .established_conn()
         .map(|conn| {
-            conn.add_path_receive_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                || conn.add_path_receive_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast))
+            conn.add_path_receive()
         })
         .unwrap_or(false)
 }
