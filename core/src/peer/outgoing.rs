@@ -590,10 +590,7 @@ pub fn propagate_routes_to_peer(
             adj_rib_out.remove_prefix(prefix);
         }
         for (prefix, path) in sent {
-            // Non-ADD-PATH: one path per prefix. Remove stale entry (different
-            // local_path_id) before inserting the replacement.
-            adj_rib_out.remove_prefix(&prefix);
-            adj_rib_out.insert(prefix, path);
+            adj_rib_out.replace(prefix, path);
         }
     }
 }

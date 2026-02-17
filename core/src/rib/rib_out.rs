@@ -45,6 +45,13 @@ impl AdjRibOut {
         self.routes.remove(prefix);
     }
 
+    /// Replace all paths for a prefix with a single path. Used for non-ADD-PATH
+    /// peers where only one path per prefix is allowed.
+    pub fn replace(&mut self, prefix: IpNetwork, path: Arc<Path>) {
+        self.remove_prefix(&prefix);
+        self.insert(prefix, path);
+    }
+
     /// Remove a specific path by prefix and path_id (used for ADD-PATH withdrawals).
     pub fn remove_path(&mut self, prefix: &IpNetwork, path_id: u32) {
         if let Some(paths) = self.routes.get_mut(prefix) {
@@ -146,6 +153,17 @@ mod tests {
         assert!(rib.has_prefix(&prefix));
         rib.remove_prefix(&prefix);
         assert!(!rib.has_prefix(&prefix));
+    }
+
+    #[test]
+    fn test_replace_clears_old_path_ids() {
+        let mut rib = AdjRibOut::new();
+        let prefix = prefix_v4("10.0.0.0/24");
+        rib.insert(prefix, make_path(1));
+        rib.insert(prefix, make_path(2));
+
+        rib.replace(prefix, make_path(3));
+        assert_eq!(rib.path_ids_for_prefix(&prefix), vec![3]);
     }
 
     #[test]
