@@ -15,8 +15,8 @@
 use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
+use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
 use crate::config::PeerConfig;
