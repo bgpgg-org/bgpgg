@@ -30,7 +30,7 @@ pub fn init_test_logging() {
 use std::collections::HashMap;
 
 use bgpgg::bgp::msg::{
-    read_bgp_message, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER,
+    read_bgp_message, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER, PRE_OPEN_FORMAT,
 };
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
@@ -1365,6 +1365,14 @@ impl FakePeer {
         self.stream = Some(stream);
     }
 
+    /// Returns the MessageFormat based on negotiated capabilities.
+    fn message_format(&self) -> MessageFormat {
+        MessageFormat {
+            use_4byte_asn: self.supports_4byte_asn,
+            add_path: false,
+        }
+    }
+
     /// Exchange OPEN messages with peer (ends up in OpenConfirm state).
     /// For outgoing connections: sends OPEN then reads OPEN.
     pub async fn handshake_open(&mut self, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
@@ -1380,15 +1388,9 @@ impl FakePeer {
             .expect("Failed to send OPEN");
 
         // Read their OPEN
-        let msg = read_bgp_message(
-            self.stream.as_mut().unwrap(),
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .expect("Failed to read OPEN");
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
+            .await
+            .expect("Failed to read OPEN");
         match msg {
             BgpMessage::Open(_) => {}
             _ => panic!("Expected OPEN message"),
@@ -1401,15 +1403,9 @@ impl FakePeer {
         self.asn = asn;
 
         // Read their OPEN (they connected, they send first)
-        let msg = read_bgp_message(
-            self.stream.as_mut().unwrap(),
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .expect("Failed to read OPEN");
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
+            .await
+            .expect("Failed to read OPEN");
         match msg {
             BgpMessage::Open(_) => {}
             _ => panic!("Expected OPEN message"),
@@ -1435,15 +1431,10 @@ impl FakePeer {
             .await
             .expect("Failed to send KEEPALIVE");
 
-        let msg = read_bgp_message(
-            self.stream.as_mut().unwrap(),
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .expect("Failed to read KEEPALIVE");
+        let format = self.message_format();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
+            .await
+            .expect("Failed to read KEEPALIVE");
         match msg {
             BgpMessage::Keepalive(_) => {}
             _ => panic!("Expected KEEPALIVE message during handshake"),
@@ -1532,15 +1523,9 @@ impl FakePeer {
 
     /// Read and discard an OPEN message
     pub async fn read_open(&mut self) -> OpenMessage {
-        let msg = read_bgp_message(
-            self.stream.as_mut().unwrap(),
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .unwrap();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
+            .await
+            .unwrap();
         match msg {
             BgpMessage::Open(open) => open,
             _ => panic!("Expected OPEN message"),
@@ -1549,31 +1534,21 @@ impl FakePeer {
 
     /// Read and discard a KEEPALIVE message
     pub async fn read_keepalive(&mut self) {
-        let msg = read_bgp_message(
-            self.stream.as_mut().unwrap(),
-            MessageFormat {
-                use_4byte_asn: false,
-                add_path: false,
-            },
-        )
-        .await
-        .unwrap();
+        let format = self.message_format();
+        let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
+            .await
+            .unwrap();
         assert!(matches!(msg, BgpMessage::Keepalive(_)));
     }
 
     /// Read a NOTIFICATION message (skips any KEEPALIVEs) with 5s timeout
     pub async fn read_notification(&mut self) -> NotificationMessage {
+        let format = self.message_format();
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(
-                    self.stream.as_mut().unwrap(),
-                    MessageFormat {
-                        use_4byte_asn: false,
-                        add_path: false,
-                    },
-                )
-                .await
-                .expect("Failed to read message");
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
+                    .await
+                    .expect("Failed to read message");
 
                 match msg {
                     BgpMessage::Notification(notif) => return notif,
@@ -1592,17 +1567,12 @@ impl FakePeer {
 
     /// Read an UPDATE message (skips any KEEPALIVEs) with 5s timeout
     pub async fn read_update(&mut self) -> UpdateMessage {
+        let format = self.message_format();
         let result = timeout(Duration::from_secs(5), async {
             loop {
-                let msg = read_bgp_message(
-                    self.stream.as_mut().unwrap(),
-                    MessageFormat {
-                        use_4byte_asn: self.supports_4byte_asn,
-                        add_path: false,
-                    },
-                )
-                .await
-                .expect("Failed to read UPDATE");
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
+                    .await
+                    .expect("Failed to read UPDATE");
 
                 match msg {
                     BgpMessage::Update(update) => return update,
