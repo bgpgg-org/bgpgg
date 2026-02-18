@@ -214,7 +214,7 @@ impl UpdateMessage {
 
         for attr in &self.path_attributes {
             if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
-                nlri.extend(mp_reach.nlri.iter().cloned());
+                nlri.extend_from_slice(&mp_reach.nlri);
             }
         }
 
@@ -714,6 +714,16 @@ mod tests {
     use crate::rib::{PathAttrs, RouteSource};
     use std::net::Ipv4Addr;
 
+    fn nlri_v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> Nlri {
+        Nlri {
+            prefix: IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(a, b, c, d),
+                prefix_length: len,
+            }),
+            path_id: None,
+        }
+    }
+
     /// Test helper to create a base Path with sensible defaults
     fn test_path() -> Path {
         Path {
@@ -869,18 +879,9 @@ mod tests {
         expected UpdateMessage{
             withdrawn_routes_len: 12,
             withdrawn_routes: vec![
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 12, 0),
-                    prefix_length: 24,
-                }), path_id: None },
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 13, 0),
-                    prefix_length: 24,
-                }), path_id: None },
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 14, 0),
-                    prefix_length: 24,
-                }), path_id: None },
+                nlri_v4(10, 11, 12, 0, 24),
+                nlri_v4(10, 11, 13, 0, 24),
+                nlri_v4(10, 11, 14, 0, 24),
             ],
             total_path_attributes_len: 24,
             format: DEFAULT_FORMAT,
@@ -909,14 +910,8 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 15, 0),
-                    prefix_length: 24,
-                }), path_id: None },
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 16, 0),
-                    prefix_length: 24,
-                }), path_id: None },
+                nlri_v4(10, 11, 15, 0, 24),
+                nlri_v4(10, 11, 16, 0, 24),
             ],
         }
     );
@@ -966,10 +961,7 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 15, 0),
-                    prefix_length: 24,
-                }), path_id: None },
+                nlri_v4(10, 11, 15, 0, 24),
             ],
         }
     );
@@ -985,18 +977,9 @@ mod tests {
         expected UpdateMessage{
             withdrawn_routes_len: 12,
             withdrawn_routes: vec![
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 12, 0),
-                    prefix_length: 24,
-                }), path_id: None },
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 13, 0),
-                    prefix_length: 24,
-                }), path_id: None },
-                Nlri { prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 11, 14, 0),
-                    prefix_length: 24,
-                }), path_id: None },
+                nlri_v4(10, 11, 12, 0, 24),
+                nlri_v4(10, 11, 13, 0, 24),
+                nlri_v4(10, 11, 14, 0, 24),
             ],
             total_path_attributes_len: 0,
             format: DEFAULT_FORMAT,
