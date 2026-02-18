@@ -1102,9 +1102,9 @@ mod tests {
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
     use crate::bgp::{
-        DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
+        nlri_v4, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
-    use crate::net::{Ipv4Net, Ipv6Net};
+    use crate::net::Ipv6Net;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     // Sample MP_REACH_NLRI for IPv4 (192.168.1.1, NLRI=10.0.0.0/8)
@@ -1842,8 +1842,6 @@ mod tests {
 
     #[test]
     fn test_validate_nlri_afi_mismatch() {
-        use crate::net::{Ipv4Net, Ipv6Net};
-        use std::net::{Ipv4Addr, Ipv6Addr};
 
         let ipv6_route = Nlri {
             prefix: IpNetwork::V6(Ipv6Net {
@@ -1852,13 +1850,7 @@ mod tests {
             }),
             path_id: None,
         };
-        let ipv4_route = Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(192, 168, 1, 0),
-                prefix_length: 24,
-            }),
-            path_id: None,
-        };
+        let ipv4_route = nlri_v4(192, 168, 1, 0, 24, None);
 
         // AFI mismatch should fail
         assert!(!validate_nlri_afi(&Afi::Ipv4, &[ipv6_route]));
@@ -1877,13 +1869,7 @@ mod tests {
                 "without add_path",
                 MP_REACH_IPV4_SAMPLE,
                 false,
-                vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id: None,
-                }],
+                vec![nlri_v4(10, 0, 0, 0, 8, None)],
             ),
             (
                 "with add_path",
@@ -1897,13 +1883,7 @@ mod tests {
                     0x00, 0x00, 0x00, 0x2a, 0x08, 0x0a,
                 ],
                 true,
-                vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id: Some(42),
-                }],
+                vec![nlri_v4(10, 0, 0, 0, 8, Some(42))],
             ),
             (
                 "with add_path multiple NLRIs",
@@ -1920,20 +1900,8 @@ mod tests {
                 ],
                 true,
                 vec![
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(10, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id: Some(1),
-                    },
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(172, 16, 0, 0),
-                            prefix_length: 16,
-                        }),
-                        path_id: Some(2),
-                    },
+                    nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                    nlri_v4(172, 16, 0, 0, 16, Some(2)),
                 ],
             ),
         ];
@@ -1958,20 +1926,8 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             nlri: vec![
-                Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id: Some(1),
-                },
-                Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(172, 16, 0, 0),
-                        prefix_length: 16,
-                    }),
-                    path_id: Some(2),
-                },
+                nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                nlri_v4(172, 16, 0, 0, 16, Some(2)),
             ],
         };
 
@@ -2053,13 +2009,7 @@ mod tests {
                     0x08, 0x0a, // Withdrawn: 10.0.0.0/8
                 ],
                 false,
-                vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id: None,
-                }],
+                vec![nlri_v4(10, 0, 0, 0, 8, None)],
             ),
             (
                 "with add_path",
@@ -2070,13 +2020,7 @@ mod tests {
                     0x00, 0x00, 0x00, 0x05, 0x08, 0x0a,
                 ],
                 true,
-                vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id: Some(5),
-                }],
+                vec![nlri_v4(10, 0, 0, 0, 8, Some(5))],
             ),
             (
                 "with add_path same prefix different path_ids",
@@ -2089,20 +2033,8 @@ mod tests {
                 ],
                 true,
                 vec![
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(10, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id: Some(1),
-                    },
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(10, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id: Some(2),
-                    },
+                    nlri_v4(10, 0, 0, 0, 8, Some(1)),
+                    nlri_v4(10, 0, 0, 0, 8, Some(2)),
                 ],
             ),
         ];

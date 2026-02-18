@@ -700,7 +700,6 @@ impl Message for UpdateMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::MessageFormat;
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_codec::{
         read_path_attribute, write_path_attribute, write_path_attributes,
@@ -708,22 +707,12 @@ mod tests {
     use crate::bgp::msg_update_types::{AttrType, MpReachNlri, MpUnreachNlri};
     use crate::bgp::multiprotocol::{Afi, Safi};
     use crate::bgp::{
-        ADDPATH_FORMAT, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO,
+        nlri_v4, ADDPATH_FORMAT, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO,
         PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
     use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
     use crate::rib::{PathAttrs, RouteSource};
     use std::net::{Ipv4Addr, Ipv6Addr};
-
-    fn nlri_v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> Nlri {
-        Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(a, b, c, d),
-                prefix_length: len,
-            }),
-            path_id: None,
-        }
-    }
 
     /// Test helper to create a base Path with sensible defaults
     fn test_path() -> Path {
@@ -880,9 +869,9 @@ mod tests {
         expected UpdateMessage{
             withdrawn_routes_len: 12,
             withdrawn_routes: vec![
-                nlri_v4(10, 11, 12, 0, 24),
-                nlri_v4(10, 11, 13, 0, 24),
-                nlri_v4(10, 11, 14, 0, 24),
+                nlri_v4(10, 11, 12, 0, 24, None),
+                nlri_v4(10, 11, 13, 0, 24, None),
+                nlri_v4(10, 11, 14, 0, 24, None),
             ],
             total_path_attributes_len: 24,
             format: DEFAULT_FORMAT,
@@ -911,8 +900,8 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                nlri_v4(10, 11, 15, 0, 24),
-                nlri_v4(10, 11, 16, 0, 24),
+                nlri_v4(10, 11, 15, 0, 24, None),
+                nlri_v4(10, 11, 16, 0, 24, None),
             ],
         }
     );
@@ -962,7 +951,7 @@ mod tests {
                 }
             ],
             nlri_list: vec![
-                nlri_v4(10, 11, 15, 0, 24),
+                nlri_v4(10, 11, 15, 0, 24, None),
             ],
         }
     );
@@ -978,9 +967,9 @@ mod tests {
         expected UpdateMessage{
             withdrawn_routes_len: 12,
             withdrawn_routes: vec![
-                nlri_v4(10, 11, 12, 0, 24),
-                nlri_v4(10, 11, 13, 0, 24),
-                nlri_v4(10, 11, 14, 0, 24),
+                nlri_v4(10, 11, 12, 0, 24, None),
+                nlri_v4(10, 11, 13, 0, 24, None),
+                nlri_v4(10, 11, 14, 0, 24, None),
             ],
             total_path_attributes_len: 0,
             format: DEFAULT_FORMAT,
