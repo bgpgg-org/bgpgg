@@ -708,11 +708,12 @@ mod tests {
     use crate::bgp::msg_update_types::{AttrType, MpReachNlri, MpUnreachNlri};
     use crate::bgp::multiprotocol::{Afi, Safi};
     use crate::bgp::{
-        DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
+        ADDPATH_FORMAT, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO,
+        PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
-    use crate::net::{IpNetwork, Ipv4Net};
+    use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
     use crate::rib::{PathAttrs, RouteSource};
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn nlri_v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> Nlri {
         Nlri {
@@ -1226,14 +1227,7 @@ mod tests {
         // both with and without ADD-PATH path identifiers.
         let cases = vec![
             ("without add-path", DEFAULT_FORMAT, None),
-            (
-                "with add-path",
-                MessageFormat {
-                    use_4byte_asn: true,
-                    add_path: true,
-                },
-                Some(5),
-            ),
+            ("with add-path", ADDPATH_FORMAT, Some(5)),
         ];
 
         for (desc, format, path_id) in cases {
@@ -1956,9 +1950,6 @@ mod tests {
 
     #[test]
     fn test_update_message_ipv6_encode_decode() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
         // Create an UPDATE message with only IPv6 routes
         let ipv6_prefix = IpNetwork::V6(Ipv6Net {
             address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
@@ -2134,32 +2125,17 @@ mod tests {
     #[test]
     fn test_new_eor() {
         let cases = vec![
-            (
-                "IPv4 Unicast - empty UPDATE",
-                Afi::Ipv4,
-                Safi::Unicast,
-                true,
-            ),
-            (
-                "IPv6 Unicast - MP_UNREACH_NLRI",
-                Afi::Ipv6,
-                Safi::Unicast,
-                true,
-            ),
+            ("IPv4 Unicast - empty UPDATE", Afi::Ipv4, Safi::Unicast),
+            ("IPv6 Unicast - MP_UNREACH_NLRI", Afi::Ipv6, Safi::Unicast),
             (
                 "IPv4 Multicast - MP_UNREACH_NLRI",
                 Afi::Ipv4,
                 Safi::Multicast,
-                false,
             ),
         ];
 
-        for (desc, afi, safi, use_4byte_asn) in cases {
-            let format = MessageFormat {
-                use_4byte_asn,
-                add_path: false,
-            };
-            let eor = UpdateMessage::new_eor(afi, safi, format);
+        for (desc, afi, safi) in cases {
+            let eor = UpdateMessage::new_eor(afi, safi, DEFAULT_FORMAT);
 
             // All EOR markers should be recognized as EOR
             assert!(eor.is_eor(), "{}: should be EOR marker", desc);
@@ -2167,9 +2143,6 @@ mod tests {
             // All should have empty withdrawn and NLRI
             assert_eq!(eor.withdrawn_routes, vec![], "{}", desc);
             assert_eq!(eor.nlri_list, vec![], "{}", desc);
-
-            // Check format
-            assert_eq!(eor.use_4byte_asn(), use_4byte_asn, "{}", desc);
 
             // IPv4 Unicast should have no attributes
             if matches!((afi, safi), (Afi::Ipv4, Safi::Unicast)) {
@@ -2194,15 +2167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_addpath_encode_decode_roundtrip() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
-        let format = MessageFormat {
-            use_4byte_asn: true,
-            add_path: true,
-        };
-
+    fn test_addpath_roundtrip() {
         let cases = vec![
             (
                 "ipv4",
@@ -2233,7 +2198,7 @@ mod tests {
             path.local_path_id = Some(42);
             path.attrs.next_hop = next_hop;
 
-            let msg = UpdateMessage::new(&path, nlri.clone(), format);
+            let msg = UpdateMessage::new(&path, nlri.clone(), ADDPATH_FORMAT);
             let expected_nlri: Vec<Nlri> = nlri
                 .into_iter()
                 .map(|net| Nlri {
@@ -2244,7 +2209,7 @@ mod tests {
             assert_eq!(msg.nlri_list(), expected_nlri, "{}", desc);
 
             let bytes = msg.to_bytes();
-            let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
+            let decoded = UpdateMessage::from_bytes(bytes, ADDPATH_FORMAT).unwrap();
 
             assert_eq!(decoded.nlri_list(), expected_nlri, "{}", desc);
             assert_eq!(decoded.next_hop(), Some(next_hop), "{}", desc);
@@ -2252,15 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_addpath_withdraw_encode_decode() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
-        let format = MessageFormat {
-            use_4byte_asn: true,
-            add_path: true,
-        };
-
+    fn test_addpath_withdraw_roundtrip() {
         let cases = vec![
             (
                 "ipv4",
@@ -2286,9 +2243,9 @@ mod tests {
                     path_id: Some(7),
                 })
                 .collect();
-            let msg = UpdateMessage::new_withdraw(withdrawn.clone(), format);
+            let msg = UpdateMessage::new_withdraw(withdrawn.clone(), ADDPATH_FORMAT);
             let bytes = msg.to_bytes();
-            let decoded = UpdateMessage::from_bytes(bytes, format).unwrap();
+            let decoded = UpdateMessage::from_bytes(bytes, ADDPATH_FORMAT).unwrap();
 
             assert_eq!(decoded.withdrawn_routes(), withdrawn, "{}", desc);
         }

@@ -40,6 +40,12 @@ pub(crate) const DEFAULT_FORMAT: msg::MessageFormat = msg::MessageFormat {
 };
 
 #[cfg(test)]
+pub(crate) const ADDPATH_FORMAT: msg::MessageFormat = msg::MessageFormat {
+    use_4byte_asn: true,
+    add_path: true,
+};
+
+#[cfg(test)]
 pub(crate) const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[
     PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
     AttrType::Communities as u8,
