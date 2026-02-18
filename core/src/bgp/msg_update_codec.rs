@@ -182,9 +182,9 @@ pub(super) fn validate_well_known_mandatory_attributes(
     Ok(())
 }
 
-fn validate_nlri_afi(afi: &Afi, routes: &[Nlri]) -> bool {
-    for entry in routes {
-        match (afi, &entry.prefix) {
+fn validate_nlri_afi(afi: &Afi, nlri_list: &[Nlri]) -> bool {
+    for nlri in nlri_list {
+        match (afi, &nlri.prefix) {
             (Afi::Ipv4, IpNetwork::V4(_)) | (Afi::Ipv6, IpNetwork::V6(_)) => {}
             _ => return false,
         }
@@ -630,9 +630,10 @@ pub(super) fn read_attr_mp_unreach_nlri(
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
 
+    let nlri_bytes = &bytes[3..];
     let withdrawn_routes = match afi {
-        Afi::Ipv4 => parse_nlri_list(&bytes[3..], add_path)?,
-        Afi::Ipv6 => parse_nlri_v6_list(&bytes[3..], add_path)?,
+        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
+        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
     };
 
     Ok(MpUnreachNlri {
@@ -681,7 +682,6 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     // SAFI (1 byte)
     bytes.push(mp_unreach.safi as u8);
 
-    // Withdrawn routes - each entry may have its own path_id
     bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
 
     bytes
@@ -923,13 +923,13 @@ pub(super) fn read_path_attributes(
 
 /// Encode NLRI entries to wire format. Each entry's optional path_id (RFC 7911)
 /// is prepended when present.
-pub(super) fn write_nlri_list(entries: &[Nlri]) -> Vec<u8> {
+pub(super) fn write_nlri_list(nlri_list: &[Nlri]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    for entry in entries {
-        if let Some(pid) = entry.path_id {
+    for nlri in nlri_list {
+        if let Some(pid) = nlri.path_id {
             bytes.extend_from_slice(&pid.to_be_bytes());
         }
-        match &entry.prefix {
+        match &nlri.prefix {
             IpNetwork::V4(net) => {
                 bytes.push(net.prefix_length);
                 let octets = net.address.octets();

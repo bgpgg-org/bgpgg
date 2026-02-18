@@ -24,7 +24,7 @@ use super::msg_update_codec::{
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
 use super::msg_update_types::{
-    nlri_from_prefixes, MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN,
+    make_nlri_list, MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN,
 };
 use super::multiprotocol::{Afi, Safi};
 use super::utils::{parse_nlri_list, ParserError};
@@ -143,7 +143,7 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     next_hop: *path.next_hop(),
-                    nlri: nlri_from_prefixes(&ipv6_routes, path_id),
+                    nlri: make_nlri_list(&ipv6_routes, path_id),
                 }),
             });
         }
@@ -157,7 +157,7 @@ impl UpdateMessage {
             total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
                 .len() as u16,
             path_attributes,
-            nlri_list: nlri_from_prefixes(&ipv4_routes, path_id),
+            nlri_list: make_nlri_list(&ipv4_routes, path_id),
             format,
         }
     }

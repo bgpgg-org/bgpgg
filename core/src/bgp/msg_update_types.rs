@@ -88,7 +88,7 @@ pub struct Nlri {
 }
 
 /// Pair each prefix with the same path identifier.
-pub fn nlri_from_prefixes(prefixes: &[IpNetwork], path_id: Option<u32>) -> Vec<Nlri> {
+pub fn make_nlri_list(prefixes: &[IpNetwork], path_id: Option<u32>) -> Vec<Nlri> {
     prefixes
         .iter()
         .map(|net| Nlri {
