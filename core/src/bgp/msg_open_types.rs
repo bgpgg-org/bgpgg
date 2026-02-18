@@ -260,7 +260,7 @@ impl Capability {
         afi_safi_list: Vec<(AfiSafi, bool)>,
     ) -> Self {
         debug_assert!(
-            restart_time <= GR_RESTART_TIME_MASK,
+            restart_time <= Self::GR_RESTART_TIME_MASK,
             "restart_time {} exceeds 12-bit maximum (4095)",
             restart_time
         );
@@ -269,11 +269,11 @@ impl Capability {
 
         // Restart Flags (4 bits) + Restart Time (12 bits)
         let restart_flags = if restart_state {
-            GR_RESTART_FLAG_MASK
+            Self::GR_RESTART_FLAG_MASK
         } else {
             0x00
         };
-        let restart_time_masked = restart_time & GR_RESTART_TIME_MASK;
+        let restart_time_masked = restart_time & Self::GR_RESTART_TIME_MASK;
         let first_byte = restart_flags | ((restart_time_masked >> 8) as u8);
         let second_byte = (restart_time_masked & 0xFF) as u8;
         val.push(first_byte);
@@ -286,7 +286,7 @@ impl Capability {
             val.push(afi_bytes[1]);
             val.push(afi_safi.safi as u8);
             let flags = if forwarding_state {
-                GR_FORWARDING_FLAG_MASK
+                Self::GR_FORWARDING_FLAG_MASK
             } else {
                 0x00
             };
@@ -326,7 +326,7 @@ impl Capability {
 
         let mut entries = Vec::new();
         let mut offset = 0;
-        while offset + ADD_PATH_TUPLE_LEN <= self.val.len() {
+        while offset + Self::ADD_PATH_TUPLE_LEN <= self.val.len() {
             let afi_val = u16::from_be_bytes([self.val[offset], self.val[offset + 1]]);
             let safi_val = self.val[offset + 2];
             let mode_val = self.val[offset + 3];
@@ -338,7 +338,7 @@ impl Capability {
             ) {
                 entries.push((AfiSafi::new(afi, safi), mode));
             }
-            offset += ADD_PATH_TUPLE_LEN;
+            offset += Self::ADD_PATH_TUPLE_LEN;
         }
 
         Some(AddPathCapability { entries })
@@ -347,7 +347,7 @@ impl Capability {
     /// Extract Graceful Restart capability info if this is a GracefulRestart capability
     pub(crate) fn as_graceful_restart(&self) -> Option<GracefulRestartCapability> {
         if !matches!(self.code, BgpCapabiltyCode::GracefulRestart)
-            || self.val.len() < GR_RESTART_HEADER_LEN
+            || self.val.len() < Self::GR_RESTART_HEADER_LEN
         {
             return None;
         }
@@ -356,14 +356,14 @@ impl Capability {
         let first_byte = self.val[0];
         let second_byte = self.val[1];
 
-        let restart_state = (first_byte & GR_RESTART_FLAG_MASK) != 0;
+        let restart_state = (first_byte & Self::GR_RESTART_FLAG_MASK) != 0;
         let restart_time =
-            (((first_byte & GR_RESTART_TIME_LOW_MASK) as u16) << 8) | (second_byte as u16);
+            (((first_byte & Self::GR_RESTART_TIME_LOW_MASK) as u16) << 8) | (second_byte as u16);
 
         // Parse AFI/SAFI tuples
         let mut afi_safi_list = Vec::new();
-        let mut offset = GR_RESTART_HEADER_LEN;
-        while offset + GR_AFI_SAFI_TUPLE_LEN <= self.val.len() {
+        let mut offset = Self::GR_RESTART_HEADER_LEN;
+        while offset + Self::GR_AFI_SAFI_TUPLE_LEN <= self.val.len() {
             let afi_bytes = [self.val[offset], self.val[offset + 1]];
             let afi_val = u16::from_be_bytes(afi_bytes);
             let safi_val = self.val[offset + 2];
@@ -371,11 +371,11 @@ impl Capability {
 
             // Try to parse AFI/SAFI, skip if unknown
             if let (Ok(afi), Ok(safi)) = (Afi::try_from(afi_val), Safi::try_from(safi_val)) {
-                let forwarding_state = (flags & GR_FORWARDING_FLAG_MASK) != 0;
+                let forwarding_state = (flags & Self::GR_FORWARDING_FLAG_MASK) != 0;
                 afi_safi_list.push((AfiSafi::new(afi, safi), forwarding_state));
             }
 
-            offset += GR_AFI_SAFI_TUPLE_LEN;
+            offset += Self::GR_AFI_SAFI_TUPLE_LEN;
         }
 
         Some(GracefulRestartCapability {
