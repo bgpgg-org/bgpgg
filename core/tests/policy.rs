@@ -180,7 +180,7 @@ async fn test_export_policy_prefix_match() {
         poll_until_stable(
             || async {
                 let routes = server1.client.get_routes().await.unwrap();
-                routes_match(&routes, &expected)
+                routes_match(&routes, &expected, ExpectPathId::Present)
             },
             Duration::from_millis(500),
             &format!("Test case failed: {}", tc.desc),
@@ -331,7 +331,7 @@ async fn test_export_policy_large_community_match() {
     poll_until_stable(
         || async {
             let routes = server1.client.get_routes().await.unwrap();
-            routes_match(&routes, &expected)
+            routes_match(&routes, &expected, ExpectPathId::Present)
         },
         Duration::from_millis(500),
         "Routes with blocked large communities should be rejected",
@@ -485,7 +485,7 @@ async fn test_export_policy_ext_community_match() {
     poll_until_stable(
         || async {
             let routes = server1.client.get_routes().await.unwrap();
-            routes_match(&routes, &expected)
+            routes_match(&routes, &expected, ExpectPathId::Present)
         },
         Duration::from_millis(500),
         "Routes with blocked extended communities should be rejected",

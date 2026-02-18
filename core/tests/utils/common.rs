@@ -27,7 +27,7 @@ pub fn init_test_logging() {
         .try_init();
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bgpgg::bgp::msg::{
     read_bgp_message, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER, PRE_OPEN_FORMAT,
@@ -209,8 +209,8 @@ pub fn build_path(params: PathParams) -> Path {
     }
 }
 
-/// Strip path IDs from a proto Path for comparison (path IDs are allocation
-/// metadata, not BGP attributes, so tests shouldn't assert on specific values).
+/// Strip path IDs from a proto Path for attribute comparison.
+/// Path IDs are allocation metadata, not BGP attributes.
 fn strip_path_ids(path: &Path) -> Path {
     let mut stripped = path.clone();
     stripped.local_path_id = None;
@@ -225,27 +225,114 @@ fn strip_route_path_ids(route: &Route) -> Route {
     }
 }
 
-pub fn routes_match(actual: &[Route], expected: &[Route]) -> bool {
-    let routes_map: HashMap<_, _> = actual
-        .iter()
-        .map(|r| {
-            (
-                r.prefix.clone(),
-                strip_route_path_ids(r).paths.first().cloned(),
-            )
-        })
-        .collect();
-    let expected_map: HashMap<_, _> = expected
-        .iter()
-        .map(|r| {
-            (
-                r.prefix.clone(),
-                strip_route_path_ids(r).paths.first().cloned(),
-            )
-        })
-        .collect();
+/// Controls path ID validation and comparison strategy in routes_match.
+#[derive(Clone, Copy)]
+pub enum ExpectPathId {
+    /// Don't check path IDs, compare best path only (adj-rib-in/out)
+    Ignore,
+    /// Assert local_path_id is Some, compare best path only (loc-rib)
+    Present,
+    /// Assert Some + distinct per prefix, compare all paths (ADD-PATH)
+    Distinct,
+}
 
-    routes_map == expected_map
+fn assert_path_ids_present(routes: &[Route]) {
+    for route in routes {
+        for path in &route.paths {
+            assert!(
+                path.local_path_id.is_some(),
+                "path for prefix {} from peer {} missing local_path_id",
+                route.prefix,
+                path.peer_address
+            );
+        }
+    }
+}
+
+fn assert_path_ids_distinct(routes: &[Route]) {
+    for route in routes {
+        let ids: Vec<u32> = route.paths.iter().filter_map(|p| p.local_path_id).collect();
+        let unique: HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "duplicate local_path_ids for prefix {}: {:?}",
+            route.prefix,
+            ids
+        );
+    }
+}
+
+/// Compare actual routes against expected.
+///
+/// - Ignore: compare best path only, no path ID checks (adj-rib-in/out)
+/// - Present: compare best path only, assert path IDs present (loc-rib)
+/// - Distinct: compare all paths, assert path IDs present + distinct (ADD-PATH)
+///
+/// Always strips path IDs before attribute comparison — tests don't predict
+/// allocator values.
+pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) -> bool {
+    match expect {
+        ExpectPathId::Ignore => {}
+        ExpectPathId::Present => assert_path_ids_present(actual),
+        ExpectPathId::Distinct => {
+            assert_path_ids_present(actual);
+            assert_path_ids_distinct(actual);
+        }
+    }
+
+    if matches!(expect, ExpectPathId::Distinct) {
+        let actual_map: HashMap<_, _> = actual
+            .iter()
+            .map(|r| (r.prefix.clone(), &r.paths))
+            .collect();
+        let expected_map: HashMap<_, _> = expected
+            .iter()
+            .map(|r| (r.prefix.clone(), &r.paths))
+            .collect();
+
+        if actual_map.len() != expected_map.len() {
+            return false;
+        }
+
+        for (prefix, expected_paths) in &expected_map {
+            let Some(actual_paths) = actual_map.get(prefix) else {
+                return false;
+            };
+            if actual_paths.len() != expected_paths.len() {
+                return false;
+            }
+            let actual_stripped: Vec<Path> = actual_paths.iter().map(strip_path_ids).collect();
+            let expected_stripped: Vec<Path> = expected_paths.iter().map(strip_path_ids).collect();
+            for expected_path in &expected_stripped {
+                if !actual_stripped.contains(expected_path) {
+                    return false;
+                }
+            }
+        }
+        true
+    } else {
+        let routes_map: HashMap<_, _> = actual
+            .iter()
+            .map(|r| {
+                (
+                    r.prefix.clone(),
+                    strip_route_path_ids(r).paths.first().cloned(),
+                )
+            })
+            .collect();
+        let expected_map: HashMap<_, _> = expected
+            .iter()
+            .map(|r| {
+                (
+                    r.prefix.clone(),
+                    strip_route_path_ids(r).paths.first().cloned(),
+                )
+            })
+            .collect();
+
+        routes_map == expected_map
+    }
 }
 
 /// Helper to create a standard test config with sane defaults
@@ -550,7 +637,7 @@ pub async fn poll_rib_with_timeout(
                     return false;
                 };
 
-                if !routes_match(&routes, expected_routes) {
+                if !routes_match(&routes, expected_routes, ExpectPathId::Present) {
                     return false;
                 }
             }
@@ -576,13 +663,14 @@ pub async fn poll_route_exists(server: &TestServer, expected: Route) {
     .await;
 
     let routes = server.client.get_routes().await.unwrap();
-    let actual = routes.iter().find(|r| r.prefix == expected.prefix).unwrap();
-    let actual_stripped = strip_route_path_ids(actual);
-    let expected_stripped = strip_route_path_ids(&expected);
-    assert_eq!(
-        actual_stripped.paths, expected_stripped.paths,
-        "Path mismatch for route {}",
-        expected.prefix
+    let actual: Vec<Route> = routes
+        .into_iter()
+        .filter(|r| r.prefix == expected.prefix)
+        .collect();
+    assert!(
+        routes_match(&actual, &[expected], ExpectPathId::Present),
+        "Route mismatch on server {}",
+        server.address
     );
 }
 
@@ -672,7 +760,7 @@ pub async fn wait_convergence(
                 let Ok(routes) = server.client.get_routes().await else {
                     return false;
                 };
-                if !routes_match(&routes, expected_routes) {
+                if !routes_match(&routes, expected_routes, ExpectPathId::Present) {
                     return false;
                 }
             }

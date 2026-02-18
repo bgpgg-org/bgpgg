@@ -607,7 +607,11 @@ async fn test_list_routes_impl(use_stream: bool) {
         })
         .collect();
 
-    assert!(routes_match(&adj_in_routes, &expected_adj_in));
+    assert!(routes_match(
+        &adj_in_routes,
+        &expected_adj_in,
+        ExpectPathId::Ignore
+    ));
 
     // Test 3: ADJ_OUT - Should see routes that server1 would send to server2
     let adj_out_routes = if use_stream {
@@ -640,7 +644,11 @@ async fn test_list_routes_impl(use_stream: bool) {
         })
         .collect();
 
-    assert!(routes_match(&adj_out_routes, &expected_adj_out));
+    assert!(routes_match(
+        &adj_out_routes,
+        &expected_adj_out,
+        ExpectPathId::Present
+    ));
 }
 
 #[tokio::test]
