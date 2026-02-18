@@ -1842,7 +1842,6 @@ mod tests {
 
     #[test]
     fn test_validate_nlri_afi_mismatch() {
-
         let ipv6_route = Nlri {
             prefix: IpNetwork::V6(Ipv6Net {
                 address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),

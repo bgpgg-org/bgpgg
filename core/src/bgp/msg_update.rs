@@ -745,13 +745,7 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-            nlri: vec![Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, 0, 0),
-                    prefix_length: 8,
-                }),
-                path_id: None,
-            }],
+            nlri: vec![nlri_v4(10, 0, 0, 0, 8, None)],
         }
     }
 
@@ -1063,20 +1057,8 @@ mod tests {
     fn test_new_withdraw() {
         // Create a withdraw message with multiple prefixes
         let withdrawn: Vec<Nlri> = vec![
-            Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, 0, 0),
-                    prefix_length: 24,
-                }),
-                path_id: None,
-            },
-            Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(192, 168, 1, 0),
-                    prefix_length: 24,
-                }),
-                path_id: None,
-            },
+            nlri_v4(10, 0, 0, 0, 24, None),
+            nlri_v4(192, 168, 1, 0, 24, None),
         ];
 
         let message = UpdateMessage::new_withdraw(withdrawn.clone(), DEFAULT_FORMAT);
@@ -1097,13 +1079,7 @@ mod tests {
     #[test]
     fn test_new_withdraw_serialization() {
         // Create a withdraw message
-        let withdrawn = vec![Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 24,
-            }),
-            path_id: None,
-        }];
+        let withdrawn = vec![nlri_v4(10, 0, 0, 0, 24, None)];
 
         let message = UpdateMessage::new_withdraw(withdrawn, DEFAULT_FORMAT);
 
@@ -1224,25 +1200,13 @@ mod tests {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-                nlri: vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id,
-                }],
+                nlri: vec![nlri_v4(10, 0, 0, 0, 8, path_id)],
             };
 
             let mp_unreach = MpUnreachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
-                withdrawn_routes: vec![Nlri {
-                    prefix: IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(20, 0, 0, 0),
-                        prefix_length: 8,
-                    }),
-                    path_id,
-                }],
+                withdrawn_routes: vec![nlri_v4(20, 0, 0, 0, 8, path_id)],
             };
 
             let path_attributes = vec![
@@ -1267,21 +1231,9 @@ mod tests {
             let path_attributes_bytes =
                 write_path_attributes(&path_attributes, format.use_4byte_asn);
 
-            let nlri_list = vec![Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(40, 0, 0, 0),
-                    prefix_length: 8,
-                }),
-                path_id,
-            }];
+            let nlri_list = vec![nlri_v4(40, 0, 0, 0, 8, path_id)];
 
-            let withdrawn_routes = vec![Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(30, 0, 0, 0),
-                    prefix_length: 8,
-                }),
-                path_id,
-            }];
+            let withdrawn_routes = vec![nlri_v4(30, 0, 0, 0, 8, path_id)];
             let withdrawn_routes_bytes = write_nlri_list(&withdrawn_routes);
 
             let msg = UpdateMessage {
@@ -1312,20 +1264,8 @@ mod tests {
             assert_eq!(
                 nlri,
                 vec![
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(10, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id,
-                    },
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(40, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id,
-                    },
+                    nlri_v4(10, 0, 0, 0, 8, path_id),
+                    nlri_v4(40, 0, 0, 0, 8, path_id),
                 ],
                 "{}",
                 desc
@@ -1340,20 +1280,8 @@ mod tests {
             assert_eq!(
                 withdrawn,
                 vec![
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(20, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id,
-                    },
-                    Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(30, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id,
-                    },
+                    nlri_v4(20, 0, 0, 0, 8, path_id),
+                    nlri_v4(30, 0, 0, 0, 8, path_id),
                 ],
                 "{}",
                 desc
@@ -2093,13 +2021,7 @@ mod tests {
                     withdrawn_routes: vec![],
                     total_path_attributes_len: 0,
                     path_attributes: vec![],
-                    nlri_list: vec![Nlri {
-                        prefix: IpNetwork::V4(Ipv4Net {
-                            address: Ipv4Addr::new(10, 0, 0, 0),
-                            prefix_length: 8,
-                        }),
-                        path_id: None,
-                    }],
+                    nlri_list: vec![nlri_v4(10, 0, 0, 0, 8, None)],
                     format,
                 },
                 false,
@@ -2280,20 +2202,8 @@ mod tests {
 
     #[test]
     fn test_nlri_list() {
-        let nlri_mp = Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            path_id: None,
-        };
-        let nlri_traditional = Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(20, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            path_id: None,
-        };
+        let nlri_mp = nlri_v4(10, 0, 0, 0, 8, None);
+        let nlri_traditional = nlri_v4(20, 0, 0, 0, 8, None);
 
         let msg = UpdateMessage {
             withdrawn_routes_len: 0,
@@ -2317,20 +2227,8 @@ mod tests {
 
     #[test]
     fn test_withdrawn_routes() {
-        let withdrawn_mp = Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            path_id: None,
-        };
-        let withdrawn_traditional = Nlri {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(20, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            path_id: None,
-        };
+        let withdrawn_mp = nlri_v4(10, 0, 0, 0, 8, None);
+        let withdrawn_traditional = nlri_v4(20, 0, 0, 0, 8, None);
 
         let msg = UpdateMessage {
             withdrawn_routes_len: 0,
@@ -2356,10 +2254,14 @@ mod tests {
 
     #[test]
     fn test_addpath_disabled_no_path_id() {
-        let msg = UpdateMessage::new(&test_path(), vec![], DEFAULT_FORMAT);
+        let format = MessageFormat {
+            use_4byte_asn: true,
+            add_path: false,
+        };
+        let msg = UpdateMessage::new(&test_path(), vec![], format);
         assert!(msg.nlri_list().is_empty());
 
-        let decoded = UpdateMessage::from_bytes(msg.to_bytes(), DEFAULT_FORMAT).unwrap();
+        let decoded = UpdateMessage::from_bytes(msg.to_bytes(), format).unwrap();
         assert!(decoded.nlri_list().is_empty());
     }
 }
