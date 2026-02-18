@@ -1104,6 +1104,8 @@ mod tests {
     use crate::bgp::{
         DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
+    use crate::net::{Ipv4Net, Ipv6Net};
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     // Sample MP_REACH_NLRI for IPv4 (192.168.1.1, NLRI=10.0.0.0/8)
     const MP_REACH_IPV4_SAMPLE: &[u8] = &[
@@ -1303,7 +1305,6 @@ mod tests {
     #[test]
     fn test_extended_communities_roundtrip() {
         use crate::bgp::msg_update_types::{from_ipv4, from_two_octet_as, SUBTYPE_ROUTE_TARGET};
-        use std::net::Ipv4Addr;
 
         let original_ext_communities = vec![
             from_two_octet_as(SUBTYPE_ROUTE_TARGET, 65000, 100),
@@ -1870,9 +1871,6 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_reach_nlri_ipv4() {
-        use crate::net::Ipv4Net;
-        use std::net::Ipv4Addr;
-
         // (name, input, add_path, expected_nlri)
         let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
             (
@@ -1954,10 +1952,40 @@ mod tests {
     }
 
     #[test]
-    fn test_read_attr_mp_reach_nlri_ipv6() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
+    fn test_mp_reach_ipv4_addpath_roundtrip() {
+        let mp_reach = MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+            nlri: vec![
+                Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(10, 0, 0, 0),
+                        prefix_length: 8,
+                    }),
+                    path_id: Some(1),
+                },
+                Nlri {
+                    prefix: IpNetwork::V4(Ipv4Net {
+                        address: Ipv4Addr::new(172, 16, 0, 0),
+                        prefix_length: 16,
+                    }),
+                    path_id: Some(2),
+                },
+            ],
+        };
 
+        let bytes = write_attr_mp_reach_nlri(&mp_reach);
+        let parsed = read_attr_mp_reach_nlri(&bytes, true).unwrap();
+
+        assert_eq!(parsed.afi, mp_reach.afi);
+        assert_eq!(parsed.safi, mp_reach.safi);
+        assert_eq!(parsed.next_hop, mp_reach.next_hop);
+        assert_eq!(parsed.nlri, mp_reach.nlri);
+    }
+
+    #[test]
+    fn test_read_attr_mp_reach_nlri_ipv6() {
         // Common IPv6 header: AFI=IPv6, SAFI=1, next_hop=2001:db8::1
         let ipv6_header: &[u8] = &[
             0x00, 0x02, // AFI = IPv6 (2)
@@ -2015,9 +2043,6 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv4() {
-        use crate::net::Ipv4Net;
-        use std::net::Ipv4Addr;
-
         // (name, input, add_path, expected_withdrawn)
         let tests: Vec<(&str, Vec<u8>, bool, Vec<Nlri>)> = vec![
             (
@@ -2092,9 +2117,6 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv6() {
-        use crate::net::Ipv6Net;
-        use std::net::Ipv6Addr;
-
         // (name, input, add_path, expected_withdrawn)
         let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
             (
