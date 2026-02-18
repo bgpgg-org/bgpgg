@@ -135,6 +135,8 @@ pub struct PeerConfig {
     pub graceful_restart: Option<GracefulRestartConfig>,
     pub idle_hold_time_secs: Option<u64>,
     pub min_route_advertisement_interval_secs: Option<u64>,
+    pub add_path_send: Option<bool>,
+    pub add_path_receive: Option<bool>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -625,6 +627,26 @@ pub async fn poll_rib(expectations: &[(&TestServer, Vec<Route>)]) {
     poll_rib_with_timeout(expectations, 100).await;
 }
 
+/// Polls until each server's RIB matches expected routes using ADD-PATH comparison.
+/// Uses ExpectPathId::Distinct to assert multiple paths per prefix with distinct path_ids.
+pub async fn poll_rib_addpath(expectations: &[(&TestServer, Vec<Route>)]) {
+    poll_until(
+        || async {
+            for (server, expected_routes) in expectations {
+                let Ok(routes) = server.client.get_routes().await else {
+                    return false;
+                };
+                if !routes_match(&routes, expected_routes, ExpectPathId::Distinct) {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for ADD-PATH routes to propagate",
+    )
+    .await;
+}
+
 /// Polls until each server's full RIB matches exactly, with custom timeout (iterations x 100ms)
 pub async fn poll_rib_with_timeout(
     expectations: &[(&TestServer, Vec<Route>)],
@@ -985,6 +1007,8 @@ pub async fn chain_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        add_path_send: config.add_path_send.map(|v| if v { 1 } else { 0 }),
+        add_path_receive: config.add_path_receive,
         ..Default::default()
     };
 
@@ -1191,6 +1215,8 @@ pub async fn mesh_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        add_path_send: config.add_path_send.map(|v| if v { 1 } else { 0 }),
+        add_path_receive: config.add_path_receive,
         ..Default::default()
     };
 
