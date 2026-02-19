@@ -488,6 +488,37 @@ pub async fn setup_server_and_fake_peer() -> (TestServer, FakePeer) {
 /// # Arguments
 /// * `config` - Peer configuration (hold timer, GR, etc). Defaults to hold_timer=90s if not specified.
 ///
+/// Bidirectional peering of two servers with default config, waits for Established.
+pub async fn peer_servers(server1: &TestServer, server2: &TestServer) {
+    peer_servers_with_config(server1, server2, SessionConfig::default()).await;
+}
+
+/// Bidirectional peering of two servers with custom config, waits for Established.
+pub async fn peer_servers_with_config(
+    server1: &TestServer,
+    server2: &TestServer,
+    config: SessionConfig,
+) {
+    server1.add_peer_with_config(server2, config).await;
+    server2.add_peer_with_config(server1, config).await;
+
+    let peer_addr = server2.address.to_string();
+    poll_until(
+        || async {
+            server1.client.get_peers().await.is_ok_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.address == peer_addr && peer.state == BgpState::Established as i32
+                })
+            })
+        },
+        &format!(
+            "Timeout waiting for AS{} <-> AS{} to establish",
+            server1.asn, server2.asn
+        ),
+    )
+    .await;
+}
+
 /// Returns (server1, server2) TestServer instances for each server.
 /// Both servers will be in Established state when this function returns.
 pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestServer) {

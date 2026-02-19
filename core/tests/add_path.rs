@@ -31,147 +31,69 @@ fn addpath_config() -> SessionConfig {
 /// Sets up the common ADD-PATH test topology:
 ///
 ///   S1(65001) ---\
-///                 +---> S2(65002) ---[ADD-PATH]---> S4(65004)
-///   S3(65003) ---/          |
-///                           +--------[normal]-----> S5(65005)
+///                 +---> S3(65003) ---[ADD-PATH send]---> S4(65004)
+///   S2(65002) ---/    (ADD-PATH recv)      |
+///                                          +----[normal]---> S5(65005)
 ///
-/// S1 and S3 send routes to S2. S2 forwards to S4 (with ADD-PATH) and S5 (normal).
+/// S1 and S2 originate routes. S3 collects and forwards to S4 (ADD-PATH) and S5 (normal).
 /// Returns (s1, s2, s3, s4, s5) with all sessions Established.
 async fn setup_addpath_topology() -> (TestServer, TestServer, TestServer, TestServer, TestServer) {
-    let server1 = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
-    let server2 = start_test_server(Config::new(
-        65002,
-        "127.0.0.2:0",
-        Ipv4Addr::new(2, 2, 2, 2),
-        90,
-    ))
-    .await;
-    let server3 = start_test_server(Config::new(
-        65003,
-        "127.0.0.3:0",
-        Ipv4Addr::new(3, 3, 3, 3),
-        90,
-    ))
-    .await;
-    let server4 = start_test_server(Config::new(
-        65004,
-        "127.0.0.4:0",
-        Ipv4Addr::new(4, 4, 4, 4),
-        90,
-    ))
-    .await;
-    let server5 = start_test_server(Config::new(
-        65005,
-        "127.0.0.5:0",
-        Ipv4Addr::new(5, 5, 5, 5),
-        90,
-    ))
-    .await;
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    let server3 = start_test_server(test_config(65003, 3)).await;
+    let server4 = start_test_server(test_config(65004, 4)).await;
+    let server5 = start_test_server(test_config(65005, 5)).await;
 
-    // S1 <-> S2 (normal eBGP)
-    server1.add_peer(&server2).await;
-    server2.add_peer(&server1).await;
-
-    // S3 <-> S2 (normal eBGP)
-    server3.add_peer(&server2).await;
-    server2.add_peer(&server3).await;
-
-    // S2 <-> S4 with ADD-PATH (both sides need ADD-PATH config for negotiation)
-    server2
-        .add_peer_with_config(&server4, addpath_config())
-        .await;
-    server4
-        .add_peer_with_config(&server2, addpath_config())
-        .await;
-
-    // S2 <-> S5 normal eBGP
-    server2.add_peer(&server5).await;
-    server5.add_peer(&server2).await;
-
-    // Wait for all sessions to reach Established
-    for (server, expected_count) in [
-        (&server1, 1),
-        (&server2, 4),
-        (&server3, 1),
-        (&server4, 1),
-        (&server5, 1),
-    ] {
-        poll_until(
-            || async {
-                let Ok(peers) = server.client.get_peers().await else {
-                    return false;
-                };
-                peers
-                    .iter()
-                    .filter(|peer| peer.state == BgpState::Established as i32)
-                    .count()
-                    == expected_count
-            },
-            &format!(
-                "Timeout waiting for {} Established peers on AS{}",
-                expected_count, server.asn
-            ),
-        )
-        .await;
-    }
+    peer_servers(&server1, &server3).await;
+    peer_servers(&server2, &server3).await;
+    peer_servers_with_config(&server3, &server4, addpath_config()).await;
+    peer_servers(&server3, &server5).await;
 
     (server1, server2, server3, server4, server5)
 }
 
-/// S1 and S3 announce same prefix to S2. S4 (ADD-PATH) should see 2 paths,
-/// S5 (normal) should see only 1 (best path).
-#[tokio::test]
-async fn test_addpath_multiple_paths() {
-    let (server1, server2, server3, server4, server5) = setup_addpath_topology().await;
-    let server2_addr = server2.address.to_string();
+/// S1 and S2 announce 10.0.0.0/24, validates:
+/// - S3 loc-rib has both paths (one from each originator)
+/// - S4 (ADD-PATH) receives both paths with distinct path_ids
+/// - S5 (normal) receives only the best path (S1 wins by lower BGP ID)
+async fn send_and_validate_addpath_routes(
+    server1: &TestServer,
+    server2: &TestServer,
+    server3: &TestServer,
+    server4: &TestServer,
+    server5: &TestServer,
+) {
+    let server3_addr = server3.address.to_string();
+    for (server, next_hop) in [(server1, "192.168.1.1"), (server2, "192.168.2.1")] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: next_hop.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
 
-    // S1 announces 10.0.0.0/24
-    announce_route(
-        &server1,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.1.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
-
-    // S3 announces 10.0.0.0/24
-    announce_route(
-        &server3,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.3.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
-
-    // S4 (ADD-PATH) should see 2 paths with distinct path_ids.
-    // Both have next_hop=S2 (eBGP next_hop rewrite), distinguished by AS path.
-    poll_rib_addpath(&[(
-        &server4,
+    // S3 loc-rib: both paths from S1 and S2
+    poll_rib(&[(
+        server3,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
             paths: vec![
                 build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65001])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
                 }),
                 build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65003])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: server2.address.to_string(),
+                    peer_address: server2.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
@@ -181,22 +103,62 @@ async fn test_addpath_multiple_paths() {
     )])
     .await;
 
-    // S5 (normal) should see only 1 path (best — S1's path wins by lower BGP ID 1.1.1.1)
-    poll_rib(&[(
-        &server5,
+    // S4 (ADD-PATH): both paths with distinct path_ids, next_hop=S3 (eBGP rewrite)
+    poll_rib_addpath(&[(
+        server4,
         vec![Route {
             prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002, 65001])],
-                next_hop: server2_addr.clone(),
-                peer_address: server2_addr,
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
+            paths: vec![
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003, 65001])],
+                    next_hop: server3_addr.clone(),
+                    peer_address: server3_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003, 65002])],
+                    next_hop: server3_addr.clone(),
+                    peer_address: server3_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+            ],
         }],
     )])
     .await;
+
+    // S5 (normal): only best path (S1 wins by lower BGP ID 1.1.1.1)
+    poll_rib(&[(
+        server5,
+        expected_single_path(&server3_addr, vec![65003, 65001]),
+    )])
+    .await;
+}
+
+/// Expected rib: single path for 10.0.0.0/24 via S3 with given AS path.
+fn expected_single_path(server3_addr: &str, as_path: Vec<u32>) -> Vec<Route> {
+    vec![Route {
+        prefix: "10.0.0.0/24".to_string(),
+        paths: vec![build_path(PathParams {
+            as_path: vec![as_sequence(as_path)],
+            next_hop: server3_addr.to_string(),
+            peer_address: server3_addr.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        })],
+    }]
+}
+
+/// S1 and S2 announce same prefix to S3. Validates ADD-PATH (S4 gets both paths)
+/// vs normal (S5 gets only best).
+#[tokio::test]
+async fn test_addpath_multiple_paths() {
+    let (server1, server2, server3, server4, server5) = setup_addpath_topology().await;
+    send_and_validate_addpath_routes(&server1, &server2, &server3, &server4, &server5).await;
 }
 
 /// Both announce, then S1 withdraws. S4 (ADD-PATH) should drop to 1 path,
@@ -204,167 +166,45 @@ async fn test_addpath_multiple_paths() {
 #[tokio::test]
 async fn test_addpath_withdraw() {
     let (server1, server2, server3, server4, server5) = setup_addpath_topology().await;
-    let server2_addr = server2.address.to_string();
+    let server3_addr = server3.address.to_string();
 
-    // Both announce 10.0.0.0/24
-    announce_route(
-        &server1,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.1.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
-    announce_route(
-        &server3,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.3.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
+    send_and_validate_addpath_routes(&server1, &server2, &server3, &server4, &server5).await;
 
-    // Wait for S4 to have 2 paths
-    poll_rib_addpath(&[(
-        &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![
-                build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65001])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                }),
-                build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65003])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                }),
-            ],
-        }],
-    )])
-    .await;
-
-    // S1 withdraws
     server1
         .client
         .remove_route("10.0.0.0/24".to_string())
         .await
         .unwrap();
 
-    // S4 (ADD-PATH) should drop to 1 path (S3's)
+    // S4 (ADD-PATH) should drop to 1 path (S2's)
     poll_rib_addpath(&[(
         &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002, 65003])],
-                next_hop: server2_addr.clone(),
-                peer_address: server2_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        expected_single_path(&server3_addr, vec![65003, 65002]),
     )])
     .await;
 
-    // S5 (normal) should have S3's path (now the only and best)
+    // S5 (normal) should have S2's path (now the only and best)
     poll_rib(&[(
         &server5,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002, 65003])],
-                next_hop: server2_addr.clone(),
-                peer_address: server2_addr,
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        expected_single_path(&server3_addr, vec![65003, 65002]),
     )])
     .await;
 }
 
-/// Both announce, then S2 removes peer S1. S4 (ADD-PATH) should drop to 1 path (S3's).
+/// Both announce, then S3 removes peer S1. S4 (ADD-PATH) should drop to 1 path (S2's).
 #[tokio::test]
 async fn test_addpath_peer_disconnect() {
-    let (server1, server2, server3, server4, _) = setup_addpath_topology().await;
-    let server2_addr = server2.address.to_string();
+    let (server1, server2, server3, server4, server5) = setup_addpath_topology().await;
+    let server3_addr = server3.address.to_string();
 
-    // Both announce 10.0.0.0/24
-    announce_route(
-        &server1,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.1.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
-    announce_route(
-        &server3,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.3.1".to_string(),
-            ..Default::default()
-        },
-    )
-    .await;
+    send_and_validate_addpath_routes(&server1, &server2, &server3, &server4, &server5).await;
 
-    // Wait for S4 to have 2 paths
+    server3.remove_peer(&server1).await;
+
+    // S4 should drop to 1 path (S2's)
     poll_rib_addpath(&[(
         &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![
-                build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65001])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                }),
-                build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002, 65003])],
-                    next_hop: server2_addr.clone(),
-                    peer_address: server2_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                }),
-            ],
-        }],
-    )])
-    .await;
-
-    // S2 removes peer S1 — triggers bulk path removal
-    server2.remove_peer(&server1).await;
-
-    // S4 should drop to 1 path (S3's)
-    poll_rib_addpath(&[(
-        &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002, 65003])],
-                next_hop: server2_addr.clone(),
-                peer_address: server2_addr,
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        expected_single_path(&server3_addr, vec![65003, 65002]),
     )])
     .await;
 }
