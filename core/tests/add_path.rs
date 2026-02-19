@@ -16,21 +16,26 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
 
 /// ADD-PATH config: send all paths + receive path IDs
 fn addpath_config() -> SessionConfig {
     SessionConfig {
-        add_path_send: Some(1),
+        add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
         add_path_receive: Some(true),
         ..Default::default()
     }
 }
 
 /// Sets up the common ADD-PATH test topology:
-/// S1(65001) -> S2(65002) <- S3(65003), S2 -> S4(65004) with ADD-PATH, S2 -> S5(65005) normal
 ///
+///   S1(65001) ---\
+///                 +---> S2(65002) ---[ADD-PATH]---> S4(65004)
+///   S3(65003) ---/          |
+///                           +--------[normal]-----> S5(65005)
+///
+/// S1 and S3 send routes to S2. S2 forwards to S4 (with ADD-PATH) and S5 (normal).
 /// Returns (s1, s2, s3, s4, s5) with all sessions Established.
 async fn setup_addpath_topology() -> (TestServer, TestServer, TestServer, TestServer, TestServer) {
     let server1 = start_test_server(Config::new(
@@ -396,7 +401,7 @@ async fn test_addpath_route_reflector() {
     // RR peers with clients using rr_client + ADD-PATH
     let rr_addpath_config = SessionConfig {
         rr_client: Some(true),
-        add_path_send: Some(1),
+        add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
         add_path_receive: Some(true),
         ..Default::default()
     };

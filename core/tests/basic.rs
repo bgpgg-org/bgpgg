@@ -628,6 +628,62 @@ async fn test_route_advertised_when_peer_becomes_established() {
     );
 }
 
+/// Two peers announce the same prefix to a middle server.
+/// The middle server's loc-rib should store both paths (one per peer).
+#[tokio::test]
+async fn test_loc_rib_stores_multiple_paths() {
+    // S1(65001) <-> S2(65002) <-> S3(65003)
+    let [server1, server2, server3] = chain_servers(
+        [
+            start_test_server(test_config(65001, 1)).await,
+            start_test_server(test_config(65002, 2)).await,
+            start_test_server(test_config(65003, 3)).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    // Both announce 10.0.0.0/24
+    for server in [&server1, &server3] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // S2 should have 2 paths for the same prefix (one from each peer)
+    poll_rib(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003])],
+                    next_hop: server3.address.to_string(),
+                    peer_address: server3.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+            ],
+        }],
+    )])
+    .await;
+}
+
 /// When the best path changes for a non-ADD-PATH peer, the adj-rib-out should
 /// not accumulate stale entries from the previous best path (which had a
 /// different local_path_id).

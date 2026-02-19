@@ -40,7 +40,7 @@ use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
+    AddPathSendMode, AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
     GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, Route,
     SessionConfig, UnknownAttribute,
 };
@@ -1007,7 +1007,14 @@ pub async fn chain_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
-        add_path_send: config.add_path_send.map(|v| if v { 1 } else { 0 }),
+        add_path_send: config.add_path_send.map(|v| {
+            if v {
+                AddPathSendMode::AddPathSendAll
+            } else {
+                AddPathSendMode::AddPathSendDisabled
+            }
+            .into()
+        }),
         add_path_receive: config.add_path_receive,
         ..Default::default()
     };
@@ -1215,7 +1222,14 @@ pub async fn mesh_servers<const N: usize>(
         graceful_restart: config.graceful_restart,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
-        add_path_send: config.add_path_send.map(|v| if v { 1 } else { 0 }),
+        add_path_send: config.add_path_send.map(|v| {
+            if v {
+                AddPathSendMode::AddPathSendAll
+            } else {
+                AddPathSendMode::AddPathSendDisabled
+            }
+            .into()
+        }),
         add_path_receive: config.add_path_receive,
         ..Default::default()
     };

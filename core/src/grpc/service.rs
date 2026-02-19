@@ -302,8 +302,10 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         graceful_restart,
         rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
         add_path_send: match cfg.add_path_send {
-            Some(0) => crate::config::AddPathSend::Disabled,
-            Some(_) => crate::config::AddPathSend::All,
+            Some(v) if v == proto::AddPathSendMode::AddPathSendAll as i32 => {
+                crate::config::AddPathSend::All
+            }
+            Some(_) => crate::config::AddPathSend::Disabled,
             None => defaults.add_path_send,
         },
         add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),
