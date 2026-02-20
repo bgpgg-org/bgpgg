@@ -384,6 +384,92 @@ async fn test_addpath_rr_no_reflect_to_originator() {
     .await;
 }
 
+/// Per-path withdrawal must not remove other paths from the same ADD-PATH peer.
+/// FakePeer sends two paths (path_id=1, path_id=2), then withdraws path_id=1.
+/// path_id=2 must survive.
+#[tokio::test]
+async fn test_addpath_per_path_withdrawal() {
+    let (server, mut fake) = setup_fakepeer_addpath(
+        Ipv4Addr::new(1, 1, 1, 1), // server BGP ID
+        Ipv4Addr::new(2, 2, 2, 2), // fake BGP ID
+    )
+    .await;
+
+    // Path 1: next_hop=192.168.1.1
+    let update1 = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+            &attr_local_pref(100),
+        ],
+        &addpath_nlri(1, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update1).await;
+
+    // Path 2: next_hop=192.168.2.1
+    let update2 = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 2, 1)),
+            &attr_local_pref(100),
+        ],
+        &addpath_nlri(2, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update2).await;
+
+    // Both paths in loc-rib
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| {
+                    routes
+                        .iter()
+                        .any(|r| r.prefix == "10.0.0.0/24" && r.paths.len() == 2)
+                })
+        },
+        "Timeout waiting for both paths",
+    )
+    .await;
+
+    // Withdraw path_id=1 only
+    let withdraw = build_raw_update(
+        &addpath_nlri(1, &[24, 10, 0, 0]),
+        &[],
+        &[],
+        None,
+    );
+    fake.send_raw(&withdraw).await;
+
+    // path_id=2 (next_hop=192.168.2.1) must survive
+    poll_until_stable(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| {
+                    routes.iter().any(|r| {
+                        r.prefix == "10.0.0.0/24"
+                            && r.paths.len() == 1
+                            && r.paths[0].next_hop == "192.168.2.1"
+                    })
+                })
+        },
+        Duration::from_secs(2),
+        "path_id=2 was removed by withdrawal of path_id=1",
+    )
+    .await;
+}
+
 /// Receiver-side: ORIGINATOR_ID loop rejection must not withdraw other paths from same peer.
 /// FakePeer sends valid path (path_id=1), then looped path (path_id=2). Valid must survive.
 #[tokio::test]
