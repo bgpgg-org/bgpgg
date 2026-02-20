@@ -1600,6 +1600,51 @@ impl FakePeer {
         }
     }
 
+    /// Accept incoming connection and complete full BGP handshake.
+    /// Mirrors connect_and_handshake but for incoming connections (FakePeer listens).
+    /// Without capabilities: uses OpenMessage::new (plain OPEN).
+    /// With capabilities: uses build_raw_open (custom OPEN with capabilities).
+    pub async fn accept_and_handshake(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        capabilities: Option<Vec<Vec<u8>>>,
+    ) {
+        self.accept().await;
+        self.asn = asn;
+
+        // Read their OPEN
+        let _server_open = self.read_open().await;
+
+        // Send our OPEN
+        if let Some(caps) = capabilities {
+            let asn_2byte = if asn > 65535 { AS_TRANS } else { asn as u16 };
+            self.supports_4byte_asn = true;
+            let open = build_raw_open(
+                asn_2byte,
+                300,
+                u32::from(router_id),
+                RawOpenOptions {
+                    capabilities: Some(caps),
+                    ..Default::default()
+                },
+            );
+            self.send_raw(&open).await;
+        } else {
+            let open = OpenMessage::new(asn, 300, u32::from(router_id));
+            self.stream
+                .as_mut()
+                .unwrap()
+                .write_all(&open.serialize())
+                .await
+                .expect("Failed to send OPEN");
+        }
+
+        // Exchange KEEPALIVEs
+        self.send_keepalive().await;
+        self.read_keepalive().await;
+    }
+
     pub fn to_peer(&self, state: BgpState) -> Peer {
         Peer {
             address: self.address.clone(),
@@ -2081,5 +2126,16 @@ pub fn build_multiprotocol_capability_ipv4_unicast() -> Vec<u8> {
         0, 1, // AFI = 1 (IPv4)
         0, // Reserved
         1, // SAFI = 1 (Unicast)
+    ]
+}
+
+/// Build ADD-PATH capability (RFC 7911) for IPv4 Unicast, send+receive
+pub fn build_addpath_capability_ipv4_unicast() -> Vec<u8> {
+    vec![
+        69, // Capability code 69 = ADD-PATH
+        4,  // Length: 4 bytes
+        0, 1, // AFI = 1 (IPv4)
+        1, // SAFI = 1 (Unicast)
+        3, // Send + Receive
     ]
 }

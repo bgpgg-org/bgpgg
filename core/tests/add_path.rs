@@ -15,9 +15,11 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 /// ADD-PATH config: send all paths + receive path IDs
 fn addpath_config() -> SessionConfig {
@@ -209,14 +211,16 @@ async fn test_addpath_peer_disconnect() {
     .await;
 }
 
-/// Route reflector with ADD-PATH: RR reflects both client paths to each client.
-/// BUG: ORIGINATOR_ID loop rejection doesn't scope to path_id, withdraws valid paths too.
-/// See addpath.md "Known Bug: ADD-PATH + Route Reflector Loop Rejection".
-#[tokio::test]
-#[ignore]
-async fn test_addpath_route_reflector() {
-    // All iBGP (same ASN 65001)
-    let route_reflector = start_test_server(Config::new(
+/// Sets up an iBGP route reflector with ADD-PATH and two clients:
+///
+///   Client1(BGP ID 2.2.2.2) --+
+///                              +--> RR(BGP ID 1.1.1.1)
+///   Client2(BGP ID 3.3.3.3) --+
+///
+/// All ASN 65001, rr_client + ADD-PATH on all peerings.
+/// Returns (rr, client1, client2) with all sessions Established.
+async fn setup_rr_addpath_topology() -> (TestServer, TestServer, TestServer) {
+    let rr = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -238,98 +242,212 @@ async fn test_addpath_route_reflector() {
     ))
     .await;
 
-    // RR peers with clients using rr_client + ADD-PATH
-    let rr_addpath_config = SessionConfig {
+    let rr_config = SessionConfig {
         rr_client: Some(true),
         add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
         add_path_receive: Some(true),
         ..Default::default()
     };
+    rr.add_peer_with_config(&client1, rr_config).await;
+    rr.add_peer_with_config(&client2, rr_config).await;
+    client1.add_peer_with_config(&rr, addpath_config()).await;
+    client2.add_peer_with_config(&rr, addpath_config()).await;
 
-    route_reflector
-        .add_peer_with_config(&client1, rr_addpath_config)
-        .await;
-    route_reflector
-        .add_peer_with_config(&client2, rr_addpath_config)
-        .await;
-
-    // Clients peer with RR using ADD-PATH (no rr_client from client side)
-    client1
-        .add_peer_with_config(&route_reflector, addpath_config())
-        .await;
-    client2
-        .add_peer_with_config(&route_reflector, addpath_config())
-        .await;
-
-    // Wait for Established
     poll_until(
         || async {
-            let Ok(peers) = route_reflector.client.get_peers().await else {
-                return false;
-            };
-            peers
-                .iter()
-                .filter(|peer| peer.state == BgpState::Established as i32)
-                .count()
-                == 2
+            rr.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .filter(|p| p.state == BgpState::Established as i32)
+                    .count()
+                    == 2
+            })
         },
         "Timeout waiting for RR peers to reach Established",
     )
     .await;
 
-    let rr_addr = route_reflector.address.to_string();
+    (rr, client1, client2)
+}
 
-    // Client1 announces 10.0.0.0/24
-    announce_route(
-        &client1,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.1.1".to_string(),
-            ..Default::default()
-        },
+/// Create a server + FakePeer with ADD-PATH iBGP session in Established state.
+/// FakePeer listens, server connects out. Both are ASN 65001.
+///
+///   Server --[iBGP + ADD-PATH recv]--> FakePeer
+async fn setup_fakepeer_addpath(
+    server_bgp_id: Ipv4Addr,
+    fake_bgp_id: Ipv4Addr,
+) -> (TestServer, FakePeer) {
+    let server = start_test_server(Config::new(65001, "127.0.0.1:0", server_bgp_id, 90)).await;
+    let mut fake = FakePeer::new("127.0.0.2:0", 65001).await;
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                port: Some(fake.port() as u32),
+                add_path_receive: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    fake.accept_and_handshake(
+        65001,
+        fake_bgp_id,
+        Some(vec![
+            build_multiprotocol_capability_ipv4_unicast(),
+            build_addpath_capability_ipv4_unicast(),
+        ]),
     )
     .await;
 
-    // Client2 announces 10.0.0.0/24
-    announce_route(
-        &client2,
-        RouteParams {
-            prefix: "10.0.0.0/24".to_string(),
-            next_hop: "192.168.2.1".to_string(),
-            ..Default::default()
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.state == BgpState::Established as i32)
+            })
         },
+        "Timeout waiting for Established",
     )
     .await;
 
-    // Client1 should see Client2's path reflected by RR (iBGP: next_hop preserved)
-    poll_rib_addpath(&[(
-        &client1,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                next_hop: "192.168.2.1".to_string(),
-                peer_address: rr_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+    (server, fake)
+}
+
+/// Build ADD-PATH NLRI bytes: 4-byte path_id + prefix_len + prefix_bytes
+fn addpath_nlri(path_id: u32, prefix_bytes: &[u8]) -> Vec<u8> {
+    let mut nlri = path_id.to_be_bytes().to_vec();
+    nlri.extend_from_slice(prefix_bytes);
+    nlri
+}
+
+/// Build ORIGINATOR_ID attribute
+fn attr_originator_id(ip: Ipv4Addr) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::ORIGINATOR_ID,
+        4,
+        &ip.octets(),
+    )
+}
+
+/// Build LOCAL_PREF attribute
+fn attr_local_pref(value: u32) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::LOCAL_PREF,
+        4,
+        &value.to_be_bytes(),
+    )
+}
+
+/// Sender-side: RR must not reflect a client's own path back to that client.
+/// Checks RR's adj-rib-out toward Client1.
+#[tokio::test]
+async fn test_addpath_rr_no_reflect_to_originator() {
+    let (rr, client1, client2) = setup_rr_addpath_topology().await;
+    let client1_addr = client1.address.to_string();
+
+    for (server, next_hop) in [(&client1, "192.168.1.1"), (&client2, "192.168.2.1")] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: next_hop.to_string(),
                 ..Default::default()
-            })],
-        }],
-    )])
+            },
+        )
+        .await;
+    }
+
+    // Should only have Client2's path, not Client1's own reflected back
+    poll_until_stable(
+        || async {
+            rr.client
+                .get_adj_rib_out(&client1_addr)
+                .await
+                .is_ok_and(|routes| {
+                    routes.iter().any(|r| {
+                        r.prefix == "10.0.0.0/24"
+                            && r.paths.len() == 1
+                            && r.paths[0].next_hop == "192.168.2.1"
+                    })
+                })
+        },
+        Duration::from_secs(2),
+        "RR adj-rib-out toward Client1 should have exactly 1 path (Client2's, next_hop 192.168.2.1)",
+    )
+    .await;
+}
+
+/// Receiver-side: ORIGINATOR_ID loop rejection must not withdraw other paths from same peer.
+/// FakePeer sends valid path (path_id=1), then looped path (path_id=2). Valid must survive.
+#[tokio::test]
+async fn test_originator_id_rejection_preserves_other_paths() {
+    let (server, mut fake) = setup_fakepeer_addpath(
+        Ipv4Addr::new(2, 2, 2, 2), // server BGP ID
+        Ipv4Addr::new(3, 3, 3, 3), // fake BGP ID
+    )
     .await;
 
-    // Client2 should see Client1's path reflected by RR
-    poll_rib_addpath(&[(
-        &client2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                next_hop: "192.168.1.1".to_string(),
-                peer_address: rr_addr,
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
-    )])
+    // Valid path: ORIGINATOR_ID=3.3.3.3 (not ours)
+    let update_valid = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 2, 1)),
+            &attr_local_pref(100),
+            &attr_originator_id(Ipv4Addr::new(3, 3, 3, 3)),
+        ],
+        &addpath_nlri(1, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update_valid).await;
+
+    poll_until_stable(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+        },
+        Duration::from_secs(1),
+        "Timeout waiting for valid path to stabilize",
+    )
+    .await;
+
+    // Looped path: ORIGINATOR_ID=2.2.2.2 (matches server's BGP ID)
+    let update_looped = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+            &attr_local_pref(100),
+            &attr_originator_id(Ipv4Addr::new(2, 2, 2, 2)),
+        ],
+        &addpath_nlri(2, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update_looped).await;
+
+    // Valid path must survive the looped path's rejection
+    poll_while(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+        },
+        Duration::from_secs(2),
+        "Valid path was removed by ORIGINATOR_ID loop rejection of another path",
+    )
     .await;
 }
