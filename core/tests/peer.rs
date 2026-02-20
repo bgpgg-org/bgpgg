@@ -1443,32 +1443,25 @@ async fn test_graceful_restart_reconnect() {
 
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
-    // FakePeer announces route 10.0.0.0/24
-    let update = build_raw_update(
-        &[],
-        &[
-            &attr_origin_igp(),
-            &attr_as_path_2byte(vec![65002]),
-            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
-        ],
-        &[24, 10, 0, 0], // 10.0.0.0/24
-        None,
-    );
-    peer.send_raw(&update).await;
-
-    // Verify route in RIB
-    poll_until(
-        || async {
-            server
-                .client
-                .get_routes()
-                .await
-                .ok()
-                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+    // Server injects route locally (source=Local) so the source-peer filter
+    // won't block it when re-sending to the restarting peer.
+    announce_route(
+        &server,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
         },
-        "route should be in RIB",
     )
     .await;
+
+    // FakePeer receives the locally-injected route
+    let initial_update = peer.read_update().await;
+    assert_eq!(
+        initial_update.nlri_prefixes().len(),
+        1,
+        "Peer should receive locally-injected route"
+    );
 
     // Drop TCP without NOTIFICATION -> triggers GR
     drop(peer.stream.take());
@@ -1514,9 +1507,6 @@ async fn test_graceful_restart_reconnect() {
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 
     // RFC 4724 Section 4.2: Receiving Speaker sends full table to Restarting Speaker
-    //
-    // The server sends the retained route (10.0.0.0/24) back to the peer, since the peer
-    // indicated R=1 (restart in progress) and thus is assumed to have lost its state.
     let route_update = peer.read_update().await;
     assert_eq!(
         route_update.nlri_prefixes().len(),
@@ -1529,8 +1519,7 @@ async fn test_graceful_restart_reconnect() {
         "Server should send 10.0.0.0/24 route"
     );
 
-    // Server should send End-of-RIB marker after initial update (RFC 4724)
-    // Use short timeout - EOR should come quickly after route update
+    // Server should send End-of-RIB marker after initial update
     use tokio::time::{timeout, Duration};
     let eor_result = timeout(Duration::from_secs(2), peer.read_update()).await;
     assert!(
