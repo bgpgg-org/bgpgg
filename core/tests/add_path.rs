@@ -426,43 +426,30 @@ async fn test_addpath_per_path_withdrawal() {
     // Both paths in loc-rib
     poll_until(
         || async {
-            server
-                .client
-                .get_routes()
-                .await
-                .is_ok_and(|routes| {
-                    routes
-                        .iter()
-                        .any(|r| r.prefix == "10.0.0.0/24" && r.paths.len() == 2)
-                })
+            server.client.get_routes().await.is_ok_and(|routes| {
+                routes
+                    .iter()
+                    .any(|r| r.prefix == "10.0.0.0/24" && r.paths.len() == 2)
+            })
         },
         "Timeout waiting for both paths",
     )
     .await;
 
     // Withdraw path_id=1 only
-    let withdraw = build_raw_update(
-        &addpath_nlri(1, &[24, 10, 0, 0]),
-        &[],
-        &[],
-        None,
-    );
+    let withdraw = build_raw_update(&addpath_nlri(1, &[24, 10, 0, 0]), &[], &[], None);
     fake.send_raw(&withdraw).await;
 
     // path_id=2 (next_hop=192.168.2.1) must survive
     poll_until_stable(
         || async {
-            server
-                .client
-                .get_routes()
-                .await
-                .is_ok_and(|routes| {
-                    routes.iter().any(|r| {
-                        r.prefix == "10.0.0.0/24"
-                            && r.paths.len() == 1
-                            && r.paths[0].next_hop == "192.168.2.1"
-                    })
+            server.client.get_routes().await.is_ok_and(|routes| {
+                routes.iter().any(|r| {
+                    r.prefix == "10.0.0.0/24"
+                        && r.paths.len() == 1
+                        && r.paths[0].next_hop == "192.168.2.1"
                 })
+            })
         },
         Duration::from_secs(2),
         "path_id=2 was removed by withdrawal of path_id=1",

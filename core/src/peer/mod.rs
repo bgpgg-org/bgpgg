@@ -180,8 +180,11 @@ pub struct LocalConfig {
     pub cluster_id: std::net::Ipv4Addr,
 }
 
-/// (announced routes, withdrawn prefixes)
-pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<IpNetwork>);
+/// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
+pub type Withdrawal = (IpNetwork, Option<u32>);
+
+/// (announced routes, withdrawn routes)
+pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<Withdrawal>);
 
 mod fsm;
 mod incoming;

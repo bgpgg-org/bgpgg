@@ -27,7 +27,7 @@ use crate::peer::outgoing::{
     propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
 };
 use crate::peer::BgpState;
-use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
+use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics, Withdrawal};
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
@@ -272,7 +272,7 @@ pub enum ServerOp {
     },
     PeerUpdate {
         peer_ip: IpAddr,
-        withdrawn: Vec<IpNetwork>,
+        withdrawn: Vec<Withdrawal>,
         announced: Vec<PrefixPath>,
     },
     PeerDisconnected {

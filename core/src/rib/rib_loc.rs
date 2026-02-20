@@ -15,6 +15,7 @@
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
+use crate::peer::Withdrawal;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
 use std::collections::{HashMap, HashSet};
@@ -239,15 +240,22 @@ impl<A: PathIdAllocator> LocRib<A> {
     }
 
     /// Remove paths from a specific peer for a given prefix.
+    /// When `remote_path_id` is Some, only the path with that remote_path_id is removed.
+    /// When None, all paths from that peer are removed (non-ADD-PATH behavior).
     /// Returns true if a path was actually removed.
-    fn remove_peer_path(&mut self, prefix: IpNetwork, peer_ip: IpAddr) -> bool {
+    fn remove_peer_path(
+        &mut self,
+        prefix: IpNetwork,
+        peer_ip: IpAddr,
+        remote_path_id: Option<u32>,
+    ) -> bool {
+        let predicate = |p: &Path| {
+            is_path_from_peer(p, peer_ip)
+                && remote_path_id.is_none_or(|id| p.remote_path_id == Some(id))
+        };
         let freed_path_ids = match prefix {
-            IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, |p| {
-                is_path_from_peer(p, peer_ip)
-            }),
-            IpNetwork::V6(v6_prefix) => remove_paths(&mut self.ipv6_unicast, &v6_prefix, |p| {
-                is_path_from_peer(p, peer_ip)
-            }),
+            IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, predicate),
+            IpNetwork::V6(v6_prefix) => remove_paths(&mut self.ipv6_unicast, &v6_prefix, predicate),
         };
         let had_path = !freed_path_ids.is_empty();
         self.path_ids.free_all(freed_path_ids);
@@ -271,7 +279,7 @@ impl<A: PathIdAllocator> LocRib<A> {
     pub fn apply_peer_update<F>(
         &mut self,
         peer_ip: IpAddr,
-        withdrawn: Vec<IpNetwork>,
+        withdrawn: Vec<Withdrawal>,
         announced: Vec<PrefixPath>,
         import_policy: F,
     ) -> RouteDelta
@@ -280,7 +288,7 @@ impl<A: PathIdAllocator> LocRib<A> {
     {
         // Collect affected prefixes and snapshot old best BEFORE mutations
         let mut affected_set: HashSet<IpNetwork> = HashSet::new();
-        affected_set.extend(withdrawn.iter().copied());
+        affected_set.extend(withdrawn.iter().map(|(prefix, _)| *prefix));
         affected_set.extend(announced.iter().map(|(prefix, _)| *prefix));
         let affected: Vec<IpNetwork> = affected_set.into_iter().collect();
         let old_best: HashMap<IpNetwork, Arc<Path>> = affected
@@ -289,9 +297,9 @@ impl<A: PathIdAllocator> LocRib<A> {
             .collect();
 
         // Process withdrawals
-        for prefix in withdrawn {
+        for (prefix, remote_path_id) in withdrawn {
             info!(prefix = ?prefix, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
-            self.remove_peer_path(prefix, peer_ip);
+            self.remove_peer_path(prefix, peer_ip, remote_path_id);
         }
 
         // Process announcements - apply import policy and add to Loc-RIB
@@ -303,7 +311,7 @@ impl<A: PathIdAllocator> LocRib<A> {
                 self.upsert_path(prefix, Arc::new(path));
             } else {
                 debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
-                self.remove_peer_path(prefix, peer_ip);
+                self.remove_peer_path(prefix, peer_ip, path_arc.remote_path_id);
             }
         }
 

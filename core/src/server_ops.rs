@@ -24,7 +24,7 @@ use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, send_announcements_to_peer, PeerExportContext,
 };
-use crate::peer::{BgpState, PeerOp};
+use crate::peer::{BgpState, PeerOp, Withdrawal};
 use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
     PrefixSet,
@@ -1252,7 +1252,7 @@ impl BgpServer {
         peer_ip: IpAddr,
         peer_as: u32,
         peer_bgp_id: u32,
-        withdrawn: &[IpNetwork],
+        withdrawn: &[Withdrawal],
         announced: &[PrefixPath],
     ) {
         // Mirror the actual BGP session encoding
@@ -1268,9 +1268,9 @@ impl BgpServer {
         if !withdrawn.is_empty() {
             let nlri: Vec<Nlri> = withdrawn
                 .iter()
-                .map(|prefix| Nlri {
+                .map(|(prefix, path_id)| Nlri {
                     prefix: *prefix,
-                    path_id: None,
+                    path_id: *path_id,
                 })
                 .collect();
             let update = UpdateMessage::new_withdraw(nlri, format);

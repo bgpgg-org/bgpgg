@@ -18,12 +18,11 @@ use crate::bgp::msg_update_types::PathAttrValue;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::log::{info, warn};
-use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use super::{Peer, RouteChanges, SessionType};
+use super::{Peer, RouteChanges, SessionType, Withdrawal};
 
 impl Peer {
     /// Validate AFI/SAFI is negotiated and not disabled.
@@ -175,12 +174,12 @@ impl Peer {
     }
 
     /// Process withdrawn routes from an UPDATE message
-    fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
+    fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<Withdrawal> {
         let mut withdrawn = Vec::new();
         for entry in update_msg.withdrawn_routes() {
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, "withdrawing route");
             self.rib_in.remove_route(entry.prefix, entry.path_id);
-            withdrawn.push(entry.prefix);
+            withdrawn.push((entry.prefix, entry.path_id));
         }
         withdrawn
     }
@@ -258,12 +257,16 @@ impl Peer {
 
         // RFC 4271: AS_PATH loop prevention - return prefixes as implicit withdrawals
         if self.has_as_path_loop(&path) {
-            return Ok((vec![], update_msg.nlri_prefixes()));
+            let withdrawn: Vec<Withdrawal> =
+                nlri_list.iter().map(|e| (e.prefix, e.path_id)).collect();
+            return Ok((vec![], withdrawn));
         }
 
         // RFC 4456 Section 8: Route Reflector loop prevention for iBGP routes
         if self.session_type == Some(SessionType::Ibgp) && self.has_rr_loop(&path) {
-            return Ok((vec![], update_msg.nlri_prefixes()));
+            let withdrawn: Vec<Withdrawal> =
+                nlri_list.iter().map(|e| (e.prefix, e.path_id)).collect();
+            return Ok((vec![], withdrawn));
         }
 
         let mut announced = Vec::new();
@@ -286,7 +289,7 @@ mod tests {
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
     use crate::bgp::DEFAULT_FORMAT;
     use crate::config::MaxPrefixSetting;
-    use crate::net::Ipv4Net;
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::peer::BgpState;
     use crate::peer::PeerCapabilities;
     use crate::rib::{Path, PathAttrs, RouteSource};
