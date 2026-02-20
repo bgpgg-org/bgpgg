@@ -336,6 +336,97 @@ fn build_export_next_hop(
     }
 }
 
+/// Apply per-prefix export filtering and attribute transformation for a peer.
+/// Returns None if the path should be filtered (RR rules, source-peer, community, policy).
+fn compute_export_path(
+    prefix: &IpNetwork,
+    path: &Arc<Path>,
+    ctx: &PeerExportContext,
+) -> Option<Path> {
+    let is_ibgp = ctx.local_asn == ctx.peer_asn;
+
+    // RFC 4456: Route reflector filtering for iBGP routes to iBGP peers
+    // - eBGP/Local routes -> always send
+    // - iBGP from client -> send to all iBGP peers
+    // - iBGP from non-client -> send only to clients
+    if is_ibgp && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client {
+        return None;
+    }
+
+    // Don't send a path back to the peer it was learned from
+    if path.source().peer_ip() == Some(ctx.peer_addr) {
+        return None;
+    }
+
+    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
+    if should_filter_by_community(path.communities(), ctx.local_asn, ctx.peer_asn) {
+        return None;
+    }
+    // Clone inner Path for policy mutation
+    let mut path_mut = (**path).clone();
+
+    // Evaluate export policies in order until Accept/Reject
+    let accepted = {
+        let mut result = false;
+        for policy in ctx.export_policies {
+            match policy.evaluate(prefix, &mut path_mut) {
+                PolicyResult::Accept => {
+                    result = true;
+                    break;
+                }
+                PolicyResult::Reject => {
+                    result = false;
+                    break;
+                }
+                PolicyResult::Continue => continue,
+            }
+        }
+        result
+    };
+
+    if !accepted {
+        return None;
+    }
+
+    // Apply export attribute transformations
+    path_mut.attrs.as_path = build_export_as_path(&path_mut, ctx.local_asn, ctx.peer_asn);
+
+    // Build next hop - may return None for cross-family routes without explicit next hop
+    path_mut.attrs.next_hop = build_export_next_hop(
+        &path_mut,
+        ctx.local_next_hop,
+        ctx.local_asn,
+        ctx.peer_asn,
+        prefix,
+    )?;
+
+    path_mut.attrs.local_pref = build_export_local_pref(&path_mut, ctx.local_asn, ctx.peer_asn);
+    path_mut.attrs.med = build_export_med(&path_mut, ctx.local_asn, ctx.peer_asn);
+    path_mut.attrs.extended_communities =
+        build_export_extended_communities(&path_mut, ctx.local_asn, ctx.peer_asn);
+
+    // RFC 4271 Section 6.3: only propagate transitive unknown attributes
+    path_mut
+        .attrs
+        .unknown_attrs
+        .retain(|attr| attr.is_unknown_transitive());
+
+    // RFC 4456: RR attributes are non-transitive, so always strip for eBGP.
+    // For iBGP: preserve when reflecting OR when explicitly set (e.g., injected routes).
+    let preserve_rr_attrs = is_ibgp && (path.source().is_ibgp() || path.originator_id().is_some());
+    if !preserve_rr_attrs {
+        path_mut.attrs.originator_id = None;
+        path_mut.attrs.cluster_list.clear();
+    }
+
+    // RFC 4456: Apply RR attributes when reflecting iBGP routes to iBGP peers
+    if is_ibgp && path.source().is_ibgp() {
+        apply_rr_attributes(&mut path_mut, ctx.cluster_id);
+    }
+
+    Some(path_mut)
+}
+
 /// Compute filtered and transformed routes for a peer
 /// Returns Vec of (prefix, transformed_path) ready to advertise
 ///
@@ -347,94 +438,10 @@ pub fn compute_routes_for_peer(
     to_announce: &[PrefixPath],
     ctx: &PeerExportContext,
 ) -> Vec<(IpNetwork, Path)> {
-    let is_ibgp = ctx.local_asn == ctx.peer_asn;
-
     to_announce
         .iter()
         .filter_map(|(prefix, path)| {
-            // RFC 4456: Route reflector filtering for iBGP routes to iBGP peers
-            // - eBGP/Local routes -> always send
-            // - iBGP from client -> send to all iBGP peers
-            // - iBGP from non-client -> send only to clients
-            if is_ibgp && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client
-            {
-                return None;
-            }
-
-            // Don't send a path back to the peer it was learned from
-            if path.source().peer_ip() == Some(ctx.peer_addr) {
-                return None;
-            }
-
-            // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
-            if should_filter_by_community(path.communities(), ctx.local_asn, ctx.peer_asn) {
-                return None;
-            }
-            // Clone inner Path for policy mutation
-            let mut path_mut = (**path).clone();
-
-            // Evaluate export policies in order until Accept/Reject
-            let accepted = {
-                let mut result = false;
-                for policy in ctx.export_policies {
-                    match policy.evaluate(prefix, &mut path_mut) {
-                        PolicyResult::Accept => {
-                            result = true;
-                            break;
-                        }
-                        PolicyResult::Reject => {
-                            result = false;
-                            break;
-                        }
-                        PolicyResult::Continue => continue,
-                    }
-                }
-                result
-            };
-
-            if !accepted {
-                return None;
-            }
-
-            // Apply export attribute transformations
-            path_mut.attrs.as_path = build_export_as_path(&path_mut, ctx.local_asn, ctx.peer_asn);
-
-            // Build next hop - may return None for cross-family routes without explicit next hop
-            path_mut.attrs.next_hop = build_export_next_hop(
-                &path_mut,
-                ctx.local_next_hop,
-                ctx.local_asn,
-                ctx.peer_asn,
-                prefix,
-            )?;
-
-            path_mut.attrs.local_pref =
-                build_export_local_pref(&path_mut, ctx.local_asn, ctx.peer_asn);
-            path_mut.attrs.med = build_export_med(&path_mut, ctx.local_asn, ctx.peer_asn);
-            path_mut.attrs.extended_communities =
-                build_export_extended_communities(&path_mut, ctx.local_asn, ctx.peer_asn);
-
-            // RFC 4271 Section 6.3: only propagate transitive unknown attributes
-            path_mut
-                .attrs
-                .unknown_attrs
-                .retain(|attr| attr.is_unknown_transitive());
-
-            // RFC 4456: RR attributes are non-transitive, so always strip for eBGP.
-            // For iBGP: preserve when reflecting OR when explicitly set (e.g., injected routes).
-            let preserve_rr_attrs =
-                is_ibgp && (path.source().is_ibgp() || path.originator_id().is_some());
-            if !preserve_rr_attrs {
-                path_mut.attrs.originator_id = None;
-                path_mut.attrs.cluster_list.clear();
-            }
-
-            // RFC 4456: Apply RR attributes when reflecting iBGP routes to iBGP peers
-            if is_ibgp && path.source().is_ibgp() {
-                apply_rr_attributes(&mut path_mut, ctx.cluster_id);
-            }
-
-            Some((*prefix, path_mut))
+            compute_export_path(prefix, path, ctx).map(|exported| (*prefix, exported))
         })
         .collect()
 }
@@ -482,6 +489,35 @@ pub fn build_addpath_updates(
     (to_announce, to_withdraw)
 }
 
+/// Batch and send already-filtered announcements to a peer.
+fn send_batched_announcements(
+    ctx: &PeerExportContext,
+    to_send: &[PrefixPath],
+    format: MessageFormat,
+) {
+    let batches = batch_announcements_by_path(to_send);
+
+    for batch in batches {
+        debug!(peer_addr = %ctx.peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
+
+        let update_msg = UpdateMessage::new(&batch.path, batch.prefixes.clone(), format);
+
+        // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
+        // RFC 4271 Section 9.2: Check message size before sending
+        let serialized = update_msg.serialize();
+        if serialized.len() > MAX_MESSAGE_SIZE as usize {
+            warn!(peer_addr = %ctx.peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
+            continue;
+        }
+
+        if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
+            error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send UPDATE to peer");
+        } else {
+            info!(count = batch.prefixes.len(), peer_addr = %ctx.peer_addr, "propagated routes to peer");
+        }
+    }
+}
+
 /// Send route announcements to a peer.
 /// Batches prefixes that share the same path attributes into single UPDATE messages.
 /// Returns the list of (prefix, exported_path) actually sent (post-policy).
@@ -506,39 +542,19 @@ pub fn send_announcements_to_peer(
         .map(|(prefix, path)| (prefix, Arc::new(path)))
         .collect();
 
-    let batches = batch_announcements_by_path(&filtered_arc);
-
-    // Send one UPDATE message per unique set of path attributes
-    for batch in batches {
-        debug!(peer_addr = %ctx.peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
-
-        let update_msg = UpdateMessage::new(&batch.path, batch.prefixes.clone(), format);
-
-        // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
-        // RFC 4271 Section 9.2: Check message size before sending
-        let serialized = update_msg.serialize();
-        if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            warn!(peer_addr = %ctx.peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
-            continue;
-        }
-
-        if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
-            error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send UPDATE to peer");
-        } else {
-            info!(count = batch.prefixes.len(), peer_addr = %ctx.peer_addr, "propagated routes to peer");
-        }
-    }
+    send_batched_announcements(ctx, &filtered_arc, format);
 
     filtered_arc
 }
 
-/// Export paths to a peer and update adj-rib-out. For ADD-PATH peers, diffs all
-/// paths against adj-rib-out. For non-ADD-PATH peers, sends best-path only.
+/// Export paths to a peer and update adj-rib-out.
+///
+/// For each changed prefix, computes the desired export state and diffs against
+/// adj-rib-out. Withdrawals fall out naturally when a prefix has no exportable path
+/// (filtered, withdrawn, or absent) but exists in adj-rib-out.
 pub fn propagate_routes_to_peer(
     ctx: &PeerExportContext,
-    to_announce: &[PrefixPath],
-    to_withdraw: &[IpNetwork],
-    all_changed: &[IpNetwork],
+    changed_prefixes: &[IpNetwork],
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
@@ -549,7 +565,7 @@ pub fn propagate_routes_to_peer(
 
     if ctx.add_path_send {
         let (addpath_to_announce, addpath_to_withdraw) =
-            build_addpath_updates(all_changed, loc_rib, adj_rib_out);
+            build_addpath_updates(changed_prefixes, loc_rib, adj_rib_out);
 
         let withdrawn: Vec<Nlri> = addpath_to_withdraw
             .iter()
@@ -569,13 +585,22 @@ pub fn propagate_routes_to_peer(
             adj_rib_out.insert(prefix, path);
         }
     } else {
-        let peer_withdrawals: Vec<IpNetwork> = to_withdraw
-            .iter()
-            .filter(|prefix| adj_rib_out.has_prefix(prefix))
-            .cloned()
-            .collect();
+        let mut to_announce = Vec::new();
+        let mut to_withdraw = Vec::new();
 
-        let withdrawn: Vec<Nlri> = peer_withdrawals
+        for prefix in changed_prefixes {
+            let desired = loc_rib
+                .get_best_path(prefix)
+                .and_then(|best| compute_export_path(prefix, best, ctx));
+
+            match (desired, adj_rib_out.has_prefix(prefix)) {
+                (Some(path), _) => to_announce.push((*prefix, Arc::new(path))),
+                (None, true) => to_withdraw.push(*prefix),
+                (None, false) => {}
+            }
+        }
+
+        let withdrawn: Vec<Nlri> = to_withdraw
             .iter()
             .map(|prefix| Nlri {
                 prefix: *prefix,
@@ -583,37 +608,12 @@ pub fn propagate_routes_to_peer(
             })
             .collect();
         send_withdrawals(ctx.peer_addr, ctx.peer_tx, withdrawn, format);
+        send_batched_announcements(ctx, &to_announce, format);
 
-        let sent = send_announcements_to_peer(ctx, to_announce, format);
-
-        // Implicit withdrawals: prefixes that have a best path in loc-rib but were
-        // filtered by export policy (e.g. source-peer filter). If we previously sent
-        // this prefix, we need to withdraw it.
-        let implicit_withdrawals: Vec<IpNetwork> = to_announce
-            .iter()
-            .filter(|(prefix, _)| {
-                !sent.iter().any(|(sp, _)| sp == prefix) && adj_rib_out.has_prefix(prefix)
-            })
-            .map(|(prefix, _)| *prefix)
-            .collect();
-        if !implicit_withdrawals.is_empty() {
-            let nlri: Vec<Nlri> = implicit_withdrawals
-                .iter()
-                .map(|prefix| Nlri {
-                    prefix: *prefix,
-                    path_id: None,
-                })
-                .collect();
-            send_withdrawals(ctx.peer_addr, ctx.peer_tx, nlri, format);
-            for prefix in &implicit_withdrawals {
-                adj_rib_out.remove_prefix(prefix);
-            }
-        }
-
-        for prefix in &peer_withdrawals {
+        for prefix in &to_withdraw {
             adj_rib_out.remove_prefix(prefix);
         }
-        for (prefix, path) in sent {
+        for (prefix, path) in to_announce {
             adj_rib_out.replace(prefix, path);
         }
     }

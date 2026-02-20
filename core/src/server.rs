@@ -939,7 +939,7 @@ impl BgpServer {
     /// Propagate route changes to all established peers (except the originating peer)
     /// If originating_peer is None, propagates to all peers (used for locally originated routes)
     ///
-    /// RFC 4456 Route Reflector filtering is handled by compute_routes_for_peer based on:
+    /// RFC 4456 Route Reflector filtering is handled by compute_export_path based on:
     /// - path.source.is_rr_client(): whether source peer was an RR client
     /// - rr_client: whether peer is an RR client
     pub(crate) async fn propagate_routes(
@@ -953,19 +953,6 @@ impl BgpServer {
 
         let local_asn = self.config.asn;
         let cluster_id = self.config.cluster_id();
-
-        // For non-ADD-PATH peers: compute to_announce/to_withdraw from best_changed
-        let mut to_announce = Vec::new();
-        let mut to_withdraw = Vec::new();
-
-        for prefix in &delta.best_changed {
-            if let Some(best_path) = self.loc_rib.get_best_path(prefix) {
-                to_announce.push((*prefix, best_path.clone()));
-            } else {
-                to_withdraw.push(*prefix);
-            }
-        }
-
         let local_addr = self.local_addr;
         let loc_rib = &self.loc_rib;
 
@@ -988,6 +975,8 @@ impl BgpServer {
                 continue;
             }
 
+            let add_path_send = conn.add_path_send();
+
             // conn/entry borrows released - ctx owns cloned values
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
@@ -1003,17 +992,16 @@ impl BgpServer {
                 peer_supports_4byte_asn: conn.supports_four_octet_asn(),
                 rr_client: entry.config.rr_client,
                 cluster_id,
-                add_path_send: conn.add_path_send(),
+                add_path_send,
             };
 
-            propagate_routes_to_peer(
-                &ctx,
-                &to_announce,
-                &to_withdraw,
-                &delta.changed,
-                loc_rib,
-                &mut entry.adj_rib_out,
-            );
+            let changed = if add_path_send {
+                &delta.changed
+            } else {
+                &delta.best_changed
+            };
+
+            propagate_routes_to_peer(&ctx, changed, loc_rib, &mut entry.adj_rib_out);
         }
     }
 }
