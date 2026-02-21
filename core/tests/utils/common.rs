@@ -1559,6 +1559,7 @@ impl FakePeer {
         MessageFormat {
             use_4byte_asn: self.supports_4byte_asn,
             add_path: self.add_path,
+            is_ebgp: false,
         }
     }
 
@@ -1983,6 +1984,15 @@ pub fn attr_as_path_empty() -> Vec<u8> {
 pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
     let octets = ip.octets();
     build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
+}
+
+pub fn attr_local_pref(value: u32) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::LOCAL_PREF,
+        4,
+        &value.to_be_bytes(),
+    )
 }
 
 /// Build AGGREGATOR attribute with 4-byte ASN encoding (RFC 6793)

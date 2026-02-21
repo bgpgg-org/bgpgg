@@ -18,6 +18,55 @@ use super::utils::ParserError;
 use crate::net::IpNetwork;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// RFC 7606 Section 7: Should a malformed attribute trigger treat-as-withdraw?
+///
+/// Returns true for attributes whose errors invalidate the entire UPDATE
+/// (e.g. ORIGIN, AS_PATH, NEXT_HOP). Returns false for attributes where
+/// the error can be handled by silently discarding just the attribute
+/// (e.g. AGGREGATOR, ATOMIC_AGGREGATE).
+///
+/// MP_REACH_NLRI is not covered here — it requires session reset (Section 7.11)
+/// and is handled directly in the parser.
+///
+/// Some attributes differ by session type: LOCAL_PREF, ORIGINATOR_ID,
+/// CLUSTER_LIST are attribute-discard on eBGP but treat-as-withdraw on iBGP
+/// (Sections 7.5, 7.9, 7.10).
+pub fn should_treat_as_withdraw(attr_type_code: u8, is_ebgp: bool) -> bool {
+    match attr_type_code {
+        // Section 7.1
+        attr_type_code::ORIGIN => true,
+        // Section 7.2
+        attr_type_code::AS_PATH => true,
+        // Section 7.3
+        attr_type_code::NEXT_HOP => true,
+        // Section 7.4
+        attr_type_code::MULTI_EXIT_DISC => true,
+        // Section 7.5: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
+        attr_type_code::LOCAL_PREF => !is_ebgp,
+        // Section 7.6: attribute-discard
+        attr_type_code::ATOMIC_AGGREGATE => false,
+        // Section 7.7: attribute-discard
+        attr_type_code::AGGREGATOR => false,
+        // Section 7.8
+        attr_type_code::COMMUNITIES => true,
+        // Section 7.14
+        attr_type_code::EXTENDED_COMMUNITIES => true,
+        // Consistent with Section 8
+        attr_type_code::LARGE_COMMUNITIES => true,
+        // Section 7.9: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
+        attr_type_code::ORIGINATOR_ID => !is_ebgp,
+        // Section 7.10: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
+        attr_type_code::CLUSTER_LIST => !is_ebgp,
+        // Section 7.12 / 3(j): simple layout, NLRI position is deterministic
+        attr_type_code::MP_UNREACH_NLRI => true,
+        // RFC 6793: attribute-discard
+        attr_type_code::AS4_PATH => false,
+        attr_type_code::AS4_AGGREGATOR => false,
+        // Unknown optional: attribute-discard
+        _ => false,
+    }
+}
+
 // Re-export community functions and constants
 pub use super::community::{asn, from_asn_value, value};
 pub use super::community::{NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED};
@@ -46,6 +95,14 @@ impl PathAttrFlag {
 
     pub(super) fn extended_len(&self) -> bool {
         self.0 & Self::EXTENDED_LENGTH != 0
+    }
+
+    pub(super) fn header_len(&self) -> usize {
+        if self.extended_len() {
+            4
+        } else {
+            3
+        }
     }
 }
 

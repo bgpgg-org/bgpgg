@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for BGP UPDATE message error handling per RFC 4271 Section 6.3
+//! Tests for BGP UPDATE message error handling per RFC 7606 and RFC 4271 Section 6.3
 
 mod utils;
 pub use utils::*;
@@ -21,7 +21,9 @@ use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
 use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
+/// RFC 7606: missing well-known mandatory attribute -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_missing_well_known_attribute() {
     let test_cases = vec![
@@ -31,22 +33,16 @@ async fn test_update_missing_well_known_attribute() {
                 attr_as_path_empty(),
                 attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
-            attr_type_code::ORIGIN,
         ),
         (
             "as_path",
             vec![attr_origin_igp(), attr_next_hop(Ipv4Addr::new(10, 0, 0, 1))],
-            attr_type_code::AS_PATH,
         ),
-        (
-            "next_hop",
-            vec![attr_origin_igp(), attr_as_path_empty()],
-            attr_type_code::NEXT_HOP,
-        ),
+        ("next_hop", vec![attr_origin_igp(), attr_as_path_empty()]),
     ];
 
-    for (name, attrs, expected_missing_type) in test_cases {
-        let (_server, mut peer) = setup_server_and_fake_peer().await;
+    for (name, attrs) in test_cases {
+        let (server, mut peer) = setup_server_and_fake_peer().await;
 
         let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
         let msg = build_raw_update(
@@ -58,17 +54,28 @@ async fn test_update_missing_well_known_attribute() {
 
         peer.send_raw(&msg).await;
 
-        let notif = peer.read_notification().await;
-        assert_eq!(
-            notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            "Test case: {}",
+        // RFC 7606: treat-as-withdraw, session stays up
+        poll_peer_stats(
+            &server,
+            &peer.address,
+            ExpectedStats {
+                update_received: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+            "Test case: {} - peer should stay established (treat-as-withdraw)",
             name
         );
-        assert_eq!(
-            notif.data(),
-            &[expected_missing_type],
-            "Test case: {}",
+
+        // Route should NOT be installed
+        let routes = server.client.get_routes().await.expect("get routes");
+        assert!(
+            routes.is_empty(),
+            "Test case: {} - route should be withdrawn",
             name
         );
     }
@@ -87,6 +94,7 @@ async fn test_update_malformed_attribute_list() {
 
     peer.send_raw(&msg).await;
 
+    // This is a framing error -> still session reset
     let notif = peer.read_notification().await;
     assert_eq!(
         notif.error(),
@@ -95,6 +103,7 @@ async fn test_update_malformed_attribute_list() {
     assert_eq!(notif.data(), &[] as &[u8]);
 }
 
+/// RFC 7606: ORIGIN flag errors -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_attribute_flags_error_origin() {
     let test_cases = vec![
@@ -109,33 +118,54 @@ async fn test_update_attribute_flags_error_origin() {
     ];
 
     for (name, wrong_flags) in test_cases {
-        let (_server, mut peer) = setup_server_and_fake_peer().await;
+        let (server, mut peer) = setup_server_and_fake_peer().await;
 
         let malformed_attr =
             build_attr_bytes(wrong_flags, attr_type_code::ORIGIN, 1, &[Origin::IGP as u8]);
-        let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
+        let nlri = &[24, 10, 11, 12];
+        let msg = build_raw_update(
+            &[],
+            &[
+                &malformed_attr,
+                &attr_as_path_empty(),
+                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+            nlri,
+            None,
+        );
 
         peer.send_raw(&msg).await;
 
-        let notif = peer.read_notification().await;
-        assert_eq!(
-            notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-            "Test case: {}",
+        // RFC 7606: treat-as-withdraw, session stays up
+        poll_peer_stats(
+            &server,
+            &peer.address,
+            ExpectedStats {
+                update_received: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+            "Test case: {} - peer should stay established",
             name
         );
-        assert_eq!(
-            &notif.data()[0..3],
-            &[wrong_flags, attr_type_code::ORIGIN, 1],
-            "Test case: {}",
+
+        let routes = server.client.get_routes().await.expect("get routes");
+        assert!(
+            routes.is_empty(),
+            "Test case: {} - route should be withdrawn",
             name
         );
     }
 }
 
+/// RFC 7606 Section 7.4: MED flag errors -> treat-as-withdraw (session stays up, route withdrawn)
 #[tokio::test]
 async fn test_update_attribute_flags_error_med_missing_optional_bit() {
-    let (_server, mut peer) = setup_server_and_fake_peer().await;
+    let (server, mut peer) = setup_server_and_fake_peer().await;
 
     // Build MED attribute with WRONG flags (missing OPTIONAL bit)
     let wrong_flags = attr_flags::TRANSITIVE; // Should have OPTIONAL too
@@ -145,25 +175,57 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
         4,
         &[0, 0, 0, 100],
     );
-    let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
+    let nlri = &[24, 10, 11, 12];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            &malformed_attr,
+        ],
+        nlri,
+        None,
+    );
 
     peer.send_raw(&msg).await;
 
-    let notif = peer.read_notification().await;
-    assert_eq!(
-        notif.error(),
-        &BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
+    // RFC 7606 Section 7.4: treat-as-withdraw for MED, session stays up
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (treat-as-withdraw for MED)"
     );
-    assert_eq!(
-        &notif.data()[0..3],
-        &[wrong_flags, attr_type_code::MULTI_EXIT_DISC, 4]
-    );
+
+    // Route should NOT be installed (treat-as-withdraw)
+    poll_while(
+        || async {
+            let routes = server.client.get_routes().await.unwrap_or_default();
+            routes.iter().all(|r| r.prefix != "10.11.12.0/24")
+        },
+        Duration::from_secs(1),
+        "route 10.11.12.0/24 should not be installed",
+    )
+    .await;
 }
 
+/// RFC 7606 Section 5.2: attribute length errors with no NLRI/withdrawn
+/// escalate to session reset (no routes to withdraw)
 #[tokio::test]
-async fn test_update_attribute_length_error() {
-    // Tests AttributeLengthError for well-known attributes.
-    // Optional attributes (MED, AGGREGATOR) use OptionalAttributeError instead.
+async fn test_update_attribute_length_error_no_nlri() {
+    // Only attributes whose error action is treat-as-withdraw escalate via
+    // Section 5.2 when there are no NLRI. LOCAL_PREF is excluded because
+    // on eBGP sessions (setup_server_and_fake_peer) it's attribute-discard
+    // per RFC 7606 Section 7.5.
     let test_cases = vec![
         (
             "origin_wrong_length",
@@ -172,8 +234,7 @@ async fn test_update_attribute_length_error() {
                 attr_type_code::ORIGIN,
                 2,
                 &[Origin::IGP as u8],
-            ), // WRONG: length=2, should be 1
-            vec![attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2],
+            ),
         ),
         (
             "next_hop_wrong_length",
@@ -182,55 +243,66 @@ async fn test_update_attribute_length_error() {
                 attr_type_code::NEXT_HOP,
                 5,
                 &[10, 0, 0, 1, 0],
-            ), // WRONG: length=5, should be 4
-            vec![attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 5],
-        ),
-        (
-            "local_pref_wrong_length",
-            build_attr_bytes(
-                attr_flags::TRANSITIVE,
-                attr_type_code::LOCAL_PREF,
-                3,
-                &[0, 0, 0],
-            ), // WRONG: length=3, should be 4
-            vec![attr_flags::TRANSITIVE, attr_type_code::LOCAL_PREF, 3],
-        ),
-        (
-            "atomic_aggregate_wrong_length",
-            build_attr_bytes(
-                attr_flags::TRANSITIVE,
-                attr_type_code::ATOMIC_AGGREGATE,
-                1,
-                &[0],
-            ), // WRONG: length=1, should be 0
-            vec![attr_flags::TRANSITIVE, attr_type_code::ATOMIC_AGGREGATE, 1],
+            ),
         ),
     ];
 
-    for (name, malformed_attr, expected_data_prefix) in test_cases {
+    for (name, malformed_attr) in test_cases {
         let (_server, mut peer) = setup_server_and_fake_peer().await;
 
-        // Build UPDATE with single malformed attribute (no alignment issues!)
+        // No NLRI -> Section 5.2 escalation -> session reset
         let msg = build_raw_update(&[], &[&malformed_attr], &[], None);
-
         peer.send_raw(&msg).await;
 
         let notif = peer.read_notification().await;
         assert_eq!(
             notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
-            "Test case: {}",
-            name
-        );
-        assert_eq!(
-            &notif.data()[0..expected_data_prefix.len()],
-            &expected_data_prefix[..],
+            &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
             "Test case: {}",
             name
         );
     }
 }
 
+/// RFC 7606: attribute length error with NLRI -> treat-as-withdraw (session stays up)
+#[tokio::test]
+async fn test_update_attribute_length_error_with_nlri() {
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    // NEXT_HOP with wrong length (5 instead of 4) - but correctly sized in the wire buffer
+    let malformed_attr = build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::NEXT_HOP,
+        5,
+        &[10, 0, 0, 1, 0],
+    );
+
+    let nlri = &[24, 10, 11, 12];
+    // Send only the malformed attr (other missing attrs also trigger treat-as-withdraw)
+    let msg = build_raw_update(&[], &[&malformed_attr], nlri, None);
+    peer.send_raw(&msg).await;
+
+    // RFC 7606: treat-as-withdraw, session stays up
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (treat-as-withdraw)",
+    );
+
+    let routes = server.client.get_routes().await.expect("get routes");
+    assert!(routes.is_empty(), "Route should be withdrawn");
+}
+
+/// Unrecognized well-known attribute still causes session reset
 #[tokio::test]
 async fn test_update_unrecognized_well_known_attribute() {
     let (_server, mut peer) = setup_server_and_fake_peer().await;
@@ -249,12 +321,13 @@ async fn test_update_unrecognized_well_known_attribute() {
     assert_eq!(notif.data(), &[attr_flags::TRANSITIVE, 200, 2, 0xaa, 0xbb]);
 }
 
+/// RFC 7606: invalid ORIGIN value -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_invalid_origin_attribute() {
-    let (_server, mut peer) = setup_server_and_fake_peer().await;
+    let (server, mut peer) = setup_server_and_fake_peer().await;
 
     let invalid_origin_attr =
-        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid (only 0, 1, 2 are valid)
+        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]); // 3 is invalid
 
     let nlri = &[24, 10, 11, 12];
     let msg = build_raw_update(
@@ -270,17 +343,26 @@ async fn test_update_invalid_origin_attribute() {
 
     peer.send_raw(&msg).await;
 
-    let notif = peer.read_notification().await;
-    assert_eq!(
-        notif.error(),
-        &BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute)
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (treat-as-withdraw for invalid ORIGIN)"
     );
-    assert_eq!(
-        notif.data(),
-        &[attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, 3]
-    );
+
+    let routes = server.client.get_routes().await.expect("get routes");
+    assert!(routes.is_empty(), "Route should be withdrawn");
 }
 
+/// RFC 7606: invalid NEXT_HOP -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_invalid_next_hop_attribute() {
     let test_cases = vec![
@@ -290,7 +372,7 @@ async fn test_update_invalid_next_hop_attribute() {
     ];
 
     for (name, ip_bytes) in test_cases {
-        let (_server, mut peer) = setup_server_and_fake_peer().await;
+        let (server, mut peer) = setup_server_and_fake_peer().await;
 
         let invalid_next_hop_attr = build_attr_bytes(
             attr_flags::TRANSITIVE,
@@ -313,25 +395,26 @@ async fn test_update_invalid_next_hop_attribute() {
 
         peer.send_raw(&msg).await;
 
-        let notif = peer.read_notification().await;
-        assert_eq!(
-            notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
-            "Test case: {}",
+        poll_peer_stats(
+            &server,
+            &peer.address,
+            ExpectedStats {
+                update_received: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+            "Test case: {} - peer should stay established (treat-as-withdraw)",
             name
         );
-        assert_eq!(
-            notif.data(),
-            &[
-                attr_flags::TRANSITIVE,
-                attr_type_code::NEXT_HOP,
-                4,
-                ip_bytes[0],
-                ip_bytes[1],
-                ip_bytes[2],
-                ip_bytes[3]
-            ],
-            "Test case: {}",
+
+        let routes = server.client.get_routes().await.expect("get routes");
+        assert!(
+            routes.is_empty(),
+            "Test case: {} - route should be withdrawn",
             name
         );
     }
@@ -373,6 +456,7 @@ async fn test_next_hop_is_local_address_rejected() {
     );
 }
 
+/// RFC 7606: malformed AS_PATH (parse errors) -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_malformed_as_path() {
     let test_cases = vec![
@@ -394,20 +478,10 @@ async fn test_update_malformed_as_path() {
                 &[0x02, 0x02, 0x00, 0x0a], // AS_SEQUENCE, claims 2 ASNs but only 1 provided
             ),
         ),
-        (
-            "ebgp_first_as_mismatch",
-            // Peer is AS 65002, but AS_PATH starts with 65003 (0xFE03)
-            build_attr_bytes(
-                attr_flags::TRANSITIVE,
-                attr_type_code::AS_PATH,
-                6,
-                &[0x02, 0x02, 0xfe, 0x03, 0xfe, 0x04], // AS_SEQUENCE [65003, 65028]
-            ),
-        ),
     ];
 
     for (name, malformed_as_path) in test_cases {
-        let (_server, mut peer) = setup_server_and_fake_peer().await;
+        let (server, mut peer) = setup_server_and_fake_peer().await;
 
         let nlri = &[24, 10, 11, 12];
         let msg = build_raw_update(
@@ -423,81 +497,166 @@ async fn test_update_malformed_as_path() {
 
         peer.send_raw(&msg).await;
 
-        let notif = peer.read_notification().await;
-        assert_eq!(
-            notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
-            "Test case: {}",
+        poll_peer_stats(
+            &server,
+            &peer.address,
+            ExpectedStats {
+                update_received: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+            "Test case: {} - peer should stay established (treat-as-withdraw)",
+            name
+        );
+
+        let routes = server.client.get_routes().await.expect("get routes");
+        assert!(
+            routes.is_empty(),
+            "Test case: {} - route should be withdrawn",
             name
         );
     }
 }
 
+/// eBGP first-AS mismatch is a semantic error checked in incoming.rs -> NOTIFICATION
 #[tokio::test]
-async fn test_update_optional_attribute_error() {
-    let test_cases = vec![
-        (
-            "med_invalid_length",
-            attr_flags::OPTIONAL,
-            attr_type_code::MULTI_EXIT_DISC,
-            3,
-            vec![0x00, 0x00, 0x01],
-        ),
-        (
-            "aggregator_invalid_length",
-            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-            attr_type_code::AGGREGATOR,
-            4,
-            vec![0x00, 0x01, 0x01, 0x01],
-        ),
-    ];
-
-    for (name, flags, type_code, len, data) in test_cases {
-        let (_server, mut peer) = setup_server_and_fake_peer().await;
-
-        let invalid_attr = build_attr_bytes(flags, type_code, len, &data);
-        let nlri = &[24, 10, 11, 12];
-        let msg = build_raw_update(
-            &[],
-            &[
-                &attr_origin_igp(),
-                &attr_as_path_empty(),
-                &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
-                &invalid_attr,
-            ],
-            nlri,
-            None,
-        );
-
-        peer.send_raw(&msg).await;
-
-        let notif = peer.read_notification().await;
-        assert_eq!(
-            notif.error(),
-            &BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
-            "Test case: {}",
-            name
-        );
-        let mut expected_data = vec![flags, type_code, len];
-        expected_data.extend(&data);
-        assert_eq!(notif.data(), &expected_data, "Test case: {}", name);
-    }
-}
-
-#[tokio::test]
-async fn test_update_duplicate_attribute() {
+async fn test_update_as_path_first_as_mismatch() {
     let (_server, mut peer) = setup_server_and_fake_peer().await;
 
-    // Send UPDATE with two ORIGIN attributes (duplicate)
-    let msg = build_raw_update(&[], &[&attr_origin_igp(), &attr_origin_igp()], &[], None);
+    // Peer is AS 65002, but AS_PATH starts with 65003
+    let bad_as_path = build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::AS_PATH,
+        6,
+        &[0x02, 0x02, 0xfe, 0x03, 0xfe, 0x04], // AS_SEQUENCE [65003, 65028]
+    );
+
+    let nlri = &[24, 10, 11, 12];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &bad_as_path,
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        nlri,
+        None,
+    );
 
     peer.send_raw(&msg).await;
 
     let notif = peer.read_notification().await;
     assert_eq!(
         notif.error(),
-        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath),
     );
+}
+
+/// RFC 7606: optional attribute errors -> attribute-discard (session stays up, route installed)
+#[tokio::test]
+async fn test_update_optional_attribute_error() {
+    // MED is now treat-as-withdraw (RFC 7606 Section 7.4), so only
+    // AGGREGATOR remains as a true attribute-discard case here.
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    let invalid_attr = build_attr_bytes(
+        attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        attr_type_code::AGGREGATOR,
+        4,
+        &[0x00, 0x01, 0x01, 0x01],
+    );
+    let nlri = &[24, 10, 11, 12];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            &invalid_attr,
+        ],
+        nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // RFC 7606 Section 7.7: attribute-discard for AGGREGATOR, route installed
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (attribute-discard for AGGREGATOR)"
+    );
+
+    // Route should be installed (bad optional attr discarded, rest valid)
+    poll_until(
+        || async {
+            let routes = server.client.get_routes().await.unwrap_or_default();
+            routes.iter().any(|r| r.prefix == "10.11.12.0/24")
+        },
+        "route 10.11.12.0/24 should be installed",
+    )
+    .await;
+}
+
+/// RFC 7606: duplicate non-MP attributes are silently discarded (keep first)
+#[tokio::test]
+async fn test_update_duplicate_attribute() {
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Send UPDATE with two ORIGIN attributes (duplicate) - silently keep first
+    let nlri = &[24, 10, 11, 12];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // RFC 7606: duplicate non-MP attrs silently discarded, session stays up
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (duplicate attr discarded)"
+    );
+
+    // Route should be installed successfully
+    poll_until(
+        || async {
+            let routes = server.client.get_routes().await.unwrap_or_default();
+            routes.iter().any(|r| r.prefix == "10.11.12.0/24")
+        },
+        "route 10.11.12.0/24 should be installed",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -573,4 +732,149 @@ async fn test_update_multicast_nlri_ignored() {
         .await
         .expect("Failed to get routes");
     assert!(routes.is_empty(), "Multicast NLRI should be ignored");
+}
+
+/// RFC 7606: eBGP peers should have LOCAL_PREF silently stripped by parser
+#[tokio::test]
+async fn test_update_ebgp_local_pref_stripped() {
+    // setup_server_and_fake_peer: server=AS65001, peer=AS65002 -> eBGP
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Send UPDATE with LOCAL_PREF=200 (should be stripped for eBGP)
+    let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            &attr_local_pref(200),
+        ],
+        nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Route should be installed (LOCAL_PREF silently stripped, not an error)
+    poll_until(
+        || async {
+            let routes = server.client.get_routes().await.unwrap_or_default();
+            routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+        },
+        "route 10.11.12.0/24 should be installed",
+    )
+    .await;
+
+    // Verify LOCAL_PREF was stripped -> defaults to 100 in Loc-RIB
+    let routes = server.client.get_routes().await.expect("get routes");
+    let route = routes
+        .iter()
+        .find(|route| route.prefix == "10.11.12.0/24")
+        .expect("route should exist");
+    let path = &route.paths[0];
+    assert_eq!(
+        path.local_pref,
+        Some(100),
+        "LOCAL_PREF should be stripped from eBGP and default to 100 (got {:?})",
+        path.local_pref
+    );
+}
+
+/// RFC 7606: when multiple attribute errors occur, the strongest strategy wins
+/// TreatAsWithdraw > AttributeDiscard
+#[tokio::test]
+async fn test_update_multiple_errors_strongest_wins() {
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Invalid ORIGIN value -> TreatAsWithdraw
+    let invalid_origin = build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 1, &[3]);
+    // Invalid MED length (3 instead of 4) -> AttributeDiscard
+    let invalid_med = build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::MULTI_EXIT_DISC,
+        3,
+        &[0, 0, 1],
+    );
+
+    let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
+    let msg = build_raw_update(
+        &[],
+        &[
+            &invalid_origin,
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+            &invalid_med,
+        ],
+        nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // TreatAsWithdraw wins over AttributeDiscard -> session stays up, route withdrawn
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (treat-as-withdraw, not session reset)"
+    );
+
+    let routes = server.client.get_routes().await.expect("get routes");
+    assert!(
+        routes.is_empty(),
+        "Route should be withdrawn (treat-as-withdraw wins)"
+    );
+}
+
+/// Duplicate MP_REACH_NLRI attributes -> session reset (not treat-as-withdraw)
+#[tokio::test]
+async fn test_update_duplicate_mp_reach_nlri() {
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Build two MP_REACH_NLRI attributes for IPv4 unicast
+    let mp_reach_value: &[u8] = &[
+        0x00, 0x01, // AFI = IPv4
+        0x01, // SAFI = Unicast
+        0x04, // Next hop length = 4
+        0x0a, 0x00, 0x00, 0x01, // Next hop = 10.0.0.1
+        0x00, // Reserved
+        0x18, 0x0a, 0x0b, 0x0c, // NLRI: 10.11.12.0/24
+    ];
+    let mp_reach = build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::MP_REACH_NLRI,
+        mp_reach_value.len() as u8,
+        mp_reach_value,
+    );
+
+    // Send UPDATE with ORIGIN, AS_PATH, and two MP_REACH_NLRI (duplicate)
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &mp_reach,
+            &mp_reach,
+        ],
+        &[], // No traditional NLRI (using MP_REACH_NLRI)
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // Duplicate MP attribute -> session reset
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+    );
 }

@@ -1250,6 +1250,7 @@ impl BgpServer {
         let format = MessageFormat {
             use_4byte_asn,
             add_path,
+            is_ebgp: false,
         };
 
         // Send withdrawals if any
@@ -1894,6 +1895,7 @@ async fn send_initial_bmp_state_to_task(
                 let format = MessageFormat {
                     use_4byte_asn: peer_supports_4byte_asn(peer_info),
                     add_path: peer_add_path_receive_mask(peer_info),
+                    is_ebgp: false,
                 };
                 let updates = routes_to_update_messages(&routes, format);
                 for update in updates {

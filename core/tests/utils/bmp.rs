@@ -323,6 +323,7 @@ impl FakeBmpServer {
             MessageFormat {
                 use_4byte_asn: true,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         )
         .unwrap();
@@ -628,6 +629,7 @@ impl FakeBmpServer {
             MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         )
         .unwrap();

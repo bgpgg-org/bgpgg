@@ -479,40 +479,41 @@ impl Peer {
         }
 
         // Process UPDATE message content
-        if let BgpMessage::Update(update_msg) = message {
-            // RFC 4724: Check for End-of-RIB marker
-            if update_msg.is_eor() {
-                self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                    .await;
-                return Ok(None);
-            }
+        match message {
+            BgpMessage::Update(update_msg) => {
+                // RFC 4724: Check for End-of-RIB marker
+                if update_msg.is_eor() {
+                    self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                        .await;
+                    return Ok(None);
+                }
 
-            match self.handle_update(update_msg) {
-                Ok(delta) => Ok(Some(delta)),
-                Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
-                    // RFC 4271 8.1.2: check allow_automatic_stop
-                    if self.config.allow_automatic_stop {
-                        self.process_event(&FsmEvent::AutomaticStop(
-                            CeaseSubcode::MaxPrefixesReached,
-                        ))
-                        .await?;
-                        Ok(None)
-                    } else {
-                        warn!(peer_ip = %self.addr,
-                              "max prefix exceeded but allow_automatic_stop=false, continuing");
+                match self.handle_update(update_msg) {
+                    Ok(delta) => Ok(Some(delta)),
+                    Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
+                        // RFC 4271 8.1.2: check allow_automatic_stop
+                        if self.config.allow_automatic_stop {
+                            self.process_event(&FsmEvent::AutomaticStop(
+                                CeaseSubcode::MaxPrefixesReached,
+                            ))
+                            .await?;
+                            Ok(None)
+                        } else {
+                            warn!(peer_ip = %self.addr,
+                                  "max prefix exceeded but allow_automatic_stop=false, continuing");
+                            Ok(None)
+                        }
+                    }
+                    Err(bgp_error) => {
+                        // RFC 4271 Event 28: UpdateMsgErr
+                        let notif = NotificationMessage::new(bgp_error, vec![]);
+                        self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
+                            .await?;
                         Ok(None)
                     }
                 }
-                Err(bgp_error) => {
-                    // RFC 4271 Event 28: UpdateMsgErr
-                    let notif = NotificationMessage::new(bgp_error, vec![]);
-                    self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
-                        .await?;
-                    Ok(None)
-                }
             }
-        } else {
-            Ok(None)
+            _ => Ok(None),
         }
     }
 

@@ -44,6 +44,7 @@ pub async fn run_receiver(
             MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         )
         .await

@@ -47,7 +47,7 @@ impl Peer {
                 result = conn.msg_rx.recv() => {
                     match result {
                         Some(Ok(bytes)) => {
-                            let format = self.capabilities.receive_format();
+                            let format = self.capabilities.receive_format(self.session_type);
                             let message_type = bytes[18]; // Type is in header byte 18
                             let body = bytes[19..].to_vec(); // Body starts after header
 

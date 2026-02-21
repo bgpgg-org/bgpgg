@@ -116,7 +116,7 @@ impl PeerCapabilities {
 
     /// MessageFormat for parsing incoming UPDATEs from this peer.
     /// Includes ADD-PATH for all AFI/SAFIs where receive is negotiated.
-    pub fn receive_format(&self) -> MessageFormat {
+    pub fn receive_format(&self, session_type: Option<SessionType>) -> MessageFormat {
         let mut add_path = AddPathMask::NONE;
         if let Some(ap) = &self.add_path {
             for (afi_safi, mode) in &ap.entries {
@@ -128,12 +128,13 @@ impl PeerCapabilities {
         MessageFormat {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
+            is_ebgp: session_type == Some(SessionType::Ebgp),
         }
     }
 
     /// Build MessageFormat for encoding outgoing messages to this peer.
     /// Includes ADD-PATH for all AFI/SAFIs where send is negotiated.
-    pub fn send_format(&self) -> MessageFormat {
+    pub fn send_format(&self, session_type: Option<SessionType>) -> MessageFormat {
         let mut add_path = AddPathMask::NONE;
         if let Some(ap) = &self.add_path {
             for (afi_safi, mode) in &ap.entries {
@@ -145,6 +146,7 @@ impl PeerCapabilities {
         MessageFormat {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
+            is_ebgp: session_type == Some(SessionType::Ebgp),
         }
     }
 
@@ -701,7 +703,7 @@ impl Peer {
             }
 
             // Create EOR message
-            let format = self.capabilities.send_format();
+            let format = self.capabilities.send_format(self.session_type);
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 
             // Send EOR

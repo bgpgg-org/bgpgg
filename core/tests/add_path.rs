@@ -348,16 +348,6 @@ fn attr_originator_id(ip: Ipv4Addr) -> Vec<u8> {
     )
 }
 
-/// Build LOCAL_PREF attribute
-fn attr_local_pref(value: u32) -> Vec<u8> {
-    build_attr_bytes(
-        attr_flags::TRANSITIVE,
-        attr_type_code::LOCAL_PREF,
-        4,
-        &value.to_be_bytes(),
-    )
-}
-
 /// Sender-side: RR must not reflect a client's own path back to that client.
 /// Checks RR's adj-rib-out toward Client1.
 #[tokio::test]

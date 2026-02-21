@@ -16,9 +16,9 @@ use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
-    attr_type_code, Aggregator, AsPath, AsPathSegment, AsPathSegmentType, AttrType, LargeCommunity,
-    MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrFlag, PathAttrValue,
-    PathAttribute,
+    attr_type_code, should_treat_as_withdraw, Aggregator, AsPath, AsPathSegment, AsPathSegmentType,
+    AttrType, LargeCommunity, MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrFlag,
+    PathAttrValue, PathAttribute,
 };
 use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::{
@@ -82,17 +82,17 @@ pub(super) fn validate_attribute_length(
         AttrType::AtomicAggregate => attr_len == 0,
         AttrType::Aggregator => attr_len == 6 || attr_len == 8, // 2-byte or 4-byte ASN + IPv4
         AttrType::AsPath => true,                               // Variable length
-        AttrType::Communities => attr_len.is_multiple_of(4),    // Must be multiple of 4
+        AttrType::Communities => attr_len > 0 && attr_len.is_multiple_of(4), // RFC 7606 Section 7.8
         // RFC 4456: ORIGINATOR_ID is 4 bytes (IPv4 address)
         AttrType::OriginatorId => attr_len == 4,
-        // RFC 4456: CLUSTER_LIST is N*4 bytes (list of IPv4 addresses)
-        AttrType::ClusterList => attr_len.is_multiple_of(4),
+        // RFC 7606 Section 7.10: non-zero multiple of 4
+        AttrType::ClusterList => attr_len > 0 && attr_len.is_multiple_of(4),
         AttrType::MpReachNlri => true,   // Variable length
         AttrType::MpUnreachNlri => true, // Variable length
-        AttrType::ExtendedCommunities => attr_len.is_multiple_of(8), // Must be multiple of 8
+        AttrType::ExtendedCommunities => attr_len > 0 && attr_len.is_multiple_of(8), // RFC 7606 Section 7.14
         AttrType::As4Path => true,       // Variable length (RFC 6793)
         AttrType::As4Aggregator => true, // Variable length - validation in parser (RFC 6793)
-        AttrType::LargeCommunities => attr_len.is_multiple_of(12), // Must be multiple of 12
+        AttrType::LargeCommunities => attr_len > 0 && attr_len.is_multiple_of(12), // Non-zero multiple of 12
     };
 
     if !valid {
@@ -133,17 +133,12 @@ pub(super) fn validate_update_message_lengths(
     Ok(())
 }
 
+/// RFC 7606: Missing well-known mandatory attributes -> treat-as-withdraw.
+/// Returns true if all mandatory attributes are present (valid).
+/// Only call this when the UPDATE contains NLRI (RFC 4271 Section 5).
 pub(super) fn validate_well_known_mandatory_attributes(
     path_attributes: &[PathAttribute],
-    has_nlri: bool,
-) -> Result<(), ParserError> {
-    // RFC 4271 Section 5: well-known mandatory attributes MUST be included
-    // in every UPDATE message that contains NLRI
-    // RFC 2858: MP_REACH_NLRI can replace NEXT_HOP for multiprotocol
-    if !has_nlri {
-        return Ok(());
-    }
-
+) -> bool {
     let has_origin = path_attributes
         .iter()
         .any(|attr| matches!(attr.value, PathAttrValue::Origin(_)));
@@ -158,28 +153,22 @@ pub(super) fn validate_well_known_mandatory_attributes(
         .any(|attr| matches!(attr.value, PathAttrValue::MpReachNlri(_)));
 
     if !has_origin {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::ORIGIN],
-        });
+        warn!("missing ORIGIN attribute, treat-as-withdraw per RFC 7606");
+        return false;
     }
 
     if !has_as_path {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::AS_PATH],
-        });
+        warn!("missing AS_PATH attribute, treat-as-withdraw per RFC 7606");
+        return false;
     }
 
     // NEXT_HOP is required UNLESS MP_REACH_NLRI is present
     if !has_next_hop && !has_mp_reach {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-            data: vec![attr_type_code::NEXT_HOP],
-        });
+        warn!("missing NEXT_HOP attribute, treat-as-withdraw per RFC 7606");
+        return false;
     }
 
-    Ok(())
+    true
 }
 
 fn validate_nlri_afi(afi: &Afi, nlri_list: &[Nlri]) -> bool {
@@ -231,7 +220,7 @@ fn validate_mp_reach_buffer(
 
 pub(super) fn parse_attr_type(
     bytes: &[u8],
-    flags: u8,
+    flags: &PathAttrFlag,
     attr_type_code: u8,
     attr_len: u16,
 ) -> Result<Option<AttrType>, ParserError> {
@@ -240,9 +229,8 @@ pub(super) fn parse_attr_type(
         Err(_) => {
             // Unrecognized well-known attribute (OPTIONAL=0)
             // RFC 4271 Section 6.3: return error with full attribute data
-            if flags & PathAttrFlag::OPTIONAL == 0 {
-                let extended_len = flags & PathAttrFlag::EXTENDED_LENGTH != 0;
-                let header_len = if extended_len { 4 } else { 3 };
+            if flags.0 & PathAttrFlag::OPTIONAL == 0 {
+                let header_len = flags.header_len();
                 let total_attr_len = header_len + attr_len as usize;
                 let attr_data = bytes[..total_attr_len.min(bytes.len())].to_vec();
 
@@ -693,11 +681,153 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     bytes
 }
 
+/// Parse a single path attribute from the byte stream.
+///
+/// Parse the value of a known attribute type.
+///
+/// Returns Some(value) on success, None if the attribute is malformed.
+fn parse_attr_value(
+    attr_type: &AttrType,
+    attr_data: &[u8],
+    format: MessageFormat,
+) -> Option<PathAttrValue> {
+    let use_4byte_asn = format.use_4byte_asn;
+
+    let value = match attr_type {
+        AttrType::Origin => match attr_data[0] {
+            0 => PathAttrValue::Origin(Origin::IGP),
+            1 => PathAttrValue::Origin(Origin::EGP),
+            2 => PathAttrValue::Origin(Origin::INCOMPLETE),
+            value => {
+                warn!(
+                    "invalid ORIGIN value {}, treat-as-withdraw per RFC 7606",
+                    value
+                );
+                return None;
+            }
+        },
+        AttrType::AsPath => match read_attr_as_path(attr_data, use_4byte_asn) {
+            Ok(as_path) => PathAttrValue::AsPath(as_path),
+            Err(_) => {
+                warn!("malformed AS_PATH per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::NextHop => {
+            let next_hop = read_attr_next_hop(attr_data);
+            if let NextHopAddr::Ipv4(addr) = next_hop {
+                if !is_valid_unicast_ipv4(u32::from(addr)) {
+                    warn!("invalid NEXT_HOP per RFC 7606");
+                    return None;
+                }
+            }
+            PathAttrValue::NextHop(next_hop)
+        }
+        AttrType::MultiExtiDisc => match read_u32(attr_data) {
+            Ok(med) => PathAttrValue::MultiExtiDisc(med),
+            Err(_) => {
+                warn!("malformed MED per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::LocalPref => {
+            if format.is_ebgp {
+                warn!("discarding LOCAL_PREF from eBGP peer");
+                return None;
+            }
+            match read_u32(attr_data) {
+                Ok(local_pref) => PathAttrValue::LocalPref(local_pref),
+                Err(_) => {
+                    warn!("malformed LOCAL_PREF per RFC 7606");
+                    return None;
+                }
+            }
+        }
+        AttrType::AtomicAggregate => PathAttrValue::AtomicAggregate,
+        AttrType::Aggregator => PathAttrValue::Aggregator(read_attr_aggregator(attr_data)),
+        AttrType::Communities => match read_attr_communities(attr_data) {
+            Ok(communities) => PathAttrValue::Communities(communities),
+            Err(_) => {
+                warn!("malformed COMMUNITIES per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::OriginatorId => {
+            if format.is_ebgp {
+                warn!("discarding ORIGINATOR_ID from eBGP peer");
+                return None;
+            }
+            PathAttrValue::OriginatorId(read_attr_originator_id(attr_data))
+        }
+        AttrType::ClusterList => {
+            if format.is_ebgp {
+                warn!("discarding CLUSTER_LIST from eBGP peer");
+                return None;
+            }
+            PathAttrValue::ClusterList(read_attr_cluster_list(attr_data))
+        }
+        AttrType::MpReachNlri => match read_attr_mp_reach_nlri(attr_data, format) {
+            Ok(mp_reach) if validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) => {
+                PathAttrValue::MpReachNlri(mp_reach)
+            }
+            _ => {
+                warn!("malformed MP_REACH_NLRI per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::MpUnreachNlri => match read_attr_mp_unreach_nlri(attr_data, format) {
+            Ok(mp_unreach) if validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) => {
+                PathAttrValue::MpUnreachNlri(mp_unreach)
+            }
+            _ => {
+                warn!("malformed MP_UNREACH_NLRI per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::ExtendedCommunities => match read_attr_extended_communities(attr_data) {
+            Ok(ext_communities) => PathAttrValue::ExtendedCommunities(ext_communities),
+            Err(_) => {
+                warn!("malformed EXTENDED_COMMUNITIES per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::LargeCommunities => match read_attr_large_communities(attr_data) {
+            Ok(large_communities) => PathAttrValue::LargeCommunities(large_communities),
+            Err(_) => {
+                warn!("malformed LARGE_COMMUNITIES per RFC 7606");
+                return None;
+            }
+        },
+        AttrType::As4Path => match read_attr_as4_path(attr_data) {
+            Ok(as4_path) => PathAttrValue::As4Path(as4_path),
+            Err(_) => {
+                warn!("malformed AS4_PATH per RFC 6793");
+                return None;
+            }
+        },
+        AttrType::As4Aggregator => match read_attr_as4_aggregator(attr_data) {
+            Ok(as4_aggregator) => PathAttrValue::As4Aggregator(as4_aggregator),
+            Err(_) => {
+                warn!("malformed AS4_AGGREGATOR per RFC 6793");
+                return None;
+            }
+        },
+    };
+
+    Some(value)
+}
+
+/// Returns `(attribute, bytes_consumed, treat_as_withdraw)`:
+/// - attribute: parsed attribute, or None if discarded
+/// - bytes_consumed: total bytes to advance cursor
+/// - treat_as_withdraw: true if the error requires treating the UPDATE as a withdrawal
+///
+/// Only returns Err for session-reset-level errors (unrecognized well-known
+/// attributes, or malformed MP_REACH_NLRI per RFC 7606 Section 7.11).
 pub(super) fn read_path_attribute(
     bytes: &[u8],
     format: MessageFormat,
-) -> Result<(Option<PathAttribute>, u8), ParserError> {
-    let use_4byte_asn = format.use_4byte_asn;
+) -> Result<(Option<PathAttribute>, u16, bool), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
 
@@ -706,147 +836,51 @@ pub(super) fn read_path_attribute(
         false => bytes[2] as u16,
     };
 
-    let attr_type_opt = parse_attr_type(bytes, attribute_flag.0, attr_type_code, attr_len)?;
+    let header_len = attribute_flag.header_len();
+    let total_offset = header_len + attr_len as usize;
 
-    let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-    let total_offset = offset + attr_len as usize;
+    // Unrecognized well-known attribute -> always session reset
+    let known_type = parse_attr_type(bytes, &attribute_flag, attr_type_code, attr_len)?;
 
-    let attr_val = match attr_type_opt {
+    let treat_as_withdraw = should_treat_as_withdraw(attr_type_code, format.is_ebgp);
+
+    let attr_val = match known_type {
         Some(attr_type) => {
-            // Known attribute - validate and parse normally
-            validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)?;
+            let attr_bytes = &bytes[..total_offset.min(bytes.len())];
 
-            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-            let attr_total_len = offset + attr_len as usize;
-            let attr_bytes = &bytes[..attr_total_len.min(bytes.len())];
+            let validation =
+                validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)
+                    .and_then(|_| validate_attribute_length(&attr_type, attr_len, attr_bytes));
 
-            validate_attribute_length(&attr_type, attr_len, attr_bytes)?;
+            if let Err(err) = validation {
+                warn!(
+                    type_code = attr_type_code,
+                    "malformed attribute per RFC 7606"
+                );
+                // Section 7.11: MP_REACH_NLRI -> session reset
+                if attr_type_code == attr_type_code::MP_REACH_NLRI {
+                    return Err(err);
+                }
+                return Ok((None, total_offset as u16, treat_as_withdraw));
+            }
 
-            let attr_data = &bytes[offset..offset + attr_len as usize];
+            let attr_data = &bytes[header_len..header_len + attr_len as usize];
 
-            match attr_type {
-                AttrType::Origin => {
-                    let value = bytes[offset];
-                    let origin = match value {
-                        0 => Origin::IGP,
-                        1 => Origin::EGP,
-                        2 => Origin::INCOMPLETE,
-                        _ => {
-                            return Err(ParserError::BgpError {
-                                error: BgpError::UpdateMessageError(
-                                    UpdateMessageError::InvalidOriginAttribute,
-                                ),
-                                data: attr_bytes.to_vec(),
-                            });
-                        }
-                    };
-                    PathAttrValue::Origin(origin)
-                }
-                AttrType::AsPath => {
-                    let as_path = read_attr_as_path(attr_data, use_4byte_asn)?;
-                    PathAttrValue::AsPath(as_path)
-                }
-                AttrType::NextHop => {
-                    let next_hop = read_attr_next_hop(attr_data);
-
-                    // RFC 4271: NEXT_HOP must be a valid IP host address
-                    if let NextHopAddr::Ipv4(addr) = next_hop {
-                        if !is_valid_unicast_ipv4(u32::from(addr)) {
-                            return Err(ParserError::BgpError {
-                                error: BgpError::UpdateMessageError(
-                                    UpdateMessageError::InvalidNextHopAttribute,
-                                ),
-                                data: attr_bytes.to_vec(),
-                            });
-                        }
-                    }
-
-                    PathAttrValue::NextHop(next_hop)
-                }
-                AttrType::MultiExtiDisc => {
-                    let multi_exit_disc = read_u32(attr_data)?;
-                    PathAttrValue::MultiExtiDisc(multi_exit_disc)
-                }
-                AttrType::LocalPref => {
-                    let local_pref = read_u32(attr_data)?;
-                    PathAttrValue::LocalPref(local_pref)
-                }
-                AttrType::AtomicAggregate => {
-                    if attr_len > 0 {
-                        return Err(ParserError::BgpError {
-                            error: BgpError::UpdateMessageError(
-                                UpdateMessageError::AttributeLengthError,
-                            ),
-                            data: Vec::new(),
-                        });
-                    }
-                    PathAttrValue::AtomicAggregate
-                }
-                AttrType::Aggregator => {
-                    let aggregator = read_attr_aggregator(attr_data);
-                    PathAttrValue::Aggregator(aggregator)
-                }
-                AttrType::Communities => {
-                    let communities = read_attr_communities(attr_data)?;
-                    PathAttrValue::Communities(communities)
-                }
-                AttrType::OriginatorId => {
-                    let originator_id = read_attr_originator_id(attr_data);
-                    PathAttrValue::OriginatorId(originator_id)
-                }
-                AttrType::ClusterList => {
-                    let cluster_list = read_attr_cluster_list(attr_data);
-                    PathAttrValue::ClusterList(cluster_list)
-                }
-                AttrType::MpReachNlri => {
-                    let mp_reach = read_attr_mp_reach_nlri(attr_data, format)?;
-                    // Validate routes match declared AFI
-                    if !validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) {
+            match parse_attr_value(&attr_type, attr_data, format) {
+                Some(value) => value,
+                None => {
+                    // Section 7.11: MP_REACH_NLRI -> session reset
+                    if attr_type_code == attr_type_code::MP_REACH_NLRI {
                         return Err(optional_attribute_error(attr_bytes));
                     }
-                    PathAttrValue::MpReachNlri(mp_reach)
-                }
-                AttrType::MpUnreachNlri => {
-                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data, format)?;
-                    // Validate routes match declared AFI
-                    if !validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) {
-                        return Err(optional_attribute_error(attr_bytes));
-                    }
-                    PathAttrValue::MpUnreachNlri(mp_unreach)
-                }
-                AttrType::ExtendedCommunities => {
-                    let ext_communities = read_attr_extended_communities(attr_data)?;
-                    PathAttrValue::ExtendedCommunities(ext_communities)
-                }
-                AttrType::LargeCommunities => {
-                    let large_communities = read_attr_large_communities(attr_data)?;
-                    PathAttrValue::LargeCommunities(large_communities)
-                }
-                AttrType::As4Path => {
-                    match read_attr_as4_path(attr_data) {
-                        Ok(as4_path) => PathAttrValue::As4Path(as4_path),
-                        Err(_) => {
-                            // RFC 6793 §10.2: Discard malformed AS4_PATH
-                            return Ok((None, total_offset as u8));
-                        }
-                    }
-                }
-                AttrType::As4Aggregator => {
-                    match read_attr_as4_aggregator(attr_data) {
-                        Ok(as4_aggregator) => PathAttrValue::As4Aggregator(as4_aggregator),
-                        Err(_) => {
-                            // RFC 6793 §10.3: Discard malformed AS4_AGGREGATOR
-                            return Ok((None, total_offset as u8));
-                        }
-                    }
+                    return Ok((None, total_offset as u16, treat_as_withdraw));
                 }
             }
         }
         None => {
             // Unknown optional attribute
             // RFC 4271 Section 6.3: set PARTIAL bit for transitive, store raw data
-            let offset = if attribute_flag.extended_len() { 4 } else { 3 };
-            let data = bytes[offset..offset + attr_len as usize].to_vec();
+            let data = bytes[header_len..header_len + attr_len as usize].to_vec();
 
             let mut flags = attribute_flag.0;
             if flags & PathAttrFlag::TRANSITIVE != 0 {
@@ -872,37 +906,56 @@ pub(super) fn read_path_attribute(
         value: attr_val,
     };
 
-    Ok((Some(attribute), total_offset as u8))
+    Ok((Some(attribute), total_offset as u16, false))
 }
 
+/// Parse all path attributes from the byte stream.
+///
+/// Returns `(attributes, treat_as_withdraw)`. The flag is set if any
+/// per-attribute error escalated to treat-as-withdraw.
+///
+/// Only returns Err for session-reset-level errors.
 pub(super) fn read_path_attributes(
     bytes: &[u8],
     format: MessageFormat,
-) -> Result<Vec<PathAttribute>, ParserError> {
+) -> Result<(Vec<PathAttribute>, bool), ParserError> {
     let mut cursor = 0;
     let mut path_attributes: Vec<PathAttribute> = Vec::new();
     let mut seen_type_codes: HashSet<u8> = HashSet::new();
+    let mut treat_as_withdraw = false;
 
     while cursor < bytes.len() {
-        let (attribute_opt, offset) = read_path_attribute(&bytes[cursor..], format)?;
+        let (attribute_opt, offset, attr_treat_as_withdraw) =
+            read_path_attribute(&bytes[cursor..], format)?;
         let offset_usize = offset as usize;
+
+        treat_as_withdraw |= attr_treat_as_withdraw;
 
         if let Some(attribute) = attribute_opt {
             let type_code = attribute.type_code();
+            let is_mp = matches!(
+                type_code,
+                attr_type_code::MP_REACH_NLRI | attr_type_code::MP_UNREACH_NLRI
+            );
             if !seen_type_codes.insert(type_code) {
-                return Err(ParserError::BgpError {
-                    error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-                    data: Vec::new(),
-                });
+                if is_mp {
+                    // Duplicate MP attribute -> SessionReset
+                    return Err(ParserError::BgpError {
+                        error: BgpError::UpdateMessageError(
+                            UpdateMessageError::MalformedAttributeList,
+                        ),
+                        data: Vec::new(),
+                    });
+                }
+                // RFC 7606: duplicate non-MP attribute -> discard (keep first)
+                warn!(
+                    type_code = type_code,
+                    "discarded duplicate attribute per RFC 7606"
+                );
+                cursor += offset_usize;
+                continue;
             }
             path_attributes.push(attribute);
-        } else {
-            // Attribute was discarded - extract type code from raw bytes for logging
-            let attr_type_code = bytes[cursor + 1];
-            warn!(
-                type_code = attr_type_code,
-                "discarded malformed attribute per RFC 6793"
-            );
         }
 
         cursor += offset_usize;
@@ -923,7 +976,7 @@ pub(super) fn read_path_attributes(
         });
     }
 
-    Ok(path_attributes)
+    Ok((path_attributes, treat_as_withdraw))
 }
 
 /// Encode NLRI entries to wire format. Each entry's optional path_id (RFC 7911)
@@ -1128,7 +1181,7 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_origin() {
-        let (attribute_opt, offset) =
+        let (attribute_opt, offset, _) =
             read_path_attribute(PATH_ATTR_ORIGIN_EGP, DEFAULT_FORMAT).unwrap();
         let attribute = attribute_opt.unwrap();
 
@@ -1146,21 +1199,17 @@ mod tests {
     fn test_read_path_attribute_origin_invalid_value() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::InvalidOriginAttribute)
-                );
-                assert_eq!(data, input);
-            }
-            _ => panic!("Expected InvalidOriginAttribute error"),
-        }
+        // RFC 7606: invalid ORIGIN value -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 4);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_communities() {
-        let (attr_opt, offset) =
+        let (attr_opt, offset, _) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
@@ -1194,7 +1243,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::Communities(communities) = parsed_attr.value {
@@ -1230,23 +1279,17 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_communities_empty() {
-        let (attr_opt, offset) =
+        // RFC 7606 Section 7.8: length must be non-zero multiple of 4
+        let (attr_opt, offset, treat_as_withdraw) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
-
-        assert_eq!(
-            attr,
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Communities(vec![]),
-            }
-        );
-        assert_eq!(offset, 3); // 3-byte header only
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 3);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_communities_well_known() {
-        let (attr_opt, _) =
+        let (attr_opt, _, _) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
@@ -1272,15 +1315,12 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, .. }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-            }
-            _ => panic!("Expected OptionalAttributeError for invalid communities length"),
-        }
+        // RFC 7606: COMMUNITIES length error -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 6);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1326,7 +1366,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::ExtendedCommunities(ext_communities) = parsed_attr.value {
@@ -1355,7 +1395,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_as_path() {
-        let (as_path_opt, offset) = read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) =
+            read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         let segments = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
@@ -1382,16 +1423,12 @@ mod tests {
             AsPathSegmentType::AsSet as u8,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
-                );
-                assert_eq!(data, Vec::<u8>::new());
-            }
-            _ => panic!("Expected MalformedASPath error"),
-        }
+        // RFC 7606: malformed AS_PATH -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 4);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1406,23 +1443,19 @@ mod tests {
             0x10,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
-                );
-                assert_eq!(data, Vec::<u8>::new());
-            }
-            _ => panic!("Expected MalformedASPath error"),
-        }
+        // RFC 7606: malformed AS_PATH -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 7);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_as_path_empty() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1458,7 +1491,7 @@ mod tests {
             0x1e, // ASN 30
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1496,7 +1529,7 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
-        let (as_path_opt, offset) =
+        let (as_path_opt, offset, _) =
             read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
@@ -1522,16 +1555,12 @@ mod tests {
             0x0e,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
+        // RFC 7606: NEXT_HOP length error -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 8);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1554,18 +1583,12 @@ mod tests {
                 ip_bytes[3],
             ];
 
-            match read_path_attribute(&input, DEFAULT_FORMAT) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(data, input, "Failed for {}", name);
-                }
-                _ => panic!("Expected InvalidNextHopAttribute for {}", name),
-            }
+            // RFC 7606: invalid NEXT_HOP address -> treat-as-withdraw
+            let (attr_opt, offset, treat_as_withdraw) =
+                read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            assert!(attr_opt.is_none(), "Failed for {}", name);
+            assert_eq!(offset, 7, "Failed for {}", name);
+            assert!(treat_as_withdraw, "Failed for {}", name);
         }
     }
 
@@ -1582,7 +1605,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1605,16 +1628,12 @@ mod tests {
             0x01,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected OptionalAttributeError"),
-        }
+        // RFC 7606 Section 7.4: MED error -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 6);
+        assert!(treat_as_withdraw);
     }
 
     // LOCAL_PREF attribute tests
@@ -1630,7 +1649,7 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1653,16 +1672,12 @@ mod tests {
             0x0f,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
+        // RFC 7606: LOCAL_PREF length error -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 6);
+        assert!(treat_as_withdraw);
     }
 
     // ATOMIC_AGGREGATE attribute tests
@@ -1674,7 +1689,7 @@ mod tests {
             0x00,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1695,16 +1710,12 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected AttributeLengthError"),
-        }
+        // RFC 7606: ATOMIC_AGGREGATE length error -> attribute-discard (not treat-as-withdraw)
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 4);
+        assert!(!treat_as_withdraw);
     }
 
     // AGGREGATOR attribute tests
@@ -1724,7 +1735,7 @@ mod tests {
             0x0d,
         ];
 
-        let (as_path_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
         let as_path = as_path_opt.unwrap();
         assert_eq!(
             as_path,
@@ -1750,21 +1761,17 @@ mod tests {
             0x0a,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError)
-                );
-                assert_eq!(data, input.to_vec());
-            }
-            _ => panic!("Expected OptionalAttributeError"),
-        }
+        // RFC 7606: AGGREGATOR length error -> attribute-discard (not treat-as-withdraw)
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 6);
+        assert!(!treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_extended_communities() {
-        let (attr_opt, offset) =
+        let (attr_opt, offset, _) =
             read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
         let attr = attr_opt.unwrap();
 
@@ -1794,7 +1801,7 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
         let parsed_attr = parsed_attr_opt.unwrap();
 
         if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
@@ -2140,7 +2147,7 @@ mod tests {
         struct TestCase {
             name: &'static str,
             input: &'static [u8],
-            expected_offset: Option<u8>,
+            expected_offset: Option<u16>,
         }
 
         let tests = vec![
@@ -2238,7 +2245,7 @@ mod tests {
         for test in tests {
             let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
-            let (attr_opt, offset) = result.unwrap();
+            let (attr_opt, offset, _) = result.unwrap();
             assert!(
                 attr_opt.is_none(),
                 "{}: malformed attribute should be discarded",
@@ -2271,7 +2278,7 @@ mod tests {
 
         let result = read_path_attribute(input, DEFAULT_FORMAT);
         assert!(result.is_ok());
-        let (attr_opt, _) = result.unwrap();
+        let (attr_opt, _, _) = result.unwrap();
         assert!(
             attr_opt.is_some(),
             "Well-formed AS4_PATH should be accepted"
@@ -2288,7 +2295,6 @@ mod tests {
 
     #[test]
     fn test_malformed_as_path() {
-        // Regular AS_PATH (well-known mandatory) should still cause errors
         // Segment claims 2 ASNs but data is truncated
         let input: &[u8] = &[
             PathAttrFlag::TRANSITIVE,
@@ -2302,17 +2308,12 @@ mod tests {
             0x0a, // First ASN: 10 (second ASN missing - truncated)
         ];
 
-        let result = read_path_attribute(input, DEFAULT_FORMAT);
-        assert!(result.is_err(), "Malformed AS_PATH should cause error");
-
-        if let Err(ParserError::BgpError { error, .. }) = result {
-            assert_eq!(
-                error,
-                BgpError::UpdateMessageError(UpdateMessageError::MalformedASPath)
-            );
-        } else {
-            panic!("Expected MalformedASPath error");
-        }
+        // RFC 7606: malformed AS_PATH -> treat-as-withdraw
+        let (attr_opt, offset, treat_as_withdraw) =
+            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(attr_opt.is_none());
+        assert_eq!(offset, 9);
+        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -2381,7 +2382,7 @@ mod tests {
         for test in tests {
             let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
-            let (attr_opt, _) = result.unwrap();
+            let (attr_opt, _, _) = result.unwrap();
             assert!(
                 attr_opt.is_some(),
                 "{}: AS4_PATH should not be discarded",
@@ -2557,6 +2558,97 @@ mod tests {
         assert!(is_confed_segment(AsPathSegmentType::AsConfedSet));
         assert!(!is_confed_segment(AsPathSegmentType::AsSequence));
         assert!(!is_confed_segment(AsPathSegmentType::AsSet));
+    }
+
+    #[test]
+    fn test_validate_attribute_length() {
+        // (name, attr_type, attr_len, expect_ok)
+        let tests: Vec<(&str, AttrType, u16, bool)> = vec![
+            // Origin: must be exactly 1
+            ("origin valid", AttrType::Origin, 1, true),
+            ("origin too short", AttrType::Origin, 0, false),
+            ("origin too long", AttrType::Origin, 2, false),
+            // NextHop: must be exactly 4
+            ("nexthop valid", AttrType::NextHop, 4, true),
+            ("nexthop too short", AttrType::NextHop, 3, false),
+            ("nexthop too long", AttrType::NextHop, 5, false),
+            // MED: must be exactly 4
+            ("med valid", AttrType::MultiExtiDisc, 4, true),
+            ("med too short", AttrType::MultiExtiDisc, 3, false),
+            // LocalPref: must be exactly 4
+            ("localpref valid", AttrType::LocalPref, 4, true),
+            ("localpref too long", AttrType::LocalPref, 5, false),
+            // AtomicAggregate: must be exactly 0
+            ("atomic_agg valid", AttrType::AtomicAggregate, 0, true),
+            ("atomic_agg nonzero", AttrType::AtomicAggregate, 1, false),
+            // Aggregator: 6 (2-byte ASN) or 8 (4-byte ASN)
+            ("aggregator 6", AttrType::Aggregator, 6, true),
+            ("aggregator 8", AttrType::Aggregator, 8, true),
+            ("aggregator 7", AttrType::Aggregator, 7, false),
+            ("aggregator 0", AttrType::Aggregator, 0, false),
+            // AsPath: variable length, always valid
+            ("aspath empty", AttrType::AsPath, 0, true),
+            ("aspath any", AttrType::AsPath, 100, true),
+            // Communities: non-zero multiple of 4
+            ("communities 4", AttrType::Communities, 4, true),
+            ("communities 8", AttrType::Communities, 8, true),
+            ("communities 0", AttrType::Communities, 0, false),
+            ("communities 3", AttrType::Communities, 3, false),
+            ("communities 5", AttrType::Communities, 5, false),
+            // OriginatorId: must be exactly 4
+            ("originator_id valid", AttrType::OriginatorId, 4, true),
+            ("originator_id short", AttrType::OriginatorId, 3, false),
+            // ClusterList: non-zero multiple of 4
+            ("cluster_list 4", AttrType::ClusterList, 4, true),
+            ("cluster_list 8", AttrType::ClusterList, 8, true),
+            ("cluster_list 0", AttrType::ClusterList, 0, false),
+            ("cluster_list 5", AttrType::ClusterList, 5, false),
+            // ExtendedCommunities: non-zero multiple of 8
+            ("ext_comm 8", AttrType::ExtendedCommunities, 8, true),
+            ("ext_comm 16", AttrType::ExtendedCommunities, 16, true),
+            ("ext_comm 0", AttrType::ExtendedCommunities, 0, false),
+            ("ext_comm 7", AttrType::ExtendedCommunities, 7, false),
+            // LargeCommunities: non-zero multiple of 12
+            ("large_comm 12", AttrType::LargeCommunities, 12, true),
+            ("large_comm 24", AttrType::LargeCommunities, 24, true),
+            ("large_comm 0", AttrType::LargeCommunities, 0, false),
+            ("large_comm 11", AttrType::LargeCommunities, 11, false),
+            // Variable length types: always valid
+            ("mp_reach", AttrType::MpReachNlri, 50, true),
+            ("mp_unreach", AttrType::MpUnreachNlri, 50, true),
+            ("as4_path", AttrType::As4Path, 10, true),
+            ("as4_aggregator", AttrType::As4Aggregator, 8, true),
+        ];
+
+        for (name, attr_type, attr_len, expect_ok) in &tests {
+            let result = validate_attribute_length(attr_type, *attr_len, &[]);
+            assert_eq!(result.is_ok(), *expect_ok, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_validate_attribute_length_error_subcodes() {
+        // Well-known attribute (Origin) -> AttributeLengthError
+        let result = validate_attribute_length(&AttrType::Origin, 0, &[]);
+        if let Err(ParserError::BgpError { error, .. }) = result {
+            assert_eq!(
+                error,
+                BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            );
+        } else {
+            panic!("Expected AttributeLengthError for well-known Origin");
+        }
+
+        // Optional attribute (MED) -> OptionalAttributeError
+        let result = validate_attribute_length(&AttrType::MultiExtiDisc, 3, &[]);
+        if let Err(ParserError::BgpError { error, .. }) = result {
+            assert_eq!(
+                error,
+                BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
+            );
+        } else {
+            panic!("Expected OptionalAttributeError for optional MED");
+        }
     }
 
     #[test]

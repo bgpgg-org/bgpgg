@@ -418,7 +418,7 @@ impl ConnectionState {
     pub fn send_format(&self) -> MessageFormat {
         self.capabilities
             .as_ref()
-            .map(|caps| caps.send_format())
+            .map(|caps| caps.send_format(None))
             .unwrap_or(PRE_OPEN_FORMAT)
     }
 
@@ -426,7 +426,7 @@ impl ConnectionState {
     pub fn receive_format(&self) -> MessageFormat {
         self.capabilities
             .as_ref()
-            .map(|caps| caps.receive_format())
+            .map(|caps| caps.receive_format(None))
             .unwrap_or(PRE_OPEN_FORMAT)
     }
 }
