@@ -1057,6 +1057,7 @@ async fn test_well_known_communities() {
                         ..Default::default()
                     })],
                 }],
+                ExpectPathId::Present,
             ) && server1
                 .client
                 .get_peer(server2.address.to_string())

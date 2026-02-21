@@ -35,7 +35,7 @@ fmt:
 
 loadtest: setup
 	@echo "Building bgpggd and running load tests..."
-	cargo build --bin bgpggd
+	cargo build --bin bgpggd --release
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
 
 smoketest:

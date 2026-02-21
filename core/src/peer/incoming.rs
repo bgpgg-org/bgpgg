@@ -18,12 +18,11 @@ use crate::bgp::msg_update_types::PathAttrValue;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::log::{info, warn};
-use crate::net::IpNetwork;
 use crate::rib::{Path, RouteSource};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use super::{Peer, RouteChanges, SessionType};
+use super::{Peer, RouteChanges, SessionType, Withdrawal};
 
 impl Peer {
     /// Validate AFI/SAFI is negotiated and not disabled.
@@ -75,7 +74,7 @@ impl Peer {
     /// Returns true if loop detected (route should be rejected).
     fn has_as_path_loop(&self, path: &Path) -> bool {
         let local_asn = self.local_config.asn;
-        for segment in &path.as_path {
+        for segment in path.as_path() {
             if segment.asn_list.contains(&local_asn) {
                 warn!(
                     local_asn,
@@ -93,7 +92,7 @@ impl Peer {
     fn has_rr_loop(&self, path: &Path) -> bool {
         let local_router_id = self.local_config.bgp_id;
 
-        if path.originator_id == Some(local_router_id) {
+        if path.originator_id() == Some(local_router_id) {
             warn!(
                 originator_id = %local_router_id,
                 peer = %self.addr,
@@ -102,7 +101,7 @@ impl Peer {
             return true;
         }
 
-        if path.cluster_list.contains(&self.local_config.cluster_id) {
+        if path.cluster_list().contains(&self.local_config.cluster_id) {
             warn!(
                 cluster_id = %self.local_config.cluster_id,
                 peer = %self.addr,
@@ -175,12 +174,12 @@ impl Peer {
     }
 
     /// Process withdrawn routes from an UPDATE message
-    fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<IpNetwork> {
+    fn process_withdrawals(&mut self, update_msg: &UpdateMessage) -> Vec<Withdrawal> {
         let mut withdrawn = Vec::new();
-        for prefix in update_msg.withdrawn_routes() {
-            info!(prefix = ?prefix, peer_ip = %self.addr, "withdrawing route");
-            self.rib_in.remove_route(prefix);
-            withdrawn.push(prefix);
+        for entry in update_msg.withdrawn_routes() {
+            info!(prefix = ?entry.prefix, peer_ip = %self.addr, "withdrawing route");
+            self.rib_in.remove_route(entry.prefix, entry.path_id);
+            withdrawn.push((entry.prefix, entry.path_id));
         }
         withdrawn
     }
@@ -211,7 +210,7 @@ impl Peer {
         &mut self,
         update_msg: &UpdateMessage,
     ) -> Result<RouteChanges, BgpError> {
-        if !self.check_max_prefix_limit(update_msg.nlri_list().len())? {
+        if !self.check_max_prefix_limit(update_msg.nlri_prefixes().len())? {
             return Ok((vec![], vec![]));
         }
 
@@ -227,9 +226,11 @@ impl Peer {
 
         let peer_supports_4byte_asn = self.capabilities.four_octet_asn.is_some();
 
+        let nlri_list = update_msg.nlri_list();
+
         let Some(mut path) = Path::from_update_msg(update_msg, source, peer_supports_4byte_asn)
         else {
-            if !update_msg.nlri_list().is_empty() {
+            if !nlri_list.is_empty() {
                 warn!(peer_ip = %self.addr, "UPDATE has NLRI but missing required attributes, skipping announcements");
             }
             return Ok((vec![], vec![]));
@@ -238,40 +239,44 @@ impl Peer {
         // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive;
         // strip on eBGP receive in case a buggy peer sent them.
         if self.session_type == Some(SessionType::Ebgp) {
-            path.originator_id = None;
-            path.cluster_list.clear();
+            path.attrs.originator_id = None;
+            path.attrs.cluster_list.clear();
         }
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
         let local_ip = self.local_config.addr.ip();
-        let is_local_nexthop = match (&path.next_hop, local_ip) {
+        let is_local_nexthop = match (&path.attrs.next_hop, local_ip) {
             (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
             (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
             _ => false,
         };
         if is_local_nexthop {
-            warn!(next_hop = %path.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
+            warn!(next_hop = %path.attrs.next_hop, peer = %self.addr, "rejecting UPDATE: NEXT_HOP is local address");
             return Ok((vec![], vec![]));
         }
 
         // RFC 4271: AS_PATH loop prevention - return prefixes as implicit withdrawals
         if self.has_as_path_loop(&path) {
-            return Ok((vec![], update_msg.nlri_list()));
+            let withdrawn: Vec<Withdrawal> =
+                nlri_list.iter().map(|e| (e.prefix, e.path_id)).collect();
+            return Ok((vec![], withdrawn));
         }
 
         // RFC 4456 Section 8: Route Reflector loop prevention for iBGP routes
         if self.session_type == Some(SessionType::Ibgp) && self.has_rr_loop(&path) {
-            return Ok((vec![], update_msg.nlri_list()));
+            let withdrawn: Vec<Withdrawal> =
+                nlri_list.iter().map(|e| (e.prefix, e.path_id)).collect();
+            return Ok((vec![], withdrawn));
         }
 
-        // Wrap path in Arc once
-        let path_arc = Arc::new(path);
-
         let mut announced = Vec::new();
-        for prefix in update_msg.nlri_list() {
-            info!(prefix = ?prefix, peer_ip = %self.addr, med = ?path_arc.med, "adding route to Adj-RIB-In");
-            self.rib_in.add_route(prefix, Arc::clone(&path_arc));
-            announced.push((prefix, Arc::clone(&path_arc)));
+
+        for entry in &nlri_list {
+            path.remote_path_id = entry.path_id;
+            let path_arc = Arc::new(path.clone());
+            info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
+            self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
+            announced.push((entry.prefix, path_arc));
         }
 
         Ok((announced, vec![]))
@@ -281,35 +286,40 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::MessageFormat;
     use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
+    use crate::bgp::DEFAULT_FORMAT;
     use crate::config::MaxPrefixSetting;
-    use crate::net::Ipv4Net;
+    use crate::net::{IpNetwork, Ipv4Net};
     use crate::peer::BgpState;
     use crate::peer::PeerCapabilities;
-    use crate::rib::{Path, RouteSource};
+    use crate::rib::{Path, PathAttrs, RouteSource};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_path_with_as(first_as: u32) -> Path {
         Path {
-            origin: Origin::IGP,
-            as_path: vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![first_as],
-            }],
-            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-            source: RouteSource::Local,
-            local_pref: None,
-            med: None,
-            atomic_aggregate: false,
-            aggregator: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            unknown_attrs: vec![],
-            originator_id: None,
-            cluster_list: vec![],
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![first_as],
+                }],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
         }
     }
 
@@ -335,6 +345,7 @@ mod tests {
                 route_refresh: false,
                 four_octet_asn: None,
                 graceful_restart: None,
+                add_path: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 
@@ -366,13 +377,7 @@ mod tests {
             peer.asn = Some(peer_asn);
 
             let path = test_path_with_as(first_as);
-            let update = UpdateMessage::new(
-                &path,
-                vec![],
-                MessageFormat {
-                    use_4byte_asn: false,
-                },
-            );
+            let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let result = peer.handle_update(update);
             assert_eq!(
@@ -471,13 +476,8 @@ mod tests {
                         })
                     })
                     .collect();
-                let initial_update = UpdateMessage::new(
-                    &test_path_with_as(65001),
-                    initial_nlri,
-                    MessageFormat {
-                        use_4byte_asn: false,
-                    },
-                );
+                let initial_update =
+                    UpdateMessage::new(&test_path_with_as(65001), initial_nlri, DEFAULT_FORMAT);
                 peer.handle_update(initial_update).unwrap();
             }
 
@@ -490,13 +490,7 @@ mod tests {
                 })
                 .collect();
 
-            let update = UpdateMessage::new(
-                &test_path_with_as(65001),
-                nlri,
-                MessageFormat {
-                    use_4byte_asn: false,
-                },
-            );
+            let update = UpdateMessage::new(&test_path_with_as(65001), nlri, DEFAULT_FORMAT);
 
             let result = peer.handle_update(update);
             assert_eq!(result.is_ok(), expected_ok, "{}", desc);

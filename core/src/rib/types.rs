@@ -18,6 +18,9 @@ use crate::rib::path::Path;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+/// A single prefix with a single path, used for propagation and wire encoding.
+pub type PrefixPath = (IpNetwork, Arc<Path>);
+
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum RouteSource {
@@ -98,7 +101,8 @@ impl RouteSource {
 }
 
 /// Represents a route with one or more paths to a prefix
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Route {
     pub prefix: IpNetwork,
     pub paths: Vec<Arc<Path>>,

@@ -31,7 +31,34 @@ pub mod utils;
 pub use msg_update_codec::merge_as_paths;
 
 #[cfg(test)]
-use msg_update_types::{AttrType, PathAttrFlag};
+use crate::net::{IpNetwork, Ipv4Net};
+#[cfg(test)]
+use msg_update_types::{AttrType, Nlri, PathAttrFlag};
+#[cfg(test)]
+use std::net::Ipv4Addr;
+
+#[cfg(test)]
+pub(crate) fn nlri_v4(a: u8, b: u8, c: u8, d: u8, len: u8, path_id: Option<u32>) -> Nlri {
+    Nlri {
+        prefix: IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(a, b, c, d),
+            prefix_length: len,
+        }),
+        path_id,
+    }
+}
+
+#[cfg(test)]
+pub(crate) const DEFAULT_FORMAT: msg::MessageFormat = msg::MessageFormat {
+    use_4byte_asn: true,
+    add_path: msg::AddPathMask::NONE,
+};
+
+#[cfg(test)]
+pub(crate) const ADDPATH_FORMAT: msg::MessageFormat = msg::MessageFormat {
+    use_4byte_asn: true,
+    add_path: msg::AddPathMask::ALL,
+};
 
 #[cfg(test)]
 pub(crate) const PATH_ATTR_COMMUNITIES_TWO: &[u8] = &[

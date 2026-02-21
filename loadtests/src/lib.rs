@@ -8,13 +8,13 @@ mod load_test;
 // Re-export for convenience
 pub use route_generator::calculate_expected_best_paths;
 
-use bgpgg::bgp::msg::{BgpMessage, Message, MessageFormat};
+use bgpgg::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat};
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
-use bgpgg::rib::{Path, RouteSource};
+use bgpgg::rib::{Path, PathAttrs, RouteSource};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncWriteExt;
@@ -37,14 +37,20 @@ pub async fn bgp_handshake(
     stream.write_all(&open.serialize()).await?;
 
     // Read peer's OPEN (use_4byte_asn=true since we advertised the capability)
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to read OPEN: {:?}", e),
-            )
-        })?;
+    let msg = bgpgg::bgp::msg::read_bgp_message(
+        &mut *stream,
+        MessageFormat {
+            use_4byte_asn: true,
+            add_path: AddPathMask::NONE,
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to read OPEN: {:?}", e),
+        )
+    })?;
 
     match msg {
         BgpMessage::Open(peer_open) => {
@@ -68,14 +74,20 @@ pub async fn bgp_handshake(
     stream.write_all(&keepalive.serialize()).await?;
 
     // Read peer's KEEPALIVE (use_4byte_asn=true for consistency)
-    let msg = bgpgg::bgp::msg::read_bgp_message(&mut *stream, true)
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to read KEEPALIVE: {:?}", e),
-            )
-        })?;
+    let msg = bgpgg::bgp::msg::read_bgp_message(
+        &mut *stream,
+        MessageFormat {
+            use_4byte_asn: true,
+            add_path: AddPathMask::NONE,
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to read KEEPALIVE: {:?}", e),
+        )
+    })?;
 
     match msg {
         BgpMessage::Keepalive(_) => Ok(()),
@@ -131,20 +143,25 @@ pub fn create_update_message(
     };
 
     let path = Path {
-        origin,
-        as_path: as_path_segments,
-        next_hop: NextHopAddr::Ipv4(next_hop),
-        source: RouteSource::Local,
-        local_pref,
-        med,
-        atomic_aggregate: false,
-        aggregator: None,
-        communities,
-        extended_communities: vec![],
-        large_communities: vec![],
-        unknown_attrs: vec![],
-        originator_id: None,
-        cluster_list: vec![],
+        local_path_id: None,
+        remote_path_id: None,
+        stale: false,
+        attrs: PathAttrs {
+            origin,
+            as_path: as_path_segments,
+            next_hop: NextHopAddr::Ipv4(next_hop),
+            source: RouteSource::Local,
+            local_pref,
+            med,
+            atomic_aggregate: false,
+            aggregator: None,
+            communities,
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        },
     };
 
     let update = UpdateMessage::new(
@@ -152,6 +169,7 @@ pub fn create_update_message(
         routes,
         MessageFormat {
             use_4byte_asn: true,
+            add_path: AddPathMask::NONE,
         },
     );
     update.serialize()
@@ -167,13 +185,13 @@ pub fn transform_path_for_ebgp_export(
     let mut exported = path.clone();
 
     // Prepend local ASN to AS_PATH
-    if !exported.as_path.is_empty() {
-        let first_segment = &exported.as_path[0];
+    if !exported.attrs.as_path.is_empty() {
+        let first_segment = &exported.attrs.as_path[0];
         if first_segment.segment_type == AsPathSegmentType::AsSequence {
             // Prepend to existing AS_SEQUENCE
             let mut new_asn_list = vec![local_asn as u32];
             new_asn_list.extend_from_slice(&first_segment.asn_list);
-            exported.as_path[0] = AsPathSegment {
+            exported.attrs.as_path[0] = AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: new_asn_list.len() as u8,
                 asn_list: new_asn_list,
@@ -185,12 +203,12 @@ pub fn transform_path_for_ebgp_export(
                 segment_len: 1,
                 asn_list: vec![local_asn as u32],
             }];
-            new_segments.extend_from_slice(&exported.as_path);
-            exported.as_path = new_segments;
+            new_segments.extend_from_slice(&exported.attrs.as_path);
+            exported.attrs.as_path = new_segments;
         }
     } else {
         // Empty AS_PATH, create new segment
-        exported.as_path = vec![AsPathSegment {
+        exported.attrs.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
             asn_list: vec![local_asn as u32],
@@ -198,13 +216,13 @@ pub fn transform_path_for_ebgp_export(
     }
 
     // Rewrite next_hop to local router ID
-    exported.next_hop = NextHopAddr::Ipv4(local_router_id);
+    exported.attrs.next_hop = NextHopAddr::Ipv4(local_router_id);
 
     // Remove local_pref (not used in eBGP)
-    exported.local_pref = None;
+    exported.attrs.local_pref = None;
 
     // Remove MED (typically not propagated across AS boundaries)
-    exported.med = None;
+    exported.attrs.med = None;
 
     exported
 }
@@ -258,19 +276,24 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
     let communities: Vec<u32> = proto_path.communities.clone();
 
     Ok(Path {
-        origin,
-        as_path,
-        next_hop: NextHopAddr::Ipv4(next_hop),
-        source,
-        local_pref: proto_path.local_pref,
-        med: proto_path.med,
-        atomic_aggregate: proto_path.atomic_aggregate,
-        aggregator: None,
-        communities,
-        extended_communities: vec![],
-        large_communities: vec![],
-        unknown_attrs: vec![],
-        originator_id: None,
-        cluster_list: vec![],
+        local_path_id: None,
+        remote_path_id: None,
+        stale: false,
+        attrs: PathAttrs {
+            origin,
+            as_path,
+            next_hop: NextHopAddr::Ipv4(next_hop),
+            source,
+            local_pref: proto_path.local_pref,
+            med: proto_path.med,
+            atomic_aggregate: proto_path.atomic_aggregate,
+            aggregator: None,
+            communities,
+            extended_communities: vec![],
+            large_communities: vec![],
+            unknown_attrs: vec![],
+            originator_id: None,
+            cluster_list: vec![],
+        },
     })
 }

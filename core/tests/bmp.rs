@@ -155,7 +155,7 @@ async fn test_add_bmp_server_with_existing_peers() {
     for rm in &[&rm1, &rm2, &rm3, &rm4] {
         let peer_addr = rm.peer_header().peer_address;
         let peer = peers.iter().find(|p| p.address == peer_addr).unwrap();
-        let nlri = rm.bgp_update().nlri_list();
+        let nlri = rm.bgp_update().nlri_prefixes();
 
         // Must be one of the two routes
         assert!(nlri[..] == route_1[..] || nlri[..] == route_2[..]);

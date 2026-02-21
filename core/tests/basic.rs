@@ -619,11 +619,159 @@ async fn test_route_advertised_when_peer_becomes_established() {
 
     // Read UPDATE message - route should be automatically sent when peer became Established
     let update = fake_peer.read_update().await;
-    let nlri = update.nlri_list();
+    let nlri = update.nlri_prefixes();
     assert_eq!(nlri.len(), 1, "Expected one route announcement");
     assert_eq!(
         nlri[0].to_string(),
         "10.0.0.0/24",
         "Expected 10.0.0.0/24 to be announced"
+    );
+}
+
+/// Two peers announce the same prefix to a middle server.
+/// The middle server's loc-rib should store both paths (one per peer).
+#[tokio::test]
+async fn test_loc_rib_stores_multiple_paths() {
+    // S1(65001) <-> S2(65002) <-> S3(65003)
+    let [server1, server2, server3] = chain_servers(
+        [
+            start_test_server(test_config(65001, 1)).await,
+            start_test_server(test_config(65002, 2)).await,
+            start_test_server(test_config(65003, 3)).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    // Both announce 10.0.0.0/24
+    for server in [&server1, &server3] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // S2 should have 2 paths for the same prefix (one from each peer)
+    poll_rib(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003])],
+                    next_hop: server3.address.to_string(),
+                    peer_address: server3.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+            ],
+        }],
+    )])
+    .await;
+}
+
+/// When the best path changes for a non-ADD-PATH peer, the adj-rib-out should
+/// not accumulate stale entries from the previous best path (which had a
+/// different local_path_id).
+///
+/// Topology: s1(65001) <-> hub(65010) <-> s2(65002), hub <-> downstream(65020)
+///
+/// Both s1 and s2 originate 10.0.0.0/24. Hub picks best and exports to
+/// downstream. When s1 withdraws, best changes to s2's path. Hub's adj-rib-out
+/// toward downstream should have exactly 1 path, not stale entries.
+#[tokio::test]
+async fn test_adj_rib_out_no_stale_on_best_change() {
+    let [server1, hub, server2] = chain_servers(
+        [
+            start_test_server(test_config(65001, 1)).await,
+            start_test_server(test_config(65010, 10)).await,
+            start_test_server(test_config(65002, 2)).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    let downstream = start_test_server(test_config(65020, 20)).await;
+    hub.add_peer(&downstream).await;
+    downstream.add_peer(&hub).await;
+    poll_until(
+        || async { verify_peers(&downstream, vec![hub.to_peer(BgpState::Established)]).await },
+        "downstream not established",
+    )
+    .await;
+
+    // Both originate the same prefix
+    for (server, hop) in [(&server1, "192.168.1.1"), (&server2, "192.168.2.1")] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: hop.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // Wait for hub to export best to downstream
+    let ds_addr = downstream.address.to_string();
+    poll_until(
+        || async {
+            hub.client
+                .get_adj_rib_out(&ds_addr)
+                .await
+                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+        },
+        "adj-rib-out toward downstream should have route",
+    )
+    .await;
+
+    // s1 withdraws -> best changes to s2's path (different local_path_id)
+    server1
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+
+    // Wait for downstream to see s2's path
+    poll_until(
+        || async {
+            downstream.client.get_routes().await.is_ok_and(|routes| {
+                routes.iter().any(|r| {
+                    r.prefix == "10.0.0.0/24"
+                        && r.paths
+                            .first()
+                            .is_some_and(|p| p.as_path.iter().any(|seg| seg.asns.contains(&65002)))
+                })
+            })
+        },
+        "downstream should receive s2's route",
+    )
+    .await;
+
+    // Key assertion: exactly 1 path, no stale entries
+    let adj_out = hub.client.get_adj_rib_out(&ds_addr).await.unwrap();
+    let route = adj_out
+        .iter()
+        .find(|r| r.prefix == "10.0.0.0/24")
+        .expect("route should exist in adj-rib-out");
+    assert_eq!(
+        route.paths.len(),
+        1,
+        "adj-rib-out should have 1 path, not stale entries"
     );
 }

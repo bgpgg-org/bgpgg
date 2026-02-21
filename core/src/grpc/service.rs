@@ -18,6 +18,7 @@ use crate::bgp::msg_update::{
 use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
+use crate::rib::PathAttrs;
 use crate::server::{AdminState, MgmtOp};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
@@ -73,13 +74,13 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
         .paths
         .into_iter()
         .map(|path| ProtoPath {
-            origin: match path.origin {
+            origin: match path.origin() {
                 Origin::IGP => 0,
                 Origin::EGP => 1,
                 Origin::INCOMPLETE => 2,
             },
             as_path: path
-                .as_path
+                .as_path()
                 .iter()
                 .filter_map(|segment| {
                     // Filter out confederation segments per RFC 5065 (not exposed externally)
@@ -98,17 +99,17 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            next_hop: path.next_hop.to_string(),
+            next_hop: path.next_hop().to_string(),
             peer_address: path
-                .source
+                .source()
                 .peer_ip()
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| LOCAL_ROUTE_SOURCE_STR.to_string()),
-            local_pref: path.local_pref,
-            med: path.med,
-            atomic_aggregate: path.atomic_aggregate,
+            local_pref: path.local_pref(),
+            med: path.med(),
+            atomic_aggregate: path.atomic_aggregate(),
             unknown_attributes: path
-                .unknown_attrs
+                .unknown_attrs()
                 .iter()
                 .filter_map(|attr| {
                     if let PathAttrValue::Unknown {
@@ -127,19 +128,25 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            communities: path.communities.clone(),
+            communities: path.communities().clone(),
             extended_communities: path
-                .extended_communities
+                .extended_communities()
                 .iter()
                 .map(|&ec| u64_to_proto_extcomm(ec))
                 .collect(),
             large_communities: path
-                .large_communities
+                .large_communities()
                 .iter()
                 .map(internal_to_proto_large_community)
                 .collect(),
-            originator_id: path.originator_id.map(|id| id.to_string()),
-            cluster_list: path.cluster_list.iter().map(|id| id.to_string()).collect(),
+            originator_id: path.originator_id().map(|id| id.to_string()),
+            cluster_list: path
+                .cluster_list()
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            local_path_id: path.local_path_id,
+            remote_path_id: path.remote_path_id,
         })
         .collect();
 
@@ -294,6 +301,14 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         export_policy: Vec::new(),
         graceful_restart,
         rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
+        add_path_send: match cfg.add_path_send {
+            Some(v) if v == proto::AddPathSendMode::AddPathSendAll as i32 => {
+                crate::config::AddPathSend::All
+            }
+            Some(_) => crate::config::AddPathSend::Disabled,
+            None => defaults.add_path_send,
+        },
+        add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),
     }
 }
 
@@ -641,17 +656,22 @@ impl BgpService for BgpGrpcService {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
             prefix,
-            next_hop,
-            origin,
-            as_path,
-            local_pref: req.local_pref,
-            med: req.med,
-            atomic_aggregate: req.atomic_aggregate,
-            communities: req.communities,
-            extended_communities,
-            large_communities,
-            originator_id,
-            cluster_list,
+            attrs: PathAttrs {
+                origin,
+                as_path,
+                next_hop,
+                source: crate::rib::RouteSource::Local,
+                local_pref: req.local_pref,
+                med: req.med,
+                atomic_aggregate: req.atomic_aggregate,
+                aggregator: None,
+                communities: req.communities,
+                extended_communities,
+                large_communities,
+                unknown_attrs: vec![],
+                originator_id,
+                cluster_list,
+            },
             response: tx,
         };
 
@@ -733,17 +753,22 @@ impl BgpService for BgpGrpcService {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
                 prefix,
-                next_hop,
-                origin,
-                as_path,
-                local_pref: req.local_pref,
-                med: req.med,
-                atomic_aggregate: req.atomic_aggregate,
-                communities: req.communities,
-                extended_communities,
-                large_communities,
-                originator_id,
-                cluster_list,
+                attrs: PathAttrs {
+                    origin,
+                    as_path,
+                    next_hop,
+                    source: crate::rib::RouteSource::Local,
+                    local_pref: req.local_pref,
+                    med: req.med,
+                    atomic_aggregate: req.atomic_aggregate,
+                    aggregator: None,
+                    communities: req.communities,
+                    extended_communities,
+                    large_communities,
+                    unknown_attrs: vec![],
+                    originator_id,
+                    cluster_list,
+                },
                 response: tx,
             };
 

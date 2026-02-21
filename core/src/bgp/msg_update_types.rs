@@ -80,19 +80,37 @@ pub mod attr_type_code {
 pub const AS_TRANS: u16 = 23456;
 pub const MAX_2BYTE_ASN: u32 = 65535;
 
+/// A prefix with its optional ADD-PATH path identifier (RFC 7911).
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
+pub struct Nlri {
+    pub prefix: IpNetwork,
+    pub path_id: Option<u32>,
+}
+
+/// Pair each prefix with the same path identifier.
+pub fn make_nlri_list(prefixes: &[IpNetwork], path_id: Option<u32>) -> Vec<Nlri> {
+    prefixes
+        .iter()
+        .map(|net| Nlri {
+            prefix: *net,
+            path_id,
+        })
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpReachNlri {
     pub afi: Afi,
     pub safi: Safi,
     pub next_hop: NextHopAddr,
-    pub nlri: Vec<IpNetwork>,
+    pub nlri: Vec<Nlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
-    pub withdrawn_routes: Vec<IpNetwork>,
+    pub withdrawn_routes: Vec<Nlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

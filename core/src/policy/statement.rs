@@ -334,29 +334,31 @@ impl Action {
             Action::Accept => true,
             Action::Reject => false,
             Action::SetLocalPref { value, force } => {
-                if *force || path.local_pref.is_none() {
-                    path.local_pref = Some(*value);
+                if *force || path.local_pref().is_none() {
+                    path.attrs.local_pref = Some(*value);
                 }
                 true
             }
             Action::SetMed(value) => {
-                path.med = *value;
+                path.attrs.med = *value;
                 true
             }
             Action::SetCommunity(op) => {
                 match op {
                     CommunityOp::Add(to_add) => {
                         for &comm in to_add {
-                            if !path.communities.contains(&comm) {
-                                path.communities.push(comm);
+                            if !path.communities().contains(&comm) {
+                                path.attrs.communities.push(comm);
                             }
                         }
                     }
                     CommunityOp::Remove(to_remove) => {
-                        path.communities.retain(|comm| !to_remove.contains(comm));
+                        path.attrs
+                            .communities
+                            .retain(|comm| !to_remove.contains(comm));
                     }
                     CommunityOp::Replace(new_communities) => {
-                        path.communities = new_communities.clone();
+                        path.attrs.communities = new_communities.clone();
                     }
                 }
                 true
@@ -365,17 +367,18 @@ impl Action {
                 match op {
                     ExtCommunityOp::Add(to_add) => {
                         for &ec in to_add {
-                            if !path.extended_communities.contains(&ec) {
-                                path.extended_communities.push(ec);
+                            if !path.extended_communities().contains(&ec) {
+                                path.attrs.extended_communities.push(ec);
                             }
                         }
                     }
                     ExtCommunityOp::Remove(to_remove) => {
-                        path.extended_communities
+                        path.attrs
+                            .extended_communities
                             .retain(|ec| !to_remove.contains(ec));
                     }
                     ExtCommunityOp::Replace(new_ext_communities) => {
-                        path.extended_communities = new_ext_communities.clone();
+                        path.attrs.extended_communities = new_ext_communities.clone();
                     }
                 }
                 true
@@ -384,16 +387,18 @@ impl Action {
                 match op {
                     LargeCommunityOp::Add(to_add) => {
                         for &lc in to_add {
-                            if !path.large_communities.contains(&lc) {
-                                path.large_communities.push(lc);
+                            if !path.large_communities().contains(&lc) {
+                                path.attrs.large_communities.push(lc);
                             }
                         }
                     }
                     LargeCommunityOp::Remove(to_remove) => {
-                        path.large_communities.retain(|lc| !to_remove.contains(lc));
+                        path.attrs
+                            .large_communities
+                            .retain(|lc| !to_remove.contains(lc));
                     }
                     LargeCommunityOp::Replace(new_large_communities) => {
-                        path.large_communities = new_large_communities.clone();
+                        path.attrs.large_communities = new_large_communities.clone();
                     }
                 }
                 true
@@ -432,12 +437,12 @@ impl Condition {
                 MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
             },
             Condition::Neighbor(neighbor) => path
-                .source
+                .source()
                 .peer_ip()
                 .map(|ip| ip == *neighbor)
                 .unwrap_or(false),
             Condition::NeighborSet(set, match_opt) => {
-                let Some(peer_ip) = path.source.peer_ip() else {
+                let Some(peer_ip) = path.source().peer_ip() else {
                     return false;
                 };
                 match match_opt {
@@ -447,13 +452,13 @@ impl Condition {
                 }
             }
             Condition::AsPath(asn) => path
-                .as_path
+                .as_path()
                 .iter()
                 .flat_map(|segment| segment.asn_list.iter())
                 .any(|&path_asn| path_asn == *asn),
             Condition::AsPathSet(set, match_opt) => {
                 let as_path_str = path
-                    .as_path
+                    .as_path()
                     .iter()
                     .flat_map(|segment| segment.asn_list.iter())
                     .map(|asn| asn.to_string())
@@ -467,48 +472,51 @@ impl Condition {
                     }
                 }
             }
-            Condition::Community(community) => path.communities.contains(community),
+            Condition::Community(community) => path.communities().contains(community),
             Condition::CommunitySet(set, match_opt) => match match_opt {
-                MatchOptionConfig::Any => {
-                    path.communities.iter().any(|c| set.communities.contains(c))
-                }
-                MatchOptionConfig::All => {
-                    path.communities.iter().all(|c| set.communities.contains(c))
-                }
-                MatchOptionConfig::Invert => {
-                    !path.communities.iter().any(|c| set.communities.contains(c))
-                }
+                MatchOptionConfig::Any => path
+                    .communities()
+                    .iter()
+                    .any(|c| set.communities.contains(c)),
+                MatchOptionConfig::All => path
+                    .communities()
+                    .iter()
+                    .all(|c| set.communities.contains(c)),
+                MatchOptionConfig::Invert => !path
+                    .communities()
+                    .iter()
+                    .any(|c| set.communities.contains(c)),
             },
             Condition::ExtCommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .any(|ec| set.ext_communities.contains(ec)),
                 MatchOptionConfig::All => path
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .all(|ec| set.ext_communities.contains(ec)),
                 MatchOptionConfig::Invert => !path
-                    .extended_communities
+                    .extended_communities()
                     .iter()
                     .any(|ec| set.ext_communities.contains(ec)),
             },
             Condition::LargeCommunitySet(set, match_opt) => match match_opt {
                 MatchOptionConfig::Any => path
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .any(|lc| set.large_communities.contains(lc)),
                 MatchOptionConfig::All => path
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .all(|lc| set.large_communities.contains(lc)),
                 MatchOptionConfig::Invert => !path
-                    .large_communities
+                    .large_communities()
                     .iter()
                     .any(|lc| set.large_communities.contains(lc)),
             },
             Condition::RouteType(route_type) => matches!(
-                (route_type, &path.source),
+                (route_type, path.source()),
                 (RouteType::Ebgp, RouteSource::Ebgp { .. })
                     | (RouteType::Ibgp, RouteSource::Ibgp { .. })
                     | (RouteType::Local, RouteSource::Local)
@@ -832,7 +840,7 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
-        assert_eq!(path.local_pref, Some(100));
+        assert_eq!(path.local_pref(), Some(100));
     }
 
     #[test]
@@ -855,11 +863,11 @@ mod tests {
         });
 
         assert_eq!(statement.apply(&prefix, &mut path), Some(true));
-        assert_eq!(path.local_pref, Some(200));
+        assert_eq!(path.local_pref(), Some(200));
 
-        path.local_pref = None;
+        path.attrs.local_pref = None;
         assert_eq!(statement.apply(&other_prefix, &mut path), None);
-        assert_eq!(path.local_pref, None);
+        assert_eq!(path.local_pref(), None);
     }
 
     #[test]
@@ -878,14 +886,14 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         assert_eq!(statement.apply(&prefix, &mut path1), Some(true));
-        assert_eq!(path1.local_pref, Some(200));
+        assert_eq!(path1.local_pref(), Some(200));
 
         let mut path2 = create_path(RouteSource::Ebgp {
             peer_ip: test_ip(2),
             bgp_id: std::net::Ipv4Addr::new(2, 2, 2, 2),
         });
         assert_eq!(statement.apply(&prefix, &mut path2), None);
-        assert_eq!(path2.local_pref, None);
+        assert_eq!(path2.local_pref(), None);
     }
 
     #[test]
@@ -900,10 +908,10 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        path.med = Some(100);
+        path.attrs.med = Some(100);
         assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
-        assert_eq!(path.local_pref, Some(200));
-        assert_eq!(path.med, None);
+        assert_eq!(path.local_pref(), Some(200));
+        assert_eq!(path.med(), None);
     }
 
     #[test]
@@ -962,14 +970,14 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         assert!(policy.accept(&prefix, &mut path1));
-        assert_eq!(path1.local_pref, Some(200));
+        assert_eq!(path1.local_pref(), Some(200));
 
         let mut path2 = create_path(RouteSource::Ebgp {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         assert!(policy.accept(&other_prefix, &mut path2));
-        assert_eq!(path2.local_pref, Some(100));
+        assert_eq!(path2.local_pref(), Some(100));
     }
 
     #[test]
@@ -980,7 +988,7 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         assert!(policy.accept(&test_prefix(), &mut path));
-        assert_eq!(path.local_pref, Some(100));
+        assert_eq!(path.local_pref(), Some(100));
     }
 
     #[test]
