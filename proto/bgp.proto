@@ -81,6 +81,7 @@ message SessionConfig {
     optional bool rr_client = 11;  // RFC 4456: Mark peer as route reflector client
     optional AddPathSendMode add_path_send = 12;   // RFC 7911: send mode
     optional bool add_path_receive = 13;  // RFC 7911: Accept multiple paths from peer
+    optional uint32 asn = 14;  // Expected peer ASN (reject OPEN if mismatched)
 }
 
 // Add peer request/response

@@ -192,6 +192,30 @@ impl Peer {
         local_hold_time: u16,
         peer_capabilities: PeerCapabilities,
     ) -> Result<(), io::Error> {
+        // Validate peer ASN if configured
+        if let Some(expected_asn) = self.config.asn {
+            if peer_asn != expected_asn {
+                warn!(peer_ip = %self.addr,
+                      expected_asn = expected_asn,
+                      received_asn = peer_asn,
+                      "rejecting session: peer ASN mismatch");
+
+                let notif = NotificationMessage::new(
+                    BgpError::OpenMessageError(OpenMessageError::BadPeerAs),
+                    vec![],
+                );
+                self.send_notification(notif).await?;
+
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "remote ASN mismatch: expected {}, received {}",
+                        expected_asn, peer_asn
+                    ),
+                ));
+            }
+        }
+
         // Set peer ASN and determine session type
         self.asn = Some(peer_asn);
         self.session_type = Some(if peer_asn == local_asn {
@@ -364,7 +388,7 @@ impl Peer {
                 Ok(())
             }
             BgpMessage::Open(_) => {
-                let _ = self.handle_message(message).await;
+                self.handle_message(message).await?;
                 Ok(())
             }
             BgpMessage::RouteRefresh(_) => {
