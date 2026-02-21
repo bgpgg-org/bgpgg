@@ -22,7 +22,8 @@ use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
-    batch_announcements_by_path, send_announcements_to_peer, PeerExportContext,
+    batch_announcements_by_path, compute_routes_for_peer, send_batched_announcements,
+    PeerExportContext,
 };
 use crate::peer::{BgpState, PeerOp, Withdrawal};
 use crate::policy::sets::{
@@ -963,15 +964,14 @@ impl BgpServer {
             };
 
             let mut all_sent = Vec::new();
-            let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(&ctx, chunk, format);
-                all_sent.extend(sent);
-                total_sent += chunk.len();
+                let filtered = compute_routes_for_peer(chunk, &ctx);
+                send_batched_announcements(&ctx, &filtered, format);
+                all_sent.extend(filtered);
             }
 
-            info!(%peer_ip, ?afi, total_routes = total_sent, "completed SOFT_OUT reset");
+            info!(%peer_ip, ?afi, total_routes = all_sent.len(), "completed SOFT_OUT reset");
 
             peer_info.adj_rib_out.replace_afi(afi, all_sent);
         }
@@ -1984,15 +1984,14 @@ impl BgpServer {
             };
 
             let mut all_sent = Vec::new();
-            let mut total_sent = 0;
 
             for chunk in routes.chunks(CHUNK_SIZE) {
-                let sent = send_announcements_to_peer(&ctx, chunk, format);
-                all_sent.extend(sent);
-                total_sent += chunk.len();
+                let filtered = compute_routes_for_peer(chunk, &ctx);
+                send_batched_announcements(&ctx, &filtered, format);
+                all_sent.extend(filtered);
             }
 
-            info!(%peer_ip, total_routes = total_sent, "completed ROUTE_REFRESH");
+            info!(%peer_ip, total_routes = all_sent.len(), "completed ROUTE_REFRESH");
 
             peer_info.adj_rib_out.replace_afi(afi, all_sent);
         }
