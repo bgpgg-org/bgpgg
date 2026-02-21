@@ -130,6 +130,9 @@ pub struct PeerConfig {
     /// RFC 7911: Whether to accept multiple paths from this peer
     #[serde(default, rename = "add-path-receive")]
     pub add_path_receive: bool,
+    /// Expected remote ASN. When set, OPEN messages with mismatched ASN are rejected.
+    #[serde(default, rename = "remote-asn")]
+    pub remote_asn: Option<u32>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -189,6 +192,7 @@ impl Default for PeerConfig {
             rr_client: false,
             add_path_send: AddPathSend::default(),
             add_path_receive: false,
+            remote_asn: None,
         }
     }
 }

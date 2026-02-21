@@ -1881,3 +1881,68 @@ async fn test_large_asn_requires_4byte_capability() {
         "Server should reject OLD speaker when local ASN > 65535"
     );
 }
+
+/// Configured remote_asn validates peer ASN during OPEN exchange.
+/// Matching ASN establishes, mismatched ASN is rejected, None accepts any.
+#[tokio::test]
+async fn test_remote_asn_validation() {
+    // (name, remote_asn on server1, peer_asn for server2, should_establish)
+    let cases: Vec<(&str, Option<u32>, u32, bool)> = vec![
+        ("matching", Some(65002), 65002, true),
+        ("mismatch", Some(65002), 65099, false),
+        ("none", None, 65099, true),
+    ];
+
+    for (name, remote_asn, peer_asn, should_establish) in cases {
+        let server1 = start_test_server(Config::new(
+            65001,
+            "127.0.0.1:0",
+            Ipv4Addr::new(1, 1, 1, 1),
+            90,
+        ))
+        .await;
+        let server2 = start_test_server(Config::new(
+            peer_asn,
+            "127.0.0.2:0",
+            Ipv4Addr::new(2, 2, 2, 2),
+            90,
+        ))
+        .await;
+
+        // Server1 passive with remote_asn config; server2 actively connects
+        server1
+            .add_peer_with_config(
+                &server2,
+                SessionConfig {
+                    passive_mode: Some(true),
+                    remote_asn,
+                    ..Default::default()
+                },
+            )
+            .await;
+        server2.add_peer(&server1).await;
+
+        if should_establish {
+            poll_until(
+                || async {
+                    verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await
+                },
+                &format!("{}: should reach Established", name),
+            )
+            .await;
+        } else {
+            poll_while(
+                || async {
+                    server1.client.get_peers().await.is_ok_and(|peers| {
+                        peers
+                            .iter()
+                            .all(|p| p.state != BgpState::Established as i32)
+                    })
+                },
+                std::time::Duration::from_secs(3),
+                &format!("{}: should NOT reach Established", name),
+            )
+            .await;
+        }
+    }
+}
