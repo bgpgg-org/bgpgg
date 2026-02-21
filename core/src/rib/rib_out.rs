@@ -71,6 +71,18 @@ impl AdjRibOut {
             .unwrap_or_default()
     }
 
+    /// Get all prefixes for a given AFI.
+    pub fn prefixes_for_afi(&self, afi: Afi) -> Vec<IpNetwork> {
+        self.routes
+            .keys()
+            .filter(|prefix| match afi {
+                Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
+                Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
+            })
+            .copied()
+            .collect()
+    }
+
     /// Get all routes grouped by prefix, suitable for gRPC responses.
     pub fn get_routes(&self) -> Vec<Route> {
         self.routes

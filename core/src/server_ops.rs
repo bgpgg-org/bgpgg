@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::MessageFormat;
+use crate::bgp::msg::{AddPathMask, MessageFormat};
 use crate::bgp::msg_notification::CeaseSubcode;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::msg_update_types::Nlri;
@@ -22,7 +22,7 @@ use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
-    batch_announcements_by_path, export_all_routes_to_peer, PeerExportContext,
+    batch_announcements_by_path, propagate_routes_to_peer, PeerExportContext,
 };
 use crate::peer::{BgpState, PeerOp, Withdrawal};
 use crate::policy::sets::{
@@ -915,59 +915,61 @@ impl BgpServer {
             return;
         };
 
-        let Some(conn) = peer_info.established_conn() else {
-            return;
-        };
-
-        let Some(peer_asn) = conn.asn else {
-            return;
-        };
-        let export_policies = &peer_info.export_policies;
-        if export_policies.is_empty() {
-            return;
-        }
         if safi != Safi::Unicast {
             warn!(?safi, "unsupported SAFI");
             return;
         }
+        if peer_info.export_policies.is_empty() {
+            return;
+        }
 
-        if let Some(peer_tx) = &conn.peer_tx {
-            let afi_safi = AfiSafi::new(afi, safi);
-            let add_path_send = conn.add_path_send_negotiated(&afi_safi);
+        let Some(conn) = peer_info.established_conn() else {
+            return;
+        };
+        let Some(peer_asn) = conn.asn else {
+            return;
+        };
+        let Some(peer_tx) = conn.peer_tx.clone() else {
+            return;
+        };
+        let send_format = conn.send_format();
+        let local_next_hop = conn
+            .conn_info
+            .as_ref()
+            .map(|ci| ci.local_address)
+            .unwrap_or(self.local_addr);
 
-            let ctx = PeerExportContext {
-                peer_addr: peer_ip,
-                peer_tx,
-                local_asn: self.config.asn,
-                peer_asn,
-                local_next_hop: conn
-                    .conn_info
-                    .as_ref()
-                    .map(|conn_info| conn_info.local_address)
-                    .unwrap_or(self.local_addr),
-                export_policies,
-                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
-                rr_client: peer_info.config.rr_client,
-                cluster_id: self.config.cluster_id(),
-                add_path_send,
-            };
+        let export_policies = &peer_info.export_policies;
+        let ctx = PeerExportContext {
+            peer_addr: peer_ip,
+            peer_tx: &peer_tx,
+            local_asn: self.config.asn,
+            peer_asn,
+            local_next_hop,
+            export_policies,
+            peer_supports_4byte_asn: send_format.use_4byte_asn,
+            rr_client: peer_info.config.rr_client,
+            cluster_id: self.config.cluster_id(),
+            add_path_send: send_format.add_path,
+        };
 
-            // Collect routes: all paths for ADD-PATH peers, best-only otherwise
-            let routes = self.loc_rib.get_paths(afi, add_path_send);
-
-            let format = MessageFormat {
-                use_4byte_asn: ctx.peer_supports_4byte_asn,
-                add_path: add_path_send,
-            };
-
-            let sent = export_all_routes_to_peer(&routes, &ctx, format);
-            info!(%peer_ip, ?afi, total_routes = sent.len(), "resent routes to peer");
-
-            peer_info.adj_rib_out.clear_afi(afi);
-            for (prefix, path) in sent {
-                peer_info.adj_rib_out.insert(prefix, path);
+        // Union of loc-rib and adj-rib-out prefixes: ensures withdrawals
+        // are sent for paths previously exported but now filtered/absent.
+        let mut all_prefixes = self.loc_rib.prefixes_for_afi(afi);
+        for prefix in peer_info.adj_rib_out.prefixes_for_afi(afi) {
+            if !all_prefixes.contains(&prefix) {
+                all_prefixes.push(prefix);
             }
         }
+
+        propagate_routes_to_peer(
+            &ctx,
+            &all_prefixes,
+            &self.loc_rib,
+            &mut peer_info.adj_rib_out,
+        );
+
+        info!(%peer_ip, ?afi, "resent routes to peer");
     }
 
     async fn handle_add_route(
@@ -1251,7 +1253,9 @@ impl BgpServer {
         // Mirror the actual BGP session encoding
         let peer_info = self.peers.get(&peer_ip);
         let use_4byte_asn = peer_info.map(peer_supports_4byte_asn).unwrap_or(true);
-        let add_path = peer_info.map(peer_add_path_received).unwrap_or(false);
+        let add_path = peer_info
+            .map(peer_add_path_receive_mask)
+            .unwrap_or(AddPathMask::NONE);
         let format = MessageFormat {
             use_4byte_asn,
             add_path,
@@ -1823,12 +1827,12 @@ fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
         .unwrap_or(true) // Default to true if not negotiated (BMP is newer protocol)
 }
 
-/// Determine if peer session uses ADD-PATH (peer sends us path_ids)
-fn peer_add_path_received(peer_info: &PeerInfo) -> bool {
+/// ADD-PATH mask for AFI/SAFIs where the peer sends us path_ids
+fn peer_add_path_receive_mask(peer_info: &PeerInfo) -> AddPathMask {
     peer_info
         .established_conn()
-        .map(|conn| conn.add_path_receive())
-        .unwrap_or(false)
+        .map(|conn| conn.receive_format().add_path)
+        .unwrap_or(AddPathMask::NONE)
 }
 
 /// Convert routes to UpdateMessages, batching by shared path attributes
@@ -1898,7 +1902,7 @@ async fn send_initial_bmp_state_to_task(
             if let Ok(routes) = get_peer_adj_rib_in(peer_tx).await {
                 let format = MessageFormat {
                     use_4byte_asn: peer_supports_4byte_asn(peer_info),
-                    add_path: peer_add_path_received(peer_info),
+                    add_path: peer_add_path_receive_mask(peer_info),
                 };
                 let updates = routes_to_update_messages(&routes, format);
                 for update in updates {

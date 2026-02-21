@@ -17,7 +17,11 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    defined_set_config, ActionsConfig, AddPathSendMode, BgpState, ConditionsConfig,
+    DefinedSetConfig, Origin, PrefixMatch, PrefixSetData, ResetType, Route, SessionConfig,
+    StatementConfig,
+};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -568,4 +572,540 @@ async fn test_originator_id_rejection_preserves_other_paths() {
         "Valid path was removed by ORIGINATOR_ID loop rejection of another path",
     )
     .await;
+}
+
+/// Soft reset out must withdraw stale ADD-PATH entries.
+///
+/// Topology: S1, S2 -> S3 -> S4 (ADD-PATH)
+///
+/// 1. S1 and S2 announce 10.0.0.0/24 to S3
+/// 2. S3 forwards both paths to S4 (2 paths via ADD-PATH)
+/// 3. Apply export policy on S3->S4 rejecting 10.0.0.0/24
+/// 4. Soft reset out S3->S4
+/// 5. S4 should have 0 paths (both withdrawn)
+///
+/// Bug: resend_routes_to_peer clears adj-rib-out without sending withdrawals,
+/// leaving orphaned path_ids on the peer.
+#[tokio::test]
+async fn test_addpath_soft_reset_withdraws_stale_paths() {
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    let server3 = start_test_server(test_config(65003, 3)).await;
+    let server4 = start_test_server(test_config(65004, 4)).await;
+
+    peer_servers(&server1, &server3).await;
+    peer_servers(&server2, &server3).await;
+    peer_servers_with_config(&server3, &server4, addpath_config()).await;
+
+    let server3_addr = server3.address.to_string();
+    let server4_addr = server4.address.to_string();
+
+    // S1 and S2 announce 10.0.0.0/24
+    for (server, next_hop) in [(&server1, "192.168.1.1"), (&server2, "192.168.2.1")] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: next_hop.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // S4 (ADD-PATH) receives both paths
+    poll_rib_addpath(&[(
+        &server4,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003, 65001])],
+                    next_hop: server3_addr.clone(),
+                    peer_address: server3_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+                build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65003, 65002])],
+                    next_hop: server3_addr.clone(),
+                    peer_address: server3_addr.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                }),
+            ],
+        }],
+    )])
+    .await;
+
+    // Apply export policy on S3 -> S4 that rejects 10.0.0.0/24
+    server3
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "prefix-set".to_string(),
+                name: "blocked".to_string(),
+                config: Some(defined_set_config::Config::PrefixSet(PrefixSetData {
+                    prefixes: vec![PrefixMatch {
+                        prefix: "10.0.0.0/24".to_string(),
+                        masklength_range: None,
+                    }],
+                })),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    server3
+        .client
+        .add_policy(
+            "block-10".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_prefix_set: Some(bgpgg::grpc::proto::MatchSetRef {
+                            set_name: "blocked".to_string(),
+                            match_option: "any".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server3
+        .client
+        .set_policy_assignment(
+            server4_addr.clone(),
+            "export".to_string(),
+            vec!["block-10".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Trigger soft reset out on S3 -> S4
+    server3
+        .client
+        .reset_peer(server4_addr.clone(), ResetType::SoftOut, None, None)
+        .await
+        .unwrap();
+
+    // S4 should have no routes after the soft reset (policy rejects 10.0.0.0/24)
+    poll_until(
+        || async {
+            server4
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes.is_empty())
+        },
+        "S4 should have 0 routes after soft reset out with export policy rejecting 10.0.0.0/24",
+    )
+    .await;
+
+    // Also verify S3's adj-rib-out toward S4 is empty
+    poll_until(
+        || async {
+            server3
+                .client
+                .get_adj_rib_out(&server4_addr)
+                .await
+                .is_ok_and(|routes| routes.is_empty())
+        },
+        "S3 adj-rib-out toward S4 should be empty after soft reset with reject policy",
+    )
+    .await;
+}
+
+/// GR + ADD-PATH: stale paths must be marked per path_id and recovered individually.
+///
+/// FakePeer sends two paths for 10.0.0.0/24, then disconnects (GR).
+/// During GR timer, both paths stay. FakePeer reconnects and resends only one path.
+/// After EOR, the un-resent path should be swept while the resent one survives.
+#[tokio::test]
+async fn test_addpath_graceful_restart_stale_sweep() {
+    let gr_restart_time_secs = 120;
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let mut fake = FakePeer::new("127.0.0.2:0", 65001).await;
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                port: Some(fake.port() as u32),
+                add_path_receive: Some(true),
+                graceful_restart: Some(bgpgg::grpc::proto::GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(gr_restart_time_secs),
+                }),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Initial handshake with GR + ADD-PATH capabilities
+    fake.accept_and_handshake(
+        65001,
+        Ipv4Addr::new(2, 2, 2, 2),
+        Some(vec![
+            build_multiprotocol_capability_ipv4_unicast(),
+            build_addpath_capability_ipv4_unicast(),
+            build_gr_capability(gr_restart_time_secs as u16, false),
+        ]),
+    )
+    .await;
+
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|peer| peer.state == BgpState::Established as i32)
+            })
+        },
+        "Timeout waiting for Established",
+    )
+    .await;
+
+    // Send two paths for 10.0.0.0/24
+    let update1 = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+            &attr_local_pref(100),
+        ],
+        &addpath_nlri(1, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update1).await;
+
+    let update2 = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 2, 1)),
+            &attr_local_pref(100),
+        ],
+        &addpath_nlri(2, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update2).await;
+
+    // Both paths should be in loc-rib
+    let fake_addr = "127.0.0.2".to_string();
+    let ibgp_path = |next_hop: &str| {
+        build_path(PathParams {
+            next_hop: next_hop.to_string(),
+            peer_address: fake_addr.clone(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(100),
+            ..Default::default()
+        })
+    };
+
+    poll_rib_addpath(&[(
+        &server,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![ibgp_path("192.168.1.1"), ibgp_path("192.168.2.1")],
+        }],
+    )])
+    .await;
+
+    // Drop TCP without NOTIFICATION -> triggers GR
+    drop(fake.stream.take());
+
+    // Routes retained during GR timer
+    poll_while(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes.len() == 1 && routes[0].paths.len() == 2)
+        },
+        Duration::from_secs(1),
+        "Routes should be retained during GR timer",
+    )
+    .await;
+
+    // Reconnect with R=1 (restarting)
+    fake.accept().await;
+    fake.read_open().await;
+    let gr_cap = build_gr_capability(gr_restart_time_secs as u16, true);
+    let mp_cap = build_multiprotocol_capability_ipv4_unicast();
+    let addpath_cap = build_addpath_capability_ipv4_unicast();
+    let open = build_raw_open(
+        65001,
+        300,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions {
+            capabilities: Some(vec![mp_cap, addpath_cap, gr_cap]),
+            ..Default::default()
+        },
+    );
+    fake.send_raw(&open).await;
+    fake.send_keepalive().await;
+    fake.read_keepalive().await;
+
+    // Resend only path_id=1 (path_id=2 should be swept after EOR)
+    let update_resend = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+            &attr_local_pref(100),
+        ],
+        &addpath_nlri(1, &[24, 10, 0, 0]),
+        None,
+    );
+    fake.send_raw(&update_resend).await;
+
+    // Send EOR (empty UPDATE) to trigger stale sweep
+    let eor = build_raw_update(&[], &[], &[], None);
+    fake.send_raw(&eor).await;
+
+    // After EOR: only path_id=1 should survive, path_id=2 swept
+    poll_until_stable(
+        || async {
+            let expected = vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![ibgp_path("192.168.1.1")],
+            }];
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes_match(&routes, &expected, ExpectPathId::Distinct))
+        },
+        Duration::from_secs(2),
+        "Only path_id=1 should survive after GR stale sweep (path_id=2 should be removed)",
+    )
+    .await;
+}
+
+/// Mixed ADD-PATH topology: 3 downstream peers with different capabilities.
+///
+///   S1(65001) ---\
+///                 +---> S3(65003) ---> S4 (ADD-PATH)
+///   S2(65002) ---/         |--------> S5 (normal)
+///                          +--------> S6 (ADD-PATH)
+///
+/// Validates adj-rib-out correctness per peer type when paths change.
+#[tokio::test]
+async fn test_addpath_mixed_topology() {
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    let server3 = start_test_server(test_config(65003, 3)).await;
+    let server4 = start_test_server(test_config(65004, 4)).await;
+    let server5 = start_test_server(test_config(65005, 5)).await;
+    let server6 = start_test_server(test_config(65006, 6)).await;
+
+    peer_servers(&server1, &server3).await;
+    peer_servers(&server2, &server3).await;
+    peer_servers_with_config(&server3, &server4, addpath_config()).await;
+    peer_servers(&server3, &server5).await;
+    peer_servers_with_config(&server3, &server6, addpath_config()).await;
+
+    let server3_addr = server3.address.to_string();
+    let server4_addr = server4.address.to_string();
+    let server6_addr = server6.address.to_string();
+
+    // S1 and S2 announce 10.0.0.0/24
+    for (server, next_hop) in [(&server1, "192.168.1.1"), (&server2, "192.168.2.1")] {
+        announce_route(
+            server,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: next_hop.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // ADD-PATH peers (S4, S6) should both get 2 paths
+    let addpath_expected = vec![Route {
+        prefix: "10.0.0.0/24".to_string(),
+        paths: vec![
+            build_path(PathParams {
+                as_path: vec![as_sequence(vec![65003, 65001])],
+                next_hop: server3_addr.clone(),
+                peer_address: server3_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            }),
+            build_path(PathParams {
+                as_path: vec![as_sequence(vec![65003, 65002])],
+                next_hop: server3_addr.clone(),
+                peer_address: server3_addr.clone(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            }),
+        ],
+    }];
+
+    poll_rib_addpath(&[
+        (&server4, addpath_expected.clone()),
+        (&server6, addpath_expected.clone()),
+    ])
+    .await;
+
+    // S5 (normal) should get only best path
+    poll_rib(&[(
+        &server5,
+        expected_single_path(&server3_addr, vec![65003, 65001]),
+    )])
+    .await;
+
+    // Verify adj-rib-out: ADD-PATH peers have 2 entries, normal has 1
+    poll_until(
+        || async {
+            let Ok(rib_s4) = server3.client.get_adj_rib_out(&server4_addr).await else {
+                return false;
+            };
+            let Ok(rib_s6) = server3.client.get_adj_rib_out(&server6_addr).await else {
+                return false;
+            };
+            rib_s4
+                .iter()
+                .any(|r| r.prefix == "10.0.0.0/24" && r.paths.len() == 2)
+                && rib_s6
+                    .iter()
+                    .any(|r| r.prefix == "10.0.0.0/24" && r.paths.len() == 2)
+        },
+        "ADD-PATH peers should have 2 paths in adj-rib-out",
+    )
+    .await;
+
+    // S1 withdraws -> ADD-PATH peers drop to 1 path, normal peer updates best
+    server1
+        .client
+        .remove_route("10.0.0.0/24".to_string())
+        .await
+        .unwrap();
+
+    let single_s2_path = expected_single_path(&server3_addr, vec![65003, 65002]);
+
+    // All three downstream peers should converge to the same single path
+    poll_rib_addpath(&[
+        (&server4, single_s2_path.clone()),
+        (&server6, single_s2_path.clone()),
+    ])
+    .await;
+    poll_rib(&[(&server5, single_s2_path.clone())]).await;
+}
+
+/// Capability negotiation: ADD-PATH peer that only advertises receive (not send).
+/// Server should NOT use ADD-PATH encoding toward this peer.
+#[tokio::test]
+async fn test_addpath_receive_only_negotiation() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let mut fake = FakePeer::new("127.0.0.2:0", 65002).await;
+
+    // Server configured to send ADD-PATH, but FakePeer only advertises receive
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                port: Some(fake.port() as u32),
+                add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
+                add_path_receive: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // FakePeer advertises ADD-PATH with receive-only (mode=1)
+    let addpath_recv_only = vec![
+        69, // Capability code 69 = ADD-PATH
+        4,  // Length: 4 bytes
+        0, 1, // AFI = 1 (IPv4)
+        1, // SAFI = 1 (Unicast)
+        1, // Receive only (not send)
+    ];
+
+    fake.accept_and_handshake(
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        Some(vec![
+            build_multiprotocol_capability_ipv4_unicast(),
+            addpath_recv_only,
+            build_capability_4byte_asn(65002),
+        ]),
+    )
+    .await;
+
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|peer| peer.state == BgpState::Established as i32)
+            })
+        },
+        "Timeout waiting for Established",
+    )
+    .await;
+
+    // Announce a route
+    announce_route(
+        &server,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // FakePeer reads the UPDATE. Since peer only advertises "receive" (not "send+receive"),
+    // server should NOT negotiate ADD-PATH send. The UPDATE should NOT have path_id.
+    // We set add_path=false on the message_format since we expect non-ADD-PATH encoding.
+    let update = fake.read_update().await;
+
+    // No path_id should be present since negotiation didn't agree on send
+    assert!(
+        update.nlri_list().iter().all(|nlri| nlri.path_id.is_none()),
+        "Server should NOT include path_id when peer only advertises receive (not send+receive)"
+    );
 }

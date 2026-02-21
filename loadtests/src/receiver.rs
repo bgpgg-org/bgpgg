@@ -1,5 +1,5 @@
 use crate::bgp_handshake;
-use bgpgg::bgp::msg::{BgpMessage, MessageFormat};
+use bgpgg::bgp::msg::{AddPathMask, BgpMessage, MessageFormat};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -43,7 +43,7 @@ pub async fn run_receiver(
             &mut stream,
             MessageFormat {
                 use_4byte_asn: false,
-                add_path: false,
+                add_path: AddPathMask::NONE,
             },
         )
         .await

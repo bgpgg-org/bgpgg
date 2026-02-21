@@ -8,7 +8,7 @@ mod load_test;
 // Re-export for convenience
 pub use route_generator::calculate_expected_best_paths;
 
-use bgpgg::bgp::msg::{BgpMessage, Message, MessageFormat};
+use bgpgg::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat};
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::{NextHopAddr, UpdateMessage};
@@ -41,7 +41,7 @@ pub async fn bgp_handshake(
         &mut *stream,
         MessageFormat {
             use_4byte_asn: true,
-            add_path: false,
+            add_path: AddPathMask::NONE,
         },
     )
     .await
@@ -78,7 +78,7 @@ pub async fn bgp_handshake(
         &mut *stream,
         MessageFormat {
             use_4byte_asn: true,
-            add_path: false,
+            add_path: AddPathMask::NONE,
         },
     )
     .await
@@ -169,7 +169,7 @@ pub fn create_update_message(
         routes,
         MessageFormat {
             use_4byte_asn: true,
-            add_path: false,
+            add_path: AddPathMask::NONE,
         },
     );
     update.serialize()

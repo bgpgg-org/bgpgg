@@ -26,7 +26,7 @@ use super::msg_update_codec::{
 use super::msg_update_types::{
     make_nlri_list, MpReachNlri, MpUnreachNlri, Nlri, AS_TRANS, MAX_2BYTE_ASN,
 };
-use super::multiprotocol::{Afi, Safi};
+use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::{parse_nlri_list, ParserError};
 use crate::net::IpNetwork;
 use crate::rib::Path;
@@ -129,7 +129,14 @@ impl UpdateMessage {
             });
         }
 
-        let path_id = if format.add_path {
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+        let ipv4_path_id = if format.add_path.contains(&ipv4_unicast) {
+            path.local_path_id
+        } else {
+            None
+        };
+        let ipv6_path_id = if format.add_path.contains(&ipv6_unicast) {
             path.local_path_id
         } else {
             None
@@ -143,7 +150,7 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     next_hop: *path.next_hop(),
-                    nlri: make_nlri_list(&ipv6_routes, path_id),
+                    nlri: make_nlri_list(&ipv6_routes, ipv6_path_id),
                 }),
             });
         }
@@ -157,7 +164,7 @@ impl UpdateMessage {
             total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
                 .len() as u16,
             path_attributes,
-            nlri_list: make_nlri_list(&ipv4_routes, path_id),
+            nlri_list: make_nlri_list(&ipv4_routes, ipv4_path_id),
             format,
         }
     }
@@ -531,10 +538,14 @@ impl UpdateMessage {
         let body_length = bytes.len();
         let mut data = bytes;
 
+        // Standard withdrawn/NLRI fields are always IPv4 Unicast (RFC 4271)
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv4_add_path = format.add_path.contains(&ipv4_unicast);
+
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
 
-        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len], format.add_path)?;
+        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len], ipv4_add_path)?;
         data = data[withdrawn_routes_len..].to_vec();
 
         let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
@@ -552,7 +563,7 @@ impl UpdateMessage {
 
         let nlri_list: Vec<Nlri> = match total_path_attributes_len {
             0 => vec![],
-            _ => parse_nlri_list(&data, format.add_path)?,
+            _ => parse_nlri_list(&data, ipv4_add_path)?,
         };
 
         validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
@@ -2254,10 +2265,7 @@ mod tests {
 
     #[test]
     fn test_addpath_disabled_no_path_id() {
-        let format = MessageFormat {
-            use_4byte_asn: true,
-            add_path: false,
-        };
+        let format = DEFAULT_FORMAT;
         let msg = UpdateMessage::new(&test_path(), vec![], format);
         assert!(msg.nlri_list().is_empty());
 

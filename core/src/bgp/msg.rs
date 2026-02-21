@@ -17,26 +17,61 @@ use super::msg_notification::{BgpError, MessageHeaderError, NotificationMessage}
 use super::msg_open::OpenMessage;
 use super::msg_route_refresh::RouteRefreshMessage;
 use super::msg_update::UpdateMessage;
+use super::multiprotocol::AfiSafi;
 use super::utils::ParserError;
 use tokio::io::AsyncReadExt;
 
 pub const BGP_HEADER_SIZE_BYTES: usize = 19;
 pub const MAX_MESSAGE_SIZE: u16 = 4096;
 
+/// Per-AFI/SAFI ADD-PATH bitmask (RFC 7911).
+/// Each bit corresponds to an AfiSafi::add_path_bit().
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddPathMask(u32);
+
+impl AddPathMask {
+    pub const NONE: Self = Self(0);
+    pub const ALL: Self = Self(u32::MAX);
+
+    /// Build a mask from a list of AFI/SAFIs
+    pub fn from_afi_safis(afi_safis: &[AfiSafi]) -> Self {
+        let mut mask = Self::NONE;
+        for afi_safi in afi_safis {
+            mask = mask.with(afi_safi);
+        }
+        mask
+    }
+
+    /// Return a new mask with the given AFI/SAFI added
+    pub fn with(self, afi_safi: &AfiSafi) -> Self {
+        Self(self.0 | afi_safi.add_path_bit())
+    }
+
+    /// Check if ADD-PATH is enabled for a specific AFI/SAFI
+    pub fn contains(&self, afi_safi: &AfiSafi) -> bool {
+        self.0 & afi_safi.add_path_bit() != 0
+    }
+
+    /// Returns true if no AFI/SAFI has ADD-PATH enabled
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// Message encoding format based on negotiated capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageFormat {
     /// Whether to use 4-byte ASN encoding (RFC 6793)
     pub use_4byte_asn: bool,
-    /// Whether to use ADD-PATH encoding (RFC 7911) - path_id prepended to each NLRI
-    pub add_path: bool,
+    /// Which AFI/SAFI combos use ADD-PATH encoding (RFC 7911)
+    pub add_path: AddPathMask,
 }
 
 /// Format for parsing OPEN messages, before capabilities are negotiated.
 /// OPEN always uses 2-byte ASN (RFC 6793) and no ADD-PATH.
 pub const PRE_OPEN_FORMAT: MessageFormat = MessageFormat {
     use_4byte_asn: false,
-    add_path: false,
+    add_path: AddPathMask::NONE,
 };
 
 // BGP header marker (16 bytes of 0xFF)

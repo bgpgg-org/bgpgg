@@ -82,7 +82,7 @@ impl Message for RouteMonitoringMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg::MessageFormat;
+    use crate::bgp::msg::{AddPathMask, MessageFormat};
     use std::net::IpAddr;
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
             }],
             MessageFormat {
                 use_4byte_asn: true,
-                add_path: false,
+                add_path: AddPathMask::NONE,
             },
         );
 

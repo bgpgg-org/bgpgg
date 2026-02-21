@@ -76,6 +76,9 @@ fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
             if existing.attrs != path.attrs {
                 Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
                 *existing = path;
+            } else if existing.stale {
+                // GR: identical attrs but stale -> clear the stale flag
+                Arc::make_mut(existing).stale = false;
             }
         }
         None => {
@@ -467,6 +470,22 @@ impl<A: PathIdAllocator> LocRib<A> {
     /// Check if a prefix exists in Loc-RIB
     pub fn has_prefix(&self, prefix: &IpNetwork) -> bool {
         self.get_route(prefix).is_some()
+    }
+
+    /// Get all prefixes for a given AFI.
+    pub fn prefixes_for_afi(&self, afi: Afi) -> Vec<IpNetwork> {
+        match afi {
+            Afi::Ipv4 => self
+                .ipv4_unicast
+                .keys()
+                .map(|k| IpNetwork::V4(*k))
+                .collect(),
+            Afi::Ipv6 => self
+                .ipv6_unicast
+                .keys()
+                .map(|k| IpNetwork::V6(*k))
+                .collect(),
+        }
     }
 
     /// Get paths for an AFI. If `all_paths` is true, returns every path

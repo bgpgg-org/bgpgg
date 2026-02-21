@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
+use crate::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
@@ -114,19 +114,37 @@ impl PeerCapabilities {
         }
     }
 
-    /// Build MessageFormat for parsing incoming messages from this peer
+    /// MessageFormat for parsing incoming UPDATEs from this peer.
+    /// Includes ADD-PATH for all AFI/SAFIs where receive is negotiated.
     pub fn receive_format(&self) -> MessageFormat {
+        let mut add_path = AddPathMask::NONE;
+        if let Some(ap) = &self.add_path {
+            for (afi_safi, mode) in &ap.entries {
+                if mode.can_receive() {
+                    add_path = add_path.with(afi_safi);
+                }
+            }
+        }
         MessageFormat {
             use_4byte_asn: self.supports_four_octet_asn(),
-            add_path: self.add_path_receive(),
+            add_path,
         }
     }
 
-    /// Build MessageFormat for encoding outgoing messages to this peer
-    pub fn send_format(&self, afi_safi: &AfiSafi) -> MessageFormat {
+    /// Build MessageFormat for encoding outgoing messages to this peer.
+    /// Includes ADD-PATH for all AFI/SAFIs where send is negotiated.
+    pub fn send_format(&self) -> MessageFormat {
+        let mut add_path = AddPathMask::NONE;
+        if let Some(ap) = &self.add_path {
+            for (afi_safi, mode) in &ap.entries {
+                if mode.can_send() {
+                    add_path = add_path.with(afi_safi);
+                }
+            }
+        }
         MessageFormat {
             use_4byte_asn: self.supports_four_octet_asn(),
-            add_path: self.add_path_send_negotiated(afi_safi),
+            add_path,
         }
     }
 
@@ -683,7 +701,7 @@ impl Peer {
             }
 
             // Create EOR message
-            let format = self.capabilities.send_format(afi_safi);
+            let format = self.capabilities.send_format();
             let eor_msg = UpdateMessage::new_eor(afi_safi.afi, afi_safi.safi, format);
 
             // Send EOR

@@ -15,7 +15,7 @@
 //! Route propagation logic for BGP UPDATE messages
 
 use crate::bgp::ext_community::is_transitive;
-use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
+use crate::bgp::msg::{AddPathMask, Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{
     NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
@@ -56,7 +56,7 @@ pub struct PeerExportContext<'a> {
     pub peer_supports_4byte_asn: bool,
     pub rr_client: bool,
     pub cluster_id: Ipv4Addr,
-    pub add_path_send: bool,
+    pub add_path_send: AddPathMask,
 }
 
 /// Check if a path should be exported to a peer (pre-policy filtering).
@@ -555,7 +555,7 @@ pub fn propagate_routes_to_peer(
 
     for prefix in changed_prefixes {
         // Get candidate paths: all for ADD-PATH, best-only otherwise
-        let candidates: Vec<Arc<Path>> = if ctx.add_path_send {
+        let candidates: Vec<Arc<Path>> = if !ctx.add_path_send.is_empty() {
             loc_rib.get_all_paths(prefix)
         } else {
             loc_rib.get_best_path(prefix).into_iter().cloned().collect()
@@ -582,7 +582,7 @@ pub fn propagate_routes_to_peer(
             .collect();
 
         // Build wire withdrawals
-        if ctx.add_path_send {
+        if !ctx.add_path_send.is_empty() {
             for pid in &stale_ids {
                 withdrawn_nlri.push(Nlri {
                     prefix: *prefix,
@@ -1154,7 +1154,7 @@ mod tests {
             peer_supports_4byte_asn: false,
             rr_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
-            add_path_send: false,
+            add_path_send: AddPathMask::NONE,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1162,7 +1162,7 @@ mod tests {
             &filtered,
             MessageFormat {
                 use_4byte_asn: false,
-                add_path: false,
+                add_path: AddPathMask::NONE,
             },
         );
 
@@ -1290,7 +1290,7 @@ mod tests {
             peer_supports_4byte_asn: false,
             rr_client: false,
             cluster_id,
-            add_path_send: false,
+            add_path_send: AddPathMask::NONE,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));

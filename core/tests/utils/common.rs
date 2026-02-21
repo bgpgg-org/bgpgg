@@ -30,7 +30,8 @@ pub fn init_test_logging() {
 use std::collections::{HashMap, HashSet};
 
 use bgpgg::bgp::msg::{
-    read_bgp_message, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER, PRE_OPEN_FORMAT,
+    read_bgp_message, AddPathMask, BgpMessage, Message, MessageFormat, MessageType, BGP_MARKER,
+    PRE_OPEN_FORMAT,
 };
 use bgpgg::bgp::msg_keepalive::KeepaliveMessage;
 use bgpgg::bgp::msg_notification::NotificationMessage;
@@ -1528,7 +1529,7 @@ impl FakePeer {
     fn message_format(&self) -> MessageFormat {
         MessageFormat {
             use_4byte_asn: self.supports_4byte_asn,
-            add_path: false,
+            add_path: AddPathMask::NONE,
         }
     }
 

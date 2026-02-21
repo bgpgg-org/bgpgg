@@ -20,7 +20,7 @@ use super::msg_update_types::{
     MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrFlag, PathAttrValue,
     PathAttribute,
 };
-use super::multiprotocol::{Afi, Safi};
+use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::{
     is_valid_unicast_ipv4, parse_nlri_list, parse_nlri_v6_list, read_u32, ParserError,
 };
@@ -556,7 +556,7 @@ pub(super) fn read_attr_cluster_list(bytes: &[u8]) -> Vec<Ipv4Addr> {
 
 pub(super) fn read_attr_mp_reach_nlri(
     bytes: &[u8],
-    add_path: bool,
+    format: MessageFormat,
 ) -> Result<MpReachNlri, ParserError> {
     // MP_REACH_NLRI: AFI(2) + SAFI(1) + NextHopLen(1) + NextHop + Reserved(1) + NLRI
     const HEADER_SIZE: usize = 4; // AFI(2) + SAFI(1) + NextHopLen(1)
@@ -573,6 +573,9 @@ pub(super) fn read_attr_mp_reach_nlri(
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
     let next_hop_len = bytes[3] as usize;
+
+    // Resolve ADD-PATH from the AFI/SAFI declared in this attribute
+    let add_path = format.add_path.contains(&AfiSafi::new(afi, safi));
 
     validate_mp_reach_buffer(&afi, next_hop_len, bytes, HEADER_SIZE, RESERVED_SIZE)?;
 
@@ -618,7 +621,7 @@ pub(super) fn read_attr_mp_reach_nlri(
 
 pub(super) fn read_attr_mp_unreach_nlri(
     bytes: &[u8],
-    add_path: bool,
+    format: MessageFormat,
 ) -> Result<MpUnreachNlri, ParserError> {
     if bytes.len() < 3 {
         return Err(ParserError::BgpError {
@@ -629,6 +632,9 @@ pub(super) fn read_attr_mp_unreach_nlri(
 
     let afi = Afi::try_from(u16::from_be_bytes([bytes[0], bytes[1]]))?;
     let safi = Safi::try_from(bytes[2])?;
+
+    // Resolve ADD-PATH from the AFI/SAFI declared in this attribute
+    let add_path = format.add_path.contains(&AfiSafi::new(afi, safi));
 
     let nlri_bytes = &bytes[3..];
     let withdrawn_routes = match afi {
@@ -692,7 +698,6 @@ pub(super) fn read_path_attribute(
     format: MessageFormat,
 ) -> Result<(Option<PathAttribute>, u8), ParserError> {
     let use_4byte_asn = format.use_4byte_asn;
-    let add_path = format.add_path;
     let attribute_flag = PathAttrFlag(bytes[0]);
     let attr_type_code = bytes[1];
 
@@ -794,7 +799,7 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::ClusterList(cluster_list)
                 }
                 AttrType::MpReachNlri => {
-                    let mp_reach = read_attr_mp_reach_nlri(attr_data, add_path)?;
+                    let mp_reach = read_attr_mp_reach_nlri(attr_data, format)?;
                     // Validate routes match declared AFI
                     if !validate_nlri_afi(&mp_reach.afi, &mp_reach.nlri) {
                         return Err(optional_attribute_error(attr_bytes));
@@ -802,7 +807,7 @@ pub(super) fn read_path_attribute(
                     PathAttrValue::MpReachNlri(mp_reach)
                 }
                 AttrType::MpUnreachNlri => {
-                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data, add_path)?;
+                    let mp_unreach = read_attr_mp_unreach_nlri(attr_data, format)?;
                     // Validate routes match declared AFI
                     if !validate_nlri_afi(&mp_unreach.afi, &mp_unreach.withdrawn_routes) {
                         return Err(optional_attribute_error(attr_bytes));
@@ -1102,7 +1107,8 @@ mod tests {
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
     use crate::bgp::{
-        nlri_v4, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO, PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
+        nlri_v4, ADDPATH_FORMAT, DEFAULT_FORMAT, PATH_ATTR_COMMUNITIES_TWO,
+        PATH_ATTR_EXTENDED_COMMUNITIES_TWO,
     };
     use crate::net::Ipv6Net;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1862,12 +1868,12 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_reach_nlri_ipv4() {
-        // (name, input, add_path, expected_nlri)
-        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+        // (name, input, format, expected_nlri)
+        let tests: Vec<(&str, &[u8], MessageFormat, Vec<Nlri>)> = vec![
             (
                 "without add_path",
                 MP_REACH_IPV4_SAMPLE,
-                false,
+                DEFAULT_FORMAT,
                 vec![nlri_v4(10, 0, 0, 0, 8, None)],
             ),
             (
@@ -1881,7 +1887,7 @@ mod tests {
                     // NLRI: path_id=42, 10.0.0.0/8
                     0x00, 0x00, 0x00, 0x2a, 0x08, 0x0a,
                 ],
-                true,
+                ADDPATH_FORMAT,
                 vec![nlri_v4(10, 0, 0, 0, 8, Some(42))],
             ),
             (
@@ -1897,7 +1903,7 @@ mod tests {
                     // NLRI 2: path_id=2, 172.16.0.0/16
                     0x00, 0x00, 0x00, 0x02, 0x10, 0xac, 0x10,
                 ],
-                true,
+                ADDPATH_FORMAT,
                 vec![
                     nlri_v4(10, 0, 0, 0, 8, Some(1)),
                     nlri_v4(172, 16, 0, 0, 16, Some(2)),
@@ -1905,8 +1911,8 @@ mod tests {
             ),
         ];
 
-        for (name, input, add_path, expected_nlri) in tests {
-            let result = read_attr_mp_reach_nlri(input, add_path).unwrap();
+        for (name, input, format, expected_nlri) in tests {
+            let result = read_attr_mp_reach_nlri(input, format).unwrap();
             assert_eq!(result.afi, Afi::Ipv4, "{name}");
             assert_eq!(result.safi, Safi::Unicast, "{name}");
             assert_eq!(
@@ -1931,7 +1937,7 @@ mod tests {
         };
 
         let bytes = write_attr_mp_reach_nlri(&mp_reach);
-        let parsed = read_attr_mp_reach_nlri(&bytes, true).unwrap();
+        let parsed = read_attr_mp_reach_nlri(&bytes, ADDPATH_FORMAT).unwrap();
 
         assert_eq!(parsed.afi, mp_reach.afi);
         assert_eq!(parsed.safi, mp_reach.safi);
@@ -1950,13 +1956,13 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // Reserved
         ];
 
-        // (name, nlri_bytes, add_path, expected_nlri)
-        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+        // (name, nlri_bytes, format, expected_nlri)
+        let tests: Vec<(&str, &[u8], MessageFormat, Vec<Nlri>)> = vec![
             (
                 "without add_path",
                 // 2001:db8::/32
                 &[0x20, 0x20, 0x01, 0x0d, 0xb8],
-                false,
+                DEFAULT_FORMAT,
                 vec![Nlri {
                     prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
@@ -1969,7 +1975,7 @@ mod tests {
                 "with add_path",
                 // path_id=100, 2001:db8::/32
                 &[0x00, 0x00, 0x00, 0x64, 0x20, 0x20, 0x01, 0x0d, 0xb8],
-                true,
+                ADDPATH_FORMAT,
                 vec![Nlri {
                     prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
@@ -1980,11 +1986,11 @@ mod tests {
             ),
         ];
 
-        for (name, nlri_bytes, add_path, expected_nlri) in tests {
+        for (name, nlri_bytes, format, expected_nlri) in tests {
             let mut input = ipv6_header.to_vec();
             input.extend_from_slice(nlri_bytes);
 
-            let result = read_attr_mp_reach_nlri(&input, add_path).unwrap();
+            let result = read_attr_mp_reach_nlri(&input, format).unwrap();
             assert_eq!(result.afi, Afi::Ipv6, "{name}");
             assert_eq!(result.safi, Safi::Unicast, "{name}");
             assert_eq!(
@@ -1998,8 +2004,8 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv4() {
-        // (name, input, add_path, expected_withdrawn)
-        let tests: Vec<(&str, Vec<u8>, bool, Vec<Nlri>)> = vec![
+        // (name, input, format, expected_withdrawn)
+        let tests: Vec<(&str, Vec<u8>, MessageFormat, Vec<Nlri>)> = vec![
             (
                 "without add_path",
                 vec![
@@ -2007,7 +2013,7 @@ mod tests {
                     0x01, // SAFI = unicast
                     0x08, 0x0a, // Withdrawn: 10.0.0.0/8
                 ],
-                false,
+                DEFAULT_FORMAT,
                 vec![nlri_v4(10, 0, 0, 0, 8, None)],
             ),
             (
@@ -2018,7 +2024,7 @@ mod tests {
                     // path_id=5, 10.0.0.0/8
                     0x00, 0x00, 0x00, 0x05, 0x08, 0x0a,
                 ],
-                true,
+                ADDPATH_FORMAT,
                 vec![nlri_v4(10, 0, 0, 0, 8, Some(5))],
             ),
             (
@@ -2030,7 +2036,7 @@ mod tests {
                     0x00, 0x00, 0x00, 0x01, 0x08, 0x0a, // path_id=2, 10.0.0.0/8
                     0x00, 0x00, 0x00, 0x02, 0x08, 0x0a,
                 ],
-                true,
+                ADDPATH_FORMAT,
                 vec![
                     nlri_v4(10, 0, 0, 0, 8, Some(1)),
                     nlri_v4(10, 0, 0, 0, 8, Some(2)),
@@ -2038,8 +2044,8 @@ mod tests {
             ),
         ];
 
-        for (name, input, add_path, expected_withdrawn) in tests {
-            let result = read_attr_mp_unreach_nlri(&input, add_path).unwrap();
+        for (name, input, format, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(&input, format).unwrap();
             assert_eq!(result.afi, Afi::Ipv4, "{name}");
             assert_eq!(result.safi, Safi::Unicast, "{name}");
             assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");
@@ -2048,8 +2054,8 @@ mod tests {
 
     #[test]
     fn test_read_attr_mp_unreach_nlri_ipv6() {
-        // (name, input, add_path, expected_withdrawn)
-        let tests: Vec<(&str, &[u8], bool, Vec<Nlri>)> = vec![
+        // (name, input, format, expected_withdrawn)
+        let tests: Vec<(&str, &[u8], MessageFormat, Vec<Nlri>)> = vec![
             (
                 "without add_path",
                 &[
@@ -2057,7 +2063,7 @@ mod tests {
                     0x01, // SAFI = unicast
                     0x20, 0x20, 0x01, 0x0d, 0xb8, // Withdrawn: 2001:db8::/32
                 ],
-                false,
+                DEFAULT_FORMAT,
                 vec![Nlri {
                     prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
@@ -2074,7 +2080,7 @@ mod tests {
                     // path_id=7, 2001:db8::/32
                     0x00, 0x00, 0x00, 0x07, 0x20, 0x20, 0x01, 0x0d, 0xb8,
                 ],
-                true,
+                ADDPATH_FORMAT,
                 vec![Nlri {
                     prefix: IpNetwork::V6(Ipv6Net {
                         address: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
@@ -2085,8 +2091,8 @@ mod tests {
             ),
         ];
 
-        for (name, input, add_path, expected_withdrawn) in tests {
-            let result = read_attr_mp_unreach_nlri(input, add_path).unwrap();
+        for (name, input, format, expected_withdrawn) in tests {
+            let result = read_attr_mp_unreach_nlri(input, format).unwrap();
             assert_eq!(result.afi, Afi::Ipv6, "{name}");
             assert_eq!(result.safi, Safi::Unicast, "{name}");
             assert_eq!(result.withdrawn_routes, expected_withdrawn, "{name}");

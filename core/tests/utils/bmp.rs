@@ -15,7 +15,7 @@
 //! BMP testing utilities
 
 use super::common::TestServer;
-use bgpgg::bgp::msg::{MessageFormat, BGP_HEADER_SIZE_BYTES};
+use bgpgg::bgp::msg::{AddPathMask, MessageFormat, BGP_HEADER_SIZE_BYTES};
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bmp::msg::BmpMessage;
@@ -322,7 +322,7 @@ impl FakeBmpServer {
             body[bgp_body_offset..].to_vec(),
             MessageFormat {
                 use_4byte_asn: true,
-                add_path: false,
+                add_path: AddPathMask::NONE,
             },
         )
         .unwrap();
@@ -627,7 +627,7 @@ impl FakeBmpServer {
             body[bgp_body_offset..].to_vec(),
             MessageFormat {
                 use_4byte_asn: false,
-                add_path: false,
+                add_path: AddPathMask::NONE,
             },
         )
         .unwrap();

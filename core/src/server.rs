@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::Message;
+use crate::bgp::msg::{Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
@@ -412,6 +412,22 @@ impl ConnectionState {
         self.capabilities
             .as_ref()
             .is_some_and(|caps| caps.add_path_receive())
+    }
+
+    /// MessageFormat for encoding outgoing messages to this peer
+    pub fn send_format(&self) -> MessageFormat {
+        self.capabilities
+            .as_ref()
+            .map(|caps| caps.send_format())
+            .unwrap_or(PRE_OPEN_FORMAT)
+    }
+
+    /// MessageFormat for parsing incoming messages from this peer
+    pub fn receive_format(&self) -> MessageFormat {
+        self.capabilities
+            .as_ref()
+            .map(|caps| caps.receive_format())
+            .unwrap_or(PRE_OPEN_FORMAT)
     }
 }
 
@@ -971,14 +987,20 @@ impl BgpServer {
                 continue;
             }
 
+            let send_format = conn.send_format();
+
             let afis = [
                 (
                     Afi::Ipv4,
-                    conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)),
+                    send_format
+                        .add_path
+                        .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)),
                 ),
                 (
                     Afi::Ipv6,
-                    conn.add_path_send_negotiated(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
+                    send_format
+                        .add_path
+                        .contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
                 ),
             ];
 
@@ -993,14 +1015,14 @@ impl BgpServer {
                     .map(|conn_info| conn_info.local_address)
                     .unwrap_or(local_addr),
                 export_policies: &export_policies,
-                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
+                peer_supports_4byte_asn: send_format.use_4byte_asn,
                 rr_client: entry.config.rr_client,
                 cluster_id,
-                add_path_send: false, // overridden per-AFI below
+                add_path_send: send_format.add_path,
             };
 
-            for (afi, add_path_send) in afis {
-                let source = if add_path_send {
+            for (afi, has_add_path) in afis {
+                let source = if has_add_path {
                     &delta.changed
                 } else {
                     &delta.best_changed
@@ -1021,15 +1043,7 @@ impl BgpServer {
                     continue;
                 }
 
-                propagate_routes_to_peer(
-                    &PeerExportContext {
-                        add_path_send,
-                        ..ctx
-                    },
-                    &changed,
-                    loc_rib,
-                    &mut entry.adj_rib_out,
-                );
+                propagate_routes_to_peer(&ctx, &changed, loc_rib, &mut entry.adj_rib_out);
             }
         }
     }
