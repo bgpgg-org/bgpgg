@@ -22,8 +22,7 @@ use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
-    batch_announcements_by_path, compute_routes_for_peer, send_batched_announcements,
-    PeerExportContext,
+    batch_announcements_by_path, export_all_routes_to_peer, PeerExportContext,
 };
 use crate::peer::{BgpState, PeerOp, Withdrawal};
 use crate::policy::sets::{
@@ -912,7 +911,7 @@ impl BgpServer {
 
     fn resend_routes_to_peer(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
-            warn!(%peer_ip, "SOFT_OUT for unknown peer");
+            warn!(%peer_ip, "resend routes for unknown peer");
             return;
         };
 
@@ -931,8 +930,6 @@ impl BgpServer {
             warn!(?safi, "unsupported SAFI");
             return;
         }
-
-        const CHUNK_SIZE: usize = 10_000;
 
         if let Some(peer_tx) = &conn.peer_tx {
             let afi_safi = AfiSafi::new(afi, safi);
@@ -963,17 +960,13 @@ impl BgpServer {
                 add_path: add_path_send,
             };
 
-            let mut all_sent = Vec::new();
+            let sent = export_all_routes_to_peer(&routes, &ctx, format);
+            info!(%peer_ip, ?afi, total_routes = sent.len(), "resent routes to peer");
 
-            for chunk in routes.chunks(CHUNK_SIZE) {
-                let filtered = compute_routes_for_peer(chunk, &ctx);
-                send_batched_announcements(&ctx, &filtered, format);
-                all_sent.extend(filtered);
+            peer_info.adj_rib_out.clear_afi(afi);
+            for (prefix, path) in sent {
+                peer_info.adj_rib_out.insert(prefix, path);
             }
-
-            info!(%peer_ip, ?afi, total_routes = all_sent.len(), "completed SOFT_OUT reset");
-
-            peer_info.adj_rib_out.replace_afi(afi, all_sent);
         }
     }
 
@@ -1790,6 +1783,11 @@ impl BgpServer {
 
         let _ = response.send(Ok(()));
     }
+
+    async fn handle_route_refresh(&mut self, peer_ip: std::net::IpAddr, afi: Afi, safi: Safi) {
+        info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
+        self.resend_routes_to_peer(peer_ip, afi, safi);
+    }
 }
 
 /// Parse community string in format "65000:100" or decimal
@@ -1915,85 +1913,4 @@ async fn send_initial_bmp_state_to_task(
         }
     }
     let _ = response.send(Ok(()));
-}
-
-impl BgpServer {
-    async fn handle_route_refresh(&mut self, peer_ip: std::net::IpAddr, afi: Afi, safi: Safi) {
-        info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
-
-        // Get peer info
-        let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
-            warn!(%peer_ip, "ROUTE_REFRESH from unknown peer");
-            return;
-        };
-
-        // Only process if peer is Established
-        let Some(conn) = peer_info.established_conn() else {
-            warn!(%peer_ip, "ROUTE_REFRESH from non-Established peer");
-            return;
-        };
-
-        let Some(peer_asn) = conn.asn else {
-            warn!(%peer_ip, "ROUTE_REFRESH before ASN known");
-            return;
-        };
-
-        let export_policies = &peer_info.export_policies;
-        if export_policies.is_empty() {
-            warn!(%peer_ip, "export policies not initialized");
-            return;
-        }
-
-        // Only Unicast SAFI is supported currently
-        if safi != Safi::Unicast {
-            warn!(?safi, "unsupported SAFI requested");
-            return;
-        }
-
-        const CHUNK_SIZE: usize = 10_000;
-
-        info!(%peer_ip, ?afi, ?safi, chunk_size = CHUNK_SIZE, "processing ROUTE_REFRESH with chunking");
-
-        if let Some(peer_tx) = &conn.peer_tx {
-            let afi_safi = AfiSafi::new(afi, safi);
-            let add_path_send = conn.add_path_send_negotiated(&afi_safi);
-
-            let ctx = PeerExportContext {
-                peer_addr: peer_ip,
-                peer_tx,
-                local_asn: self.config.asn,
-                peer_asn,
-                local_next_hop: conn
-                    .conn_info
-                    .as_ref()
-                    .map(|conn_info| conn_info.local_address)
-                    .unwrap_or(self.local_addr),
-                export_policies,
-                peer_supports_4byte_asn: conn.supports_four_octet_asn(),
-                rr_client: peer_info.config.rr_client,
-                cluster_id: self.config.cluster_id(),
-                add_path_send,
-            };
-
-            // Collect routes: all paths for ADD-PATH peers, best-only otherwise
-            let routes = self.loc_rib.get_paths(afi, add_path_send);
-
-            let format = MessageFormat {
-                use_4byte_asn: ctx.peer_supports_4byte_asn,
-                add_path: add_path_send,
-            };
-
-            let mut all_sent = Vec::new();
-
-            for chunk in routes.chunks(CHUNK_SIZE) {
-                let filtered = compute_routes_for_peer(chunk, &ctx);
-                send_batched_announcements(&ctx, &filtered, format);
-                all_sent.extend(filtered);
-            }
-
-            info!(%peer_ip, total_routes = all_sent.len(), "completed ROUTE_REFRESH");
-
-            peer_info.adj_rib_out.replace_afi(afi, all_sent);
-        }
-    }
 }

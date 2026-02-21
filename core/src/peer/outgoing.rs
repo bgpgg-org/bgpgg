@@ -504,8 +504,26 @@ pub fn build_addpath_updates(
     (to_announce, to_withdraw)
 }
 
+const CHUNK_SIZE: usize = 10_000;
+
+/// Export all routes to a peer, filtering through export policy.
+/// Returns the routes that were actually sent (post-policy).
+pub fn export_all_routes_to_peer(
+    routes: &[PrefixPath],
+    ctx: &PeerExportContext,
+    format: MessageFormat,
+) -> Vec<PrefixPath> {
+    let mut all_sent = Vec::new();
+    for chunk in routes.chunks(CHUNK_SIZE) {
+        let filtered = compute_routes_for_peer(chunk, ctx);
+        send_batched_announcements(ctx, &filtered, format);
+        all_sent.extend(filtered);
+    }
+    all_sent
+}
+
 /// Batch and send announcements to a peer.
-pub fn send_batched_announcements(
+fn send_batched_announcements(
     ctx: &PeerExportContext,
     to_send: &[PrefixPath],
     format: MessageFormat,

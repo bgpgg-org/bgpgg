@@ -14,7 +14,7 @@
 
 use crate::bgp::multiprotocol::Afi;
 use crate::net::IpNetwork;
-use crate::rib::{Path, PrefixPath, Route};
+use crate::rib::{Path, Route};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -62,17 +62,12 @@ impl AdjRibOut {
         }
     }
 
-    /// Replace all entries for a given AFI with newly sent routes.
-    /// Removes existing entries matching the AFI, then inserts the new ones.
-    pub fn replace_afi(&mut self, afi: Afi, sent: Vec<PrefixPath>) {
+    /// Remove all entries for a given AFI.
+    pub fn clear_afi(&mut self, afi: Afi) {
         self.routes.retain(|prefix, _| match afi {
             Afi::Ipv4 => !matches!(prefix, IpNetwork::V4(_)),
             Afi::Ipv6 => !matches!(prefix, IpNetwork::V6(_)),
         });
-
-        for (prefix, path) in sent {
-            self.insert(prefix, path);
-        }
     }
 
     /// Clear all routes (used on peer disconnect).
@@ -203,20 +198,21 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_afi() {
+    fn test_clear_afi() {
         let mut rib = AdjRibOut::new();
         let prefix_v4_a = prefix_v4("10.0.0.0/24");
         let prefix_v4_b = prefix_v4("10.0.1.0/24");
         rib.insert(prefix_v4_a, make_path(1));
         rib.insert(prefix_v4_b, make_path(2));
 
-        // Replace with a single new route
-        let new_path = make_path(3);
-        let new_prefix = prefix_v4("192.168.0.0/24");
-        rib.replace_afi(Afi::Ipv4, vec![(new_prefix, new_path)]);
+        rib.clear_afi(Afi::Ipv4);
 
         assert!(!rib.has_prefix(&prefix_v4_a));
         assert!(!rib.has_prefix(&prefix_v4_b));
+
+        // Insert new route after clear
+        let new_prefix = prefix_v4("192.168.0.0/24");
+        rib.insert(new_prefix, make_path(3));
         assert!(rib.has_prefix(&new_prefix));
     }
 }
