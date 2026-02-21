@@ -59,6 +59,28 @@ pub struct PeerExportContext<'a> {
     pub add_path_send: bool,
 }
 
+/// Check if a path should be exported to a peer (pre-policy filtering).
+fn should_export_to_peer(path: &Path, ctx: &PeerExportContext) -> bool {
+    let is_ibgp = ctx.local_asn == ctx.peer_asn;
+
+    // RFC 4456: iBGP reflection requires at least one RR client
+    if is_ibgp && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client {
+        return false;
+    }
+
+    // Don't send a path back to the peer it was learned from
+    if path.source().peer_ip() == Some(ctx.peer_addr) {
+        return false;
+    }
+
+    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
+    if should_filter_by_community(path.communities(), ctx.local_asn, ctx.peer_asn) {
+        return false;
+    }
+
+    true
+}
+
 /// Check if a route should be filtered based on well-known communities
 /// RFC 1997 Section 3: Well-known communities
 fn should_filter_by_community(communities: &[u32], local_asn: u32, peer_asn: u32) -> bool {
@@ -343,25 +365,11 @@ fn compute_export_path(
     path: &Arc<Path>,
     ctx: &PeerExportContext,
 ) -> Option<Path> {
+    if !should_export_to_peer(path, ctx) {
+        return None;
+    }
+
     let is_ibgp = ctx.local_asn == ctx.peer_asn;
-
-    // RFC 4456: Route reflector filtering for iBGP routes to iBGP peers
-    // - eBGP/Local routes -> always send
-    // - iBGP from client -> send to all iBGP peers
-    // - iBGP from non-client -> send only to clients
-    if is_ibgp && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client {
-        return None;
-    }
-
-    // Don't send a path back to the peer it was learned from
-    if path.source().peer_ip() == Some(ctx.peer_addr) {
-        return None;
-    }
-
-    // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
-    if should_filter_by_community(path.communities(), ctx.local_asn, ctx.peer_asn) {
-        return None;
-    }
     // Clone inner Path for policy mutation
     let mut path_mut = (**path).clone();
 
