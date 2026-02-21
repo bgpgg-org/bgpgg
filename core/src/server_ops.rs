@@ -30,6 +30,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::{DefinedSetType, PolicyResult};
+use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{PathAttrs, PrefixPath, Route};
 use crate::server::PolicyDirection;
 use crate::server::{
@@ -947,27 +948,17 @@ impl BgpServer {
             peer_asn,
             local_next_hop,
             export_policies,
-            peer_supports_4byte_asn: send_format.use_4byte_asn,
             rr_client: peer_info.config.rr_client,
             cluster_id: self.config.cluster_id(),
-            add_path_send: send_format.add_path,
+            send_format,
         };
 
-        // Union of loc-rib and adj-rib-out prefixes: ensures withdrawals
-        // are sent for paths previously exported but now filtered/absent.
-        let mut all_prefixes = self.loc_rib.prefixes_for_afi(afi);
-        for prefix in peer_info.adj_rib_out.prefixes_for_afi(afi) {
-            if !all_prefixes.contains(&prefix) {
-                all_prefixes.push(prefix);
-            }
-        }
-
-        propagate_routes_to_peer(
-            &ctx,
-            &all_prefixes,
-            &self.loc_rib,
-            &mut peer_info.adj_rib_out,
-        );
+        let all_prefixes = self.loc_rib.prefixes_for_afi(afi);
+        let delta = RouteDelta {
+            best_changed: all_prefixes.clone(),
+            changed: all_prefixes,
+        };
+        propagate_routes_to_peer(&ctx, &delta, &self.loc_rib, &mut peer_info.adj_rib_out);
 
         info!(%peer_ip, ?afi, "resent routes to peer");
     }

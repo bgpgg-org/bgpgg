@@ -18,89 +18,9 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::grpc::proto::{
-    defined_set_config, ActionsConfig, ConditionsConfig, DefinedSetConfig, Origin, PrefixMatch,
-    PrefixSetData, Route, StatementConfig,
+    ActionsConfig, ConditionsConfig, DefinedSetConfig, Origin, Route, StatementConfig,
 };
 use tokio::time::Duration;
-
-// Test helpers
-
-/// Create a prefix-set with given name and prefixes
-fn prefix_set(name: &str, prefixes: Vec<(&str, Option<&str>)>) -> DefinedSetConfig {
-    DefinedSetConfig {
-        set_type: "prefix-set".to_string(),
-        name: name.to_string(),
-        config: Some(defined_set_config::Config::PrefixSet(PrefixSetData {
-            prefixes: prefixes
-                .into_iter()
-                .map(|(prefix, range)| PrefixMatch {
-                    prefix: prefix.to_string(),
-                    masklength_range: range.map(|s| s.to_string()),
-                })
-                .collect(),
-        })),
-    }
-}
-
-/// Create an export policy that rejects matching prefix-set, accepts rest
-async fn apply_export_reject_policy(
-    server: &mut TestServer,
-    peer_addr: &str,
-    set_name: &str,
-    prefixes: Vec<(&str, Option<&str>)>,
-) {
-    // Add prefix-set
-    server
-        .client
-        .add_defined_set(prefix_set(set_name, prefixes), false)
-        .await
-        .unwrap();
-
-    // Create policy: reject matching prefixes, accept rest
-    server
-        .client
-        .add_policy(
-            "export-policy".to_string(),
-            vec![
-                StatementConfig {
-                    conditions: Some(ConditionsConfig {
-                        match_prefix_set: Some(bgpgg::grpc::proto::MatchSetRef {
-                            set_name: set_name.to_string(),
-                            match_option: "any".to_string(),
-                        }),
-                        ..Default::default()
-                    }),
-                    actions: Some(ActionsConfig {
-                        reject: Some(true),
-                        ..Default::default()
-                    }),
-                },
-                StatementConfig {
-                    conditions: None,
-                    actions: Some(ActionsConfig {
-                        accept: Some(true),
-                        ..Default::default()
-                    }),
-                },
-            ],
-        )
-        .await
-        .unwrap();
-
-    // Assign to peer
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec!["export-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
-}
-
-// Tests
 
 #[tokio::test]
 async fn test_export_policy_prefix_match() {
@@ -133,11 +53,11 @@ async fn test_export_policy_prefix_match() {
     ];
 
     for tc in cases {
-        let (server1, mut server2) = setup_two_peered_servers(PeerConfig::default()).await;
+        let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
         // Apply export policy on server2
         apply_export_reject_policy(
-            &mut server2,
+            &server2,
             &server1.address.to_string(),
             "blocked",
             tc.blocked_prefixes,

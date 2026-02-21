@@ -38,12 +38,14 @@ use bgpgg::bgp::msg_notification::NotificationMessage;
 use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
+use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    AddPathSendMode, AdminState, AsPathSegment, AsPathSegmentType, BgpState, ExtendedCommunity,
-    GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, Route,
-    SessionConfig, UnknownAttribute,
+    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, AsPathSegment,
+    AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
+    GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, PrefixMatch,
+    PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
 };
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::server::BgpServer;
@@ -1471,6 +1473,8 @@ pub struct FakePeer {
     pub listener: Option<TcpListener>,
     /// Whether this peer advertised 4-byte ASN capability
     pub supports_4byte_asn: bool,
+    /// ADD-PATH mask for parsing incoming UPDATEs from the remote peer.
+    pub add_path: AddPathMask,
 }
 
 impl FakePeer {
@@ -1497,6 +1501,7 @@ impl FakePeer {
             asn: 0,
             listener: None,
             supports_4byte_asn: false,
+            add_path: AddPathMask::NONE,
         }
     }
 
@@ -1510,6 +1515,7 @@ impl FakePeer {
             asn: local_asn,
             listener: Some(listener),
             supports_4byte_asn: false,
+            add_path: AddPathMask::NONE,
         }
     }
 
@@ -1525,11 +1531,34 @@ impl FakePeer {
         self.stream = Some(stream);
     }
 
+    /// Scan raw capabilities for ADD-PATH (code 69) entries where we advertised
+    /// receive (mode bit 0). Returns an AddPathMask for those AFI/SAFIs.
+    fn parse_addpath_receive(caps: &[Vec<u8>]) -> AddPathMask {
+        let mut mask = AddPathMask::NONE;
+        for cap in caps {
+            if cap.len() >= 6 && cap[0] == 69 {
+                let data = &cap[2..];
+                for chunk in data.chunks_exact(4) {
+                    let afi = u16::from_be_bytes([chunk[0], chunk[1]]);
+                    let safi = chunk[2];
+                    let mode = chunk[3];
+                    // Bit 0 = receive: we told the peer we can receive ADD-PATH
+                    if mode & 1 != 0 {
+                        if let (Ok(afi), Ok(safi)) = (Afi::try_from(afi), Safi::try_from(safi)) {
+                            mask = mask.with(&AfiSafi::new(afi, safi));
+                        }
+                    }
+                }
+            }
+        }
+        mask
+    }
+
     /// Returns the MessageFormat based on negotiated capabilities.
     fn message_format(&self) -> MessageFormat {
         MessageFormat {
             use_4byte_asn: self.supports_4byte_asn,
-            add_path: AddPathMask::NONE,
+            add_path: self.add_path,
         }
     }
 
@@ -1618,15 +1647,16 @@ impl FakePeer {
         let _server_open = self.read_open().await;
 
         // Send our OPEN
-        if let Some(caps) = capabilities {
+        if let Some(caps) = &capabilities {
             let asn_2byte = if asn > 65535 { AS_TRANS } else { asn as u16 };
             self.supports_4byte_asn = true;
+            self.add_path = Self::parse_addpath_receive(caps);
             let open = build_raw_open(
                 asn_2byte,
                 300,
                 u32::from(router_id),
                 RawOpenOptions {
-                    capabilities: Some(caps),
+                    capabilities: Some(caps.clone()),
                     ..Default::default()
                 },
             );
@@ -2130,6 +2160,17 @@ pub fn build_multiprotocol_capability_ipv4_unicast() -> Vec<u8> {
     ]
 }
 
+/// Build Multiprotocol Extensions capability (RFC 4760) for IPv6 Unicast
+pub fn build_multiprotocol_capability_ipv6_unicast() -> Vec<u8> {
+    vec![
+        1, // Capability code 1 = Multiprotocol Extensions
+        4, // Length: 4 bytes
+        0, 2, // AFI = 2 (IPv6)
+        0, // Reserved
+        1, // SAFI = 1 (Unicast)
+    ]
+}
+
 /// Build ADD-PATH capability (RFC 7911) for IPv4 Unicast, send+receive
 pub fn build_addpath_capability_ipv4_unicast() -> Vec<u8> {
     vec![
@@ -2139,4 +2180,86 @@ pub fn build_addpath_capability_ipv4_unicast() -> Vec<u8> {
         1, // SAFI = 1 (Unicast)
         3, // Send + Receive
     ]
+}
+
+/// Build ADD-PATH capability (RFC 7911) for IPv6 Unicast, send+receive
+pub fn build_addpath_capability_ipv6_unicast() -> Vec<u8> {
+    vec![
+        69, // Capability code 69 = ADD-PATH
+        4,  // Length: 4 bytes
+        0, 2, // AFI = 2 (IPv6)
+        1, // SAFI = 1 (Unicast)
+        3, // Send + Receive
+    ]
+}
+
+/// Create an export policy that rejects matching prefixes and accepts the rest,
+/// then assign it to the given peer.
+pub async fn apply_export_reject_policy(
+    server: &TestServer,
+    peer_addr: &str,
+    policy_name: &str,
+    prefixes: Vec<(&str, Option<&str>)>,
+) {
+    server
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "prefix-set".to_string(),
+                name: policy_name.to_string(),
+                config: Some(defined_set_config::Config::PrefixSet(PrefixSetData {
+                    prefixes: prefixes
+                        .into_iter()
+                        .map(|(prefix, range)| PrefixMatch {
+                            prefix: prefix.to_string(),
+                            masklength_range: range.map(|s| s.to_string()),
+                        })
+                        .collect(),
+                })),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .add_policy(
+            policy_name.to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_prefix_set: Some(bgpgg::grpc::proto::MatchSetRef {
+                            set_name: policy_name.to_string(),
+                            match_option: "any".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .set_policy_assignment(
+            peer_addr.to_string(),
+            "export".to_string(),
+            vec![policy_name.to_string()],
+            None,
+        )
+        .await
+        .unwrap();
 }

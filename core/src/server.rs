@@ -989,21 +989,6 @@ impl BgpServer {
 
             let send_format = conn.send_format();
 
-            let afis = [
-                (
-                    Afi::Ipv4,
-                    send_format
-                        .add_path
-                        .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)),
-                ),
-                (
-                    Afi::Ipv6,
-                    send_format
-                        .add_path
-                        .contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
-                ),
-            ];
-
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
@@ -1015,36 +1000,12 @@ impl BgpServer {
                     .map(|conn_info| conn_info.local_address)
                     .unwrap_or(local_addr),
                 export_policies: &export_policies,
-                peer_supports_4byte_asn: send_format.use_4byte_asn,
                 rr_client: entry.config.rr_client,
                 cluster_id,
-                add_path_send: send_format.add_path,
+                send_format,
             };
 
-            for (afi, has_add_path) in afis {
-                let source = if has_add_path {
-                    &delta.changed
-                } else {
-                    &delta.best_changed
-                };
-
-                let changed: Vec<IpNetwork> = source
-                    .iter()
-                    .filter(|prefix| {
-                        matches!(
-                            (prefix, afi),
-                            (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
-                        )
-                    })
-                    .copied()
-                    .collect();
-
-                if changed.is_empty() {
-                    continue;
-                }
-
-                propagate_routes_to_peer(&ctx, &changed, loc_rib, &mut entry.adj_rib_out);
-            }
+            propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);
         }
     }
 }

@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use crate::bgp::merge_as_paths;
+use crate::bgp::msg::AddPathMask;
 use crate::bgp::msg_update::{
     Aggregator, AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttribute, UpdateMessage,
 };
 use crate::bgp::msg_update_types::{AsPath, LargeCommunity, AS_TRANS};
+use crate::bgp::multiprotocol::AfiSafi;
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
 
@@ -113,6 +115,15 @@ impl Path {
 
     pub fn cluster_list(&self) -> &Vec<std::net::Ipv4Addr> {
         &self.attrs.cluster_list
+    }
+
+    /// Returns the local path ID if ADD-PATH is enabled for this AFI/SAFI
+    pub fn path_id_for(&self, add_path: &AddPathMask, afi_safi: &AfiSafi) -> Option<u32> {
+        if add_path.contains(afi_safi) {
+            self.local_path_id
+        } else {
+            None
+        }
     }
 
     /// Same source peer and same remote path ID (ADD-PATH identity).

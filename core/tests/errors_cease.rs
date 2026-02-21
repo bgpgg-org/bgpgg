@@ -17,6 +17,7 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::msg::AddPathMask;
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::Config;
 #[allow(hidden_glob_reexports)]
@@ -288,6 +289,7 @@ async fn test_collision_immediate() {
             asn: 65002,
             listener: None,
             supports_4byte_asn: false,
+            add_path: AddPathMask::NONE,
         };
 
         // Complete handshake on incoming
@@ -385,6 +387,7 @@ async fn test_collision_connect_state() {
         asn: 65002,
         listener: None,
         supports_4byte_asn: false,
+        add_path: AddPathMask::NONE,
     };
 
     // DelayOpen timer expires, server sends OPEN on outgoing connection
@@ -475,6 +478,7 @@ async fn test_collision_deferred() {
                 asn: 65002,
                 listener: None,
                 supports_4byte_asn: false,
+                add_path: AddPathMask::NONE,
             };
 
             incoming_peer.read_open().await;
@@ -533,6 +537,7 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
         asn: 65002,
         listener: None,
         supports_4byte_asn: false,
+        add_path: AddPathMask::NONE,
     };
 
     // Read OPEN from incoming - blocks until candidate is spawned and sends OPEN
@@ -588,6 +593,7 @@ async fn test_collision_candidate_asn_preserved_on_promotion() {
         asn: 65002,
         listener: None,
         supports_4byte_asn: false,
+        add_path: AddPathMask::NONE,
     };
 
     // Read OPEN from candidate

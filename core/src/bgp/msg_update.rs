@@ -129,18 +129,10 @@ impl UpdateMessage {
             });
         }
 
-        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
-        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
-        let ipv4_path_id = if format.add_path.contains(&ipv4_unicast) {
-            path.local_path_id
-        } else {
-            None
-        };
-        let ipv6_path_id = if format.add_path.contains(&ipv6_unicast) {
-            path.local_path_id
-        } else {
-            None
-        };
+        let ipv4_path_id =
+            path.path_id_for(&format.add_path, &AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        let ipv6_path_id =
+            path.path_id_for(&format.add_path, &AfiSafi::new(Afi::Ipv6, Safi::Unicast));
 
         // MP_REACH_NLRI for IPv6 routes (RFC 4760)
         if !ipv6_routes.is_empty() {

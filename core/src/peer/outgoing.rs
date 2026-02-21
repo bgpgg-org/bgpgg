@@ -15,17 +15,18 @@
 //! Route propagation logic for BGP UPDATE messages
 
 use crate::bgp::ext_community::is_transitive;
-use crate::bgp::msg::{AddPathMask, Message, MessageFormat, MAX_MESSAGE_SIZE};
+use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{
     NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
 };
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
-use crate::rib::rib_loc::LocRib;
+use crate::rib::rib_loc::{LocRib, RouteDelta};
 use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
 
 #[cfg(test)]
@@ -53,10 +54,9 @@ pub struct PeerExportContext<'a> {
     pub peer_asn: u32,
     pub local_next_hop: IpAddr,
     pub export_policies: &'a [Arc<crate::policy::Policy>],
-    pub peer_supports_4byte_asn: bool,
     pub rr_client: bool,
     pub cluster_id: Ipv4Addr,
-    pub add_path_send: AddPathMask,
+    pub send_format: MessageFormat,
 }
 
 /// Check if a path should be exported to a peer (pre-policy filtering).
@@ -540,72 +540,85 @@ fn send_batched_announcements(
 /// - Withdrawal NLRIs: path_id included (ADD-PATH) vs omitted
 pub fn propagate_routes_to_peer(
     ctx: &PeerExportContext,
-    changed_prefixes: &[IpNetwork],
+    delta: &RouteDelta,
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
-    let format = MessageFormat {
-        use_4byte_asn: ctx.peer_supports_4byte_asn,
-        add_path: ctx.add_path_send,
-    };
-
     let mut to_announce = Vec::new();
     let mut stale_entries = Vec::new();
     let mut withdrawn_nlri = Vec::new();
 
-    for prefix in changed_prefixes {
-        // Get candidate paths: all for ADD-PATH, best-only otherwise
-        let candidates: Vec<Arc<Path>> = if !ctx.add_path_send.is_empty() {
-            loc_rib.get_all_paths(prefix)
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let afi_safi = AfiSafi::new(afi, Safi::Unicast);
+        let has_add_path = ctx.send_format.add_path.contains(&afi_safi);
+        let prefixes = if has_add_path {
+            &delta.changed
         } else {
-            loc_rib.get_best_path(prefix).into_iter().cloned().collect()
+            &delta.best_changed
         };
 
-        // Apply export policy
-        let desired: Vec<PrefixPath> = candidates
-            .iter()
-            .filter_map(|path| {
-                compute_export_path(prefix, path, ctx).map(|exported| (*prefix, Arc::new(exported)))
-            })
-            .collect();
+        for prefix in prefixes {
+            if !matches!(
+                (prefix, afi),
+                (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
+            ) {
+                continue;
+            }
 
-        let desired_ids: Vec<u32> = desired
-            .iter()
-            .filter_map(|(_, p)| p.local_path_id)
-            .collect();
+            // Get candidate paths: all for ADD-PATH, best-only otherwise
+            let candidates: Vec<Arc<Path>> = if has_add_path {
+                loc_rib.get_all_paths(prefix)
+            } else {
+                loc_rib.get_best_path(prefix).into_iter().cloned().collect()
+            };
 
-        // Diff against adj-rib-out: find stale path_ids
-        let adj_ids = adj_rib_out.path_ids_for_prefix(prefix);
-        let stale_ids: Vec<u32> = adj_ids
-            .into_iter()
-            .filter(|pid| !desired_ids.contains(pid))
-            .collect();
+            // Apply export policy
+            let desired: Vec<PrefixPath> = candidates
+                .iter()
+                .filter_map(|path| {
+                    compute_export_path(prefix, path, ctx)
+                        .map(|exported| (*prefix, Arc::new(exported)))
+                })
+                .collect();
 
-        // Build wire withdrawals
-        if !ctx.add_path_send.is_empty() {
-            for pid in &stale_ids {
+            let desired_ids: Vec<u32> = desired
+                .iter()
+                .filter_map(|(_, path)| path.local_path_id)
+                .collect();
+
+            // Diff against adj-rib-out: find stale path_ids
+            let adj_ids = adj_rib_out.path_ids_for_prefix(prefix);
+            let stale_ids: Vec<u32> = adj_ids
+                .into_iter()
+                .filter(|pid| !desired_ids.contains(pid))
+                .collect();
+
+            // Build wire withdrawals
+            if has_add_path {
+                for pid in &stale_ids {
+                    withdrawn_nlri.push(Nlri {
+                        prefix: *prefix,
+                        path_id: Some(*pid),
+                    });
+                }
+            } else if desired.is_empty() && !stale_ids.is_empty() {
                 withdrawn_nlri.push(Nlri {
                     prefix: *prefix,
-                    path_id: Some(*pid),
+                    path_id: None,
                 });
             }
-        } else if desired.is_empty() && !stale_ids.is_empty() {
-            withdrawn_nlri.push(Nlri {
-                prefix: *prefix,
-                path_id: None,
-            });
-        }
 
-        // Track stale entries for adj-rib-out removal
-        for pid in stale_ids {
-            stale_entries.push((*prefix, pid));
-        }
+            // Track stale entries for adj-rib-out removal
+            for pid in stale_ids {
+                stale_entries.push((*prefix, pid));
+            }
 
-        to_announce.extend(desired);
+            to_announce.extend(desired);
+        }
     }
 
-    send_withdrawals(ctx, withdrawn_nlri, format);
-    send_batched_announcements(ctx, &to_announce, format);
+    send_withdrawals(ctx, withdrawn_nlri, ctx.send_format);
+    send_batched_announcements(ctx, &to_announce, ctx.send_format);
 
     for (prefix, path_id) in &stale_entries {
         adj_rib_out.remove_path(prefix, *path_id);
@@ -618,6 +631,7 @@ pub fn propagate_routes_to_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg::AddPathMask;
     use crate::bgp::msg_update::Origin;
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::policy::statement::Action;
@@ -1151,10 +1165,12 @@ mod tests {
             peer_asn: 65001,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &policies,
-            peer_supports_4byte_asn: false,
             rr_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
-            add_path_send: AddPathMask::NONE,
+            send_format: MessageFormat {
+                use_4byte_asn: false,
+                add_path: AddPathMask::NONE,
+            },
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1287,10 +1303,12 @@ mod tests {
             peer_asn: 65000,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &[],
-            peer_supports_4byte_asn: false,
             rr_client: false,
             cluster_id,
-            add_path_send: AddPathMask::NONE,
+            send_format: MessageFormat {
+                use_4byte_asn: false,
+                add_path: AddPathMask::NONE,
+            },
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));

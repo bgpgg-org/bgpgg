@@ -17,7 +17,7 @@ use super::msg_notification::{BgpError, MessageHeaderError, NotificationMessage}
 use super::msg_open::OpenMessage;
 use super::msg_route_refresh::RouteRefreshMessage;
 use super::msg_update::UpdateMessage;
-use super::multiprotocol::AfiSafi;
+use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::ParserError;
 use tokio::io::AsyncReadExt;
 
@@ -25,7 +25,6 @@ pub const BGP_HEADER_SIZE_BYTES: usize = 19;
 pub const MAX_MESSAGE_SIZE: u16 = 4096;
 
 /// Per-AFI/SAFI ADD-PATH bitmask (RFC 7911).
-/// Each bit corresponds to an AfiSafi::add_path_bit().
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddPathMask(u32);
 
@@ -33,28 +32,30 @@ impl AddPathMask {
     pub const NONE: Self = Self(0);
     pub const ALL: Self = Self(u32::MAX);
 
-    /// Build a mask from a list of AFI/SAFIs
-    pub fn from_afi_safis(afi_safis: &[AfiSafi]) -> Self {
-        let mut mask = Self::NONE;
-        for afi_safi in afi_safis {
-            mask = mask.with(afi_safi);
-        }
-        mask
-    }
-
     /// Return a new mask with the given AFI/SAFI added
     pub fn with(self, afi_safi: &AfiSafi) -> Self {
-        Self(self.0 | afi_safi.add_path_bit())
+        Self(self.0 | Self::from_afi_safi(afi_safi))
     }
 
     /// Check if ADD-PATH is enabled for a specific AFI/SAFI
     pub fn contains(&self, afi_safi: &AfiSafi) -> bool {
-        self.0 & afi_safi.add_path_bit() != 0
+        self.0 & Self::from_afi_safi(afi_safi) != 0
     }
 
     /// Returns true if no AFI/SAFI has ADD-PATH enabled
     pub fn is_empty(&self) -> bool {
         self.0 == 0
+    }
+
+    fn from_afi_safi(afi_safi: &AfiSafi) -> u32 {
+        match (afi_safi.afi, afi_safi.safi) {
+            (Afi::Ipv4, Safi::Unicast) => 1 << 0,
+            (Afi::Ipv6, Safi::Unicast) => 1 << 1,
+            (Afi::Ipv4, Safi::Multicast) => 1 << 2,
+            (Afi::Ipv6, Safi::Multicast) => 1 << 3,
+            (Afi::Ipv4, Safi::MplsLabel) => 1 << 4,
+            (Afi::Ipv6, Safi::MplsLabel) => 1 << 5,
+        }
     }
 }
 

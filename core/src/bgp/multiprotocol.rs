@@ -81,19 +81,6 @@ impl AfiSafi {
         AfiSafi { afi, safi }
     }
 
-    /// Returns a unique bit for this AFI/SAFI combination, for use in the
-    /// MessageFormat.add_path bitmask.
-    pub fn add_path_bit(&self) -> u32 {
-        match (self.afi, self.safi) {
-            (Afi::Ipv4, Safi::Unicast) => 1 << 0,
-            (Afi::Ipv6, Safi::Unicast) => 1 << 1,
-            (Afi::Ipv4, Safi::Multicast) => 1 << 2,
-            (Afi::Ipv6, Safi::Multicast) => 1 << 3,
-            (Afi::Ipv4, Safi::MplsLabel) => 1 << 4,
-            (Afi::Ipv6, Safi::MplsLabel) => 1 << 5,
-        }
-    }
-
     /// Parse AFI/SAFI from BGP OPEN message multiprotocol capability
     /// Format: [AFI_HIGH, AFI_LOW, RESERVED, SAFI]
     pub fn from_capability_bytes(val: &[u8]) -> Result<Self, ParserError> {
