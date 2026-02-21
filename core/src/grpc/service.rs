@@ -309,7 +309,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
             None => defaults.add_path_send,
         },
         add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),
-        remote_asn: cfg.remote_asn,
+        asn: cfg.asn,
     }
 }
 

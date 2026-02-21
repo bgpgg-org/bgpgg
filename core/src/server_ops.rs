@@ -998,7 +998,7 @@ impl BgpServer {
                 let (asn, state) = entry.max_state();
                 GetPeersResponse {
                     address: addr.to_string(),
-                    asn: asn.or(entry.config.remote_asn),
+                    asn: asn.or(entry.config.asn),
                     state,
                     admin_state: entry.admin_state,
                     import_policies: entry
@@ -1042,7 +1042,7 @@ impl BgpServer {
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
-            asn: asn.or(entry.config.remote_asn),
+            asn: asn.or(entry.config.asn),
             state,
             admin_state: entry.admin_state,
             import_policies: entry
@@ -1159,7 +1159,7 @@ impl BgpServer {
             let (asn, state) = entry.max_state();
             let peer = GetPeersResponse {
                 address: addr.to_string(),
-                asn: asn.or(entry.config.remote_asn),
+                asn: asn.or(entry.config.asn),
                 state,
                 admin_state: entry.admin_state,
                 import_policies: entry

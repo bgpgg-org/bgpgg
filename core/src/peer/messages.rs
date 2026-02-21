@@ -192,13 +192,13 @@ impl Peer {
         local_hold_time: u16,
         peer_capabilities: PeerCapabilities,
     ) -> Result<(), io::Error> {
-        // Validate remote ASN if configured
-        if let Some(expected_asn) = self.config.remote_asn {
+        // Validate peer ASN if configured
+        if let Some(expected_asn) = self.config.asn {
             if peer_asn != expected_asn {
                 warn!(peer_ip = %self.addr,
                       expected_asn = expected_asn,
                       received_asn = peer_asn,
-                      "rejecting session: remote ASN mismatch");
+                      "rejecting session: peer ASN mismatch");
 
                 let notif = NotificationMessage::new(
                     BgpError::OpenMessageError(OpenMessageError::BadPeerAs),

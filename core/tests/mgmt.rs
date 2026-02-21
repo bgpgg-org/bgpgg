@@ -885,9 +885,9 @@ async fn test_add_route_with_invalid_prefix_length() {
     assert_eq!(routes.len(), 0);
 }
 
-/// API reports configured remote_asn when session is down.
+/// API reports configured peer ASN when session is down.
 #[tokio::test]
-async fn test_remote_asn_api_fallback() {
+async fn test_peer_asn_api_fallback() {
     let server = start_test_server(Config::new(
         65001,
         "127.0.0.1:0",
@@ -896,27 +896,24 @@ async fn test_remote_asn_api_fallback() {
     ))
     .await;
 
-    // Add peer with remote_asn but don't start the other side
+    // Add peer with asn but don't start the other side
     server
         .client
         .add_peer(
             "127.0.0.2".to_string(),
             Some(SessionConfig {
                 passive_mode: Some(true),
-                remote_asn: Some(65002),
+                asn: Some(65002),
                 ..Default::default()
             }),
         )
         .await
         .unwrap();
 
-    // list_peers should report configured remote_asn when down
+    // list_peers should report configured asn when down
     let peers = server.client.get_peers().await.unwrap();
     let peer = peers.iter().find(|p| p.address == "127.0.0.2").unwrap();
-    assert_eq!(
-        peer.asn, 65002,
-        "should show configured remote_asn when down"
-    );
+    assert_eq!(peer.asn, 65002, "should show configured asn when down");
     assert_ne!(peer.state, BgpState::Established as i32);
 
     // get_peer should also report it

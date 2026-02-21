@@ -1882,18 +1882,18 @@ async fn test_large_asn_requires_4byte_capability() {
     );
 }
 
-/// Configured remote_asn validates peer ASN during OPEN exchange.
+/// Configured peer ASN validates remote ASN during OPEN exchange.
 /// Matching ASN establishes, mismatched ASN is rejected, None accepts any.
 #[tokio::test]
-async fn test_remote_asn_validation() {
-    // (name, remote_asn on server1, peer_asn for server2, should_establish)
+async fn test_peer_asn_validation() {
+    // (name, configured asn on server1, peer_asn for server2, should_establish)
     let cases: Vec<(&str, Option<u32>, u32, bool)> = vec![
         ("matching", Some(65002), 65002, true),
         ("mismatch", Some(65002), 65099, false),
         ("none", None, 65099, true),
     ];
 
-    for (name, remote_asn, peer_asn, should_establish) in cases {
+    for (name, configured_asn, peer_asn, should_establish) in cases {
         let server1 = start_test_server(Config::new(
             65001,
             "127.0.0.1:0",
@@ -1909,13 +1909,13 @@ async fn test_remote_asn_validation() {
         ))
         .await;
 
-        // Server1 passive with remote_asn config; server2 actively connects
+        // Server1 passive with asn config; server2 actively connects
         server1
             .add_peer_with_config(
                 &server2,
                 SessionConfig {
                     passive_mode: Some(true),
-                    remote_asn,
+                    asn: configured_asn,
                     ..Default::default()
                 },
             )
