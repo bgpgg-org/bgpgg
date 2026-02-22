@@ -52,12 +52,14 @@ pub(crate) fn nlri_v4(a: u8, b: u8, c: u8, d: u8, len: u8, path_id: Option<u32>)
 pub(crate) const DEFAULT_FORMAT: msg::MessageFormat = msg::MessageFormat {
     use_4byte_asn: true,
     add_path: msg::AddPathMask::NONE,
+    is_ebgp: false,
 };
 
 #[cfg(test)]
 pub(crate) const ADDPATH_FORMAT: msg::MessageFormat = msg::MessageFormat {
     use_4byte_asn: true,
     add_path: msg::AddPathMask::ALL,
+    is_ebgp: false,
 };
 
 #[cfg(test)]

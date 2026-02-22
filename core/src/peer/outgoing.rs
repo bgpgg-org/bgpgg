@@ -1170,6 +1170,7 @@ mod tests {
             send_format: MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
@@ -1179,6 +1180,7 @@ mod tests {
             MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         );
 
@@ -1308,6 +1310,7 @@ mod tests {
             send_format: MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
+                is_ebgp: false,
             },
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);

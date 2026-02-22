@@ -66,6 +66,8 @@ pub struct MessageFormat {
     pub use_4byte_asn: bool,
     /// Which AFI/SAFI combos use ADD-PATH encoding (RFC 7911)
     pub add_path: AddPathMask,
+    /// Whether this is an eBGP session (RFC 7606 error handling, attribute stripping)
+    pub is_ebgp: bool,
 }
 
 /// Format for parsing OPEN messages, before capabilities are negotiated.
@@ -73,6 +75,7 @@ pub struct MessageFormat {
 pub const PRE_OPEN_FORMAT: MessageFormat = MessageFormat {
     use_4byte_asn: false,
     add_path: AddPathMask::NONE,
+    is_ebgp: false,
 };
 
 // BGP header marker (16 bytes of 0xFF)

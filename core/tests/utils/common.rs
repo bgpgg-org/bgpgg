@@ -42,7 +42,7 @@ use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, AsPathSegment,
+    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, Aggregator, AsPathSegment,
     AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
     GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, PrefixMatch,
     PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
@@ -191,6 +191,7 @@ pub struct PathParams {
     pub local_path_id: Option<u32>,
     /// RFC 7911: path ID received from peer
     pub remote_path_id: Option<u32>,
+    pub aggregator: Option<Aggregator>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -211,6 +212,7 @@ pub fn build_path(params: PathParams) -> Path {
         cluster_list: params.cluster_list,
         local_path_id: params.local_path_id,
         remote_path_id: params.remote_path_id,
+        aggregator: params.aggregator,
     }
 }
 
@@ -1559,6 +1561,7 @@ impl FakePeer {
         MessageFormat {
             use_4byte_asn: self.supports_4byte_asn,
             add_path: self.add_path,
+            is_ebgp: false,
         }
     }
 
@@ -1985,6 +1988,15 @@ pub fn attr_next_hop(ip: Ipv4Addr) -> Vec<u8> {
     build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::NEXT_HOP, 4, &octets)
 }
 
+pub fn attr_local_pref(value: u32) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::LOCAL_PREF,
+        4,
+        &value.to_be_bytes(),
+    )
+}
+
 /// Build AGGREGATOR attribute with 4-byte ASN encoding (RFC 6793)
 pub fn attr_aggregator(asn: u32, ip: Ipv4Addr) -> Vec<u8> {
     let mut value = Vec::new();
@@ -1994,6 +2006,28 @@ pub fn attr_aggregator(asn: u32, ip: Ipv4Addr) -> Vec<u8> {
         attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
         attr_type_code::AGGREGATOR,
         8,
+        &value,
+    )
+}
+
+pub fn attr_originator_id(ip: Ipv4Addr) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::ORIGINATOR_ID,
+        4,
+        &ip.octets(),
+    )
+}
+
+pub fn attr_cluster_list(ids: &[Ipv4Addr]) -> Vec<u8> {
+    let mut value = Vec::new();
+    for id in ids {
+        value.extend_from_slice(&id.octets());
+    }
+    build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::CLUSTER_LIST,
+        value.len() as u8,
         &value,
     )
 }

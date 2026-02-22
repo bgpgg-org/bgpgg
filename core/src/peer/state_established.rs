@@ -134,7 +134,7 @@ impl Peer {
                 result = conn.msg_rx.recv() => {
                     match result {
                         Some(Ok(bytes)) => {
-                            let format = self.capabilities.receive_format();
+                            let format = self.capabilities.receive_format(self.session_type);
                             match Self::parse_bgp_message(&bytes, format) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message, peer_ip).await {

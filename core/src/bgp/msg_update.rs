@@ -20,7 +20,7 @@ pub use super::msg_update_types::{
 
 use super::msg::{Message, MessageFormat, MessageType};
 use super::msg_update_codec::{
-    read_path_attributes, validate_update_message_lengths,
+    format_bytes_hex, read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
 use super::msg_update_types::{
@@ -28,8 +28,10 @@ use super::msg_update_types::{
 };
 use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::{parse_nlri_list, ParserError};
+use crate::log::warn;
 use crate::net::IpNetwork;
 use crate::rib::Path;
+use std::collections::HashSet;
 
 pub(super) const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
 pub(super) const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
@@ -526,48 +528,106 @@ impl UpdateMessage {
         self.format.use_4byte_asn
     }
 
-    pub fn from_bytes(bytes: Vec<u8>, format: MessageFormat) -> Result<Self, ParserError> {
+    pub fn from_bytes(bytes: Vec<u8>, format: MessageFormat) -> Result<UpdateMessage, ParserError> {
         let body_length = bytes.len();
-        let mut data = bytes;
+        let data = &bytes[..];
 
         // Standard withdrawn/NLRI fields are always IPv4 Unicast (RFC 4271)
         let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
         let ipv4_add_path = format.add_path.contains(&ipv4_unicast);
 
+        let mut offset = 0;
+
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-        data = data[WITHDRAWN_ROUTES_LENGTH_SIZE..].to_vec();
+        offset += WITHDRAWN_ROUTES_LENGTH_SIZE;
 
-        let withdrawn_routes = parse_nlri_list(&data[..withdrawn_routes_len], ipv4_add_path)?;
-        data = data[withdrawn_routes_len..].to_vec();
+        // RFC 7606 Section 3: syntactically incorrect Withdrawn Routes field
+        // SHOULD be handled as treat-as-withdraw. Skip ahead using
+        // withdrawn_routes_len and treat the entire UPDATE as a withdrawal.
+        let (withdrawn_routes, mut treat_as_withdraw) =
+            match parse_nlri_list(&data[offset..offset + withdrawn_routes_len], ipv4_add_path) {
+                Ok(routes) => (routes, false),
+                Err(_) => {
+                    warn!(
+                        withdrawn_routes_len,
+                        "malformed withdrawn routes NLRI, treat-as-withdraw per RFC 7606 Section 3"
+                    );
+                    (vec![], true)
+                }
+            };
+        offset += withdrawn_routes_len;
 
-        let total_path_attributes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+        let total_path_attributes_len =
+            u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
 
         validate_update_message_lengths(
             withdrawn_routes_len,
             total_path_attributes_len,
             body_length,
         )?;
+        offset += TOTAL_ATTR_LENGTH_SIZE;
 
-        data = data[TOTAL_ATTR_LENGTH_SIZE..].to_vec();
-
-        let path_attributes = read_path_attributes(&data[..total_path_attributes_len], format)?;
-        data = data[total_path_attributes_len..].to_vec();
+        let (path_attributes, attr_treat_as_withdraw) =
+            read_path_attributes(&data[offset..offset + total_path_attributes_len], format)?;
+        treat_as_withdraw |= attr_treat_as_withdraw;
+        offset += total_path_attributes_len;
 
         let nlri_list: Vec<Nlri> = match total_path_attributes_len {
             0 => vec![],
-            _ => parse_nlri_list(&data, ipv4_add_path)?,
+            _ => parse_nlri_list(&data[offset..], ipv4_add_path)?,
         };
 
-        validate_well_known_mandatory_attributes(&path_attributes, !nlri_list.is_empty())?;
+        // RFC 4271 Section 5 + RFC 4760 Section 3: ORIGIN and AS_PATH must
+        // be present when advertising routes via either NLRI field or MP_REACH_NLRI.
+        let has_mp_reach_nlri = path_attributes.iter().any(
+            |attr| matches!(&attr.value, PathAttrValue::MpReachNlri(mp) if !mp.nlri.is_empty()),
+        );
+        if !nlri_list.is_empty() || has_mp_reach_nlri {
+            treat_as_withdraw |= !validate_well_known_mandatory_attributes(&path_attributes);
+        }
 
-        Ok(UpdateMessage {
-            withdrawn_routes_len: withdrawn_routes_len as u16,
-            withdrawn_routes,
-            total_path_attributes_len: total_path_attributes_len as u16,
-            path_attributes,
-            nlri_list,
-            format,
-        })
+        if treat_as_withdraw {
+            if should_escalate_to_session_reset(
+                &nlri_list,
+                has_mp_reach_nlri,
+                &path_attributes,
+                total_path_attributes_len,
+            ) {
+                warn!("treat-as-withdraw with no reachable NLRI, escalating to session reset per RFC 7606 Section 5.2");
+                return Err(ParserError::BgpError {
+                    error: super::msg_notification::BgpError::UpdateMessageError(
+                        super::msg_notification::UpdateMessageError::MalformedAttributeList,
+                    ),
+                    data: Vec::new(),
+                });
+            }
+
+            // Collect all routes from every source into withdrawals
+            let mut all_withdrawn: HashSet<Nlri> = HashSet::from_iter(withdrawn_routes);
+            all_withdrawn.extend(nlri_list);
+            all_withdrawn.extend(collect_mp_nlri(&path_attributes));
+
+            // RFC 7606 Section 6: log the full UPDATE body for debugging
+            warn!(
+                route_count = all_withdrawn.len(),
+                update_hex = %format_bytes_hex(data),
+                "treat-as-withdraw per RFC 7606"
+            );
+
+            Ok(Self::new_withdraw(
+                all_withdrawn.into_iter().collect(),
+                format,
+            ))
+        } else {
+            Ok(UpdateMessage {
+                withdrawn_routes_len: withdrawn_routes_len as u16,
+                withdrawn_routes,
+                total_path_attributes_len: total_path_attributes_len as u16,
+                path_attributes,
+                nlri_list,
+                format,
+            })
+        }
     }
 
     /// Check if this UPDATE is an End-of-RIB marker (RFC 4724)
@@ -700,12 +760,50 @@ impl Message for UpdateMessage {
     }
 }
 
+/// RFC 7606 Section 5.2: when treat-as-withdraw is triggered on an UPDATE
+/// with path attributes beyond MP_UNREACH_NLRI but no reachable NLRI, we
+/// can't be confident the NLRI were successfully parsed. Escalate to session
+/// reset. Uses total_path_attributes_len (wire) because malformed attrs are
+/// stripped during parsing.
+fn should_escalate_to_session_reset(
+    nlri_list: &[Nlri],
+    has_mp_reach_nlri: bool,
+    path_attributes: &[PathAttribute],
+    total_path_attributes_len: usize,
+) -> bool {
+    if !nlri_list.is_empty() || has_mp_reach_nlri {
+        return false; // has reachable NLRI, treat-as-withdraw is fine
+    }
+    if total_path_attributes_len == 0 {
+        return false; // no path attributes on wire
+    }
+    // Wire had path attributes but no reachable NLRI. The only safe case
+    // is a pure withdraw: exactly one MP_UNREACH_NLRI and nothing else.
+    !(path_attributes.len() == 1
+        && matches!(path_attributes[0].value, PathAttrValue::MpUnreachNlri(_)))
+}
+
+/// Collect all NLRI from MP_REACH_NLRI and MP_UNREACH_NLRI attributes.
+fn collect_mp_nlri(path_attributes: &[PathAttribute]) -> Vec<Nlri> {
+    let mut nlri = Vec::new();
+    for attr in path_attributes {
+        match &attr.value {
+            PathAttrValue::MpReachNlri(mp_reach) => nlri.extend_from_slice(&mp_reach.nlri),
+            PathAttrValue::MpUnreachNlri(mp_unreach) => {
+                nlri.extend_from_slice(&mp_unreach.withdrawn_routes)
+            }
+            _ => {}
+        }
+    }
+    nlri
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_codec::{
-        read_path_attribute, write_path_attribute, write_path_attributes,
+        read_path_attribute, write_path_attribute, write_path_attributes, PathAttrResult,
     };
     use crate::bgp::msg_update_types::{AttrType, MpReachNlri, MpUnreachNlri};
     use crate::bgp::multiprotocol::{Afi, Safi};
@@ -1368,6 +1466,7 @@ mod tests {
 
     #[test]
     fn test_attribute_flags_well_known_wrong_optional_bit() {
+        // RFC 7606: flag errors on well-known attrs -> treat-as-withdraw (not session reset)
         let test_cases = vec![
             ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
             ("as_path", AttrType::AsPath as u8, vec![0x00]),
@@ -1380,11 +1479,6 @@ mod tests {
                 "local_pref",
                 AttrType::LocalPref as u8,
                 vec![0x04, 0x00, 0x00, 0x00, 0x64],
-            ),
-            (
-                "atomic_aggregate",
-                AttrType::AtomicAggregate as u8,
-                vec![0x00],
             ),
         ];
 
@@ -1392,32 +1486,27 @@ mod tests {
             let mut input = vec![PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, DEFAULT_FORMAT) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(
-                        data,
-                        vec![
-                            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
-                            attr_type,
-                            attr_data[0]
-                        ],
-                        "Failed for {}",
-                        name
-                    );
-                }
-                _ => panic!("Expected AttributeFlagsError for {}", name),
-            }
+            let (result, _) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            assert!(
+                !matches!(result, PathAttrResult::Parsed(_)),
+                "Failed for {}",
+                name
+            );
         }
+
+        // ATOMIC_AGGREGATE -> attribute-discard
+        let input = vec![
+            PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::AtomicAggregate as u8,
+            0x00,
+        ];
+        let (result, _) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+        assert!(!matches!(result, PathAttrResult::Parsed(_)));
     }
 
     #[test]
     fn test_attribute_flags_well_known_partial_bit_set() {
+        // RFC 7606: flag errors on well-known attrs -> attribute discarded
         let test_cases = vec![
             ("origin", AttrType::Origin as u8, vec![0x01, 0x00]),
             ("as_path", AttrType::AsPath as u8, vec![0x00]),
@@ -1431,43 +1520,33 @@ mod tests {
                 AttrType::LocalPref as u8,
                 vec![0x04, 0x00, 0x00, 0x00, 0x64],
             ),
-            (
-                "atomic_aggregate",
-                AttrType::AtomicAggregate as u8,
-                vec![0x00],
-            ),
         ];
 
         for (name, attr_type, attr_data) in test_cases {
             let mut input = vec![PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, DEFAULT_FORMAT) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(
-                        data,
-                        vec![
-                            PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
-                            attr_type,
-                            attr_data[0]
-                        ],
-                        "Failed for {}",
-                        name
-                    );
-                }
-                _ => panic!("Expected AttributeFlagsError for {}", name),
-            }
+            let (result, _) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            assert!(
+                !matches!(result, PathAttrResult::Parsed(_)),
+                "Failed for {}",
+                name
+            );
         }
+
+        // ATOMIC_AGGREGATE -> attribute-discard
+        let input = vec![
+            PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
+            AttrType::AtomicAggregate as u8,
+            0x00,
+        ];
+        let (result, _) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+        assert!(!matches!(result, PathAttrResult::Parsed(_)));
     }
 
     #[test]
     fn test_attribute_flags_optional_wrong_flags() {
+        // RFC 7606: flag errors on optional attrs -> attribute discarded
         let test_cases = vec![
             (
                 "med_missing_optional",
@@ -1487,28 +1566,18 @@ mod tests {
             let mut input = vec![wrong_flags, attr_type];
             input.extend_from_slice(&attr_data);
 
-            match read_path_attribute(&input, DEFAULT_FORMAT) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(
-                        data,
-                        vec![wrong_flags, attr_type, attr_data[0]],
-                        "Failed for {}",
-                        name
-                    );
-                }
-                _ => panic!("Expected AttributeFlagsError for {}", name),
-            }
+            let (result, _) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            assert!(
+                !matches!(result, PathAttrResult::Parsed(_)),
+                "Failed for {}",
+                name
+            );
         }
     }
 
     #[test]
     fn test_attribute_flags_extended_length_data() {
+        // RFC 7606: ORIGIN flag error -> attribute discarded
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::EXTENDED_LENGTH,
             AttrType::Origin as u8,
@@ -1517,28 +1586,18 @@ mod tests {
             0x00,
         ];
 
-        match read_path_attribute(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, data }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::AttributeFlagsError)
-                );
-                assert_eq!(
-                    data,
-                    vec![
-                        PathAttrFlag::OPTIONAL | PathAttrFlag::EXTENDED_LENGTH,
-                        AttrType::Origin as u8,
-                        0x00,
-                        0x01
-                    ]
-                );
-            }
-            _ => panic!("Expected AttributeFlagsError"),
-        }
+        let (result, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(!matches!(result, PathAttrResult::Parsed(_)));
     }
 
     #[test]
     fn test_attribute_flags_aggregator_partial_bit_allowed() {
+        // 2-byte ASN format (6 bytes) requires non-4byte-ASN session
+        let format_2byte = MessageFormat {
+            use_4byte_asn: false,
+            ..DEFAULT_FORMAT
+        };
+
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
             AttrType::Aggregator as u8,
@@ -1551,8 +1610,8 @@ mod tests {
             0x0d,
         ];
 
-        let (attr_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, format_2byte).unwrap();
+        let attr = result.unwrap();
         assert_eq!(
             attr.flags.0,
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL
@@ -1572,8 +1631,8 @@ mod tests {
             0x01,
         ];
 
-        let (attr_opt, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let attr = result.unwrap();
         assert_eq!(attr.flags.0, PathAttrFlag::OPTIONAL | PathAttrFlag::PARTIAL);
         assert_eq!(offset, 7);
     }
@@ -1619,20 +1678,53 @@ mod tests {
             ),
         ];
 
-        for (name, input, expected_missing_type) in test_cases {
-            match UpdateMessage::from_bytes(input, DEFAULT_FORMAT) {
-                Err(ParserError::BgpError { error, data }) => {
-                    assert_eq!(
-                        error,
-                        BgpError::UpdateMessageError(UpdateMessageError::MissingWellKnownAttribute),
-                        "Failed for {}",
-                        name
-                    );
-                    assert_eq!(data, vec![expected_missing_type], "Failed for {}", name);
-                }
-                _ => panic!("Expected MissingWellKnownAttribute error for {}", name),
-            }
+        for (name, input, _expected_missing_type) in test_cases {
+            // RFC 7606: missing well-known mandatory -> treat-as-withdraw
+            // Parser moves NLRI to withdrawn_routes and clears path_attributes
+            let msg = UpdateMessage::from_bytes(input, DEFAULT_FORMAT).unwrap();
+            assert!(
+                !msg.withdrawn_routes.is_empty(),
+                "Failed for {}: expected withdrawn routes",
+                name
+            );
+            assert!(
+                msg.nlri_list.is_empty(),
+                "Failed for {}: NLRI should be empty after treat-as-withdraw",
+                name
+            );
+            assert!(
+                msg.path_attributes.is_empty(),
+                "Failed for {}: path_attributes should be cleared",
+                name
+            );
         }
+    }
+
+    #[test]
+    fn test_missing_well_known_attribute_mp_reach_nlri() {
+        // RFC 4760 Section 3: MP_REACH_NLRI also requires ORIGIN and AS_PATH
+        let mp_reach = PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+            value: PathAttrValue::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                nlri: vec![nlri_v4(10, 11, 12, 0, 24, None)],
+            }),
+        };
+        let mp_reach_bytes = write_path_attribute(&mp_reach, false);
+
+        // Only MP_REACH_NLRI, missing ORIGIN and AS_PATH -> treat-as-withdraw
+        let input = build_update_body(&[&mp_reach_bytes], &[]);
+        let msg = UpdateMessage::from_bytes(input, DEFAULT_FORMAT).unwrap();
+        assert!(
+            !msg.withdrawn_routes.is_empty(),
+            "MP_REACH_NLRI routes should be withdrawn"
+        );
+        assert!(
+            msg.path_attributes.is_empty(),
+            "path_attributes should be cleared"
+        );
     }
 
     #[test]
@@ -1691,8 +1783,8 @@ mod tests {
             let mut input = vec![input_flags, attr_type, attr_value.len() as u8];
             input.extend_from_slice(&attr_value);
 
-            let (attr_opt, offset) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
-            let attr = attr_opt.unwrap();
+            let (result, offset) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            let attr = result.unwrap();
 
             assert_eq!(
                 attr,
@@ -1709,8 +1801,8 @@ mod tests {
 
             // Roundtrip test
             let output = write_path_attribute(&attr, false);
-            let (parsed_attr_opt, _) = read_path_attribute(&output, DEFAULT_FORMAT).unwrap();
-            let parsed_attr = parsed_attr_opt.unwrap();
+            let (result, _) = read_path_attribute(&output, DEFAULT_FORMAT).unwrap();
+            let parsed_attr = result.unwrap();
             assert_eq!(parsed_attr, attr);
         }
     }
@@ -1774,19 +1866,13 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_attribute_malformed_attribute_list() {
-        // Two ORIGIN attributes in the same UPDATE message
+    fn test_duplicate_attribute_silently_discarded() {
+        // RFC 7606: duplicate non-MP attributes are silently discarded (keep first)
         let input = build_update_body(&[PATH_ATTR_ORIGIN_IGP, PATH_ATTR_ORIGIN_IGP], &[]);
 
-        match UpdateMessage::from_bytes(input, DEFAULT_FORMAT) {
-            Err(ParserError::BgpError { error, .. }) => {
-                assert_eq!(
-                    error,
-                    BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
-                );
-            }
-            _ => panic!("Expected MalformedAttributeList error for duplicate attribute"),
-        }
+        let result = UpdateMessage::from_bytes(input, DEFAULT_FORMAT).unwrap();
+        // Should parse successfully, keeping only the first ORIGIN
+        assert_eq!(result.origin(), Some(Origin::IGP));
     }
 
     #[test]

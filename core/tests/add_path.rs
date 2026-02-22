@@ -15,7 +15,6 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, ResetType, Route, SessionConfig};
 use std::net::Ipv4Addr;
@@ -336,26 +335,6 @@ fn addpath_nlri(path_id: u32, prefix_bytes: &[u8]) -> Vec<u8> {
     let mut nlri = path_id.to_be_bytes().to_vec();
     nlri.extend_from_slice(prefix_bytes);
     nlri
-}
-
-/// Build ORIGINATOR_ID attribute
-fn attr_originator_id(ip: Ipv4Addr) -> Vec<u8> {
-    build_attr_bytes(
-        attr_flags::OPTIONAL,
-        attr_type_code::ORIGINATOR_ID,
-        4,
-        &ip.octets(),
-    )
-}
-
-/// Build LOCAL_PREF attribute
-fn attr_local_pref(value: u32) -> Vec<u8> {
-    build_attr_bytes(
-        attr_flags::TRANSITIVE,
-        attr_type_code::LOCAL_PREF,
-        4,
-        &value.to_be_bytes(),
-    )
 }
 
 /// Sender-side: RR must not reflect a client's own path back to that client.

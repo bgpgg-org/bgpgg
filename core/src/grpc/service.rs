@@ -147,6 +147,10 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 .collect(),
             local_path_id: path.local_path_id,
             remote_path_id: path.remote_path_id,
+            aggregator: path.aggregator().map(|agg| proto::Aggregator {
+                asn: agg.asn,
+                ip_address: agg.ip_addr.to_string(),
+            }),
         })
         .collect();
 

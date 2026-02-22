@@ -302,6 +302,12 @@ message Path {
     // RFC 7911: ADD-PATH identifiers
     optional uint32 local_path_id = 14;       // Locally assigned path ID (absent = not in loc-rib)
     optional uint32 remote_path_id = 15;      // Path ID received from peer (absent = no ADD-PATH)
+    optional Aggregator aggregator = 16;
+}
+
+message Aggregator {
+    uint32 asn = 1;
+    string ip_address = 2;
 }
 
 // Unknown attribute
