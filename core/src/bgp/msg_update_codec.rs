@@ -16,9 +16,9 @@ use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
 use super::msg_update_types::{
-    attr_type_code, should_treat_as_withdraw, Aggregator, AsPath, AsPathSegment, AsPathSegmentType,
-    AttrType, LargeCommunity, MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrFlag,
-    PathAttrValue, PathAttribute,
+    attr_type_code, malformed_attr_action, Aggregator, AsPath, AsPathSegment, AsPathSegmentType,
+    AttrType, LargeCommunity, MpReachNlri, MpUnreachNlri, NextHopAddr, Nlri, Origin, PathAttrError,
+    PathAttrFlag, PathAttrValue, PathAttribute,
 };
 use super::multiprotocol::{Afi, AfiSafi, Safi};
 use super::utils::{
@@ -136,9 +136,7 @@ pub(super) fn validate_update_message_lengths(
 /// RFC 7606: Missing well-known mandatory attributes -> treat-as-withdraw.
 /// Returns true if all mandatory attributes are present (valid).
 /// Only call this when the UPDATE contains NLRI (RFC 4271 Section 5).
-pub(super) fn validate_well_known_mandatory_attributes(
-    path_attributes: &[PathAttribute],
-) -> bool {
+pub(super) fn validate_well_known_mandatory_attributes(path_attributes: &[PathAttribute]) -> bool {
     let has_origin = path_attributes
         .iter()
         .any(|attr| matches!(attr.value, PathAttrValue::Origin(_)));
@@ -817,36 +815,79 @@ fn parse_attr_value(
     Some(value)
 }
 
-/// Returns `(attribute, bytes_consumed, treat_as_withdraw)`:
-/// - attribute: parsed attribute, or None if discarded
-/// - bytes_consumed: total bytes to advance cursor
-/// - treat_as_withdraw: true if the error requires treating the UPDATE as a withdrawal
+/// Result of parsing a single path attribute per RFC 7606.
+#[derive(Debug, PartialEq)]
+pub(super) enum PathAttrResult {
+    /// Successfully parsed attribute.
+    Parsed(PathAttribute),
+    /// Malformed attribute with RFC 7606 error action.
+    Malformed(PathAttrError),
+}
+
+impl PathAttrResult {
+    #[cfg(test)]
+    pub(in crate::bgp) fn unwrap(self) -> PathAttribute {
+        match self {
+            PathAttrResult::Parsed(attr) => attr,
+            other => panic!("expected Parsed, got {:?}", other),
+        }
+    }
+}
+
+/// Returns `(result, bytes_consumed)`.
 ///
 /// Only returns Err for session-reset-level errors (unrecognized well-known
 /// attributes, or malformed MP_REACH_NLRI per RFC 7606 Section 7.11).
 pub(super) fn read_path_attribute(
     bytes: &[u8],
     format: MessageFormat,
-) -> Result<(Option<PathAttribute>, u16, bool), ParserError> {
+) -> Result<(PathAttrResult, u16), ParserError> {
     let attribute_flag = PathAttrFlag(bytes[0]);
-    let attr_type_code = bytes[1];
+    let header_len = attribute_flag.header_len();
 
+    // RFC 7606 Section 4: remaining bytes must fit the attribute header
+    if bytes.len() < header_len {
+        warn!(
+            remaining = bytes.len(),
+            header_len, "truncated attribute header, treat-as-withdraw per RFC 7606 Section 4"
+        );
+        return Ok((
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw),
+            bytes.len() as u16,
+        ));
+    }
+
+    let attr_type_code = bytes[1];
     let attr_len = match attribute_flag.extended_len() {
         true => u16::from_be_bytes([bytes[2], bytes[3]]),
         false => bytes[2] as u16,
     };
 
-    let header_len = attribute_flag.header_len();
     let total_offset = header_len + attr_len as usize;
+
+    // RFC 7606 Section 4: attribute length exceeds remaining buffer
+    if total_offset > bytes.len() {
+        warn!(
+            attr_type_code,
+            claimed = total_offset,
+            available = bytes.len(),
+            "attribute length overrun, treat-as-withdraw per RFC 7606 Section 4"
+        );
+        return Ok((
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw),
+            bytes.len() as u16,
+        ));
+    }
 
     // Unrecognized well-known attribute -> always session reset
     let known_type = parse_attr_type(bytes, &attribute_flag, attr_type_code, attr_len)?;
 
-    let treat_as_withdraw = should_treat_as_withdraw(attr_type_code, format.is_ebgp);
+    let malformed_result =
+        PathAttrResult::Malformed(malformed_attr_action(attr_type_code, format.is_ebgp));
 
     let attr_val = match known_type {
         Some(attr_type) => {
-            let attr_bytes = &bytes[..total_offset.min(bytes.len())];
+            let attr_bytes = &bytes[..total_offset];
 
             let validation =
                 validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)
@@ -861,7 +902,7 @@ pub(super) fn read_path_attribute(
                 if attr_type_code == attr_type_code::MP_REACH_NLRI {
                     return Err(err);
                 }
-                return Ok((None, total_offset as u16, treat_as_withdraw));
+                return Ok((malformed_result, total_offset as u16));
             }
 
             let attr_data = &bytes[header_len..header_len + attr_len as usize];
@@ -873,7 +914,7 @@ pub(super) fn read_path_attribute(
                     if attr_type_code == attr_type_code::MP_REACH_NLRI {
                         return Err(optional_attribute_error(attr_bytes));
                     }
-                    return Ok((None, total_offset as u16, treat_as_withdraw));
+                    return Ok((malformed_result, total_offset as u16));
                 }
             }
         }
@@ -906,7 +947,7 @@ pub(super) fn read_path_attribute(
         value: attr_val,
     };
 
-    Ok((Some(attribute), total_offset as u16, false))
+    Ok((PathAttrResult::Parsed(attribute), total_offset as u16))
 }
 
 /// Parse all path attributes from the byte stream.
@@ -925,37 +966,40 @@ pub(super) fn read_path_attributes(
     let mut treat_as_withdraw = false;
 
     while cursor < bytes.len() {
-        let (attribute_opt, offset, attr_treat_as_withdraw) =
-            read_path_attribute(&bytes[cursor..], format)?;
+        let (result, offset) = read_path_attribute(&bytes[cursor..], format)?;
         let offset_usize = offset as usize;
 
-        treat_as_withdraw |= attr_treat_as_withdraw;
-
-        if let Some(attribute) = attribute_opt {
-            let type_code = attribute.type_code();
-            let is_mp = matches!(
-                type_code,
-                attr_type_code::MP_REACH_NLRI | attr_type_code::MP_UNREACH_NLRI
-            );
-            if !seen_type_codes.insert(type_code) {
-                if is_mp {
-                    // Duplicate MP attribute -> SessionReset
-                    return Err(ParserError::BgpError {
-                        error: BgpError::UpdateMessageError(
-                            UpdateMessageError::MalformedAttributeList,
-                        ),
-                        data: Vec::new(),
-                    });
-                }
-                // RFC 7606: duplicate non-MP attribute -> discard (keep first)
-                warn!(
-                    type_code = type_code,
-                    "discarded duplicate attribute per RFC 7606"
+        match result {
+            PathAttrResult::Parsed(attribute) => {
+                let type_code = attribute.type_code();
+                let is_mp = matches!(
+                    type_code,
+                    attr_type_code::MP_REACH_NLRI | attr_type_code::MP_UNREACH_NLRI
                 );
-                cursor += offset_usize;
-                continue;
+                if !seen_type_codes.insert(type_code) {
+                    if is_mp {
+                        // Duplicate MP attribute -> SessionReset
+                        return Err(ParserError::BgpError {
+                            error: BgpError::UpdateMessageError(
+                                UpdateMessageError::MalformedAttributeList,
+                            ),
+                            data: Vec::new(),
+                        });
+                    }
+                    // RFC 7606: duplicate non-MP attribute -> discard (keep first)
+                    warn!(
+                        type_code = type_code,
+                        "discarded duplicate attribute per RFC 7606"
+                    );
+                    cursor += offset_usize;
+                    continue;
+                }
+                path_attributes.push(attribute);
             }
-            path_attributes.push(attribute);
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw) => {
+                treat_as_withdraw = true;
+            }
+            PathAttrResult::Malformed(PathAttrError::Discard) => {}
         }
 
         cursor += offset_usize;
@@ -1181,9 +1225,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_origin() {
-        let (attribute_opt, offset, _) =
-            read_path_attribute(PATH_ATTR_ORIGIN_EGP, DEFAULT_FORMAT).unwrap();
-        let attribute = attribute_opt.unwrap();
+        let (result, offset) = read_path_attribute(PATH_ATTR_ORIGIN_EGP, DEFAULT_FORMAT).unwrap();
+        let attribute = result.unwrap();
 
         assert_eq!(
             attribute,
@@ -1200,18 +1243,19 @@ mod tests {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::Origin as u8, 0x01, 0x03];
 
         // RFC 7606: invalid ORIGIN value -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 4);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_communities() {
-        let (attr_opt, offset, _) =
+        let (result, offset) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
+        let attr = result.unwrap();
 
         assert_eq!(
             attr,
@@ -1243,8 +1287,8 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
-        let parsed_attr = parsed_attr_opt.unwrap();
+        let (result, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let parsed_attr = result.unwrap();
 
         if let PathAttrValue::Communities(communities) = parsed_attr.value {
             assert_eq!(communities, original_communities);
@@ -1280,18 +1324,20 @@ mod tests {
     #[test]
     fn test_read_path_attribute_communities_empty() {
         // RFC 7606 Section 7.8: length must be non-zero multiple of 4
-        let (attr_opt, offset, treat_as_withdraw) =
+        let (result, offset) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_EMPTY, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 3);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_communities_well_known() {
-        let (attr_opt, _, _) =
+        let (result, _) =
             read_path_attribute(PATH_ATTR_COMMUNITIES_WELL_KNOWN, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
+        let attr = result.unwrap();
 
         if let PathAttrValue::Communities(communities) = attr.value {
             assert_eq!(communities.len(), 3);
@@ -1316,11 +1362,12 @@ mod tests {
         ];
 
         // RFC 7606: COMMUNITIES length error -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 6);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1366,8 +1413,8 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
-        let parsed_attr = parsed_attr_opt.unwrap();
+        let (result, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let parsed_attr = result.unwrap();
 
         if let PathAttrValue::ExtendedCommunities(ext_communities) = parsed_attr.value {
             assert_eq!(ext_communities, original_ext_communities);
@@ -1395,9 +1442,8 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_as_path() {
-        let (as_path_opt, offset, _) =
-            read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(PATH_ATTR_AS_PATH, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         let segments = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
             segment_len: 2,
@@ -1424,11 +1470,12 @@ mod tests {
         ];
 
         // RFC 7606: malformed AS_PATH -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 4);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1444,19 +1491,20 @@ mod tests {
         ];
 
         // RFC 7606: malformed AS_PATH -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 7);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_as_path_empty() {
         let input: &[u8] = &[PathAttrFlag::TRANSITIVE, AttrType::AsPath as u8, 0x00];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1491,8 +1539,8 @@ mod tests {
             0x1e, // ASN 30
         ];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1529,9 +1577,9 @@ mod tests {
 
     #[test]
     fn test_read_path_attribute_next_hop_ipv4() {
-        let (as_path_opt, offset, _) =
+        let (result, offset) =
             read_path_attribute(PATH_ATTR_NEXT_HOP_IPV4, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1556,11 +1604,12 @@ mod tests {
         ];
 
         // RFC 7606: NEXT_HOP length error -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 8);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -1584,11 +1633,16 @@ mod tests {
             ];
 
             // RFC 7606: invalid NEXT_HOP address -> treat-as-withdraw
-            let (attr_opt, offset, treat_as_withdraw) =
-                read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
-            assert!(attr_opt.is_none(), "Failed for {}", name);
+            let (result, offset) = read_path_attribute(&input, DEFAULT_FORMAT).unwrap();
+            assert!(
+                matches!(
+                    result,
+                    PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+                ),
+                "Failed for {}",
+                name
+            );
             assert_eq!(offset, 7, "Failed for {}", name);
-            assert!(treat_as_withdraw, "Failed for {}", name);
         }
     }
 
@@ -1605,8 +1659,8 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1629,11 +1683,12 @@ mod tests {
         ];
 
         // RFC 7606 Section 7.4: MED error -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 6);
-        assert!(treat_as_withdraw);
     }
 
     // LOCAL_PREF attribute tests
@@ -1649,8 +1704,8 @@ mod tests {
             0x01,
         ];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1673,11 +1728,12 @@ mod tests {
         ];
 
         // RFC 7606: LOCAL_PREF length error -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 6);
-        assert!(treat_as_withdraw);
     }
 
     // ATOMIC_AGGREGATE attribute tests
@@ -1689,8 +1745,8 @@ mod tests {
             0x00,
         ];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1711,11 +1767,12 @@ mod tests {
         ];
 
         // RFC 7606: ATOMIC_AGGREGATE length error -> attribute-discard (not treat-as-withdraw)
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::Discard)
+        ));
         assert_eq!(offset, 4);
-        assert!(!treat_as_withdraw);
     }
 
     // AGGREGATOR attribute tests
@@ -1735,8 +1792,8 @@ mod tests {
             0x0d,
         ];
 
-        let (as_path_opt, offset, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        let as_path = as_path_opt.unwrap();
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let as_path = result.unwrap();
         assert_eq!(
             as_path,
             PathAttribute {
@@ -1762,18 +1819,19 @@ mod tests {
         ];
 
         // RFC 7606: AGGREGATOR length error -> attribute-discard (not treat-as-withdraw)
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::Discard)
+        ));
         assert_eq!(offset, 6);
-        assert!(!treat_as_withdraw);
     }
 
     #[test]
     fn test_read_path_attribute_extended_communities() {
-        let (attr_opt, offset, _) =
+        let (result, offset) =
             read_path_attribute(PATH_ATTR_EXTENDED_COMMUNITIES_TWO, DEFAULT_FORMAT).unwrap();
-        let attr = attr_opt.unwrap();
+        let attr = result.unwrap();
 
         assert_eq!(
             attr,
@@ -1801,8 +1859,8 @@ mod tests {
         };
 
         let bytes = write_path_attribute(&attr, false);
-        let (parsed_attr_opt, _, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
-        let parsed_attr = parsed_attr_opt.unwrap();
+        let (result, _) = read_path_attribute(&bytes, DEFAULT_FORMAT).unwrap();
+        let parsed_attr = result.unwrap();
 
         if let PathAttrValue::LargeCommunities(large_communities) = parsed_attr.value {
             assert_eq!(large_communities, original_large_communities);
@@ -2245,9 +2303,9 @@ mod tests {
         for test in tests {
             let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
-            let (attr_opt, offset, _) = result.unwrap();
+            let (result, offset) = result.unwrap();
             assert!(
-                attr_opt.is_none(),
+                !matches!(result, PathAttrResult::Parsed(_)),
                 "{}: malformed attribute should be discarded",
                 test.name
             );
@@ -2276,15 +2334,8 @@ mod tests {
             0x14, // Second ASN: 20
         ];
 
-        let result = read_path_attribute(input, DEFAULT_FORMAT);
-        assert!(result.is_ok());
-        let (attr_opt, _, _) = result.unwrap();
-        assert!(
-            attr_opt.is_some(),
-            "Well-formed AS4_PATH should be accepted"
-        );
-
-        let attr = attr_opt.unwrap();
+        let (result, _) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let attr = result.unwrap();
         if let PathAttrValue::As4Path(as_path) = attr.value {
             assert_eq!(as_path.segments.len(), 1);
             assert_eq!(as_path.segments[0].asn_list, vec![10, 20]);
@@ -2309,11 +2360,12 @@ mod tests {
         ];
 
         // RFC 7606: malformed AS_PATH -> treat-as-withdraw
-        let (attr_opt, offset, treat_as_withdraw) =
-            read_path_attribute(input, DEFAULT_FORMAT).unwrap();
-        assert!(attr_opt.is_none());
+        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        assert!(matches!(
+            result,
+            PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw)
+        ));
         assert_eq!(offset, 9);
-        assert!(treat_as_withdraw);
     }
 
     #[test]
@@ -2382,14 +2434,8 @@ mod tests {
         for test in tests {
             let result = read_path_attribute(test.input, DEFAULT_FORMAT);
             assert!(result.is_ok(), "{}: should return Ok", test.name);
-            let (attr_opt, _, _) = result.unwrap();
-            assert!(
-                attr_opt.is_some(),
-                "{}: AS4_PATH should not be discarded",
-                test.name
-            );
-
-            let attr = attr_opt.unwrap();
+            let (result, _) = result.unwrap();
+            let attr = result.unwrap();
             if let PathAttrValue::As4Path(as_path) = attr.value {
                 assert_eq!(
                     as_path.segments.len(),

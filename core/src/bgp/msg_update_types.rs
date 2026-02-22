@@ -31,39 +31,52 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// Some attributes differ by session type: LOCAL_PREF, ORIGINATOR_ID,
 /// CLUSTER_LIST are attribute-discard on eBGP but treat-as-withdraw on iBGP
 /// (Sections 7.5, 7.9, 7.10).
-pub fn should_treat_as_withdraw(attr_type_code: u8, is_ebgp: bool) -> bool {
+/// RFC 7606 per-attribute error handling result.
+#[derive(Debug, PartialEq)]
+pub enum PathAttrError {
+    /// Attribute discarded (drop attribute, keep route).
+    Discard,
+    /// Treat-as-withdraw (convert entire UPDATE to withdrawals).
+    TreatAsWithdraw,
+}
+
+/// RFC 7606: determine the error action for a malformed attribute.
+pub fn malformed_attr_action(attr_type_code: u8, is_ebgp: bool) -> PathAttrError {
     match attr_type_code {
         // Section 7.1
-        attr_type_code::ORIGIN => true,
+        attr_type_code::ORIGIN => PathAttrError::TreatAsWithdraw,
         // Section 7.2
-        attr_type_code::AS_PATH => true,
+        attr_type_code::AS_PATH => PathAttrError::TreatAsWithdraw,
         // Section 7.3
-        attr_type_code::NEXT_HOP => true,
+        attr_type_code::NEXT_HOP => PathAttrError::TreatAsWithdraw,
         // Section 7.4
-        attr_type_code::MULTI_EXIT_DISC => true,
-        // Section 7.5: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
-        attr_type_code::LOCAL_PREF => !is_ebgp,
+        attr_type_code::MULTI_EXIT_DISC => PathAttrError::TreatAsWithdraw,
+        // Section 7.5: eBGP -> discard, iBGP -> treat-as-withdraw
+        attr_type_code::LOCAL_PREF if is_ebgp => PathAttrError::Discard,
+        attr_type_code::LOCAL_PREF => PathAttrError::TreatAsWithdraw,
         // Section 7.6: attribute-discard
-        attr_type_code::ATOMIC_AGGREGATE => false,
+        attr_type_code::ATOMIC_AGGREGATE => PathAttrError::Discard,
         // Section 7.7: attribute-discard
-        attr_type_code::AGGREGATOR => false,
+        attr_type_code::AGGREGATOR => PathAttrError::Discard,
         // Section 7.8
-        attr_type_code::COMMUNITIES => true,
+        attr_type_code::COMMUNITIES => PathAttrError::TreatAsWithdraw,
         // Section 7.14
-        attr_type_code::EXTENDED_COMMUNITIES => true,
+        attr_type_code::EXTENDED_COMMUNITIES => PathAttrError::TreatAsWithdraw,
         // Consistent with Section 8
-        attr_type_code::LARGE_COMMUNITIES => true,
-        // Section 7.9: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
-        attr_type_code::ORIGINATOR_ID => !is_ebgp,
-        // Section 7.10: eBGP -> attribute-discard, iBGP -> treat-as-withdraw
-        attr_type_code::CLUSTER_LIST => !is_ebgp,
+        attr_type_code::LARGE_COMMUNITIES => PathAttrError::TreatAsWithdraw,
+        // Section 7.9: eBGP -> discard, iBGP -> treat-as-withdraw
+        attr_type_code::ORIGINATOR_ID if is_ebgp => PathAttrError::Discard,
+        attr_type_code::ORIGINATOR_ID => PathAttrError::TreatAsWithdraw,
+        // Section 7.10: eBGP -> discard, iBGP -> treat-as-withdraw
+        attr_type_code::CLUSTER_LIST if is_ebgp => PathAttrError::Discard,
+        attr_type_code::CLUSTER_LIST => PathAttrError::TreatAsWithdraw,
         // Section 7.12 / 3(j): simple layout, NLRI position is deterministic
-        attr_type_code::MP_UNREACH_NLRI => true,
+        attr_type_code::MP_UNREACH_NLRI => PathAttrError::TreatAsWithdraw,
         // RFC 6793: attribute-discard
-        attr_type_code::AS4_PATH => false,
-        attr_type_code::AS4_AGGREGATOR => false,
+        attr_type_code::AS4_PATH => PathAttrError::Discard,
+        attr_type_code::AS4_AGGREGATOR => PathAttrError::Discard,
         // Unknown optional: attribute-discard
-        _ => false,
+        _ => PathAttrError::Discard,
     }
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
 use crate::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use crate::bgp::msg_update_types::PathAttrValue;
 use crate::bgp::multiprotocol::AfiSafi;
@@ -146,10 +146,14 @@ impl Peer {
                     };
 
                     if actual_leftmost != peer_asn {
-                        warn!(peer_ip = %self.addr, leftmost_as = actual_leftmost, peer_asn, "AS_PATH first AS does not match peer AS");
-                        return Err(BgpError::UpdateMessageError(
-                            UpdateMessageError::MalformedASPath,
-                        ));
+                        // RFC 7606 Section 7.2: SHOULD treat-as-withdraw
+                        warn!(peer_ip = %self.addr, leftmost_as = actual_leftmost, peer_asn, "AS_PATH first AS does not match peer AS, treat-as-withdraw per RFC 7606");
+                        let mut withdrawn = self.process_withdrawals(&update_msg);
+                        for nlri in update_msg.nlri_list() {
+                            self.rib_in.remove_route(nlri.prefix, nlri.path_id);
+                            withdrawn.push((nlri.prefix, nlri.path_id));
+                        }
+                        return Ok((vec![], withdrawn));
                     }
                 }
             }
@@ -357,25 +361,30 @@ mod tests {
     async fn test_handle_update_first_as_validation() {
         use crate::peer::test_helpers::create_test_peer_with_state;
 
-        // (session_type, peer_asn, first_as_in_path, should_pass)
+        // RFC 7606 Section 7.2: eBGP first-AS mismatch -> treat-as-withdraw
+        // (session_type, peer_asn, first_as_in_path, expect_withdrawn)
         let cases = vec![
-            (SessionType::Ebgp, 65001, 65002, false), // eBGP mismatch -> fail
-            (SessionType::Ebgp, 65001, 65001, true),  // eBGP match -> pass
-            (SessionType::Ibgp, 65001, 65002, true),  // iBGP mismatch -> pass (no check)
+            (SessionType::Ebgp, 65001, 65002, true), // eBGP mismatch -> treat-as-withdraw
+            (SessionType::Ebgp, 65001, 65001, false), // eBGP match -> announced
+            (SessionType::Ibgp, 65001, 65002, false), // iBGP -> no first-AS check
         ];
 
-        for (session_type, peer_asn, first_as, should_pass) in cases {
+        for (session_type, peer_asn, first_as, expect_withdrawn) in cases {
             let mut peer = create_test_peer_with_state(BgpState::Established).await;
             peer.session_type = Some(session_type);
             peer.asn = Some(peer_asn);
 
             let path = test_path_with_as(first_as);
-            let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
+            let prefix = IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            });
+            let update = UpdateMessage::new(&path, vec![prefix], DEFAULT_FORMAT);
 
-            let result = peer.handle_update(update);
+            let (announced, withdrawn) = peer.handle_update(update).unwrap();
             assert_eq!(
-                result.is_ok(),
-                should_pass,
+                !withdrawn.is_empty() && announced.is_empty(),
+                expect_withdrawn,
                 "{:?} peer_asn={} first_as={}",
                 session_type,
                 peer_asn,
