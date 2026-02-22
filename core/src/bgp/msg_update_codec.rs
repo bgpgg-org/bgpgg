@@ -73,6 +73,7 @@ pub(super) fn validate_attribute_length(
     attr_type: &AttrType,
     attr_len: u16,
     attr_bytes: &[u8],
+    use_4byte_asn: bool,
 ) -> Result<(), ParserError> {
     let valid = match attr_type {
         AttrType::Origin => attr_len == 1,
@@ -80,8 +81,10 @@ pub(super) fn validate_attribute_length(
         AttrType::MultiExtiDisc => attr_len == 4,
         AttrType::LocalPref => attr_len == 4,
         AttrType::AtomicAggregate => attr_len == 0,
-        AttrType::Aggregator => attr_len == 6 || attr_len == 8, // 2-byte or 4-byte ASN + IPv4
-        AttrType::AsPath => true,                               // Variable length
+        // RFC 7606 Section 7.7: 6 bytes without 4-byte ASN, 8 bytes with
+        AttrType::Aggregator if use_4byte_asn => attr_len == 8,
+        AttrType::Aggregator => attr_len == 6,
+        AttrType::AsPath => true, // Variable length
         AttrType::Communities => attr_len > 0 && attr_len.is_multiple_of(4), // RFC 7606 Section 7.8
         // RFC 4456: ORIGINATOR_ID is 4 bytes (IPv4 address)
         AttrType::OriginatorId => attr_len == 4,
@@ -932,7 +935,9 @@ pub(super) fn read_path_attribute(
             }
 
             // Length errors use per-attribute actions from malformed_attr_action()
-            if let Err(err) = validate_attribute_length(&attr_type, attr_len, attr_bytes) {
+            if let Err(err) =
+                validate_attribute_length(&attr_type, attr_len, attr_bytes, format.use_4byte_asn)
+            {
                 warn!(
                     type_code = attr_type_code,
                     attr_hex = %format_bytes_hex(attr_bytes),
@@ -1827,6 +1832,12 @@ mod tests {
     fn test_read_path_attribute_aggregator_ipv4() {
         use std::str::FromStr;
 
+        // 2-byte ASN format (6 bytes) with a non-4byte-ASN session
+        let format_2byte = MessageFormat {
+            use_4byte_asn: false,
+            ..DEFAULT_FORMAT
+        };
+
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::Aggregator as u8,
@@ -1839,7 +1850,7 @@ mod tests {
             0x0d,
         ];
 
-        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (result, offset) = read_path_attribute(input, format_2byte).unwrap();
         let as_path = result.unwrap();
         assert_eq!(
             as_path,
@@ -2655,66 +2666,104 @@ mod tests {
 
     #[test]
     fn test_validate_attribute_length() {
-        // (name, attr_type, attr_len, expect_ok)
-        let tests: Vec<(&str, AttrType, u16, bool)> = vec![
+        // (name, attr_type, attr_len, use_4byte_asn, expect_ok)
+        let tests: Vec<(&str, AttrType, u16, bool, bool)> = vec![
             // Origin: must be exactly 1
-            ("origin valid", AttrType::Origin, 1, true),
-            ("origin too short", AttrType::Origin, 0, false),
-            ("origin too long", AttrType::Origin, 2, false),
+            ("origin valid", AttrType::Origin, 1, true, true),
+            ("origin too short", AttrType::Origin, 0, true, false),
+            ("origin too long", AttrType::Origin, 2, true, false),
             // NextHop: must be exactly 4
-            ("nexthop valid", AttrType::NextHop, 4, true),
-            ("nexthop too short", AttrType::NextHop, 3, false),
-            ("nexthop too long", AttrType::NextHop, 5, false),
+            ("nexthop valid", AttrType::NextHop, 4, true, true),
+            ("nexthop too short", AttrType::NextHop, 3, true, false),
+            ("nexthop too long", AttrType::NextHop, 5, true, false),
             // MED: must be exactly 4
-            ("med valid", AttrType::MultiExtiDisc, 4, true),
-            ("med too short", AttrType::MultiExtiDisc, 3, false),
+            ("med valid", AttrType::MultiExtiDisc, 4, true, true),
+            ("med too short", AttrType::MultiExtiDisc, 3, true, false),
             // LocalPref: must be exactly 4
-            ("localpref valid", AttrType::LocalPref, 4, true),
-            ("localpref too long", AttrType::LocalPref, 5, false),
+            ("localpref valid", AttrType::LocalPref, 4, true, true),
+            ("localpref too long", AttrType::LocalPref, 5, true, false),
             // AtomicAggregate: must be exactly 0
-            ("atomic_agg valid", AttrType::AtomicAggregate, 0, true),
-            ("atomic_agg nonzero", AttrType::AtomicAggregate, 1, false),
-            // Aggregator: 6 (2-byte ASN) or 8 (4-byte ASN)
-            ("aggregator 6", AttrType::Aggregator, 6, true),
-            ("aggregator 8", AttrType::Aggregator, 8, true),
-            ("aggregator 7", AttrType::Aggregator, 7, false),
-            ("aggregator 0", AttrType::Aggregator, 0, false),
+            ("atomic_agg valid", AttrType::AtomicAggregate, 0, true, true),
+            (
+                "atomic_agg nonzero",
+                AttrType::AtomicAggregate,
+                1,
+                true,
+                false,
+            ),
+            // RFC 7606 Section 7.7: AGGREGATOR length depends on 4-byte ASN
+            (
+                "aggregator 8 with 4byte",
+                AttrType::Aggregator,
+                8,
+                true,
+                true,
+            ),
+            (
+                "aggregator 6 with 4byte",
+                AttrType::Aggregator,
+                6,
+                true,
+                false,
+            ),
+            (
+                "aggregator 6 without 4byte",
+                AttrType::Aggregator,
+                6,
+                false,
+                true,
+            ),
+            (
+                "aggregator 8 without 4byte",
+                AttrType::Aggregator,
+                8,
+                false,
+                false,
+            ),
+            ("aggregator 7", AttrType::Aggregator, 7, true, false),
+            ("aggregator 0", AttrType::Aggregator, 0, true, false),
             // AsPath: variable length, always valid
-            ("aspath empty", AttrType::AsPath, 0, true),
-            ("aspath any", AttrType::AsPath, 100, true),
+            ("aspath empty", AttrType::AsPath, 0, true, true),
+            ("aspath any", AttrType::AsPath, 100, true, true),
             // Communities: non-zero multiple of 4
-            ("communities 4", AttrType::Communities, 4, true),
-            ("communities 8", AttrType::Communities, 8, true),
-            ("communities 0", AttrType::Communities, 0, false),
-            ("communities 3", AttrType::Communities, 3, false),
-            ("communities 5", AttrType::Communities, 5, false),
+            ("communities 4", AttrType::Communities, 4, true, true),
+            ("communities 8", AttrType::Communities, 8, true, true),
+            ("communities 0", AttrType::Communities, 0, true, false),
+            ("communities 3", AttrType::Communities, 3, true, false),
+            ("communities 5", AttrType::Communities, 5, true, false),
             // OriginatorId: must be exactly 4
-            ("originator_id valid", AttrType::OriginatorId, 4, true),
-            ("originator_id short", AttrType::OriginatorId, 3, false),
+            ("originator_id valid", AttrType::OriginatorId, 4, true, true),
+            (
+                "originator_id short",
+                AttrType::OriginatorId,
+                3,
+                true,
+                false,
+            ),
             // ClusterList: non-zero multiple of 4
-            ("cluster_list 4", AttrType::ClusterList, 4, true),
-            ("cluster_list 8", AttrType::ClusterList, 8, true),
-            ("cluster_list 0", AttrType::ClusterList, 0, false),
-            ("cluster_list 5", AttrType::ClusterList, 5, false),
+            ("cluster_list 4", AttrType::ClusterList, 4, true, true),
+            ("cluster_list 8", AttrType::ClusterList, 8, true, true),
+            ("cluster_list 0", AttrType::ClusterList, 0, true, false),
+            ("cluster_list 5", AttrType::ClusterList, 5, true, false),
             // ExtendedCommunities: non-zero multiple of 8
-            ("ext_comm 8", AttrType::ExtendedCommunities, 8, true),
-            ("ext_comm 16", AttrType::ExtendedCommunities, 16, true),
-            ("ext_comm 0", AttrType::ExtendedCommunities, 0, false),
-            ("ext_comm 7", AttrType::ExtendedCommunities, 7, false),
+            ("ext_comm 8", AttrType::ExtendedCommunities, 8, true, true),
+            ("ext_comm 16", AttrType::ExtendedCommunities, 16, true, true),
+            ("ext_comm 0", AttrType::ExtendedCommunities, 0, true, false),
+            ("ext_comm 7", AttrType::ExtendedCommunities, 7, true, false),
             // LargeCommunities: non-zero multiple of 12
-            ("large_comm 12", AttrType::LargeCommunities, 12, true),
-            ("large_comm 24", AttrType::LargeCommunities, 24, true),
-            ("large_comm 0", AttrType::LargeCommunities, 0, false),
-            ("large_comm 11", AttrType::LargeCommunities, 11, false),
+            ("large_comm 12", AttrType::LargeCommunities, 12, true, true),
+            ("large_comm 24", AttrType::LargeCommunities, 24, true, true),
+            ("large_comm 0", AttrType::LargeCommunities, 0, true, false),
+            ("large_comm 11", AttrType::LargeCommunities, 11, true, false),
             // Variable length types: always valid
-            ("mp_reach", AttrType::MpReachNlri, 50, true),
-            ("mp_unreach", AttrType::MpUnreachNlri, 50, true),
-            ("as4_path", AttrType::As4Path, 10, true),
-            ("as4_aggregator", AttrType::As4Aggregator, 8, true),
+            ("mp_reach", AttrType::MpReachNlri, 50, true, true),
+            ("mp_unreach", AttrType::MpUnreachNlri, 50, true, true),
+            ("as4_path", AttrType::As4Path, 10, true, true),
+            ("as4_aggregator", AttrType::As4Aggregator, 8, true, true),
         ];
 
-        for (name, attr_type, attr_len, expect_ok) in &tests {
-            let result = validate_attribute_length(attr_type, *attr_len, &[]);
+        for (name, attr_type, attr_len, use_4byte_asn, expect_ok) in &tests {
+            let result = validate_attribute_length(attr_type, *attr_len, &[], *use_4byte_asn);
             assert_eq!(result.is_ok(), *expect_ok, "{name}");
         }
     }
@@ -2722,7 +2771,7 @@ mod tests {
     #[test]
     fn test_validate_attribute_length_error_subcodes() {
         // Well-known attribute (Origin) -> AttributeLengthError
-        let result = validate_attribute_length(&AttrType::Origin, 0, &[]);
+        let result = validate_attribute_length(&AttrType::Origin, 0, &[], true);
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(
                 error,
@@ -2733,7 +2782,7 @@ mod tests {
         }
 
         // Optional attribute (MED) -> OptionalAttributeError
-        let result = validate_attribute_length(&AttrType::MultiExtiDisc, 3, &[]);
+        let result = validate_attribute_length(&AttrType::MultiExtiDisc, 3, &[], true);
         if let Err(ParserError::BgpError { error, .. }) = result {
             assert_eq!(
                 error,

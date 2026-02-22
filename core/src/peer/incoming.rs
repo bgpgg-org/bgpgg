@@ -239,6 +239,13 @@ impl Peer {
             return Ok((vec![], vec![]));
         };
 
+        // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive;
+        // strip on eBGP receive in case a buggy peer sent them.
+        if self.session_type == Some(SessionType::Ebgp) {
+            path.attrs.originator_id = None;
+            path.attrs.cluster_list.clear();
+        }
+
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP
         let local_ip = self.local_config.addr.ip();
         let is_local_nexthop = match (&path.attrs.next_hop, local_ip) {

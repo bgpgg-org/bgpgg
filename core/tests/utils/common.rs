@@ -2010,6 +2010,28 @@ pub fn attr_aggregator(asn: u32, ip: Ipv4Addr) -> Vec<u8> {
     )
 }
 
+pub fn attr_originator_id(ip: Ipv4Addr) -> Vec<u8> {
+    build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::ORIGINATOR_ID,
+        4,
+        &ip.octets(),
+    )
+}
+
+pub fn attr_cluster_list(ids: &[Ipv4Addr]) -> Vec<u8> {
+    let mut value = Vec::new();
+    for id in ids {
+        value.extend_from_slice(&id.octets());
+    }
+    build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::CLUSTER_LIST,
+        value.len() as u8,
+        &value,
+    )
+}
+
 /// Build AS_PATH attribute with 2-byte ASN encoding (legacy/OLD speaker)
 pub fn attr_as_path_2byte(asns: Vec<u16>) -> Vec<u8> {
     let mut value = Vec::new();

@@ -266,6 +266,30 @@ async fn test_update_attribute_length_error_no_nlri() {
     }
 }
 
+/// RFC 7606 Section 5.2: UPDATE with withdrawn routes + malformed attr + no reachable NLRI
+/// must escalate to session reset even though withdrawn routes exist.
+#[tokio::test]
+async fn test_update_section_5_2_no_reachable_nlri_escalation() {
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Malformed ORIGIN (length=2 instead of 1) -> normally treat-as-withdraw
+    let malformed_origin =
+        build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0, 0]);
+
+    // UPDATE has withdrawn routes but NO reachable NLRI
+    let withdrawn = &[24, 10, 11, 12]; // 10.11.12.0/24
+    let msg = build_raw_update(withdrawn, &[&malformed_origin], &[], None);
+    peer.send_raw(&msg).await;
+
+    // Section 5.2: path attributes present (not just MP_UNREACH_NLRI),
+    // no reachable NLRI, error is not attribute-discard -> session reset
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+    );
+}
+
 /// RFC 7606: attribute length error with NLRI -> treat-as-withdraw (session stays up)
 #[tokio::test]
 async fn test_update_attribute_length_error_with_nlri() {
@@ -850,12 +874,9 @@ async fn test_update_multiple_errors_strongest_wins() {
     );
 }
 
-/// Duplicate MP_REACH_NLRI attributes -> session reset (not treat-as-withdraw)
+/// RFC 7606 Section 3(g): duplicate MP attributes -> session reset
 #[tokio::test]
-async fn test_update_duplicate_mp_reach_nlri() {
-    let (_server, mut peer) = setup_server_and_fake_peer().await;
-
-    // Build two MP_REACH_NLRI attributes for IPv4 unicast
+async fn test_update_duplicate_mp_attributes() {
     let mp_reach_value: &[u8] = &[
         0x00, 0x01, // AFI = IPv4
         0x01, // SAFI = Unicast
@@ -871,27 +892,48 @@ async fn test_update_duplicate_mp_reach_nlri() {
         mp_reach_value,
     );
 
-    // Send UPDATE with ORIGIN, AS_PATH, and two MP_REACH_NLRI (duplicate)
-    let msg = build_raw_update(
-        &[],
-        &[
-            &attr_origin_igp(),
-            &attr_as_path_empty(),
-            &mp_reach,
-            &mp_reach,
-        ],
-        &[], // No traditional NLRI (using MP_REACH_NLRI)
-        None,
+    let mp_unreach_value: &[u8] = &[
+        0x00, 0x01, // AFI = IPv4
+        0x01, // SAFI = Unicast
+        0x18, 0x0a, 0x0b, 0x0c, // Withdrawn: 10.11.12.0/24
+    ];
+    let mp_unreach = build_attr_bytes(
+        attr_flags::OPTIONAL,
+        attr_type_code::MP_UNREACH_NLRI,
+        mp_unreach_value.len() as u8,
+        mp_unreach_value,
     );
 
-    peer.send_raw(&msg).await;
+    let test_cases: Vec<(&str, Vec<u8>)> = vec![
+        ("duplicate_mp_reach", mp_reach),
+        ("duplicate_mp_unreach", mp_unreach),
+    ];
 
-    // Duplicate MP attribute -> session reset
-    let notif = peer.read_notification().await;
-    assert_eq!(
-        notif.error(),
-        &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-    );
+    for (name, mp_attr) in test_cases {
+        let (_server, mut peer) = setup_server_and_fake_peer().await;
+
+        let msg = build_raw_update(
+            &[],
+            &[
+                &attr_origin_igp(),
+                &attr_as_path_empty(),
+                &mp_attr,
+                &mp_attr,
+            ],
+            &[],
+            None,
+        );
+
+        peer.send_raw(&msg).await;
+
+        let notif = peer.read_notification().await;
+        assert_eq!(
+            notif.error(),
+            &BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
+            "Test case: {} - duplicate MP attribute should cause session reset",
+            name
+        );
+    }
 }
 
 /// RFC 7606 Section 4: runt attribute header (fewer than 3 bytes remaining) -> treat-as-withdraw
@@ -1017,6 +1059,8 @@ async fn test_malformed_attribute_actions() {
     struct Case {
         name: &'static str,
         peer_asn: u32, // 65001 = iBGP, 65002 = eBGP
+        /// Capabilities for the FakePeer OPEN. None = no 4-byte ASN.
+        capabilities: Option<Vec<Vec<u8>>>,
         attrs: Vec<Vec<u8>>,
         treat_as_withdraw: bool,
         /// For attribute-discard cases: verify the specific attribute is absent.
@@ -1033,6 +1077,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "origin_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0, 0]),
                 valid_as_path.clone(),
@@ -1045,6 +1090,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "as_path_invalid_segment",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 build_attr_bytes(
@@ -1062,6 +1108,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "next_hop_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1079,6 +1126,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "med_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1097,6 +1145,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "local_pref_wrong_length_ebgp",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1115,6 +1164,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "local_pref_wrong_length_ibgp",
             peer_asn: 65001,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1133,6 +1183,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "atomic_aggregate_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1151,6 +1202,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "aggregator_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1165,10 +1217,49 @@ async fn test_malformed_attribute_actions() {
             treat_as_withdraw: false,
             discarded_attr: Some(DiscardedAttr::Aggregator),
         },
+        // Section 7.7: AGGREGATOR length=6 wrong when 4-byte ASN negotiated
+        Case {
+            name: "aggregator_2byte_len_with_4byte_asn",
+            peer_asn: 65002,
+            capabilities: Some(vec![build_capability_4byte_asn(65002)]),
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::AGGREGATOR,
+                    6,
+                    &[0, 1, 10, 0, 0, 1], // 2-byte ASN format (wrong for 4-byte session)
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::Aggregator),
+        },
+        // Section 7.7: AGGREGATOR length=8 wrong when 4-byte ASN NOT negotiated
+        Case {
+            name: "aggregator_4byte_len_without_4byte_asn",
+            peer_asn: 65002,
+            capabilities: None,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::AGGREGATOR,
+                    8,
+                    &[0, 0, 0, 1, 10, 0, 0, 1], // 4-byte ASN format (wrong for 2-byte session)
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::Aggregator),
+        },
         // Section 7.8: COMMUNITIES wrong length (not multiple of 4)
         Case {
             name: "communities_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1187,6 +1278,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "originator_id_wrong_length_ebgp",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1205,6 +1297,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "originator_id_wrong_length_ibgp",
             peer_asn: 65001,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1223,6 +1316,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "cluster_list_wrong_length_ebgp",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1241,6 +1335,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "cluster_list_wrong_length_ibgp",
             peer_asn: 65001,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1259,6 +1354,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "extended_communities_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1277,6 +1373,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "large_communities_wrong_length",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1291,10 +1388,39 @@ async fn test_malformed_attribute_actions() {
             treat_as_withdraw: true,
             discarded_attr: None,
         },
+        // Section 7.9: valid ORIGINATOR_ID from eBGP -> Discard (stripped)
+        Case {
+            name: "originator_id_valid_ebgp_stripped",
+            peer_asn: 65002,
+            capabilities: None,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                attr_originator_id(Ipv4Addr::new(1, 1, 1, 1)),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::OriginatorId),
+        },
+        // Section 7.10: valid CLUSTER_LIST from eBGP -> Discard (stripped)
+        Case {
+            name: "cluster_list_valid_ebgp_stripped",
+            peer_asn: 65002,
+            capabilities: None,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                attr_cluster_list(&[Ipv4Addr::new(1, 1, 1, 1)]),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::ClusterList),
+        },
         // RFC 7606 Section 3(c): ORIGIN wrong flags -> treat-as-withdraw
         Case {
             name: "origin_wrong_flags",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 // ORIGIN with OPTIONAL flag set (should be well-known=0)
                 build_attr_bytes(attr_flags::OPTIONAL, attr_type_code::ORIGIN, 1, &[0]),
@@ -1308,6 +1434,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "atomic_aggregate_wrong_flags",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1327,6 +1454,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "aggregator_wrong_flags",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1346,6 +1474,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "as4_path_wrong_flags",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1359,6 +1488,7 @@ async fn test_malformed_attribute_actions() {
         Case {
             name: "as4_aggregator_wrong_flags",
             peer_asn: 65002,
+            capabilities: None,
             attrs: vec![
                 valid_origin.clone(),
                 valid_as_path.clone(),
@@ -1382,7 +1512,7 @@ async fn test_malformed_attribute_actions() {
             &server,
             case.peer_asn,
             Ipv4Addr::new(2, 2, 2, 2),
-            None,
+            case.capabilities,
         )
         .await;
 
@@ -1549,5 +1679,70 @@ async fn test_malformed_withdrawn_routes_nlri() {
     assert!(
         verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
         "peer should stay established after malformed withdrawn routes"
+    );
+}
+
+/// RFC 7606 Section 3(j): malformed NLRI field (prefix_len > 32) makes it impossible
+/// to use treat-as-withdraw, so session reset applies.
+#[tokio::test]
+async fn test_malformed_nlri_field_session_reset() {
+    let (_server, mut peer) = setup_server_and_fake_peer().await;
+
+    // prefix_len=33 is invalid for IPv4
+    let bad_nlri = &[33, 10, 11, 12, 0, 0];
+    let msg = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        bad_nlri,
+        None,
+    );
+
+    peer.send_raw(&msg).await;
+
+    // NLRI can't be parsed -> session reset
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::UpdateMessageError(UpdateMessageError::InvalidNetworkField),
+    );
+}
+
+/// RFC 7606 Section 5.2 negative case: discard-only error with no NLRI should NOT
+/// escalate to session reset. Malformed ATOMIC_AGGREGATE is attribute-discard,
+/// so the UPDATE is processed normally (no routes affected).
+#[tokio::test]
+async fn test_discard_only_no_nlri_no_escalation() {
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    // Malformed ATOMIC_AGGREGATE (length=1 instead of 0) -> attribute-discard
+    let malformed_atomic_agg = build_attr_bytes(
+        attr_flags::TRANSITIVE,
+        attr_type_code::ATOMIC_AGGREGATE,
+        1,
+        &[0],
+    );
+
+    // No NLRI, no withdrawn routes - just the malformed attribute
+    let msg = build_raw_update(&[], &[&malformed_atomic_agg], &[], None);
+    peer.send_raw(&msg).await;
+
+    // Attribute-discard errors should NOT trigger Section 5.2 escalation
+    poll_peer_stats(
+        &server,
+        &peer.address,
+        ExpectedStats {
+            update_received: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "Peer should stay established (discard-only error, no Section 5.2 escalation)"
     );
 }

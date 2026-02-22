@@ -587,24 +587,13 @@ impl UpdateMessage {
         }
 
         if treat_as_withdraw {
-            // Collect all routes from every source into a deduped set
-            let mut all_withdrawn: HashSet<Nlri> = HashSet::from_iter(withdrawn_routes);
-            all_withdrawn.extend(nlri_list);
-            for attr in &path_attributes {
-                match &attr.value {
-                    PathAttrValue::MpReachNlri(mp_reach) => {
-                        all_withdrawn.extend(mp_reach.nlri.iter().copied());
-                    }
-                    PathAttrValue::MpUnreachNlri(mp_unreach) => {
-                        all_withdrawn.extend(mp_unreach.withdrawn_routes.iter().copied());
-                    }
-                    _ => {}
-                }
-            }
-
-            // RFC 7606 Section 5.2: no routes to withdraw -> session reset
-            if all_withdrawn.is_empty() {
-                warn!("treat-as-withdraw with no routes, escalating to session reset per RFC 7606 Section 5.2");
+            if should_escalate_to_session_reset(
+                &nlri_list,
+                has_mp_reach_nlri,
+                &path_attributes,
+                total_path_attributes_len,
+            ) {
+                warn!("treat-as-withdraw with no reachable NLRI, escalating to session reset per RFC 7606 Section 5.2");
                 return Err(ParserError::BgpError {
                     error: super::msg_notification::BgpError::UpdateMessageError(
                         super::msg_notification::UpdateMessageError::MalformedAttributeList,
@@ -613,7 +602,12 @@ impl UpdateMessage {
                 });
             }
 
-            // RFC 7606 Section 8: log the full UPDATE body for debugging
+            // Collect all routes from every source into withdrawals
+            let mut all_withdrawn: HashSet<Nlri> = HashSet::from_iter(withdrawn_routes);
+            all_withdrawn.extend(nlri_list);
+            all_withdrawn.extend(collect_mp_nlri(&path_attributes));
+
+            // RFC 7606 Section 6: log the full UPDATE body for debugging
             warn!(
                 route_count = all_withdrawn.len(),
                 update_hex = %format_bytes_hex(data),
@@ -764,6 +758,44 @@ impl Message for UpdateMessage {
 
         bytes
     }
+}
+
+/// RFC 7606 Section 5.2: when treat-as-withdraw is triggered on an UPDATE
+/// with path attributes beyond MP_UNREACH_NLRI but no reachable NLRI, we
+/// can't be confident the NLRI were successfully parsed. Escalate to session
+/// reset. Uses total_path_attributes_len (wire) because malformed attrs are
+/// stripped during parsing.
+fn should_escalate_to_session_reset(
+    nlri_list: &[Nlri],
+    has_mp_reach_nlri: bool,
+    path_attributes: &[PathAttribute],
+    total_path_attributes_len: usize,
+) -> bool {
+    if !nlri_list.is_empty() || has_mp_reach_nlri {
+        return false; // has reachable NLRI, treat-as-withdraw is fine
+    }
+    if total_path_attributes_len == 0 {
+        return false; // no path attributes on wire
+    }
+    // Wire had path attributes but no reachable NLRI. The only safe case
+    // is a pure withdraw: exactly one MP_UNREACH_NLRI and nothing else.
+    !(path_attributes.len() == 1
+        && matches!(path_attributes[0].value, PathAttrValue::MpUnreachNlri(_)))
+}
+
+/// Collect all NLRI from MP_REACH_NLRI and MP_UNREACH_NLRI attributes.
+fn collect_mp_nlri(path_attributes: &[PathAttribute]) -> Vec<Nlri> {
+    let mut nlri = Vec::new();
+    for attr in path_attributes {
+        match &attr.value {
+            PathAttrValue::MpReachNlri(mp_reach) => nlri.extend_from_slice(&mp_reach.nlri),
+            PathAttrValue::MpUnreachNlri(mp_unreach) => {
+                nlri.extend_from_slice(&mp_unreach.withdrawn_routes)
+            }
+            _ => {}
+        }
+    }
+    nlri
 }
 
 #[cfg(test)]
@@ -1560,6 +1592,12 @@ mod tests {
 
     #[test]
     fn test_attribute_flags_aggregator_partial_bit_allowed() {
+        // 2-byte ASN format (6 bytes) requires non-4byte-ASN session
+        let format_2byte = MessageFormat {
+            use_4byte_asn: false,
+            ..DEFAULT_FORMAT
+        };
+
         let input: &[u8] = &[
             PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE | PathAttrFlag::PARTIAL,
             AttrType::Aggregator as u8,
@@ -1572,7 +1610,7 @@ mod tests {
             0x0d,
         ];
 
-        let (result, offset) = read_path_attribute(input, DEFAULT_FORMAT).unwrap();
+        let (result, offset) = read_path_attribute(input, format_2byte).unwrap();
         let attr = result.unwrap();
         assert_eq!(
             attr.flags.0,
