@@ -20,7 +20,7 @@ pub use super::msg_update_types::{
 
 use super::msg::{Message, MessageFormat, MessageType};
 use super::msg_update_codec::{
-    read_path_attributes, validate_update_message_lengths,
+    format_bytes_hex, read_path_attributes, validate_update_message_lengths,
     validate_well_known_mandatory_attributes, write_nlri_list, write_path_attributes,
 };
 use super::msg_update_types::{
@@ -541,8 +541,20 @@ impl UpdateMessage {
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         offset += WITHDRAWN_ROUTES_LENGTH_SIZE;
 
-        let withdrawn_routes =
-            parse_nlri_list(&data[offset..offset + withdrawn_routes_len], ipv4_add_path)?;
+        // RFC 7606 Section 3: syntactically incorrect Withdrawn Routes field
+        // SHOULD be handled as treat-as-withdraw. Skip ahead using
+        // withdrawn_routes_len and treat the entire UPDATE as a withdrawal.
+        let (withdrawn_routes, mut treat_as_withdraw) =
+            match parse_nlri_list(&data[offset..offset + withdrawn_routes_len], ipv4_add_path) {
+                Ok(routes) => (routes, false),
+                Err(_) => {
+                    warn!(
+                        withdrawn_routes_len,
+                        "malformed withdrawn routes NLRI, treat-as-withdraw per RFC 7606 Section 3"
+                    );
+                    (vec![], true)
+                }
+            };
         offset += withdrawn_routes_len;
 
         let total_path_attributes_len =
@@ -555,8 +567,9 @@ impl UpdateMessage {
         )?;
         offset += TOTAL_ATTR_LENGTH_SIZE;
 
-        let (path_attributes, mut treat_as_withdraw) =
+        let (path_attributes, attr_treat_as_withdraw) =
             read_path_attributes(&data[offset..offset + total_path_attributes_len], format)?;
+        treat_as_withdraw |= attr_treat_as_withdraw;
         offset += total_path_attributes_len;
 
         let nlri_list: Vec<Nlri> = match total_path_attributes_len {
@@ -600,8 +613,10 @@ impl UpdateMessage {
                 });
             }
 
+            // RFC 7606 Section 8: log the full UPDATE body for debugging
             warn!(
                 route_count = all_withdrawn.len(),
+                update_hex = %format_bytes_hex(data),
                 "treat-as-withdraw per RFC 7606"
             );
 

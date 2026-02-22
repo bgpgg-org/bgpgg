@@ -14,7 +14,7 @@
 
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
 use crate::bgp::msg_update::{NextHopAddr, UpdateMessage};
-use crate::bgp::msg_update_types::PathAttrValue;
+use crate::bgp::msg_update_types::{PathAttrValue, AS_TRANS};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::log::{info, warn};
@@ -130,7 +130,6 @@ impl Peer {
         if self.session_type == Some(SessionType::Ebgp) {
             if let Some(leftmost_as) = update_msg.leftmost_as() {
                 if let Some(peer_asn) = self.asn {
-                    use crate::bgp::msg_update_types::AS_TRANS;
                     let actual_leftmost = if leftmost_as == AS_TRANS as u32 {
                         // AS_TRANS present - get real ASN from AS4_PATH
                         update_msg

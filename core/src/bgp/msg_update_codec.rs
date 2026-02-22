@@ -179,6 +179,26 @@ fn validate_nlri_afi(afi: &Afi, nlri_list: &[Nlri]) -> bool {
     true
 }
 
+/// Format bytes as space-separated hex for RFC 7606 Section 8 logging.
+/// Truncates at 256 bytes with a "... (N total)" suffix.
+pub(super) fn format_bytes_hex(bytes: &[u8]) -> String {
+    const MAX_BYTES: usize = 256;
+    if bytes.len() <= MAX_BYTES {
+        bytes
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        let truncated: String = bytes[..MAX_BYTES]
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{}... ({} total)", truncated, bytes.len())
+    }
+}
+
 fn optional_attribute_error(attr_bytes: &[u8]) -> ParserError {
     ParserError::BgpError {
         error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
@@ -849,7 +869,9 @@ pub(super) fn read_path_attribute(
     if bytes.len() < header_len {
         warn!(
             remaining = bytes.len(),
-            header_len, "truncated attribute header, treat-as-withdraw per RFC 7606 Section 4"
+            header_len,
+            attr_hex = %format_bytes_hex(bytes),
+            "truncated attribute header, treat-as-withdraw per RFC 7606 Section 4"
         );
         return Ok((
             PathAttrResult::Malformed(PathAttrError::TreatAsWithdraw),
@@ -871,6 +893,7 @@ pub(super) fn read_path_attribute(
             attr_type_code,
             claimed = total_offset,
             available = bytes.len(),
+            attr_hex = %format_bytes_hex(bytes),
             "attribute length overrun, treat-as-withdraw per RFC 7606 Section 4"
         );
         return Ok((
@@ -882,26 +905,46 @@ pub(super) fn read_path_attribute(
     // Unrecognized well-known attribute -> always session reset
     let known_type = parse_attr_type(bytes, &attribute_flag, attr_type_code, attr_len)?;
 
-    let malformed_result =
-        PathAttrResult::Malformed(malformed_attr_action(attr_type_code, format.is_ebgp));
-
     let attr_val = match known_type {
         Some(attr_type) => {
             let attr_bytes = &bytes[..total_offset];
 
-            let validation =
+            // RFC 7606 Section 3(c): flag errors SHOULD use treat-as-withdraw,
+            // except ATOMIC_AGGREGATE/AGGREGATOR which use attribute-discard per Section 3(f).
+            if let Err(err) =
                 validate_attribute_flags(bytes[0], &attr_type, attr_type_code, attr_len)
-                    .and_then(|_| validate_attribute_length(&attr_type, attr_len, attr_bytes));
-
-            if let Err(err) = validation {
+            {
                 warn!(
                     type_code = attr_type_code,
-                    "malformed attribute per RFC 7606"
+                    attr_hex = %format_bytes_hex(attr_bytes),
+                    "attribute flag error per RFC 7606 Section 3(c)"
                 );
-                // Section 7.11: MP_REACH_NLRI -> session reset
                 if attr_type_code == attr_type_code::MP_REACH_NLRI {
                     return Err(err);
                 }
+                let action = match attr_type_code {
+                    attr_type_code::ATOMIC_AGGREGATE | attr_type_code::AGGREGATOR => {
+                        PathAttrError::Discard
+                    }
+                    _ => PathAttrError::TreatAsWithdraw,
+                };
+                return Ok((PathAttrResult::Malformed(action), total_offset as u16));
+            }
+
+            // Length errors use per-attribute actions from malformed_attr_action()
+            if let Err(err) = validate_attribute_length(&attr_type, attr_len, attr_bytes) {
+                warn!(
+                    type_code = attr_type_code,
+                    attr_hex = %format_bytes_hex(attr_bytes),
+                    "malformed attribute length per RFC 7606"
+                );
+                if attr_type_code == attr_type_code::MP_REACH_NLRI {
+                    return Err(err);
+                }
+                let malformed_result = PathAttrResult::Malformed(malformed_attr_action(
+                    attr_type_code,
+                    format.is_ebgp,
+                ));
                 return Ok((malformed_result, total_offset as u16));
             }
 
@@ -914,6 +957,10 @@ pub(super) fn read_path_attribute(
                     if attr_type_code == attr_type_code::MP_REACH_NLRI {
                         return Err(optional_attribute_error(attr_bytes));
                     }
+                    let malformed_result = PathAttrResult::Malformed(malformed_attr_action(
+                        attr_type_code,
+                        format.is_ebgp,
+                    ));
                     return Ok((malformed_result, total_offset as u16));
                 }
             }

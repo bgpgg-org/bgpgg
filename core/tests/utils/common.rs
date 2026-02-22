@@ -42,7 +42,7 @@ use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, AsPathSegment,
+    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, Aggregator, AsPathSegment,
     AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
     GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, PrefixMatch,
     PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
@@ -191,6 +191,7 @@ pub struct PathParams {
     pub local_path_id: Option<u32>,
     /// RFC 7911: path ID received from peer
     pub remote_path_id: Option<u32>,
+    pub aggregator: Option<Aggregator>,
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -211,6 +212,7 @@ pub fn build_path(params: PathParams) -> Path {
         cluster_list: params.cluster_list,
         local_path_id: params.local_path_id,
         remote_path_id: params.remote_path_id,
+        aggregator: params.aggregator,
     }
 }
 

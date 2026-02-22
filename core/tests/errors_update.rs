@@ -17,6 +17,7 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::msg::MessageType;
 use bgpgg::bgp::msg::BGP_MARKER;
 use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
@@ -991,4 +992,562 @@ async fn test_update_attribute_length_overrun() {
 
     let routes = server.client.get_routes().await.expect("get routes");
     assert!(routes.is_empty(), "route should be withdrawn");
+}
+
+/// RFC 7606: per-attribute malformed handling.
+///
+/// Each attribute type has a defined error action from malformed_attr_action():
+///   - TreatAsWithdraw: session stays up, route withdrawn
+///   - Discard: session stays up, route installed (bad attr dropped)
+///
+/// LOCAL_PREF, ORIGINATOR_ID, and CLUSTER_LIST differ by session type
+/// (eBGP -> Discard, iBGP -> TreatAsWithdraw).
+#[tokio::test]
+async fn test_malformed_attribute_actions() {
+    /// Which attribute should be absent after attribute-discard.
+    /// None means treat-as-withdraw (route removed entirely).
+    enum DiscardedAttr {
+        LocalPref,
+        AtomicAggregate,
+        Aggregator,
+        OriginatorId,
+        ClusterList,
+    }
+
+    struct Case {
+        name: &'static str,
+        peer_asn: u32, // 65001 = iBGP, 65002 = eBGP
+        attrs: Vec<Vec<u8>>,
+        treat_as_withdraw: bool,
+        /// For attribute-discard cases: verify the specific attribute is absent.
+        discarded_attr: Option<DiscardedAttr>,
+    }
+
+    let valid_origin = attr_origin_igp();
+    let valid_as_path = attr_as_path_empty();
+    let valid_next_hop = attr_next_hop(Ipv4Addr::new(10, 0, 0, 1));
+    let valid_local_pref = attr_local_pref(200);
+
+    let test_cases = vec![
+        // Section 7.1: ORIGIN wrong length
+        Case {
+            name: "origin_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::ORIGIN, 2, &[0, 0]),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.2: AS_PATH invalid segment type
+        Case {
+            name: "as_path_invalid_segment",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::AS_PATH,
+                    4,
+                    &[0x00, 0x01, 0x00, 0x0a], // segment_type=0 invalid
+                ),
+                valid_next_hop.clone(),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.3: NEXT_HOP wrong length
+        Case {
+            name: "next_hop_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::NEXT_HOP,
+                    5,
+                    &[10, 0, 0, 1, 0],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.4: MED wrong length
+        Case {
+            name: "med_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::MULTI_EXIT_DISC,
+                    3,
+                    &[0, 0, 1],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.5: LOCAL_PREF wrong length (eBGP -> Discard)
+        Case {
+            name: "local_pref_wrong_length_ebgp",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::LOCAL_PREF,
+                    3,
+                    &[0, 0, 1],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::LocalPref),
+        },
+        // Section 7.5: LOCAL_PREF wrong length (iBGP -> TreatAsWithdraw)
+        Case {
+            name: "local_pref_wrong_length_ibgp",
+            peer_asn: 65001,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::LOCAL_PREF,
+                    3,
+                    &[0, 0, 1],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.6: ATOMIC_AGGREGATE wrong length
+        Case {
+            name: "atomic_aggregate_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::ATOMIC_AGGREGATE,
+                    1,
+                    &[0],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::AtomicAggregate),
+        },
+        // Section 7.7: AGGREGATOR wrong length
+        Case {
+            name: "aggregator_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::AGGREGATOR,
+                    4,
+                    &[0, 1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::Aggregator),
+        },
+        // Section 7.8: COMMUNITIES wrong length (not multiple of 4)
+        Case {
+            name: "communities_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::COMMUNITIES,
+                    3,
+                    &[0, 0, 1],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.9: ORIGINATOR_ID wrong length (eBGP -> Discard)
+        Case {
+            name: "originator_id_wrong_length_ebgp",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::ORIGINATOR_ID,
+                    3,
+                    &[1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::OriginatorId),
+        },
+        // Section 7.9: ORIGINATOR_ID wrong length (iBGP -> TreatAsWithdraw)
+        Case {
+            name: "originator_id_wrong_length_ibgp",
+            peer_asn: 65001,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::ORIGINATOR_ID,
+                    3,
+                    &[1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.10: CLUSTER_LIST wrong length (eBGP -> Discard)
+        Case {
+            name: "cluster_list_wrong_length_ebgp",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::CLUSTER_LIST,
+                    3,
+                    &[1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::ClusterList),
+        },
+        // Section 7.10: CLUSTER_LIST wrong length (iBGP -> TreatAsWithdraw)
+        Case {
+            name: "cluster_list_wrong_length_ibgp",
+            peer_asn: 65001,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::CLUSTER_LIST,
+                    3,
+                    &[1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 7.14: EXTENDED_COMMUNITIES wrong length (not multiple of 8)
+        Case {
+            name: "extended_communities_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::EXTENDED_COMMUNITIES,
+                    7,
+                    &[0; 7],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // Section 8: LARGE_COMMUNITIES wrong length (not multiple of 12)
+        Case {
+            name: "large_communities_wrong_length",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type_code::LARGE_COMMUNITIES,
+                    11,
+                    &[0; 11],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // RFC 7606 Section 3(c): ORIGIN wrong flags -> treat-as-withdraw
+        Case {
+            name: "origin_wrong_flags",
+            peer_asn: 65002,
+            attrs: vec![
+                // ORIGIN with OPTIONAL flag set (should be well-known=0)
+                build_attr_bytes(attr_flags::OPTIONAL, attr_type_code::ORIGIN, 1, &[0]),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // RFC 7606 Section 3(f): ATOMIC_AGGREGATE wrong flags -> attribute-discard
+        Case {
+            name: "atomic_aggregate_wrong_flags",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                // ATOMIC_AGGREGATE with OPTIONAL flag set (should be well-known=0)
+                build_attr_bytes(
+                    attr_flags::OPTIONAL,
+                    attr_type_code::ATOMIC_AGGREGATE,
+                    0,
+                    &[],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::AtomicAggregate),
+        },
+        // RFC 7606 Section 3(f): AGGREGATOR wrong flags -> attribute-discard
+        Case {
+            name: "aggregator_wrong_flags",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                // AGGREGATOR with TRANSITIVE only (missing OPTIONAL)
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::AGGREGATOR,
+                    6,
+                    &[0, 1, 1, 1, 1, 1],
+                ),
+            ],
+            treat_as_withdraw: false,
+            discarded_attr: Some(DiscardedAttr::Aggregator),
+        },
+        // RFC 7606 Section 3(c): AS4_PATH wrong flags -> treat-as-withdraw
+        Case {
+            name: "as4_path_wrong_flags",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(attr_flags::TRANSITIVE, attr_type_code::AS4_PATH, 0, &[]),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+        // RFC 7606 Section 3(c): AS4_AGGREGATOR wrong flags -> treat-as-withdraw
+        Case {
+            name: "as4_aggregator_wrong_flags",
+            peer_asn: 65002,
+            attrs: vec![
+                valid_origin.clone(),
+                valid_as_path.clone(),
+                valid_next_hop.clone(),
+                build_attr_bytes(
+                    attr_flags::TRANSITIVE,
+                    attr_type_code::AS4_AGGREGATOR,
+                    0,
+                    &[],
+                ),
+            ],
+            treat_as_withdraw: true,
+            discarded_attr: None,
+        },
+    ];
+
+    for case in test_cases {
+        let server = setup_server_with_passive_peer().await;
+        let mut peer = FakePeer::connect_and_handshake(
+            None,
+            &server,
+            case.peer_asn,
+            Ipv4Addr::new(2, 2, 2, 2),
+            None,
+        )
+        .await;
+
+        // First install the route with a valid UPDATE
+        peer.send_raw(&build_raw_update(
+            &[],
+            &[
+                &valid_origin,
+                &valid_as_path,
+                &valid_next_hop,
+                &valid_local_pref,
+            ],
+            &[24, 10, 11, 12], // 10.11.12.0/24
+            None,
+        ))
+        .await;
+
+        let install_msg = format!(
+            "Test case: {} - route should be installed before malformed UPDATE",
+            case.name
+        );
+        poll_until(
+            || async {
+                let routes = server.client.get_routes().await.unwrap_or_default();
+                routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+            },
+            &install_msg,
+        )
+        .await;
+
+        // Now send the malformed UPDATE for the same prefix
+        peer.send_raw(&build_raw_update(
+            &[],
+            &case.attrs.iter().map(|a| a.as_slice()).collect::<Vec<_>>(),
+            &[24, 10, 11, 12],
+            None,
+        ))
+        .await;
+
+        poll_peer_stats(
+            &server,
+            &peer.address,
+            ExpectedStats {
+                update_received: Some(2),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+            "Test case: {} - peer should stay established",
+            case.name
+        );
+
+        if case.treat_as_withdraw {
+            poll_route_withdrawal(&[&server]).await;
+        } else {
+            let routes = server.client.get_routes().await.expect("get routes");
+            let route = routes
+                .iter()
+                .find(|route| route.prefix == "10.11.12.0/24")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Test case: {} - route should still be installed (attribute-discard)",
+                        case.name
+                    )
+                });
+            if let Some(ref attr) = case.discarded_attr {
+                let path = &route.paths[0];
+                match attr {
+                    DiscardedAttr::LocalPref => assert_eq!(
+                        path.local_pref,
+                        Some(100),
+                        "Test case: {} - LOCAL_PREF should revert to default (100) after discard",
+                        case.name
+                    ),
+                    DiscardedAttr::AtomicAggregate => assert!(
+                        !path.atomic_aggregate,
+                        "Test case: {} - ATOMIC_AGGREGATE should be discarded",
+                        case.name
+                    ),
+                    DiscardedAttr::Aggregator => assert!(
+                        path.aggregator.is_none(),
+                        "Test case: {} - AGGREGATOR should be discarded",
+                        case.name
+                    ),
+                    DiscardedAttr::OriginatorId => assert!(
+                        path.originator_id.is_none(),
+                        "Test case: {} - ORIGINATOR_ID should be discarded",
+                        case.name
+                    ),
+                    DiscardedAttr::ClusterList => assert!(
+                        path.cluster_list.is_empty(),
+                        "Test case: {} - CLUSTER_LIST should be discarded",
+                        case.name
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// RFC 7606 Section 3: syntactically incorrect Withdrawn Routes field -> treat-as-withdraw.
+/// The announced route should be treated as withdrawn, session stays up.
+#[tokio::test]
+async fn test_malformed_withdrawn_routes_nlri() {
+    let server = setup_server_with_passive_peer().await;
+    let mut peer =
+        FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
+            .await;
+
+    // First install a route via valid UPDATE
+    peer.send_raw(&build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        &[24, 10, 11, 12], // 10.11.12.0/24
+        None,
+    ))
+    .await;
+
+    poll_until(
+        || async {
+            let routes = server.client.get_routes().await.unwrap_or_default();
+            routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+        },
+        "route should be installed before malformed UPDATE",
+    )
+    .await;
+
+    // Build UPDATE with malformed withdrawn routes (prefix_len=33, invalid for IPv4)
+    // and a valid NLRI announcement for the same prefix.
+    // The malformed withdrawn field should trigger treat-as-withdraw,
+    // converting the announced NLRI into a withdrawal.
+    let malformed_withdrawn = vec![33, 10, 11, 12, 0, 0]; // prefix_len=33 is invalid
+    let attrs: Vec<Vec<u8>> = vec![
+        attr_origin_igp(),
+        attr_as_path_empty(),
+        attr_next_hop(Ipv4Addr::new(10, 0, 0, 1)),
+    ];
+    let nlri = vec![24, 10, 11, 12]; // 10.11.12.0/24
+
+    // Build the raw UPDATE manually since build_raw_update uses correct withdrawn bytes
+    let mut body = Vec::new();
+    body.extend_from_slice(&(malformed_withdrawn.len() as u16).to_be_bytes());
+    body.extend_from_slice(&malformed_withdrawn);
+    let total_attr_len: usize = attrs.iter().map(|attr| attr.len()).sum();
+    body.extend_from_slice(&(total_attr_len as u16).to_be_bytes());
+    for attr in &attrs {
+        body.extend_from_slice(attr);
+    }
+    body.extend_from_slice(&nlri);
+    let update = build_raw_message(BGP_MARKER, None, MessageType::Update.as_u8(), &body);
+    peer.send_raw(&update).await;
+
+    // The announced route should be withdrawn (treat-as-withdraw)
+    poll_route_withdrawal(&[&server]).await;
+
+    // Session should remain up
+    assert!(
+        verify_peers(&server, vec![peer.to_peer(BgpState::Established)]).await,
+        "peer should stay established after malformed withdrawn routes"
+    );
 }
