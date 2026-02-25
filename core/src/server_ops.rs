@@ -538,6 +538,20 @@ impl BgpServer {
         let capabilities = conn.capabilities.clone();
         let peer_tx = conn.peer_tx.clone();
 
+        // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
+        if peer.config.rs_client
+            && matches!(
+                peer.config.add_path_send,
+                crate::config::AddPathSend::Disabled
+            )
+        {
+            warn!(
+                %peer_ip,
+                "Route-server client without ADD-PATH may experience path hiding. \
+                 Recommendation: set add-path-send: all"
+            );
+        }
+
         // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
         // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
         let gr_cap = capabilities
@@ -586,6 +600,12 @@ impl BgpServer {
         bind_addr: SocketAddr,
     ) {
         info!(peer_addr = %addr, "adding peer via request");
+
+        // Validate peer configuration
+        if let Err(e) = config.validate() {
+            let _ = response.send(Err(e));
+            return;
+        }
 
         // Parse peer IP address
         let peer_ip: IpAddr = match addr.parse() {
@@ -949,6 +969,7 @@ impl BgpServer {
             local_next_hop,
             export_policies,
             rr_client: peer_info.config.rr_client,
+            rs_client: peer_info.config.rs_client,
             cluster_id: self.config.cluster_id(),
             send_format,
         };

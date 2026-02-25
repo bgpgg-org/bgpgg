@@ -55,6 +55,7 @@ pub struct PeerExportContext<'a> {
     pub local_next_hop: IpAddr,
     pub export_policies: &'a [Arc<crate::policy::Policy>],
     pub rr_client: bool,
+    pub rs_client: bool,
     pub cluster_id: Ipv4Addr,
     pub send_format: MessageFormat,
 }
@@ -121,9 +122,16 @@ pub fn should_propagate_to_peer(
 /// - Learned routes to eBGP: prepend local_asn to first AS_SEQUENCE (or create new segment)
 /// - Learned routes to iBGP: unchanged
 ///
+/// RFC 7947: Route servers preserve AS_PATH unchanged (no local ASN prepending)
+///
 /// Preserves AS_SET segments during propagation
-pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<AsPathSegment> {
-    let is_ebgp = peer_asn != local_asn;
+pub fn build_export_as_path(path: &Path, ctx: &PeerExportContext) -> Vec<AsPathSegment> {
+    // RFC 7947: Route servers preserve AS_PATH (no prepending)
+    if ctx.rs_client {
+        return path.as_path().clone();
+    }
+
+    let is_ebgp = ctx.peer_asn != ctx.local_asn;
 
     if matches!(path.source(), RouteSource::Local) && path.as_path().is_empty() {
         // Truly locally originated routes (empty AS_PATH)
@@ -132,7 +140,7 @@ pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<A
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
-                asn_list: vec![local_asn],
+                asn_list: vec![ctx.local_asn],
             }]
         } else {
             // iBGP: AS_PATH = [] (empty)
@@ -146,7 +154,7 @@ pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<A
         if let Some(first) = path.as_path().first() {
             if first.segment_type == AsPathSegmentType::AsSequence {
                 // Prepend to existing AS_SEQUENCE
-                let mut new_asn_list = vec![local_asn];
+                let mut new_asn_list = vec![ctx.local_asn];
                 new_asn_list.extend_from_slice(&first.asn_list);
                 new_segments.push(AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -160,7 +168,7 @@ pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<A
                 new_segments.push(AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
                     segment_len: 1,
-                    asn_list: vec![local_asn],
+                    asn_list: vec![ctx.local_asn],
                 });
                 // Preserve all segments including AS_SET
                 new_segments.extend_from_slice(path.as_path());
@@ -170,7 +178,7 @@ pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<A
             new_segments.push(AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
-                asn_list: vec![local_asn],
+                asn_list: vec![ctx.local_asn],
             });
         }
 
@@ -182,11 +190,24 @@ pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<A
 }
 
 /// Determine LOCAL_PREF to include in UPDATE message
+///
 /// RFC 4271 Section 5.1.5:
 /// - iBGP: LOCAL_PREF SHALL be included
 /// - eBGP: LOCAL_PREF MUST NOT be included
-pub fn build_export_local_pref(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
-    let is_ibgp = local_asn == peer_asn;
+///
+/// RFC 7947: Route servers follow session type rules (iBGP RS preserves, eBGP RS strips)
+pub fn build_export_local_pref(path: &Path, ctx: &PeerExportContext) -> Option<u32> {
+    let is_ibgp = ctx.local_asn == ctx.peer_asn;
+
+    // For RS clients, follow session type rules
+    if ctx.rs_client {
+        return if is_ibgp {
+            path.local_pref() // iBGP: preserve
+        } else {
+            None // eBGP: strip (RFC compliance)
+        };
+    }
+
     if is_ibgp {
         path.local_pref()
     } else {
@@ -195,11 +216,19 @@ pub fn build_export_local_pref(path: &Path, local_asn: u32, peer_asn: u32) -> Op
 }
 
 /// Determine MULTI_EXIT_DISC (MED) to include in UPDATE message
+///
 /// RFC 4271 Section 5.1.4:
 /// - iBGP: MED MAY be propagated to other BGP speakers within the same AS
 /// - eBGP: MED MUST NOT be propagated to other neighboring ASes
-pub fn build_export_med(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
-    let is_ibgp = local_asn == peer_asn;
+///
+/// RFC 7947: Route servers preserve MED unchanged
+pub fn build_export_med(path: &Path, ctx: &PeerExportContext) -> Option<u32> {
+    // RFC 7947: Route servers preserve MED
+    if ctx.rs_client {
+        return path.med();
+    }
+
+    let is_ibgp = ctx.local_asn == ctx.peer_asn;
     if is_ibgp {
         // Propagate MED over iBGP
         path.med()
@@ -214,8 +243,15 @@ pub fn build_export_med(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u3
 
 /// Filter extended communities for export to peer
 /// RFC 4360: Non-transitive extended communities (bit 6 = 1) must be filtered when advertising to eBGP peers
-pub fn build_export_extended_communities(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<u64> {
-    let is_ebgp = local_asn != peer_asn;
+/// RFC 7947: Route servers preserve ALL communities (both transitive and non-transitive)
+pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -> Vec<u64> {
+    // RFC 7947: Route servers preserve ALL communities
+    // (both transitive and non-transitive)
+    if ctx.rs_client {
+        return path.extended_communities().clone();
+    }
+
+    let is_ebgp = ctx.local_asn != ctx.peer_asn;
 
     if is_ebgp {
         // Filter out non-transitive extended communities (RFC 4360 Section 6)
@@ -339,17 +375,21 @@ fn build_ibgp_next_hop(
 /// Build the NEXT_HOP for export to a peer
 /// RFC 4271 Section 5.1.3: Rewrite NEXT_HOP to local interface address
 /// RFC 2545/4760: Cross-family (e.g., IPv6 route over IPv4 session) must preserve explicit next hop
+/// RFC 7947: Route servers preserve NEXT_HOP unchanged
 fn build_export_next_hop(
     path: &Path,
-    local_next_hop: IpAddr,
-    local_asn: u32,
-    peer_asn: u32,
+    ctx: &PeerExportContext,
     prefix: &IpNetwork,
 ) -> Option<NextHopAddr> {
-    if local_asn != peer_asn {
-        build_ebgp_next_hop(path, local_next_hop, prefix)
+    // RFC 7947: Route servers preserve NEXT_HOP unchanged
+    if ctx.rs_client {
+        return Some(*path.next_hop());
+    }
+
+    if ctx.local_asn != ctx.peer_asn {
+        build_ebgp_next_hop(path, ctx.local_next_hop, prefix)
     } else {
-        build_ibgp_next_hop(path, local_next_hop, prefix)
+        build_ibgp_next_hop(path, ctx.local_next_hop, prefix)
     }
 }
 
@@ -361,27 +401,26 @@ fn build_export_attrs(
     prefix: &IpNetwork,
 ) -> Option<PathAttrs> {
     let is_ibgp = ctx.local_asn == ctx.peer_asn;
+    let is_rs_client = ctx.rs_client;
 
-    // RFC 4456: RR attributes
-    let (originator_id, cluster_list) = build_export_rr_attrs(path, ctx, is_ibgp);
+    // RFC 4456: RR attributes (skip for RS clients)
+    let (originator_id, cluster_list) = if is_rs_client {
+        (None, Vec::new()) // RS doesn't add RR attributes
+    } else {
+        build_export_rr_attrs(path, ctx, is_ibgp)
+    };
 
     Some(PathAttrs {
         origin: path.attrs.origin,
-        as_path: build_export_as_path(path, ctx.local_asn, ctx.peer_asn),
-        next_hop: build_export_next_hop(
-            path,
-            ctx.local_next_hop,
-            ctx.local_asn,
-            ctx.peer_asn,
-            prefix,
-        )?,
+        as_path: build_export_as_path(path, ctx),
+        next_hop: build_export_next_hop(path, ctx, prefix)?,
         source: path.attrs.source,
-        local_pref: build_export_local_pref(path, ctx.local_asn, ctx.peer_asn),
-        med: build_export_med(path, ctx.local_asn, ctx.peer_asn),
+        local_pref: build_export_local_pref(path, ctx),
+        med: build_export_med(path, ctx),
         atomic_aggregate: path.attrs.atomic_aggregate,
         aggregator: path.attrs.aggregator.clone(),
         communities: path.attrs.communities.clone(),
-        extended_communities: build_export_extended_communities(path, ctx.local_asn, ctx.peer_asn),
+        extended_communities: build_export_extended_communities(path, ctx),
         large_communities: path.attrs.large_communities.clone(),
         unknown_attrs: path
             .attrs
@@ -670,6 +709,33 @@ mod tests {
         }
     }
 
+    fn make_peer_export_ctx(
+        local_asn: u32,
+        peer_asn: u32,
+        rs_client: bool,
+    ) -> PeerExportContext<'static> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Leak the channel to get 'static lifetime for test
+        let tx_static: &'static mpsc::UnboundedSender<PeerOp> = Box::leak(Box::new(tx));
+
+        PeerExportContext {
+            peer_addr: test_ip(1),
+            peer_tx: tx_static,
+            local_asn,
+            peer_asn,
+            local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            export_policies: &[],
+            rr_client: false,
+            rs_client,
+            cluster_id: Ipv4Addr::new(1, 1, 1, 1),
+            send_format: MessageFormat {
+                use_4byte_asn: false,
+                add_path: AddPathMask::NONE,
+                is_ebgp: local_asn != peer_asn,
+            },
+        }
+    }
+
     #[test]
     fn test_should_propagate_to_peer() {
         // Should propagate to established peer when no originating peer
@@ -738,23 +804,27 @@ mod tests {
         );
 
         // Local route to eBGP peer: AS_PATH = [local_asn]
-        let result = build_export_as_path(&local_path, 65000, 65001);
+        let ctx = make_peer_export_ctx(65000, 65001, false);
+        let result = build_export_as_path(&local_path, &ctx);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000]);
 
         // Local route to iBGP peer: AS_PATH = [] (empty, no segments)
-        let result = build_export_as_path(&local_path, 65000, 65000);
+        let ctx = make_peer_export_ctx(65000, 65000, false);
+        let result = build_export_as_path(&local_path, &ctx);
         assert_eq!(result.len(), 0);
 
         // Learned route to eBGP peer: prepend local ASN
-        let result = build_export_as_path(&ebgp_path, 65000, 65001);
+        let ctx = make_peer_export_ctx(65000, 65001, false);
+        let result = build_export_as_path(&ebgp_path, &ctx);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000, 65001, 65002]);
 
         // Learned route to iBGP peer: do NOT modify AS_PATH
-        let result = build_export_as_path(&ibgp_path, 65000, 65000);
+        let ctx = make_peer_export_ctx(65000, 65000, false);
+        let result = build_export_as_path(&ibgp_path, &ctx);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65003]);
@@ -842,7 +912,8 @@ mod tests {
         );
 
         // Export to eBGP peer should prepend local ASN and preserve AS_SET
-        let result = build_export_as_path(&path_with_as_set, 65000, 65100);
+        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000, 65001, 65002]);
@@ -874,7 +945,8 @@ mod tests {
         );
 
         // Export to eBGP should create new AS_SEQUENCE segment for local ASN
-        let result = build_export_as_path(&path_starting_with_as_set, 65000, 65100);
+        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let result = build_export_as_path(&path_starting_with_as_set, &ctx);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000]);
@@ -908,7 +980,8 @@ mod tests {
         );
 
         // Export to iBGP peer should preserve AS_PATH unchanged
-        let result = build_export_as_path(&path_with_as_set, 65000, 65000);
+        let ctx = make_peer_export_ctx(65000, 65000, false);
+        let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65001, 65002]);
@@ -953,74 +1026,40 @@ mod tests {
         );
 
         // iBGP: Local route with unspecified next hop -> set to local address
+        let ctx_ibgp = make_peer_export_ctx(local_asn, peer_asn_ibgp, false);
         assert_eq!(
-            build_export_next_hop(
-                &local_path,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
+            build_export_next_hop(&local_path, &ctx_ibgp, &prefix),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // iBGP: Local route with explicit next hop -> preserve
         assert_eq!(
-            build_export_next_hop(
-                &local_explicit,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
+            build_export_next_hop(&local_explicit, &ctx_ibgp, &prefix),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
         );
 
         // iBGP: Learned route -> preserve next hop
         assert_eq!(
-            build_export_next_hop(
-                &ibgp_learned,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
+            build_export_next_hop(&ibgp_learned, &ctx_ibgp, &prefix),
             Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)))
         );
 
         // eBGP: Local route with unspecified next hop -> set to local address
+        let ctx_ebgp = make_peer_export_ctx(local_asn, peer_asn_ebgp, false);
         assert_eq!(
-            build_export_next_hop(
-                &local_path,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
+            build_export_next_hop(&local_path, &ctx_ebgp, &prefix),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // eBGP: Local route with explicit next hop (same AF) -> rewrite to local address
         assert_eq!(
-            build_export_next_hop(
-                &local_explicit,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
+            build_export_next_hop(&local_explicit, &ctx_ebgp, &prefix),
             Some(NextHopAddr::Ipv4(router_id))
         );
 
         // eBGP: Learned route -> rewrite to local address
         assert_eq!(
-            build_export_next_hop(
-                &ebgp_learned,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
+            build_export_next_hop(&ebgp_learned, &ctx_ebgp, &prefix),
             Some(NextHopAddr::Ipv4(router_id))
         );
     }
@@ -1050,10 +1089,12 @@ mod tests {
         };
 
         // iBGP: include LOCAL_PREF
-        assert_eq!(build_export_local_pref(&path, 65001, 65001), Some(200));
+        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false);
+        assert_eq!(build_export_local_pref(&path, &ctx_ibgp), Some(200));
 
         // eBGP: MUST NOT include LOCAL_PREF
-        assert_eq!(build_export_local_pref(&path, 65001, 65002), None);
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false);
+        assert_eq!(build_export_local_pref(&path, &ctx_ebgp), None);
     }
 
     #[test]
@@ -1085,10 +1126,12 @@ mod tests {
         };
 
         // iBGP: propagate MED
-        assert_eq!(build_export_med(&ebgp_path, 65001, 65001), Some(50));
+        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false);
+        assert_eq!(build_export_med(&ebgp_path, &ctx_ibgp), Some(50));
 
         // eBGP: strip MED (route from eBGP must not be sent to other AS)
-        assert_eq!(build_export_med(&ebgp_path, 65001, 65002), None);
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false);
+        assert_eq!(build_export_med(&ebgp_path, &ctx_ebgp), None);
 
         // Local route with MED
         let local_path = Path {
@@ -1114,7 +1157,8 @@ mod tests {
         };
 
         // eBGP: send MED for local route
-        assert_eq!(build_export_med(&local_path, 65001, 65002), Some(50));
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false);
+        assert_eq!(build_export_med(&local_path, &ctx_ebgp), Some(50));
     }
 
     #[test]
@@ -1166,6 +1210,7 @@ mod tests {
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &policies,
             rr_client: false,
+            rs_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
             send_format: MessageFormat {
                 use_4byte_asn: false,
@@ -1271,14 +1316,16 @@ mod tests {
         };
 
         // eBGP: filters non-transitive
+        let ctx_ebgp = make_peer_export_ctx(65000, 65001, false);
         assert_eq!(
-            build_export_extended_communities(&path, 65000, 65001),
+            build_export_extended_communities(&path, &ctx_ebgp),
             vec![transitive]
         );
 
         // iBGP: keeps all
+        let ctx_ibgp = make_peer_export_ctx(65000, 65000, false);
         assert_eq!(
-            build_export_extended_communities(&path, 65000, 65000),
+            build_export_extended_communities(&path, &ctx_ibgp),
             vec![transitive, non_transitive]
         );
     }
@@ -1306,6 +1353,7 @@ mod tests {
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &[],
             rr_client: false,
+            rs_client: false,
             cluster_id,
             send_format: MessageFormat {
                 use_4byte_asn: false,

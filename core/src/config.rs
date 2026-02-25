@@ -124,6 +124,12 @@ pub struct PeerConfig {
     /// RFC 4456: Mark this peer as a route reflector client
     #[serde(default, rename = "rr-client")]
     pub rr_client: bool,
+    /// RFC 7947: Mark this peer as a route server client (transparency mode)
+    #[serde(default, rename = "rs-client")]
+    pub rs_client: bool,
+    /// RFC 4271 Section 6.3: Enforce first AS in AS_PATH matches peer AS (default: true)
+    #[serde(default = "default_true", rename = "enforce-first-as")]
+    pub enforce_first_as: bool,
     /// RFC 7911: ADD-PATH send mode for this peer
     #[serde(default, rename = "add-path-send")]
     pub add_path_send: AddPathSend,
@@ -151,6 +157,10 @@ fn default_passive_mode() -> bool {
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_port() -> u16 {
     179
 }
@@ -171,6 +181,14 @@ impl PeerConfig {
     pub fn allow_automatic_start(&self) -> bool {
         self.idle_hold_time_secs.is_some()
     }
+
+    /// Validate peer configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if self.rr_client && self.rs_client {
+            return Err("Peer cannot be both rr-client and rs-client".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Default for PeerConfig {
@@ -190,6 +208,8 @@ impl Default for PeerConfig {
             export_policy: Vec::new(),
             graceful_restart: GracefulRestartConfig::default(),
             rr_client: false,
+            rs_client: false,
+            enforce_first_as: default_true(),
             add_path_send: AddPathSend::default(),
             add_path_receive: false,
             asn: None,
@@ -664,5 +684,39 @@ mod tests {
         // Can be overridden
         config.cluster_id = Some(Ipv4Addr::new(1, 2, 3, 4));
         assert_eq!(config.cluster_id(), Ipv4Addr::new(1, 2, 3, 4));
+    }
+
+    #[test]
+    fn test_peer_config_validate_rr_rs_mutual_exclusion() {
+        // Valid: only rr_client
+        let peer = PeerConfig {
+            rr_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Valid: only rs_client
+        let peer = PeerConfig {
+            rs_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Invalid: both rr_client and rs_client
+        let peer = PeerConfig {
+            rr_client: true,
+            rs_client: true,
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Peer cannot be both rr-client and rs-client"
+        );
+
+        // Valid: neither set
+        let peer = PeerConfig::default();
+        assert!(peer.validate().is_ok());
     }
 }

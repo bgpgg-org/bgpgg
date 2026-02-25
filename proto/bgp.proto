@@ -79,9 +79,11 @@ message SessionConfig {
     optional GracefulRestartConfig graceful_restart = 9;  // Graceful Restart settings
     optional uint32 port = 10;  // Remote BGP port (default: 179)
     optional bool rr_client = 11;  // RFC 4456: Mark peer as route reflector client
-    optional AddPathSendMode add_path_send = 12;   // RFC 7911: send mode
-    optional bool add_path_receive = 13;  // RFC 7911: Accept multiple paths from peer
-    optional uint32 asn = 14;  // Expected peer ASN (reject OPEN if mismatched)
+    optional bool rs_client = 12;  // RFC 7947: Mark peer as route server client (transparency mode)
+    optional bool enforce_first_as = 16;  // RFC 4271 6.3: Enforce first AS matches peer AS (default: true)
+    optional AddPathSendMode add_path_send = 13;   // RFC 7911: send mode
+    optional bool add_path_receive = 14;  // RFC 7911: Accept multiple paths from peer
+    optional uint32 asn = 15;  // Expected peer ASN (reject OPEN if mismatched)
 }
 
 // Add peer request/response

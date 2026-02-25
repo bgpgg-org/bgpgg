@@ -144,7 +144,9 @@ impl Peer {
                         leftmost_as
                     };
 
-                    if actual_leftmost != peer_asn {
+                    // RFC 4271 Section 6.3: Enforce first AS matches peer AS
+                    // RFC 7947: Route server clients must disable this check
+                    if self.config.enforce_first_as && actual_leftmost != peer_asn {
                         // RFC 7606 Section 7.2: SHOULD treat-as-withdraw
                         warn!(peer_ip = %self.addr, leftmost_as = actual_leftmost, peer_asn, "AS_PATH first AS does not match peer AS, treat-as-withdraw per RFC 7606");
                         let mut withdrawn = self.process_withdrawals(&update_msg);

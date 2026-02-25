@@ -1001,6 +1001,7 @@ impl BgpServer {
                     .unwrap_or(local_addr),
                 export_policies: &export_policies,
                 rr_client: entry.config.rr_client,
+                rs_client: entry.config.rs_client,
                 cluster_id,
                 send_format,
             };
