@@ -18,7 +18,7 @@ use crate::bgp::msg_update_types::{PathAttrValue, AS_TRANS};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::log::{info, warn};
-use crate::rib::{Path, RouteSource};
+use crate::rib::{Path, PrefixPath, RouteSource};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -144,7 +144,9 @@ impl Peer {
                         leftmost_as
                     };
 
-                    if actual_leftmost != peer_asn {
+                    // RFC 4271 Section 6.3: Enforce first AS matches peer AS
+                    // RFC 7947: Route server clients must disable this check
+                    if self.config.enforce_first_as && actual_leftmost != peer_asn {
                         // RFC 7606 Section 7.2: SHOULD treat-as-withdraw
                         warn!(peer_ip = %self.addr, leftmost_as = actual_leftmost, peer_asn, "AS_PATH first AS does not match peer AS, treat-as-withdraw per RFC 7606");
                         let mut withdrawn = self.process_withdrawals(&update_msg);
@@ -279,7 +281,10 @@ impl Peer {
             let path_arc = Arc::new(path.clone());
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
             self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
-            announced.push((entry.prefix, path_arc));
+            announced.push(PrefixPath {
+                prefix: entry.prefix,
+                path: path_arc,
+            });
         }
 
         Ok((announced, vec![]))

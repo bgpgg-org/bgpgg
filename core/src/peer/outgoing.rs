@@ -18,7 +18,7 @@ use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{
-    NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
+    NextHopAddr, Nlri, PathAttribute, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, error, info, warn};
@@ -31,7 +31,7 @@ use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
 
 #[cfg(test)]
 use crate::policy::Policy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use std::net::Ipv4Addr;
@@ -55,16 +55,36 @@ pub struct PeerExportContext<'a> {
     pub local_next_hop: IpAddr,
     pub export_policies: &'a [Arc<crate::policy::Policy>],
     pub rr_client: bool,
+    pub rs_client: bool,
     pub cluster_id: Ipv4Addr,
     pub send_format: MessageFormat,
+    pub negotiated_afi_safis: &'a HashSet<AfiSafi>,
+}
+
+impl<'a> PeerExportContext<'a> {
+    /// Returns AFI/SAFIs to propagate. Falls back to IPv4/Unicast if no multiprotocol
+    /// capabilities were negotiated (RFC 4760).
+    fn is_ebgp(&self) -> bool {
+        self.local_asn != self.peer_asn
+    }
+
+    fn is_ibgp(&self) -> bool {
+        self.local_asn == self.peer_asn
+    }
+
+    fn afi_safis(&self) -> Vec<AfiSafi> {
+        if self.negotiated_afi_safis.is_empty() {
+            vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]
+        } else {
+            self.negotiated_afi_safis.iter().copied().collect()
+        }
+    }
 }
 
 /// Check if a path should be exported to a peer (pre-policy filtering).
 fn should_export_to_peer(path: &Path, ctx: &PeerExportContext) -> bool {
-    let is_ibgp = ctx.local_asn == ctx.peer_asn;
-
     // RFC 4456: iBGP reflection requires at least one RR client
-    if is_ibgp && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client {
+    if ctx.is_ibgp() && path.source().is_ibgp() && !path.source().is_rr_client() && !ctx.rr_client {
         return false;
     }
 
@@ -121,73 +141,82 @@ pub fn should_propagate_to_peer(
 /// - Learned routes to eBGP: prepend local_asn to first AS_SEQUENCE (or create new segment)
 /// - Learned routes to iBGP: unchanged
 ///
+/// RFC 7947: Route servers preserve AS_PATH unchanged (no local ASN prepending)
+///
 /// Preserves AS_SET segments during propagation
-pub fn build_export_as_path(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<AsPathSegment> {
-    let is_ebgp = peer_asn != local_asn;
+pub fn build_export_as_path(path: &Path, ctx: &PeerExportContext) -> Vec<AsPathSegment> {
+    // RFC 7947: Route servers preserve AS_PATH (no prepending)
+    if ctx.rs_client {
+        return path.as_path().clone();
+    }
 
+    // Truly locally originated routes (empty AS_PATH)
     if matches!(path.source(), RouteSource::Local) && path.as_path().is_empty() {
-        // Truly locally originated routes (empty AS_PATH)
-        if is_ebgp {
+        if ctx.is_ebgp() {
             // eBGP: AS_PATH = [local_asn]
             vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
-                asn_list: vec![local_asn],
+                asn_list: vec![ctx.local_asn],
             }]
         } else {
             // iBGP: AS_PATH = [] (empty)
             vec![]
         }
-    } else if is_ebgp {
-        // Learned routes to eBGP: prepend local ASN to first AS_SEQUENCE
-        // If first segment is AS_SEQUENCE, prepend to it; otherwise create new segment
-        let mut new_segments = Vec::new();
+    } else if ctx.is_ebgp() {
+        prepend_local_asn(path.as_path(), ctx.local_asn)
+    } else {
+        // iBGP: preserve AS_PATH unchanged
+        path.as_path().clone()
+    }
+}
 
-        if let Some(first) = path.as_path().first() {
-            if first.segment_type == AsPathSegmentType::AsSequence {
-                // Prepend to existing AS_SEQUENCE
-                let mut new_asn_list = vec![local_asn];
-                new_asn_list.extend_from_slice(&first.asn_list);
-                new_segments.push(AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: new_asn_list.len() as u8,
-                    asn_list: new_asn_list,
-                });
-                // Add remaining segments unchanged
-                new_segments.extend_from_slice(&path.as_path()[1..]);
-            } else {
-                // First segment is AS_SET, create new AS_SEQUENCE segment
-                new_segments.push(AsPathSegment {
-                    segment_type: AsPathSegmentType::AsSequence,
-                    segment_len: 1,
-                    asn_list: vec![local_asn],
-                });
-                // Preserve all segments including AS_SET
-                new_segments.extend_from_slice(path.as_path());
-            }
+/// Prepend local ASN to AS_PATH for eBGP export
+/// RFC 4271: Prepend to existing AS_SEQUENCE or create new segment
+fn prepend_local_asn(as_path: &[AsPathSegment], local_asn: u32) -> Vec<AsPathSegment> {
+    let mut new_segments = Vec::new();
+
+    if let Some(first) = as_path.first() {
+        if first.segment_type == AsPathSegmentType::AsSequence {
+            // Prepend to existing AS_SEQUENCE
+            let mut new_asn_list = vec![local_asn];
+            new_asn_list.extend_from_slice(&first.asn_list);
+            new_segments.push(AsPathSegment {
+                segment_type: AsPathSegmentType::AsSequence,
+                segment_len: new_asn_list.len() as u8,
+                asn_list: new_asn_list,
+            });
+            new_segments.extend_from_slice(&as_path[1..]);
         } else {
-            // Empty AS_PATH, create new AS_SEQUENCE
+            // First segment is AS_SET, create new AS_SEQUENCE segment
             new_segments.push(AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 1,
                 asn_list: vec![local_asn],
             });
+            new_segments.extend_from_slice(as_path);
         }
-
-        new_segments
     } else {
-        // Learned routes to iBGP: do not modify AS_PATH, preserve all segments
-        path.as_path().clone()
+        // Empty AS_PATH, create new AS_SEQUENCE
+        new_segments.push(AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: 1,
+            asn_list: vec![local_asn],
+        });
     }
+
+    new_segments
 }
 
 /// Determine LOCAL_PREF to include in UPDATE message
+///
 /// RFC 4271 Section 5.1.5:
 /// - iBGP: LOCAL_PREF SHALL be included
 /// - eBGP: LOCAL_PREF MUST NOT be included
-pub fn build_export_local_pref(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
-    let is_ibgp = local_asn == peer_asn;
-    if is_ibgp {
+///
+/// RFC 7947: Route servers follow the same session type rules
+pub fn build_export_local_pref(path: &Path, ctx: &PeerExportContext) -> Option<u32> {
+    if ctx.local_asn == ctx.peer_asn {
         path.local_pref()
     } else {
         None
@@ -195,29 +224,48 @@ pub fn build_export_local_pref(path: &Path, local_asn: u32, peer_asn: u32) -> Op
 }
 
 /// Determine MULTI_EXIT_DISC (MED) to include in UPDATE message
+///
 /// RFC 4271 Section 5.1.4:
 /// - iBGP: MED MAY be propagated to other BGP speakers within the same AS
 /// - eBGP: MED MUST NOT be propagated to other neighboring ASes
-pub fn build_export_med(path: &Path, local_asn: u32, peer_asn: u32) -> Option<u32> {
-    let is_ibgp = local_asn == peer_asn;
-    if is_ibgp {
-        // Propagate MED over iBGP
-        path.med()
-    } else if path.source().is_ebgp() {
-        // Strip MED when re-advertising to eBGP a route learned from eBGP
-        None
-    } else {
-        // Send MED when route is local or from iBGP
-        path.med()
+///
+/// RFC 7947: Route servers preserve MED unchanged
+pub fn build_export_med(path: &Path, ctx: &PeerExportContext) -> Option<u32> {
+    if ctx.rs_client {
+        return path.med();
+    }
+
+    // iBGP: preserve MED unchanged
+    if ctx.is_ibgp() {
+        return path.med();
+    }
+
+    // eBGP: only send MED if route originated from our AS
+    // Check source for local routes (before iBGP propagation changes it to Ibgp)
+    if matches!(path.source(), RouteSource::Local) {
+        return path.med();
+    }
+
+    // eBGP: source may be Ibgp if route transited iBGP, so inspect AS_PATH instead
+    match path.as_path().first() {
+        None => path.med(), // Empty AS_PATH means local route
+        Some(segment) if segment.asn_list.first() != Some(&ctx.local_asn) => None, // External AS
+        Some(segment) if segment.segment_type == AsPathSegmentType::AsSet => None, // RFC 4271 9.2.2.2
+        Some(_) => path.med(), // Route from our AS
     }
 }
 
 /// Filter extended communities for export to peer
 /// RFC 4360: Non-transitive extended communities (bit 6 = 1) must be filtered when advertising to eBGP peers
-pub fn build_export_extended_communities(path: &Path, local_asn: u32, peer_asn: u32) -> Vec<u64> {
-    let is_ebgp = local_asn != peer_asn;
+/// RFC 7947: Route servers preserve ALL communities (both transitive and non-transitive)
+pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -> Vec<u64> {
+    // RFC 7947: Route servers preserve ALL communities
+    // (both transitive and non-transitive)
+    if ctx.rs_client {
+        return path.extended_communities().clone();
+    }
 
-    if is_ebgp {
+    if ctx.is_ebgp() {
         // Filter out non-transitive extended communities (RFC 4360 Section 6)
         path.extended_communities()
             .iter()
@@ -227,6 +275,28 @@ pub fn build_export_extended_communities(path: &Path, local_asn: u32, peer_asn: 
     } else {
         // iBGP: propagate all extended communities
         path.extended_communities().clone()
+    }
+}
+
+/// Build unknown attributes for export to peer.
+/// RFC 7947 Section 2.2: Route servers preserve all unknown attributes (transitive and non-transitive).
+/// RFC 4271: Normal eBGP only forwards optional transitive attributes.
+fn build_export_unknown_attrs(path: &Path, ctx: &PeerExportContext) -> Vec<PathAttribute> {
+    if ctx.rs_client {
+        return path.attrs.unknown_attrs.clone();
+    }
+
+    if ctx.is_ebgp() {
+        // eBGP: only forward optional transitive unknown attributes (RFC 4271)
+        path.attrs
+            .unknown_attrs
+            .iter()
+            .filter(|attr| attr.is_unknown_transitive())
+            .cloned()
+            .collect()
+    } else {
+        // iBGP: propagate all unknown attributes within the AS
+        path.attrs.unknown_attrs.clone()
     }
 }
 
@@ -262,7 +332,7 @@ type BatchingKey = (
 pub(crate) fn batch_announcements_by_path(to_announce: &[PrefixPath]) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
-    for (prefix, path) in to_announce {
+    for PrefixPath { prefix, path } in to_announce {
         let key = (
             path.origin(),
             path.as_path().clone(),
@@ -339,17 +409,21 @@ fn build_ibgp_next_hop(
 /// Build the NEXT_HOP for export to a peer
 /// RFC 4271 Section 5.1.3: Rewrite NEXT_HOP to local interface address
 /// RFC 2545/4760: Cross-family (e.g., IPv6 route over IPv4 session) must preserve explicit next hop
+/// RFC 7947: Route servers preserve NEXT_HOP unchanged
 fn build_export_next_hop(
     path: &Path,
-    local_next_hop: IpAddr,
-    local_asn: u32,
-    peer_asn: u32,
+    ctx: &PeerExportContext,
     prefix: &IpNetwork,
 ) -> Option<NextHopAddr> {
-    if local_asn != peer_asn {
-        build_ebgp_next_hop(path, local_next_hop, prefix)
+    // RFC 7947: Route servers preserve NEXT_HOP unchanged
+    if ctx.rs_client {
+        return Some(*path.next_hop());
+    }
+
+    if ctx.is_ebgp() {
+        build_ebgp_next_hop(path, ctx.local_next_hop, prefix)
     } else {
-        build_ibgp_next_hop(path, local_next_hop, prefix)
+        build_ibgp_next_hop(path, ctx.local_next_hop, prefix)
     }
 }
 
@@ -360,36 +434,26 @@ fn build_export_attrs(
     ctx: &PeerExportContext,
     prefix: &IpNetwork,
 ) -> Option<PathAttrs> {
-    let is_ibgp = ctx.local_asn == ctx.peer_asn;
-
-    // RFC 4456: RR attributes
-    let (originator_id, cluster_list) = build_export_rr_attrs(path, ctx, is_ibgp);
+    // RFC 4456: RR attributes (skip for RS clients)
+    let (originator_id, cluster_list) = if ctx.rs_client {
+        (None, Vec::new()) // RS doesn't add RR attributes
+    } else {
+        build_export_rr_attrs(path, ctx, ctx.is_ibgp())
+    };
 
     Some(PathAttrs {
         origin: path.attrs.origin,
-        as_path: build_export_as_path(path, ctx.local_asn, ctx.peer_asn),
-        next_hop: build_export_next_hop(
-            path,
-            ctx.local_next_hop,
-            ctx.local_asn,
-            ctx.peer_asn,
-            prefix,
-        )?,
+        as_path: build_export_as_path(path, ctx),
+        next_hop: build_export_next_hop(path, ctx, prefix)?,
         source: path.attrs.source,
-        local_pref: build_export_local_pref(path, ctx.local_asn, ctx.peer_asn),
-        med: build_export_med(path, ctx.local_asn, ctx.peer_asn),
+        local_pref: build_export_local_pref(path, ctx),
+        med: build_export_med(path, ctx),
         atomic_aggregate: path.attrs.atomic_aggregate,
         aggregator: path.attrs.aggregator.clone(),
         communities: path.attrs.communities.clone(),
-        extended_communities: build_export_extended_communities(path, ctx.local_asn, ctx.peer_asn),
+        extended_communities: build_export_extended_communities(path, ctx),
         large_communities: path.attrs.large_communities.clone(),
-        unknown_attrs: path
-            .attrs
-            .unknown_attrs
-            .iter()
-            .filter(|attr| attr.is_unknown_transitive())
-            .cloned()
-            .collect(),
+        unknown_attrs: build_export_unknown_attrs(path, ctx),
         originator_id,
         cluster_list,
     })
@@ -460,8 +524,9 @@ pub fn compute_routes_for_peer(
 ) -> Vec<PrefixPath> {
     to_announce
         .iter()
-        .filter_map(|(prefix, path)| {
-            compute_export_path(prefix, path, ctx).map(|exported| (*prefix, Arc::new(exported)))
+        .filter_map(|PrefixPath { prefix, path }| {
+            compute_export_path(prefix, path, ctx)
+                .map(|exported_path| PrefixPath::new(*prefix, exported_path))
         })
         .collect()
 }
@@ -529,6 +594,74 @@ fn send_batched_announcements(
     }
 }
 
+/// Select paths for export to a peer, applying export policy.
+///
+/// - ADD-PATH peers: all paths that pass policy
+/// - Non-ADD-PATH RS clients: iterate in preference order, return first accepted (RFC 7947 route iteration)
+/// - Normal peers: best path only
+fn select_paths_for_export(
+    prefix: &IpNetwork,
+    send_add_path: bool,
+    loc_rib: &LocRib,
+    ctx: &PeerExportContext,
+) -> Vec<PrefixPath> {
+    if send_add_path {
+        loc_rib
+            .get_all_paths(prefix)
+            .iter()
+            .filter_map(|path| {
+                compute_export_path(prefix, path, ctx)
+                    .map(|exported_path| PrefixPath::new(*prefix, exported_path))
+            })
+            .collect()
+    } else if ctx.rs_client {
+        // RFC 7947 route iteration: try paths in preference order, return first that passes policy.
+        for path in loc_rib.get_all_paths(prefix) {
+            if let Some(p) = compute_export_path(prefix, &path, ctx) {
+                return vec![PrefixPath::new(*prefix, p)];
+            }
+        }
+        vec![]
+    } else {
+        loc_rib
+            .get_best_path(prefix)
+            .into_iter()
+            .filter_map(|path| {
+                compute_export_path(prefix, path, ctx)
+                    .map(|exported_path| PrefixPath::new(*prefix, exported_path))
+            })
+            .collect()
+    }
+}
+
+/// Build withdrawal NLRIs for stale paths.
+/// ADD-PATH mode: one withdrawal per path_id. Normal mode: one withdrawal if all paths removed.
+fn build_withdrawals_for_prefix(
+    prefix: IpNetwork,
+    stale_paths: &[Arc<Path>],
+    export_paths: &[PrefixPath],
+    send_add_path: bool,
+) -> Vec<Nlri> {
+    if send_add_path {
+        stale_paths
+            .iter()
+            .filter_map(|path| {
+                path.local_path_id.map(|pid| Nlri {
+                    prefix,
+                    path_id: Some(pid),
+                })
+            })
+            .collect()
+    } else if export_paths.is_empty() && !stale_paths.is_empty() {
+        vec![Nlri {
+            prefix,
+            path_id: None,
+        }]
+    } else {
+        vec![]
+    }
+}
+
 /// Export paths to a peer and update adj-rib-out.
 ///
 /// For each changed prefix, computes the desired export state and diffs against
@@ -544,86 +677,57 @@ pub fn propagate_routes_to_peer(
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
-    let mut to_announce = Vec::new();
-    let mut stale_entries = Vec::new();
-    let mut withdrawn_nlri = Vec::new();
+    let mut announcements: Vec<PrefixPath> = Vec::new();
+    let mut stale_entries: Vec<(IpNetwork, u32)> = Vec::new();
+    let mut withdrawals = Vec::new();
 
-    for afi in [Afi::Ipv4, Afi::Ipv6] {
-        let afi_safi = AfiSafi::new(afi, Safi::Unicast);
-        let has_add_path = ctx.send_format.add_path.contains(&afi_safi);
-        let prefixes = if has_add_path {
+    for afi_safi in ctx.afi_safis() {
+        let send_add_path = ctx.send_format.add_path.contains(&afi_safi);
+        // ADD-PATH peers need all changed paths to track per-path state.
+        // RFC 7947: RS clients without ADD-PATH also need all changes to avoid path hiding.
+        let prefixes = if send_add_path || ctx.rs_client {
             &delta.changed
         } else {
             &delta.best_changed
         };
 
         for prefix in prefixes {
+            // Filter prefixes by AFI (IPv4 vs IPv6)
             if !matches!(
-                (prefix, afi),
+                (prefix, afi_safi.afi),
                 (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
             ) {
                 continue;
             }
-
-            // Get candidate paths: all for ADD-PATH, best-only otherwise
-            let candidates: Vec<Arc<Path>> = if has_add_path {
-                loc_rib.get_all_paths(prefix)
-            } else {
-                loc_rib.get_best_path(prefix).into_iter().cloned().collect()
-            };
-
-            // Apply export policy
-            let desired: Vec<PrefixPath> = candidates
-                .iter()
-                .filter_map(|path| {
-                    compute_export_path(prefix, path, ctx)
-                        .map(|exported| (*prefix, Arc::new(exported)))
-                })
-                .collect();
-
-            let desired_ids: Vec<u32> = desired
-                .iter()
-                .filter_map(|(_, path)| path.local_path_id)
-                .collect();
-
-            // Diff against adj-rib-out: find stale path_ids
-            let adj_ids = adj_rib_out.path_ids_for_prefix(prefix);
-            let stale_ids: Vec<u32> = adj_ids
-                .into_iter()
-                .filter(|pid| !desired_ids.contains(pid))
-                .collect();
+            let export_paths = select_paths_for_export(prefix, send_add_path, loc_rib, ctx);
+            let stale_paths = adj_rib_out.stale_paths(prefix, &export_paths);
 
             // Build wire withdrawals
-            if has_add_path {
-                for pid in &stale_ids {
-                    withdrawn_nlri.push(Nlri {
-                        prefix: *prefix,
-                        path_id: Some(*pid),
-                    });
-                }
-            } else if desired.is_empty() && !stale_ids.is_empty() {
-                withdrawn_nlri.push(Nlri {
-                    prefix: *prefix,
-                    path_id: None,
-                });
-            }
+            withdrawals.extend(build_withdrawals_for_prefix(
+                *prefix,
+                &stale_paths,
+                &export_paths,
+                send_add_path,
+            ));
+
+            announcements.extend(export_paths);
 
             // Track stale entries for adj-rib-out removal
-            for pid in stale_ids {
-                stale_entries.push((*prefix, pid));
+            for path in &stale_paths {
+                if let Some(pid) = path.local_path_id {
+                    stale_entries.push((*prefix, pid));
+                }
             }
-
-            to_announce.extend(desired);
         }
     }
 
-    send_withdrawals(ctx, withdrawn_nlri, ctx.send_format);
-    send_batched_announcements(ctx, &to_announce, ctx.send_format);
+    send_withdrawals(ctx, withdrawals, ctx.send_format);
+    send_batched_announcements(ctx, &announcements, ctx.send_format);
 
     for (prefix, path_id) in &stale_entries {
         adj_rib_out.remove_path(prefix, *path_id);
     }
-    for (prefix, path) in to_announce {
+    for PrefixPath { prefix, path } in announcements {
         adj_rib_out.insert(prefix, path);
     }
 }
@@ -632,10 +736,12 @@ pub fn propagate_routes_to_peer(
 mod tests {
     use super::*;
     use crate::bgp::msg::AddPathMask;
-    use crate::bgp::msg_update::Origin;
+    use crate::bgp::msg_update::{attr_flags, Origin, PathAttrFlag, PathAttrValue};
+    use crate::bgp::multiprotocol::Safi;
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::policy::statement::Action;
+    use crate::policy::statement::{Action, Condition};
     use crate::policy::Statement;
+    use crate::rib::rib_loc::LocRib;
     use crate::rib::{PathAttrs, RouteSource};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -667,6 +773,52 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
             },
+        }
+    }
+
+    fn as_seq(asns: Vec<u32>) -> AsPathSegment {
+        AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: asns.len() as u8,
+            asn_list: asns,
+        }
+    }
+
+    fn make_peer_export_ctx(
+        local_asn: u32,
+        peer_asn: u32,
+        rs_client: bool,
+    ) -> PeerExportContext<'static> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Leak the channel to get 'static lifetime for test
+        let tx_static: &'static mpsc::UnboundedSender<PeerOp> = Box::leak(Box::new(tx));
+
+        // Default test setup: negotiate both IPv4 and IPv6 Unicast
+        let negotiated: &'static HashSet<AfiSafi> = Box::leak(Box::new(
+            vec![
+                AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+                AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+
+        PeerExportContext {
+            peer_addr: test_ip(1),
+            peer_tx: tx_static,
+            local_asn,
+            peer_asn,
+            local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            export_policies: &[],
+            rr_client: false,
+            rs_client,
+            cluster_id: Ipv4Addr::new(1, 1, 1, 1),
+            send_format: MessageFormat {
+                use_4byte_asn: false,
+                add_path: AddPathMask::NONE,
+                is_ebgp: local_asn != peer_asn,
+            },
+            negotiated_afi_safis: negotiated,
         }
     }
 
@@ -703,61 +855,116 @@ mod tests {
 
     #[test]
     fn test_build_export_as_path() {
-        // Local routes are stored with empty AS_PATH
-        let local_path = make_path(
-            RouteSource::Local,
-            vec![],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-        );
+        struct TestCase {
+            name: &'static str,
+            path_as_path: Vec<AsPathSegment>,
+            path_source: RouteSource,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected_as_path: Vec<Vec<u32>>, // List of ASN sequences
+        }
 
-        let ebgp_path = make_path(
-            RouteSource::Ebgp {
-                peer_ip: test_ip(1),
-                bgp_id: test_bgp_id(1),
+        let test_cases = vec![
+            TestCase {
+                name: "local route to eBGP: prepend local ASN",
+                path_as_path: vec![],
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_as_path: vec![vec![65000]],
             },
-            vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 2,
-                asn_list: vec![65001, 65002],
-            }],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 2)),
-        );
-
-        let ibgp_path = make_path(
-            RouteSource::Ibgp {
-                peer_ip: test_ip(2),
-                bgp_id: test_bgp_id(2),
-                rr_client: false,
+            TestCase {
+                name: "local route to iBGP: empty AS_PATH",
+                path_as_path: vec![],
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected_as_path: vec![],
             },
-            vec![AsPathSegment {
-                segment_type: AsPathSegmentType::AsSequence,
-                segment_len: 1,
-                asn_list: vec![65003],
-            }],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 3)),
-        );
+            TestCase {
+                name: "learned route to eBGP: prepend local ASN",
+                path_as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65002],
+                }],
+                path_source: RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_as_path: vec![vec![65000, 65001, 65002]],
+            },
+            TestCase {
+                name: "learned route to iBGP: preserve AS_PATH",
+                path_as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65003],
+                }],
+                path_source: RouteSource::Ibgp {
+                    peer_ip: test_ip(2),
+                    bgp_id: test_bgp_id(2),
+                    rr_client: false,
+                },
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected_as_path: vec![vec![65003]],
+            },
+            TestCase {
+                name: "RS client: preserve AS_PATH (no prepending)",
+                path_as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65002],
+                }],
+                path_source: RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                local_asn: 65000,
+                peer_asn: 65003,
+                rs_client: true,
+                expected_as_path: vec![vec![65001, 65002]],
+            },
+            TestCase {
+                name: "RS client with local route: preserve AS_PATH",
+                path_as_path: vec![],
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: true,
+                expected_as_path: vec![],
+            },
+        ];
 
-        // Local route to eBGP peer: AS_PATH = [local_asn]
-        let result = build_export_as_path(&local_path, 65000, 65001);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
-        assert_eq!(result[0].asn_list, vec![65000]);
+        for test_case in test_cases {
+            let path = make_path(
+                test_case.path_source,
+                test_case.path_as_path,
+                NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+            );
 
-        // Local route to iBGP peer: AS_PATH = [] (empty, no segments)
-        let result = build_export_as_path(&local_path, 65000, 65000);
-        assert_eq!(result.len(), 0);
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_as_path(&path, &ctx);
 
-        // Learned route to eBGP peer: prepend local ASN
-        let result = build_export_as_path(&ebgp_path, 65000, 65001);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
-        assert_eq!(result[0].asn_list, vec![65000, 65001, 65002]);
+            // Convert result to Vec<Vec<u32>> for easier comparison
+            let result_asns: Vec<Vec<u32>> =
+                result.iter().map(|seg| seg.asn_list.clone()).collect();
 
-        // Learned route to iBGP peer: do NOT modify AS_PATH
-        let result = build_export_as_path(&ibgp_path, 65000, 65000);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
-        assert_eq!(result[0].asn_list, vec![65003]);
+            assert_eq!(
+                result_asns, test_case.expected_as_path,
+                "Test case '{}' failed: expected {:?}, got {:?}",
+                test_case.name, test_case.expected_as_path, result_asns
+            );
+        }
     }
 
     #[test]
@@ -795,9 +1002,18 @@ mod tests {
             prefix_length: 24,
         });
         let announcements = vec![
-            (p1, Arc::clone(&path_a)),
-            (p2, Arc::clone(&path_b)),
-            (p3, Arc::clone(&path_a)),
+            PrefixPath {
+                prefix: p1,
+                path: Arc::clone(&path_a),
+            },
+            PrefixPath {
+                prefix: p2,
+                path: Arc::clone(&path_b),
+            },
+            PrefixPath {
+                prefix: p3,
+                path: Arc::clone(&path_a),
+            },
         ];
 
         let mut actual = batch_announcements_by_path(&announcements);
@@ -842,7 +1058,8 @@ mod tests {
         );
 
         // Export to eBGP peer should prepend local ASN and preserve AS_SET
-        let result = build_export_as_path(&path_with_as_set, 65000, 65100);
+        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000, 65001, 65002]);
@@ -874,7 +1091,8 @@ mod tests {
         );
 
         // Export to eBGP should create new AS_SEQUENCE segment for local ASN
-        let result = build_export_as_path(&path_starting_with_as_set, 65000, 65100);
+        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let result = build_export_as_path(&path_starting_with_as_set, &ctx);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65000]);
@@ -908,7 +1126,8 @@ mod tests {
         );
 
         // Export to iBGP peer should preserve AS_PATH unchanged
-        let result = build_export_as_path(&path_with_as_set, 65000, 65000);
+        let ctx = make_peer_export_ctx(65000, 65000, false);
+        let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
         assert_eq!(result[0].asn_list, vec![65001, 65002]);
@@ -919,110 +1138,110 @@ mod tests {
     #[test]
     fn test_build_export_next_hop() {
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
-        let local_asn = 65000;
-        let peer_asn_ebgp = 65001;
-        let peer_asn_ibgp = 65000;
         let prefix = "10.0.0.0/24".parse().unwrap();
 
-        let local_path = make_path(
-            RouteSource::Local,
-            vec![],
-            NextHopAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
-        );
-        let local_explicit = make_path(
-            RouteSource::Local,
-            vec![],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-        );
-        let ibgp_learned = make_path(
-            RouteSource::Ibgp {
-                peer_ip: test_ip(1),
-                bgp_id: test_bgp_id(1),
-                rr_client: false,
+        struct TestCase {
+            name: &'static str,
+            path_next_hop: NextHopAddr,
+            path_source: RouteSource,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected: NextHopAddr,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "iBGP: local route with unspecified NH -> set to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(router_id),
             },
-            vec![],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)),
-        );
-        let ebgp_learned = make_path(
-            RouteSource::Ebgp {
-                peer_ip: test_ip(1),
-                bgp_id: test_bgp_id(1),
+            TestCase {
+                name: "iBGP: local route with explicit NH -> preserve",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             },
-            vec![],
-            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
-        );
+            TestCase {
+                name: "iBGP: learned route -> preserve NH",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)),
+                path_source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)),
+            },
+            TestCase {
+                name: "eBGP: local route with unspecified NH -> set to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(router_id),
+            },
+            TestCase {
+                name: "eBGP: local route with explicit NH -> rewrite to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(router_id),
+            },
+            TestCase {
+                name: "eBGP: learned route -> rewrite to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
+                path_source: RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected: NextHopAddr::Ipv4(router_id),
+            },
+            TestCase {
+                name: "RS client: preserve original NH",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
+                path_source: RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: true,
+                expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
+            },
+        ];
 
-        // iBGP: Local route with unspecified next hop -> set to local address
-        assert_eq!(
-            build_export_next_hop(
-                &local_path,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(router_id))
-        );
+        for test_case in test_cases {
+            let path = make_path(test_case.path_source, vec![], test_case.path_next_hop);
 
-        // iBGP: Local route with explicit next hop -> preserve
-        assert_eq!(
-            build_export_next_hop(
-                &local_explicit,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
-        );
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_next_hop(&path, &ctx, &prefix);
 
-        // iBGP: Learned route -> preserve next hop
-        assert_eq!(
-            build_export_next_hop(
-                &ibgp_learned,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ibgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)))
-        );
-
-        // eBGP: Local route with unspecified next hop -> set to local address
-        assert_eq!(
-            build_export_next_hop(
-                &local_path,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(router_id))
-        );
-
-        // eBGP: Local route with explicit next hop (same AF) -> rewrite to local address
-        assert_eq!(
-            build_export_next_hop(
-                &local_explicit,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(router_id))
-        );
-
-        // eBGP: Learned route -> rewrite to local address
-        assert_eq!(
-            build_export_next_hop(
-                &ebgp_learned,
-                IpAddr::V4(router_id),
-                local_asn,
-                peer_asn_ebgp,
-                &prefix,
-            ),
-            Some(NextHopAddr::Ipv4(router_id))
-        );
+            assert_eq!(
+                result,
+                Some(test_case.expected),
+                "Test case '{}' failed: expected {:?}, got {:?}",
+                test_case.name,
+                Some(test_case.expected),
+                result
+            );
+        }
     }
 
     #[test]
@@ -1050,71 +1269,225 @@ mod tests {
         };
 
         // iBGP: include LOCAL_PREF
-        assert_eq!(build_export_local_pref(&path, 65001, 65001), Some(200));
+        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false);
+        assert_eq!(build_export_local_pref(&path, &ctx_ibgp), Some(200));
 
         // eBGP: MUST NOT include LOCAL_PREF
-        assert_eq!(build_export_local_pref(&path, 65001, 65002), None);
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false);
+        assert_eq!(build_export_local_pref(&path, &ctx_ebgp), None);
     }
 
     #[test]
     fn test_build_export_med() {
-        // Route from eBGP with MED
-        let ebgp_path = Path {
-            local_path_id: None,
-            remote_path_id: None,
-            stale: false,
-            attrs: PathAttrs {
-                origin: Origin::IGP,
+        struct TestCase {
+            name: &'static str,
+            as_path: Vec<AsPathSegment>,
+            source: RouteSource,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected_med: Option<u32>,
+        }
+
+        let test_cases = vec![
+            // Local routes (empty AS_PATH)
+            TestCase {
+                name: "local route to iBGP",
                 as_path: vec![],
-                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                source: RouteSource::Local,
+                local_asn: 65001,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            TestCase {
+                name: "local route to eBGP",
+                as_path: vec![],
+                source: RouteSource::Local,
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            TestCase {
+                name: "local route to RS client",
+                as_path: vec![],
+                source: RouteSource::Local,
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: true,
+                expected_med: Some(50),
+            },
+            // Local route with non-empty AS_PATH (defensive check for API misuse)
+            TestCase {
+                name: "local route with non-empty AS_PATH to eBGP",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65099], // Different from local_asn
+                }],
+                source: RouteSource::Local,
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: false,
+                expected_med: Some(50), // Should send MED because source=Local
+            },
+            // Route from our AS
+            TestCase {
+                name: "route from our AS to iBGP",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            TestCase {
+                name: "route from our AS to eBGP",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            // Route from external AS (the critical bug case)
+            TestCase {
+                name: "route from external AS to iBGP",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65000],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            TestCase {
+                name: "route from external AS to eBGP (must strip MED)",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65000],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: false,
+                expected_med: None,
+            },
+            // AS_SET handling (RFC 4271 9.2.2.2)
+            TestCase {
+                name: "AS_SET as first segment to eBGP (must strip MED)",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSet,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65003],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: false,
+                expected_med: None,
+            },
+            TestCase {
+                name: "AS_SET as first segment to iBGP",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSet,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65003],
+                }],
+                source: RouteSource::Ibgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                    rr_client: false,
+                },
+                local_asn: 65001,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_med: Some(50),
+            },
+            // Route server transparency
+            TestCase {
+                name: "RS client always preserves MED",
+                as_path: vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65000],
+                }],
                 source: RouteSource::Ebgp {
                     peer_ip: test_ip(1),
                     bgp_id: test_bgp_id(1),
                 },
-                local_pref: Some(100),
-                med: Some(50),
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
+                local_asn: 65001,
+                peer_asn: 65002,
+                rs_client: true,
+                expected_med: Some(50),
             },
-        };
+        ];
 
-        // iBGP: propagate MED
-        assert_eq!(build_export_med(&ebgp_path, 65001, 65001), Some(50));
+        for test_case in test_cases {
+            let path = Path {
+                local_path_id: None,
+                remote_path_id: None,
+                stale: false,
+                attrs: PathAttrs {
+                    origin: Origin::IGP,
+                    as_path: test_case.as_path,
+                    next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
+                    source: test_case.source,
+                    local_pref: Some(100),
+                    med: Some(50),
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                },
+            };
 
-        // eBGP: strip MED (route from eBGP must not be sent to other AS)
-        assert_eq!(build_export_med(&ebgp_path, 65001, 65002), None);
-
-        // Local route with MED
-        let local_path = Path {
-            local_path_id: None,
-            remote_path_id: None,
-            stale: false,
-            attrs: PathAttrs {
-                origin: Origin::IGP,
-                as_path: vec![],
-                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
-                source: RouteSource::Local,
-                local_pref: Some(100),
-                med: Some(50),
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
-            },
-        };
-
-        // eBGP: send MED for local route
-        assert_eq!(build_export_med(&local_path, 65001, 65002), Some(50));
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_med(&path, &ctx);
+            assert_eq!(
+                result, test_case.expected_med,
+                "Test case '{}' failed: expected {:?}, got {:?}",
+                test_case.name, test_case.expected_med, result
+            );
+        }
     }
 
     #[test]
@@ -1154,10 +1527,19 @@ mod tests {
             address: Ipv4Addr::new(10, 0, 0, 0),
             prefix_length: 24,
         });
-        let routes = vec![(prefix, Arc::new(path))];
+        let routes = vec![PrefixPath {
+            prefix,
+            path: Arc::new(path),
+        }];
 
         // Send announcements - should skip due to size
         let policies = vec![policy];
+        let negotiated: HashSet<AfiSafi> = vec![
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+        ]
+        .into_iter()
+        .collect();
         let ctx = PeerExportContext {
             peer_addr,
             peer_tx: &tx,
@@ -1166,12 +1548,14 @@ mod tests {
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &policies,
             rr_client: false,
+            rs_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
             send_format: MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
             },
+            negotiated_afi_safis: &negotiated,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1245,42 +1629,149 @@ mod tests {
 
     #[test]
     fn test_build_export_extended_communities() {
-        let transitive = 0x0002FDE800000064u64;
-        let non_transitive = 0x4002FDE800000064u64;
+        let transitive = 0x0002FDE800000064u64; // Transitive extended community
+        let non_transitive = 0x4002FDE800000064u64; // Non-transitive extended community
 
-        let path = Path {
-            local_path_id: None,
-            remote_path_id: None,
-            stale: false,
-            attrs: PathAttrs {
-                origin: Origin::IGP,
-                as_path: vec![],
-                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
-                source: RouteSource::Local,
-                local_pref: None,
-                med: None,
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![transitive, non_transitive],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
+        struct TestCase {
+            name: &'static str,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected: Vec<u64>,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "eBGP filters non-transitive",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected: vec![transitive],
             },
-        };
+            TestCase {
+                name: "iBGP keeps all",
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected: vec![transitive, non_transitive],
+            },
+            TestCase {
+                name: "RS client preserves all (including non-transitive)",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: true,
+                expected: vec![transitive, non_transitive],
+            },
+        ];
 
-        // eBGP: filters non-transitive
-        assert_eq!(
-            build_export_extended_communities(&path, 65000, 65001),
-            vec![transitive]
+        for test_case in test_cases {
+            let path = Path {
+                local_path_id: None,
+                remote_path_id: None,
+                stale: false,
+                attrs: PathAttrs {
+                    origin: Origin::IGP,
+                    as_path: vec![],
+                    next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                    source: RouteSource::Local,
+                    local_pref: None,
+                    med: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![transitive, non_transitive],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                },
+            };
+
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_extended_communities(&path, &ctx);
+            assert_eq!(
+                result, test_case.expected,
+                "Test case '{}' failed: expected {:?}, got {:?}",
+                test_case.name, test_case.expected, result
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_export_unknown_attrs() {
+        let transitive_attr = PathAttribute::new(
+            PathAttrFlag(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+            PathAttrValue::Unknown {
+                type_code: 200,
+                flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+            },
+        );
+        let non_transitive_attr = PathAttribute::new(
+            PathAttrFlag(attr_flags::OPTIONAL),
+            PathAttrValue::Unknown {
+                type_code: 201,
+                flags: attr_flags::OPTIONAL,
+                data: vec![0xca, 0xfe],
+            },
         );
 
-        // iBGP: keeps all
-        assert_eq!(
-            build_export_extended_communities(&path, 65000, 65000),
-            vec![transitive, non_transitive]
-        );
+        struct TestCase {
+            name: &'static str,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected_count: usize,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "eBGP filters non-transitive unknown attrs",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_count: 1, // transitive only
+            },
+            TestCase {
+                name: "iBGP passes all unknown attrs",
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected_count: 2,
+            },
+            TestCase {
+                name: "RS client preserves all unknown attrs (RFC 7947 Section 2.2)",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: true,
+                expected_count: 2,
+            },
+        ];
+
+        for test_case in test_cases {
+            let mut path = make_path(
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                vec![],
+                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            );
+            path.attrs.unknown_attrs = vec![transitive_attr.clone(), non_transitive_attr.clone()];
+
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_unknown_attrs(&path, &ctx);
+            assert_eq!(
+                result.len(),
+                test_case.expected_count,
+                "Test case '{}' failed: expected {} attrs, got {}",
+                test_case.name,
+                test_case.expected_count,
+                result.len()
+            );
+        }
     }
 
     #[test]
@@ -1298,6 +1789,12 @@ mod tests {
             vec![],
             NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
         );
+        let negotiated: HashSet<AfiSafi> = vec![
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+        ]
+        .into_iter()
+        .collect();
         let ctx = PeerExportContext {
             peer_addr: test_ip(2),
             peer_tx: &tokio::sync::mpsc::unbounded_channel().0,
@@ -1306,12 +1803,14 @@ mod tests {
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             export_policies: &[],
             rr_client: false,
+            rs_client: false,
             cluster_id,
             send_format: MessageFormat {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
             },
+            negotiated_afi_safis: &negotiated,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));
@@ -1325,5 +1824,88 @@ mod tests {
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(existing_originator));
         assert_eq!(cluster_list, vec![cluster_id, existing_cluster]);
+    }
+
+    #[test]
+    fn test_select_paths_rs_route_iteration() {
+        let prefix = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let nh1 = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
+        let nh2 = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 2));
+
+        // path1 (best, bgp_id 1.1.1.1): rejected by policy (sourced from test_ip(2))
+        // path2 (second-best, bgp_id 1.1.1.2): accepted
+        let path1 = make_path(
+            RouteSource::Ebgp {
+                peer_ip: test_ip(2),
+                bgp_id: test_bgp_id(1),
+            },
+            vec![as_seq(vec![65001])],
+            nh1,
+        );
+
+        let path2 = make_path(
+            RouteSource::Ebgp {
+                peer_ip: test_ip(3),
+                bgp_id: test_bgp_id(2),
+            },
+            vec![as_seq(vec![65002])],
+            nh2,
+        );
+
+        let mut loc_rib = LocRib::new();
+        loc_rib.apply_peer_update(
+            test_ip(2),
+            vec![],
+            vec![PrefixPath::new(prefix, path1)],
+            |_, _| true,
+        );
+        loc_rib.apply_peer_update(
+            test_ip(3),
+            vec![],
+            vec![PrefixPath::new(prefix, path2)],
+            |_, _| true,
+        );
+        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
+
+        let policies = vec![Arc::new(
+            Policy::new("test".to_string())
+                .with(
+                    Statement::new()
+                        .when(Condition::Neighbor(test_ip(2)))
+                        .then(Action::Reject),
+                )
+                .with(Statement::new().then(Action::Accept)),
+        )];
+        let rs_ctx = PeerExportContext {
+            export_policies: &policies,
+            ..make_peer_export_ctx(65000, 65003, true)
+        };
+        let non_rs_ctx = PeerExportContext {
+            export_policies: &policies,
+            ..make_peer_export_ctx(65000, 65003, false)
+        };
+
+        // RS client iterates to path2 (passes policy)
+        let result = select_paths_for_export(&prefix, false, &loc_rib, &rs_ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.attrs.next_hop, nh2);
+
+        // Non-RS client only checks best path (path1) -> rejected
+        let result = select_paths_for_export(&prefix, false, &loc_rib, &non_rs_ctx);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_is_ebgp_is_ibgp() {
+        let ebgp_ctx = make_peer_export_ctx(65001, 65002, false);
+        assert!(ebgp_ctx.is_ebgp());
+        assert!(!ebgp_ctx.is_ibgp());
+
+        let ibgp_ctx = make_peer_export_ctx(65001, 65001, false);
+        assert!(!ibgp_ctx.is_ebgp());
+        assert!(ibgp_ctx.is_ibgp());
     }
 }

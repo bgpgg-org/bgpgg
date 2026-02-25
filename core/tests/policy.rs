@@ -56,7 +56,7 @@ async fn test_export_policy_prefix_match() {
         let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
         // Apply export policy on server2
-        apply_export_reject_policy(
+        apply_export_prefix_reject_policy(
             &server2,
             &server1.address.to_string(),
             "blocked",

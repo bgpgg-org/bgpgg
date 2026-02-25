@@ -21,7 +21,7 @@ pub use utils::*;
 
 use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::config::BmpConfig;
-use bgpgg::grpc::proto::BgpState;
+use bgpgg::grpc::proto::{BgpState, SessionConfig};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
@@ -397,8 +397,16 @@ async fn test_bmp_statistics() {
     bmp_server.accept().await;
     let _initiation = bmp_server.read_initiation().await;
 
-    // Add BGP peer (both directions for active-active peering)
-    server1.add_peer(&server2).await;
+    // server1 passive, server2 active: one connection, no collision -> exactly one PeerUp in BMP
+    server1
+        .add_peer_with_config(
+            &server2,
+            SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
     server2.add_peer(&server1).await;
 
     // Wait for peer to establish
@@ -412,7 +420,7 @@ async fn test_bmp_statistics() {
                 peer_addr: server2.address,
                 peer_as: server2.asn,
                 peer_bgp_id: u32::from(server2.client.router_id),
-                peer_port: None, // Port is non-deterministic with active-active peering
+                peer_port: None,
             }),
             ExpectedBmpMessage::Statistics(ExpectedStatistics {
                 peer_addr: server2.address,

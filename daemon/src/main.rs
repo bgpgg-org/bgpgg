@@ -118,6 +118,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     apply_overrides(&mut config, &args);
 
+    // Validate peer configurations
+    for peer_config in &config.peers {
+        if let Err(e) = peer_config.validate() {
+            eprintln!(
+                "Error: invalid peer configuration ({}): {}",
+                peer_config.address, e
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Initialize tracing subscriber with configured log level
     let level = match config.log_level.to_lowercase().as_str() {
         "error" => LevelFilter::ERROR,

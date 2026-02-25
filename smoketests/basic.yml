@@ -21,12 +21,12 @@ configs:
   peer1_config:
     content: |
       asn: 65001
-      router_id: 1.1.1.1
+      router-id: 1.1.1.1
 
   peer2_config:
     content: |
       asn: 65002
-      router_id: 2.2.2.2
+      router-id: 2.2.2.2
 
 networks:
   smoke_net:

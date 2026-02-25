@@ -19,7 +19,21 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 /// A single prefix with a single path, used for propagation and wire encoding.
-pub type PrefixPath = (IpNetwork, Arc<Path>);
+#[derive(Debug, Clone)]
+pub struct PrefixPath {
+    pub prefix: IpNetwork,
+    pub path: Arc<Path>,
+}
+
+impl PrefixPath {
+    /// Create a new PrefixPath, wrapping the path in an Arc
+    pub fn new(prefix: IpNetwork, path: Path) -> Self {
+        Self {
+            prefix,
+            path: Arc::new(path),
+        }
+    }
+}
 
 /// Source of a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]

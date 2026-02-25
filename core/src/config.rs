@@ -81,6 +81,7 @@ pub enum AddPathSend {
 
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
 pub struct PeerConfig {
     /// Peer IP address (IPv4 or IPv6).
     #[serde(default)]
@@ -113,22 +114,28 @@ pub struct PeerConfig {
     #[serde(default)]
     pub min_route_advertisement_interval_secs: Option<u64>,
     /// List of import policy names to apply (evaluated in order)
-    #[serde(default, rename = "import-policy")]
+    #[serde(default)]
     pub import_policy: Vec<String>,
     /// List of export policy names to apply (evaluated in order)
-    #[serde(default, rename = "export-policy")]
+    #[serde(default)]
     pub export_policy: Vec<String>,
     /// Graceful Restart configuration (RFC 4724)
-    #[serde(default, rename = "graceful-restart")]
+    #[serde(default)]
     pub graceful_restart: GracefulRestartConfig,
     /// RFC 4456: Mark this peer as a route reflector client
-    #[serde(default, rename = "rr-client")]
+    #[serde(default)]
     pub rr_client: bool,
+    /// RFC 7947: Mark this peer as a route server client (transparency mode)
+    #[serde(default)]
+    pub rs_client: bool,
+    /// RFC 4271 Section 6.3: Enforce first AS in AS_PATH matches peer AS (default: true)
+    #[serde(default = "default_enforce_first_as")]
+    pub enforce_first_as: bool,
     /// RFC 7911: ADD-PATH send mode for this peer
-    #[serde(default, rename = "add-path-send")]
+    #[serde(default)]
     pub add_path_send: AddPathSend,
     /// RFC 7911: Whether to accept multiple paths from this peer
-    #[serde(default, rename = "add-path-receive")]
+    #[serde(default)]
     pub add_path_receive: bool,
     /// Expected peer ASN. When set, OPEN messages with mismatched ASN are rejected.
     #[serde(default)]
@@ -151,6 +158,10 @@ fn default_passive_mode() -> bool {
     false
 }
 
+fn default_enforce_first_as() -> bool {
+    true
+}
+
 fn default_port() -> u16 {
     179
 }
@@ -171,6 +182,20 @@ impl PeerConfig {
     pub fn allow_automatic_start(&self) -> bool {
         self.idle_hold_time_secs.is_some()
     }
+
+    /// Validate peer configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if self.rr_client && self.rs_client {
+            return Err("Peer cannot be both rr-client and rs-client".to_string());
+        }
+        // RFC 7947 2.3.2.2.2: Route server enforces send-only ADD-PATH mode with clients.
+        if self.rs_client && self.add_path_receive {
+            return Err(
+                "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)".to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for PeerConfig {
@@ -190,6 +215,8 @@ impl Default for PeerConfig {
             export_policy: Vec::new(),
             graceful_restart: GracefulRestartConfig::default(),
             rr_client: false,
+            rs_client: false,
+            enforce_first_as: default_enforce_first_as(),
             add_path_send: AddPathSend::default(),
             add_path_receive: false,
             asn: None,
@@ -454,6 +481,7 @@ pub struct LargeCommunityActionConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub asn: u32,
     #[serde(default = "default_listen_addr")]
@@ -479,13 +507,13 @@ pub struct Config {
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// Defined sets for policy matching
-    #[serde(default, rename = "defined-sets")]
+    #[serde(default)]
     pub defined_sets: DefinedSetsConfig,
     /// Policy definitions
-    #[serde(default, rename = "policy-definitions")]
+    #[serde(default)]
     pub policy_definitions: Vec<PolicyDefinitionConfig>,
     /// RFC 4456: Cluster ID for route reflector. Defaults to router_id if not set.
-    #[serde(default, rename = "cluster-id")]
+    #[serde(default)]
     pub cluster_id: Option<Ipv4Addr>,
 }
 
@@ -626,7 +654,7 @@ mod tests {
     fn test_config_from_file() {
         let temp_file = write_temp_yaml(
             "test_config.yaml",
-            "asn: 65200\nlisten_addr: \"10.0.0.1:179\"\nrouter_id: \"10.0.0.1\"\n",
+            "asn: 65200\nlisten-addr: \"10.0.0.1:179\"\nrouter-id: \"10.0.0.1\"\n",
         );
 
         let config = Config::from_file(&temp_file).unwrap();
@@ -664,5 +692,69 @@ mod tests {
         // Can be overridden
         config.cluster_id = Some(Ipv4Addr::new(1, 2, 3, 4));
         assert_eq!(config.cluster_id(), Ipv4Addr::new(1, 2, 3, 4));
+    }
+
+    #[test]
+    fn test_rr_and_rs_conflict() {
+        // Valid: only rr_client
+        let peer = PeerConfig {
+            rr_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Valid: only rs_client
+        let peer = PeerConfig {
+            rs_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Invalid: both rr_client and rs_client
+        let peer = PeerConfig {
+            rr_client: true,
+            rs_client: true,
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Peer cannot be both rr-client and rs-client"
+        );
+
+        // Valid: neither set
+        let peer = PeerConfig::default();
+        assert!(peer.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rs_client_rejects_add_path_receive() {
+        // Valid: rs_client without add_path_receive
+        let peer = PeerConfig {
+            rs_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Valid: add_path_receive without rs_client
+        let peer = PeerConfig {
+            add_path_receive: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Invalid: rs_client with add_path_receive
+        let peer = PeerConfig {
+            rs_client: true,
+            add_path_receive: true,
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)"
+        );
     }
 }
