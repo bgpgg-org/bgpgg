@@ -81,6 +81,7 @@ pub enum AddPathSend {
 
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
 pub struct PeerConfig {
     /// Peer IP address (IPv4 or IPv6).
     #[serde(default)]
@@ -113,28 +114,28 @@ pub struct PeerConfig {
     #[serde(default)]
     pub min_route_advertisement_interval_secs: Option<u64>,
     /// List of import policy names to apply (evaluated in order)
-    #[serde(default, rename = "import-policy")]
+    #[serde(default)]
     pub import_policy: Vec<String>,
     /// List of export policy names to apply (evaluated in order)
-    #[serde(default, rename = "export-policy")]
+    #[serde(default)]
     pub export_policy: Vec<String>,
     /// Graceful Restart configuration (RFC 4724)
-    #[serde(default, rename = "graceful-restart")]
+    #[serde(default)]
     pub graceful_restart: GracefulRestartConfig,
     /// RFC 4456: Mark this peer as a route reflector client
-    #[serde(default, rename = "rr-client")]
+    #[serde(default)]
     pub rr_client: bool,
     /// RFC 7947: Mark this peer as a route server client (transparency mode)
-    #[serde(default, rename = "rs-client")]
+    #[serde(default)]
     pub rs_client: bool,
     /// RFC 4271 Section 6.3: Enforce first AS in AS_PATH matches peer AS (default: true)
-    #[serde(default = "default_true", rename = "enforce-first-as")]
+    #[serde(default = "default_enforce_first_as")]
     pub enforce_first_as: bool,
     /// RFC 7911: ADD-PATH send mode for this peer
-    #[serde(default, rename = "add-path-send")]
+    #[serde(default)]
     pub add_path_send: AddPathSend,
     /// RFC 7911: Whether to accept multiple paths from this peer
-    #[serde(default, rename = "add-path-receive")]
+    #[serde(default)]
     pub add_path_receive: bool,
     /// Expected peer ASN. When set, OPEN messages with mismatched ASN are rejected.
     #[serde(default)]
@@ -157,7 +158,7 @@ fn default_passive_mode() -> bool {
     false
 }
 
-fn default_true() -> bool {
+fn default_enforce_first_as() -> bool {
     true
 }
 
@@ -209,7 +210,7 @@ impl Default for PeerConfig {
             graceful_restart: GracefulRestartConfig::default(),
             rr_client: false,
             rs_client: false,
-            enforce_first_as: default_true(),
+            enforce_first_as: default_enforce_first_as(),
             add_path_send: AddPathSend::default(),
             add_path_receive: false,
             asn: None,
@@ -474,6 +475,7 @@ pub struct LargeCommunityActionConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub asn: u32,
     #[serde(default = "default_listen_addr")]
@@ -499,13 +501,13 @@ pub struct Config {
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// Defined sets for policy matching
-    #[serde(default, rename = "defined-sets")]
+    #[serde(default)]
     pub defined_sets: DefinedSetsConfig,
     /// Policy definitions
-    #[serde(default, rename = "policy-definitions")]
+    #[serde(default)]
     pub policy_definitions: Vec<PolicyDefinitionConfig>,
     /// RFC 4456: Cluster ID for route reflector. Defaults to router_id if not set.
-    #[serde(default, rename = "cluster-id")]
+    #[serde(default)]
     pub cluster_id: Option<Ipv4Addr>,
 }
 
@@ -646,7 +648,7 @@ mod tests {
     fn test_config_from_file() {
         let temp_file = write_temp_yaml(
             "test_config.yaml",
-            "asn: 65200\nlisten_addr: \"10.0.0.1:179\"\nrouter_id: \"10.0.0.1\"\n",
+            "asn: 65200\nlisten-addr: \"10.0.0.1:179\"\nrouter-id: \"10.0.0.1\"\n",
         );
 
         let config = Config::from_file(&temp_file).unwrap();
