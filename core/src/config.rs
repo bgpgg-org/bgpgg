@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_config_validate_rr_rs_mutual_exclusion() {
+    fn test_rr_and_rs_conflict() {
         // Valid: only rr_client
         let peer = PeerConfig {
             rr_client: true,

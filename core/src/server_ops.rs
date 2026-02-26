@@ -547,8 +547,7 @@ impl BgpServer {
         {
             warn!(
                 %peer_ip,
-                "Route-server client without ADD-PATH may experience path hiding. \
-                 Recommendation: set add-path-send: all"
+                "Route server could hide paths without ADD-PATH. Set add-path-send: all"
             );
         }
 
