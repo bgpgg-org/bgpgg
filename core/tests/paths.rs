@@ -674,6 +674,97 @@ async fn test_med_not_propagated_to_other_as() {
 }
 
 #[tokio::test]
+async fn test_med_not_propagated_via_ibgp_to_other_as() {
+    // RFC 4271 Section 5.1.4: MED from one AS must not reach another AS, even via iBGP
+    //
+    // Topology: S1(AS65000) -> S2(AS65001) -> S3(AS65001)
+    //                          eBGP           iBGP      |
+    //                                                   eBGP
+    //                                                    |
+    //                                                 S4(AS65002)
+    //
+    // Critical case: Route learned via eBGP, propagated via iBGP, then to different AS
+    // - S1 originates with MED=50
+    // - S2 receives via eBGP (source=Ebgp, MED=50)
+    // - S3 receives via iBGP (source=Ibgp, MED=50) <- source changed!
+    // - S4 must receive with MED=None (route from AS65000 can't have MED in AS65002)
+    let server1 = start_test_server(test_config(65000, 1)).await;
+    let server2 = start_test_server(test_config(65001, 2)).await;
+    let server3 = start_test_server(test_config(65001, 3)).await; // Same AS as S2
+    let server4 = start_test_server(test_config(65002, 4)).await;
+
+    peer_servers(&server1, &server2).await; // S1 <-> S2 (eBGP)
+    peer_servers(&server2, &server3).await; // S2 <-> S3 (iBGP)
+    peer_servers(&server3, &server4).await; // S3 <-> S4 (eBGP)
+
+    announce_route(
+        &server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            med: Some(50),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // S2 (eBGP from S1): MED=50
+    poll_rib(&[(
+        &server2,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65000])],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                med: Some(50),
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+
+    // S3 (iBGP from S2): MED=50 (iBGP preserves)
+    poll_rib(&[(
+        &server3,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65000])],
+                next_hop: server1.address.to_string(),
+                peer_address: server2.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                med: Some(50), // Preserved via iBGP
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+
+    // S4 (eBGP from S3): MED MUST be None
+    // BUG: Currently sends MED=50 because source changed to Ibgp at S3
+    poll_rib(&[(
+        &server4,
+        vec![Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                as_path: vec![as_sequence(vec![65001, 65000])],
+                next_hop: server3.address.to_string(),
+                peer_address: server3.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                // MED must be None - route originated from AS65000
+                ..Default::default()
+            })],
+        }],
+    )])
+    .await;
+}
+
+#[tokio::test]
 async fn test_atomic_aggregate_propagation() {
     // RFC 4271 Section 5.1.6: ATOMIC_AGGREGATE propagation
     //
