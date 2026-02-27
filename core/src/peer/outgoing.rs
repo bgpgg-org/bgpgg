@@ -294,7 +294,7 @@ type BatchingKey = (
 pub(crate) fn batch_announcements_by_path(to_announce: &[PrefixPath]) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
-    for (prefix, path) in to_announce {
+    for PrefixPath { prefix, path } in to_announce {
         let key = (
             path.origin(),
             path.as_path().clone(),
@@ -464,7 +464,7 @@ fn compute_export_path(
     prefix: &IpNetwork,
     path: &Arc<Path>,
     ctx: &PeerExportContext,
-) -> Option<Path> {
+) -> Option<PrefixPath> {
     if !should_export_to_peer(path, ctx) {
         return None;
     }
@@ -474,12 +474,15 @@ fn compute_export_path(
         return None;
     }
 
-    Some(Path {
-        local_path_id: exported.local_path_id,
-        remote_path_id: exported.remote_path_id,
-        attrs: build_export_attrs(&exported, ctx, prefix)?,
-        stale: false,
-    })
+    Some(PrefixPath::new(
+        *prefix,
+        Path {
+            local_path_id: exported.local_path_id,
+            remote_path_id: exported.remote_path_id,
+            attrs: build_export_attrs(&exported, ctx, prefix)?,
+            stale: false,
+        },
+    ))
 }
 
 /// Compute filtered and transformed routes for a peer
@@ -495,9 +498,7 @@ pub fn compute_routes_for_peer(
 ) -> Vec<PrefixPath> {
     to_announce
         .iter()
-        .filter_map(|(prefix, path)| {
-            compute_export_path(prefix, path, ctx).map(|exported| (*prefix, Arc::new(exported)))
-        })
+        .filter_map(|PrefixPath { prefix, path }| compute_export_path(prefix, path, ctx))
         .collect()
 }
 
@@ -564,6 +565,54 @@ fn send_batched_announcements(
     }
 }
 
+/// Select paths for export to a peer, applying export policy.
+/// For ADD-PATH peers, considers all paths. For normal peers, only the best path.
+fn select_paths_for_export(
+    prefix: &IpNetwork,
+    send_add_path: bool,
+    loc_rib: &LocRib,
+    ctx: &PeerExportContext,
+) -> Vec<PrefixPath> {
+    let candidates: Vec<Arc<Path>> = if send_add_path {
+        loc_rib.get_all_paths(prefix)
+    } else {
+        loc_rib.get_best_path(prefix).into_iter().cloned().collect()
+    };
+
+    candidates
+        .iter()
+        .filter_map(|path| compute_export_path(prefix, path, ctx))
+        .collect()
+}
+
+/// Build withdrawal NLRIs for stale paths.
+/// ADD-PATH mode: one withdrawal per path_id. Normal mode: one withdrawal if all paths removed.
+fn build_withdrawals_for_prefix(
+    prefix: IpNetwork,
+    stale_paths: &[Arc<Path>],
+    export_paths: &[PrefixPath],
+    send_add_path: bool,
+) -> Vec<Nlri> {
+    if send_add_path {
+        stale_paths
+            .iter()
+            .filter_map(|path| {
+                path.local_path_id.map(|pid| Nlri {
+                    prefix,
+                    path_id: Some(pid),
+                })
+            })
+            .collect()
+    } else if export_paths.is_empty() && !stale_paths.is_empty() {
+        vec![Nlri {
+            prefix,
+            path_id: None,
+        }]
+    } else {
+        vec![]
+    }
+}
+
 /// Export paths to a peer and update adj-rib-out.
 ///
 /// For each changed prefix, computes the desired export state and diffs against
@@ -579,14 +628,14 @@ pub fn propagate_routes_to_peer(
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
-    let mut to_announce = Vec::new();
-    let mut stale_entries = Vec::new();
-    let mut withdrawn_nlri = Vec::new();
+    let mut announcements: Vec<PrefixPath> = Vec::new();
+    let mut stale_entries: Vec<(IpNetwork, u32)> = Vec::new();
+    let mut withdrawals = Vec::new();
 
     for afi in [Afi::Ipv4, Afi::Ipv6] {
         let afi_safi = AfiSafi::new(afi, Safi::Unicast);
-        let has_add_path = ctx.send_format.add_path.contains(&afi_safi);
-        let prefixes = if has_add_path {
+        let send_add_path = ctx.send_format.add_path.contains(&afi_safi);
+        let prefixes = if send_add_path {
             &delta.changed
         } else {
             &delta.best_changed
@@ -600,65 +649,35 @@ pub fn propagate_routes_to_peer(
                 continue;
             }
 
-            // Get candidate paths: all for ADD-PATH, best-only otherwise
-            let candidates: Vec<Arc<Path>> = if has_add_path {
-                loc_rib.get_all_paths(prefix)
-            } else {
-                loc_rib.get_best_path(prefix).into_iter().cloned().collect()
-            };
-
-            // Apply export policy
-            let desired: Vec<PrefixPath> = candidates
-                .iter()
-                .filter_map(|path| {
-                    compute_export_path(prefix, path, ctx)
-                        .map(|exported| (*prefix, Arc::new(exported)))
-                })
-                .collect();
-
-            let desired_ids: Vec<u32> = desired
-                .iter()
-                .filter_map(|(_, path)| path.local_path_id)
-                .collect();
-
-            // Diff against adj-rib-out: find stale path_ids
-            let adj_ids = adj_rib_out.path_ids_for_prefix(prefix);
-            let stale_ids: Vec<u32> = adj_ids
-                .into_iter()
-                .filter(|pid| !desired_ids.contains(pid))
-                .collect();
+            let export_paths = select_paths_for_export(prefix, send_add_path, loc_rib, ctx);
+            let stale_paths = adj_rib_out.stale_paths(prefix, &export_paths);
 
             // Build wire withdrawals
-            if has_add_path {
-                for pid in &stale_ids {
-                    withdrawn_nlri.push(Nlri {
-                        prefix: *prefix,
-                        path_id: Some(*pid),
-                    });
-                }
-            } else if desired.is_empty() && !stale_ids.is_empty() {
-                withdrawn_nlri.push(Nlri {
-                    prefix: *prefix,
-                    path_id: None,
-                });
-            }
+            withdrawals.extend(build_withdrawals_for_prefix(
+                *prefix,
+                &stale_paths,
+                &export_paths,
+                send_add_path,
+            ));
+
+            announcements.extend(export_paths);
 
             // Track stale entries for adj-rib-out removal
-            for pid in stale_ids {
-                stale_entries.push((*prefix, pid));
+            for path in &stale_paths {
+                if let Some(pid) = path.local_path_id {
+                    stale_entries.push((*prefix, pid));
+                }
             }
-
-            to_announce.extend(desired);
         }
     }
 
-    send_withdrawals(ctx, withdrawn_nlri, ctx.send_format);
-    send_batched_announcements(ctx, &to_announce, ctx.send_format);
+    send_withdrawals(ctx, withdrawals, ctx.send_format);
+    send_batched_announcements(ctx, &announcements, ctx.send_format);
 
     for (prefix, path_id) in &stale_entries {
         adj_rib_out.remove_path(prefix, *path_id);
     }
-    for (prefix, path) in to_announce {
+    for PrefixPath { prefix, path } in announcements {
         adj_rib_out.insert(prefix, path);
     }
 }
@@ -912,9 +931,18 @@ mod tests {
             prefix_length: 24,
         });
         let announcements = vec![
-            (p1, Arc::clone(&path_a)),
-            (p2, Arc::clone(&path_b)),
-            (p3, Arc::clone(&path_a)),
+            PrefixPath {
+                prefix: p1,
+                path: Arc::clone(&path_a),
+            },
+            PrefixPath {
+                prefix: p2,
+                path: Arc::clone(&path_b),
+            },
+            PrefixPath {
+                prefix: p3,
+                path: Arc::clone(&path_a),
+            },
         ];
 
         let mut actual = batch_announcements_by_path(&announcements);
@@ -1428,7 +1456,10 @@ mod tests {
             address: Ipv4Addr::new(10, 0, 0, 0),
             prefix_length: 24,
         });
-        let routes = vec![(prefix, Arc::new(path))];
+        let routes = vec![PrefixPath {
+            prefix,
+            path: Arc::new(path),
+        }];
 
         // Send announcements - should skip due to size
         let policies = vec![policy];

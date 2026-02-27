@@ -15,7 +15,7 @@
 use crate::bgp::multiprotocol::Afi;
 use crate::net::IpNetwork;
 use crate::rib::{Path, Route};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Adj-RIB-Out: Per-peer output routing table
@@ -68,6 +68,30 @@ impl AdjRibOut {
         self.routes
             .get(prefix)
             .map(|paths| paths.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get paths that are in adj-rib-out but not in the active set.
+    /// Used to identify stale routes that need to be withdrawn.
+    pub fn stale_paths(
+        &self,
+        prefix: &IpNetwork,
+        active: &[crate::rib::PrefixPath],
+    ) -> Vec<Arc<Path>> {
+        let active_ids: HashSet<u32> = active
+            .iter()
+            .filter_map(|pp| pp.path.local_path_id)
+            .collect();
+
+        self.routes
+            .get(prefix)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter(|(pid, _)| !active_ids.contains(pid))
+                    .map(|(_, path)| path.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

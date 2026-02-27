@@ -1849,14 +1849,14 @@ fn peer_add_path_receive_mask(peer_info: &PeerInfo) -> AddPathMask {
 
 /// Convert routes to UpdateMessages, batching by shared path attributes
 fn routes_to_update_messages(routes: &[Route], format: MessageFormat) -> Vec<UpdateMessage> {
-    // Convert routes to (prefix, path) tuples for batching
+    // Convert routes to PrefixPath for batching
     let announcements: Vec<PrefixPath> = routes
         .iter()
         .flat_map(|route| {
-            route
-                .paths
-                .iter()
-                .map(|path| (route.prefix, Arc::clone(path)))
+            route.paths.iter().map(|path| PrefixPath {
+                prefix: route.prefix,
+                path: Arc::clone(path),
+            })
         })
         .collect();
 

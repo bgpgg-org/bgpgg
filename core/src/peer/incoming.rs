@@ -281,7 +281,10 @@ impl Peer {
             let path_arc = Arc::new(path.clone());
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
             self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
-            announced.push((entry.prefix, path_arc));
+            announced.push(crate::rib::PrefixPath {
+                prefix: entry.prefix,
+                path: path_arc,
+            });
         }
 
         Ok((announced, vec![]))

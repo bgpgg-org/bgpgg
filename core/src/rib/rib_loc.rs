@@ -292,7 +292,7 @@ impl<A: PathIdAllocator> LocRib<A> {
         // Collect affected prefixes and snapshot old best BEFORE mutations
         let mut affected_set: HashSet<IpNetwork> = HashSet::new();
         affected_set.extend(withdrawn.iter().map(|(prefix, _)| *prefix));
-        affected_set.extend(announced.iter().map(|(prefix, _)| *prefix));
+        affected_set.extend(announced.iter().map(|pp| pp.prefix));
         let affected: Vec<IpNetwork> = affected_set.into_iter().collect();
         let old_best: HashMap<IpNetwork, Arc<Path>> = affected
             .iter()
@@ -306,7 +306,11 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
 
         // Process announcements - apply import policy and add to Loc-RIB
-        for (prefix, path_arc) in announced {
+        for PrefixPath {
+            prefix,
+            path: path_arc,
+        } in announced
+        {
             // Clone inner Path for policy mutation
             let mut path = (*path_arc).clone();
             if import_policy(&prefix, &mut path) {
@@ -498,19 +502,19 @@ impl<A: PathIdAllocator> LocRib<A> {
         if all_paths {
             routes
                 .flat_map(|route| {
-                    route
-                        .paths
-                        .iter()
-                        .map(move |path| (route.prefix, Arc::clone(path)))
+                    route.paths.iter().map(move |path| PrefixPath {
+                        prefix: route.prefix,
+                        path: Arc::clone(path),
+                    })
                 })
                 .collect()
         } else {
             routes
                 .filter_map(|route| {
-                    route
-                        .paths
-                        .first()
-                        .map(|path| (route.prefix, Arc::clone(path)))
+                    route.paths.first().map(|path| PrefixPath {
+                        prefix: route.prefix,
+                        path: Arc::clone(path),
+                    })
                 })
                 .collect()
         }
@@ -914,11 +918,11 @@ mod tests {
 
         let ipv4_routes = loc_rib.get_paths(Afi::Ipv4, false);
         assert_eq!(ipv4_routes.len(), 1);
-        assert_eq!(ipv4_routes[0].0, prefix_v4);
+        assert_eq!(ipv4_routes[0].prefix, prefix_v4);
 
         let ipv6_routes = loc_rib.get_paths(Afi::Ipv6, false);
         assert_eq!(ipv6_routes.len(), 1);
-        assert_eq!(ipv6_routes[0].0, prefix_v6);
+        assert_eq!(ipv6_routes[0].prefix, prefix_v6);
     }
 
     #[test]
@@ -1161,8 +1165,15 @@ mod tests {
             }];
         });
 
-        let delta =
-            loc_rib.apply_peer_update(peer2, vec![], vec![(prefix, worse_path)], |_, _| true);
+        let delta = loc_rib.apply_peer_update(
+            peer2,
+            vec![],
+            vec![PrefixPath {
+                prefix,
+                path: worse_path,
+            }],
+            |_, _| true,
+        );
 
         // Best didn't change (peer1's path is still best)
         assert!(
@@ -1197,7 +1208,15 @@ mod tests {
         let refreshed_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.attrs.med = Some(50);
         });
-        loc_rib.apply_peer_update(peer_ip, vec![], vec![(prefix, refreshed_path)], |_, _| true);
+        loc_rib.apply_peer_update(
+            peer_ip,
+            vec![],
+            vec![PrefixPath {
+                prefix,
+                path: refreshed_path,
+            }],
+            |_, _| true,
+        );
 
         // Replacement path should not be stale
         assert!(!loc_rib.get_best_path(&prefix).unwrap().stale);
@@ -1244,7 +1263,15 @@ mod tests {
             p.remote_path_id = Some(1);
             p.attrs.med = Some(99);
         });
-        loc_rib.apply_peer_update(peer_ip, vec![], vec![(prefix, refreshed)], |_, _| true);
+        loc_rib.apply_peer_update(
+            peer_ip,
+            vec![],
+            vec![PrefixPath {
+                prefix,
+                path: refreshed,
+            }],
+            |_, _| true,
+        );
 
         // path_id=1 should be fresh, path_id=2 should still be stale
         let paths = loc_rib.get_all_paths(&prefix);
@@ -1309,7 +1336,10 @@ mod tests {
         let delta1 = loc_rib.apply_peer_update(
             peer_high,
             vec![],
-            vec![(prefix, path_high)],
+            vec![PrefixPath {
+                prefix,
+                path: path_high,
+            }],
             |_prefix, _path| true,
         );
         assert!(
@@ -1325,7 +1355,10 @@ mod tests {
         let delta2 = loc_rib.apply_peer_update(
             peer_low,
             vec![],
-            vec![(prefix, path_low)],
+            vec![PrefixPath {
+                prefix,
+                path: path_low,
+            }],
             |_prefix, _path| true,
         );
         assert!(
