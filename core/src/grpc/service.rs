@@ -316,6 +316,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         },
         add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),
         asn: cfg.asn,
+        md5_key_file: defaults.md5_key_file,
     }
 }
 

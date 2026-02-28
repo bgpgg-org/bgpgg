@@ -15,6 +15,7 @@
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -140,6 +141,9 @@ pub struct PeerConfig {
     /// Expected peer ASN. When set, OPEN messages with mismatched ASN are rejected.
     #[serde(default)]
     pub asn: Option<u32>,
+    /// Path to file containing TCP MD5 key (RFC 2385). File should be chmod 600.
+    #[serde(default)]
+    pub md5_key_file: Option<String>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -183,6 +187,13 @@ impl PeerConfig {
         self.idle_hold_time_secs.is_some()
     }
 
+    /// Read MD5 key bytes from file, trimming whitespace/newlines.
+    pub fn read_md5_key(&self) -> Option<io::Result<Vec<u8>>> {
+        self.md5_key_file
+            .as_ref()
+            .map(|path| fs::read_to_string(path).map(|s| s.trim().as_bytes().to_vec()))
+    }
+
     /// Validate peer configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.rr_client && self.rs_client {
@@ -220,6 +231,7 @@ impl Default for PeerConfig {
             add_path_send: AddPathSend::default(),
             add_path_receive: false,
             asn: None,
+            md5_key_file: None,
         }
     }
 }
@@ -692,6 +704,49 @@ mod tests {
         // Can be overridden
         config.cluster_id = Some(Ipv4Addr::new(1, 2, 3, 4));
         assert_eq!(config.cluster_id(), Ipv4Addr::new(1, 2, 3, 4));
+    }
+
+    #[test]
+    fn test_peer_config_md5_key_file_deserialization() {
+        let peer: PeerConfig =
+            serde_yaml::from_str("address: \"10.0.0.1\"\nmd5-key-file: \"/etc/bgp/md5.key\"\n")
+                .unwrap();
+        assert_eq!(peer.md5_key_file, Some("/etc/bgp/md5.key".to_string()));
+
+        // Default: None when not specified
+        let peer: PeerConfig = serde_yaml::from_str("address: \"10.0.0.1\"\n").unwrap();
+        assert!(peer.md5_key_file.is_none());
+    }
+
+    #[test]
+    fn test_read_md5_key() {
+        let temp_path = std::env::temp_dir().join("test_bgp_md5.key");
+        let mut file = std::fs::File::create(&temp_path).unwrap();
+        writeln!(file, "my-secret-key").unwrap();
+
+        let peer = PeerConfig {
+            md5_key_file: Some(temp_path.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let key = peer.read_md5_key().unwrap().unwrap();
+        assert_eq!(key, b"my-secret-key");
+
+        // None when md5_key_file is not set
+        let peer = PeerConfig::default();
+        assert!(peer.read_md5_key().is_none());
+
+        std::fs::remove_file(temp_path).unwrap();
+    }
+
+    #[test]
+    fn test_read_md5_key_missing_file() {
+        let peer = PeerConfig {
+            md5_key_file: Some("/nonexistent/path/bgp_md5.key".to_string()),
+            ..Default::default()
+        };
+        let result = peer.read_md5_key().unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

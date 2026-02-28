@@ -16,6 +16,13 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
 
+#[cfg(target_os = "linux")]
+use std::mem;
+#[cfg(target_os = "linux")]
+use std::ptr::addr_of_mut;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::{AsRawFd, RawFd};
+
 /// BGP protocol port number
 pub const BGP_PORT: u16 = 179;
 
@@ -154,6 +161,74 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
     }
 }
 
+/// struct tcp_md5sig (linux/tcp.h)
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct TcpMd5sig {
+    peer_addr: libc::sockaddr_storage,     // tcpm_addr
+    flags: u8,                             // tcpm_flags: 0 for basic use
+    prefixlen: u8,                         // tcpm_prefixlen: 0 = exact IP match
+    keylen: u16,                           // tcpm_keylen
+    ifindex: i32,                          // tcpm_ifindex: 0 = any interface
+    key: [u8; libc::TCP_MD5SIG_MAXKEYLEN], // tcpm_key
+}
+
+// Builds a TcpMd5sig to pass to setsockopt(TCP_MD5SIG). The struct layout
+// mirrors linux/tcp.h and is interpreted directly by the kernel.
+#[cfg(target_os = "linux")]
+fn tcp_md5sig(peer_addr: IpAddr, key: &[u8]) -> TcpMd5sig {
+    let mut sig: TcpMd5sig = unsafe { mem::zeroed() };
+    sig.keylen = key.len() as u16;
+    sig.key[..key.len()].copy_from_slice(key);
+
+    match peer_addr {
+        // sin_port is left zero; the kernel matches MD5 keys by IP address only.
+        IpAddr::V4(v4) => unsafe {
+            let sa = addr_of_mut!(sig.peer_addr) as *mut libc::sockaddr_in;
+            (*sa).sin_family = libc::AF_INET as u16;
+            // octets() is already in network byte order; from_ne_bytes copies
+            // the bytes as-is into s_addr without reordering.
+            (*sa).sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
+        },
+        IpAddr::V6(v6) => unsafe {
+            let sa = addr_of_mut!(sig.peer_addr) as *mut libc::sockaddr_in6;
+            (*sa).sin6_family = libc::AF_INET6 as u16;
+            (*sa).sin6_addr.s6_addr = v6.octets();
+        },
+    }
+
+    sig
+}
+
+/// Set TCP MD5 signature key on a socket for the given peer address (RFC 2385).
+#[cfg(target_os = "linux")]
+pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()> {
+    if key.len() > libc::TCP_MD5SIG_MAXKEYLEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MD5 key too long (max 80 bytes)",
+        ));
+    }
+
+    let sig = tcp_md5sig(peer_addr, key);
+
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_MD5SIG,
+            &sig as *const _ as *const libc::c_void,
+            mem::size_of_val(&sig) as libc::socklen_t,
+        )
+    };
+
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Create and bind a TCP socket for outgoing BGP connections
 ///
 /// This helper creates an appropriate socket (IPv4 or IPv6) based on the remote address,
@@ -162,12 +237,14 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
 /// # Arguments
 /// * `local_addr` - Local address to bind to (typically IP:0 for automatic port selection)
 /// * `remote_addr` - Remote address to connect to (IP:179 for BGP)
+/// * `md5_key` - Optional TCP MD5 key bytes (RFC 2385, Linux only)
 ///
 /// # Returns
 /// `TcpStream` on success, or an `io::Error` on failure
 pub async fn create_and_bind_tcp_socket(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    md5_key: Option<&[u8]>,
 ) -> io::Result<TcpStream> {
     // Create appropriate socket based on remote address type
     let socket = if remote_addr.is_ipv4() {
@@ -178,6 +255,12 @@ pub async fn create_and_bind_tcp_socket(
 
     // Bind to local address
     socket.bind(local_addr)?;
+
+    // Apply TCP MD5 key before connect (Linux only)
+    #[cfg(target_os = "linux")]
+    if let Some(key) = md5_key {
+        apply_tcp_md5(socket.as_raw_fd(), remote_addr.ip(), key)?;
+    }
 
     // Connect to remote peer
     socket.connect(remote_addr).await
@@ -219,6 +302,65 @@ mod tests {
     use super::*;
     use std::net::Ipv6Addr;
     use tokio::net::TcpListener;
+    #[cfg(target_os = "linux")]
+    use tokio::net::TcpSocket;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tcp_md5sig() {
+        use std::ptr::addr_of;
+        let key = b"secret";
+        let cases: &[(IpAddr, u16, u32)] = &[
+            // (addr, expected AF, expected s_addr)
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                libc::AF_INET as u16,
+                u32::from_ne_bytes([10, 0, 0, 1]),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                libc::AF_INET as u16,
+                u32::from_ne_bytes([192, 168, 1, 1]),
+            ),
+        ];
+        for (addr, expected_family, expected_s_addr) in cases {
+            let sig = tcp_md5sig(*addr, key);
+            assert_eq!(sig.keylen, key.len() as u16);
+            assert_eq!(&sig.key[..key.len()], key.as_ref());
+            unsafe {
+                let sa = addr_of!(sig.peer_addr) as *const libc::sockaddr_in;
+                assert_eq!((*sa).sin_family, *expected_family);
+                assert_eq!((*sa).sin_addr.s_addr, *expected_s_addr);
+            }
+        }
+    }
+
+    /// Test that apply_tcp_md5 succeeds on a real socket.
+    /// Requires CAP_NET_ADMIN on some kernel configurations; marked ignore by default.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "may require CAP_NET_ADMIN"]
+    async fn test_apply_tcp_md5_v4() {
+        let socket = TcpSocket::new_v4().unwrap();
+        let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let key = b"test-bgp-md5-key";
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, key);
+        assert!(result.is_ok(), "apply_tcp_md5 failed: {:?}", result.err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_apply_tcp_md5_key_too_long() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let socket = TcpSocket::new_v4().unwrap();
+            let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
+            let key = vec![0u8; 81]; // exceeds TCP_MD5SIG_MAXKEYLEN
+            let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, &key);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        });
+    }
 
     #[test]
     fn test_ipv4_from_sockaddr() {
