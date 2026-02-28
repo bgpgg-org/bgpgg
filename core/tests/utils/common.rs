@@ -2323,3 +2323,50 @@ pub async fn apply_export_reject_policy(
         .await
         .unwrap();
 }
+
+/// Create an export policy that rejects routes sourced from a specific neighbor and accepts
+/// the rest, then assign it to the given peer.
+pub async fn apply_export_neighbor_reject_policy(
+    server: &TestServer,
+    peer_addr: &str,
+    policy_name: &str,
+    reject_neighbor: &str,
+) {
+    server
+        .client
+        .add_policy(
+            policy_name.to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        neighbor: Some(reject_neighbor.to_string()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .set_policy_assignment(
+            peer_addr.to_string(),
+            "export".to_string(),
+            vec![policy_name.to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+}

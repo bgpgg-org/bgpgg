@@ -373,3 +373,65 @@ async fn test_rs_rr_mutual_exclusion() {
         "Should reject peer with both rr_client and rs_client enabled"
     );
 }
+
+/// RFC 7947 Section 2.3.2: when RS-side export policy blocks the best path for a client,
+/// route iteration tries the next path rather than sending nothing.
+///
+/// Topology: Client1(65001) ──┐
+///           Client2(65002) ──┤── RS(65000) ── Client3(65003)
+#[tokio::test]
+async fn test_rs_route_iteration_no_path_hiding() {
+    let client1 = start_test_server(test_config(65001, 1)).await;
+    let client2 = start_test_server(test_config(65002, 2)).await;
+    let rs = start_test_server(test_config(65000, 3)).await;
+    let client3 = start_test_server(test_config(65003, 4)).await;
+
+    setup_route_server(&rs, vec![&client1, &client2, &client3]).await;
+
+    apply_export_neighbor_reject_policy(
+        &rs,
+        &client3.address.to_string(),
+        "reject-client1",
+        &client1.address.to_string(),
+    )
+    .await;
+
+    // Client1 (IGP origin) is preferred over Client2 (Incomplete origin); policy blocks it for Client3.
+    announce_route(
+        &client1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: client1.address.to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    announce_route(
+        &client2,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: client2.address.to_string(),
+            origin: Some(Origin::Incomplete),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Client3 receives Client2's path via route iteration.
+    poll_route_exists(
+        &client3,
+        Route {
+            prefix: "10.0.0.0/24".to_string(),
+            paths: vec![build_path(PathParams {
+                next_hop: client2.address.to_string(),
+                peer_address: rs.address.to_string(),
+                as_path: vec![as_sequence(vec![65002])],
+                origin: Some(Origin::Incomplete),
+                local_pref: Some(100),
+                ..Default::default()
+            })],
+        },
+    )
+    .await;
+}

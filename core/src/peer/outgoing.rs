@@ -578,25 +578,41 @@ fn send_batched_announcements(
 }
 
 /// Select paths for export to a peer, applying export policy.
-/// For ADD-PATH peers, considers all paths. For normal peers, only the best path.
+///
+/// - ADD-PATH peers: all paths that pass policy
+/// - Non-ADD-PATH RS clients: iterate in preference order, return first accepted (RFC 7947 route iteration)
+/// - Normal peers: best path only
 fn select_paths_for_export(
     prefix: &IpNetwork,
     send_add_path: bool,
     loc_rib: &LocRib,
     ctx: &PeerExportContext,
 ) -> Vec<PrefixPath> {
-    let candidates: Vec<Arc<Path>> = if send_add_path {
-        loc_rib.get_all_paths(prefix)
+    if send_add_path {
+        loc_rib
+            .get_all_paths(prefix)
+            .iter()
+            .filter_map(|path| {
+                compute_export_path(prefix, path, ctx).map(|p| PrefixPath::new(*prefix, p))
+            })
+            .collect()
+    } else if ctx.rs_client {
+        // RFC 7947 route iteration: try paths in preference order, return first that passes policy.
+        for path in loc_rib.get_all_paths(prefix) {
+            if let Some(p) = compute_export_path(prefix, &path, ctx) {
+                return vec![PrefixPath::new(*prefix, p)];
+            }
+        }
+        vec![]
     } else {
-        loc_rib.get_best_path(prefix).into_iter().cloned().collect()
-    };
-
-    candidates
-        .iter()
-        .filter_map(|path| {
-            compute_export_path(prefix, path, ctx).map(|p| PrefixPath::new(*prefix, p))
-        })
-        .collect()
+        loc_rib
+            .get_best_path(prefix)
+            .into_iter()
+            .filter_map(|path| {
+                compute_export_path(prefix, path, ctx).map(|p| PrefixPath::new(*prefix, p))
+            })
+            .collect()
+    }
 }
 
 /// Build withdrawal NLRIs for stale paths.
@@ -648,7 +664,9 @@ pub fn propagate_routes_to_peer(
 
     for afi_safi in ctx.afi_safis() {
         let send_add_path = ctx.send_format.add_path.contains(&afi_safi);
-        let prefixes = if send_add_path {
+        // RS clients use delta.changed so a newly arrived non-best path can be re-evaluated
+        // when the current best path is filtered. ADD-PATH also needs all changes.
+        let prefixes = if send_add_path || ctx.rs_client {
             &delta.changed
         } else {
             &delta.best_changed
@@ -702,8 +720,9 @@ mod tests {
     use crate::bgp::msg_update::Origin;
     use crate::bgp::multiprotocol::Safi;
     use crate::net::{IpNetwork, Ipv4Net};
-    use crate::policy::statement::Action;
+    use crate::policy::statement::{Action, Condition};
     use crate::policy::Statement;
+    use crate::rib::rib_loc::LocRib;
     use crate::rib::{PathAttrs, RouteSource};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -735,6 +754,14 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
             },
+        }
+    }
+
+    fn as_seq(asns: Vec<u32>) -> AsPathSegment {
+        AsPathSegment {
+            segment_type: AsPathSegmentType::AsSequence,
+            segment_len: asns.len() as u8,
+            asn_list: asns,
         }
     }
 
@@ -1702,5 +1729,77 @@ mod tests {
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(existing_originator));
         assert_eq!(cluster_list, vec![cluster_id, existing_cluster]);
+    }
+
+    #[test]
+    fn test_select_paths_rs_route_iteration() {
+        let prefix = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let nh1 = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
+        let nh2 = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 2));
+
+        // path1 (best, bgp_id 1.1.1.1): rejected by policy (sourced from test_ip(2))
+        // path2 (second-best, bgp_id 1.1.1.2): accepted
+        let path1 = make_path(
+            RouteSource::Ebgp {
+                peer_ip: test_ip(2),
+                bgp_id: test_bgp_id(1),
+            },
+            vec![as_seq(vec![65001])],
+            nh1,
+        );
+
+        let path2 = make_path(
+            RouteSource::Ebgp {
+                peer_ip: test_ip(3),
+                bgp_id: test_bgp_id(2),
+            },
+            vec![as_seq(vec![65002])],
+            nh2,
+        );
+
+        let mut loc_rib = LocRib::new();
+        loc_rib.apply_peer_update(
+            test_ip(2),
+            vec![],
+            vec![PrefixPath::new(prefix, path1)],
+            |_, _| true,
+        );
+        loc_rib.apply_peer_update(
+            test_ip(3),
+            vec![],
+            vec![PrefixPath::new(prefix, path2)],
+            |_, _| true,
+        );
+        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
+
+        let policies = vec![Arc::new(
+            Policy::new("test".to_string())
+                .with(
+                    Statement::new()
+                        .when(Condition::Neighbor(test_ip(2)))
+                        .then(Action::Reject),
+                )
+                .with(Statement::new().then(Action::Accept)),
+        )];
+        let rs_ctx = PeerExportContext {
+            export_policies: &policies,
+            ..make_peer_export_ctx(65000, 65003, true)
+        };
+        let non_rs_ctx = PeerExportContext {
+            export_policies: &policies,
+            ..make_peer_export_ctx(65000, 65003, false)
+        };
+
+        // RS client iterates to path2 (passes policy)
+        let result = select_paths_for_export(&prefix, false, &loc_rib, &rs_ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.attrs.next_hop, nh2);
+
+        // Non-RS client only checks best path (path1) -> rejected
+        let result = select_paths_for_export(&prefix, false, &loc_rib, &non_rs_ctx);
+        assert!(result.is_empty());
     }
 }

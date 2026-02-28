@@ -35,7 +35,6 @@ impl RouteDelta {
     pub fn has_changes(&self) -> bool {
         !self.best_changed.is_empty() || !self.changed.is_empty()
     }
-
 }
 
 #[cfg(test)]
