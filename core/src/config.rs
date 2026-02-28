@@ -188,6 +188,12 @@ impl PeerConfig {
         if self.rr_client && self.rs_client {
             return Err("Peer cannot be both rr-client and rs-client".to_string());
         }
+        // RFC 7947 2.3.2.2.2: Route server enforces send-only ADD-PATH mode with clients.
+        if self.rs_client && self.add_path_receive {
+            return Err(
+                "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)".to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -720,5 +726,35 @@ mod tests {
         // Valid: neither set
         let peer = PeerConfig::default();
         assert!(peer.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rs_client_rejects_add_path_receive() {
+        // Valid: rs_client without add_path_receive
+        let peer = PeerConfig {
+            rs_client: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Valid: add_path_receive without rs_client
+        let peer = PeerConfig {
+            add_path_receive: true,
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // Invalid: rs_client with add_path_receive
+        let peer = PeerConfig {
+            rs_client: true,
+            add_path_receive: true,
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)"
+        );
     }
 }

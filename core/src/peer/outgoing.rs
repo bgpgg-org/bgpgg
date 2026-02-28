@@ -18,7 +18,7 @@ use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{
-    NextHopAddr, Nlri, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
+    NextHopAddr, Nlri, PathAttribute, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, error, info, warn};
@@ -275,6 +275,22 @@ pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -
     }
 }
 
+/// Build unknown attributes for export to peer.
+/// RFC 7947 §2.2: Route servers preserve all unknown attributes (transitive and non-transitive).
+/// RFC 4271: Normal eBGP only forwards optional transitive attributes.
+fn build_export_unknown_attrs(path: &Path, ctx: &PeerExportContext) -> Vec<PathAttribute> {
+    if ctx.rs_client {
+        path.attrs.unknown_attrs.clone()
+    } else {
+        path.attrs
+            .unknown_attrs
+            .iter()
+            .filter(|attr| attr.is_unknown_transitive())
+            .cloned()
+            .collect()
+    }
+}
+
 /// Send withdrawal messages to a peer.
 fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Nlri>, format: MessageFormat) {
     if withdrawn.is_empty() {
@@ -431,13 +447,7 @@ fn build_export_attrs(
         communities: path.attrs.communities.clone(),
         extended_communities: build_export_extended_communities(path, ctx),
         large_communities: path.attrs.large_communities.clone(),
-        unknown_attrs: path
-            .attrs
-            .unknown_attrs
-            .iter()
-            .filter(|attr| attr.is_unknown_transitive())
-            .cloned()
-            .collect(),
+        unknown_attrs: build_export_unknown_attrs(path, ctx),
         originator_id,
         cluster_list,
     })
@@ -717,7 +727,7 @@ pub fn propagate_routes_to_peer(
 mod tests {
     use super::*;
     use crate::bgp::msg::AddPathMask;
-    use crate::bgp::msg_update::Origin;
+    use crate::bgp::msg_update::{attr_flags, Origin, PathAttrFlag, PathAttrValue};
     use crate::bgp::multiprotocol::Safi;
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::policy::statement::{Action, Condition};
@@ -1675,6 +1685,82 @@ mod tests {
                 result, test_case.expected,
                 "Test case '{}' failed: expected {:?}, got {:?}",
                 test_case.name, test_case.expected, result
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_export_unknown_attrs() {
+        let transitive_attr = PathAttribute::new(
+            PathAttrFlag(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+            PathAttrValue::Unknown {
+                type_code: 200,
+                flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+            },
+        );
+        let non_transitive_attr = PathAttribute::new(
+            PathAttrFlag(attr_flags::OPTIONAL),
+            PathAttrValue::Unknown {
+                type_code: 201,
+                flags: attr_flags::OPTIONAL,
+                data: vec![0xca, 0xfe],
+            },
+        );
+
+        struct TestCase {
+            name: &'static str,
+            local_asn: u32,
+            peer_asn: u32,
+            rs_client: bool,
+            expected_count: usize,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "eBGP filters non-transitive unknown attrs",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                expected_count: 1, // transitive only
+            },
+            TestCase {
+                name: "iBGP passes all unknown attrs",
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                expected_count: 2,
+            },
+            TestCase {
+                name: "RS client preserves all unknown attrs (RFC 7947 §2.2)",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: true,
+                expected_count: 2,
+            },
+        ];
+
+        for test_case in test_cases {
+            let mut path = make_path(
+                RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                vec![],
+                NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            );
+            path.attrs.unknown_attrs = vec![transitive_attr.clone(), non_transitive_attr.clone()];
+
+            let ctx =
+                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let result = build_export_unknown_attrs(&path, &ctx);
+            assert_eq!(
+                result.len(),
+                test_case.expected_count,
+                "Test case '{}' failed: expected {} attrs, got {}",
+                test_case.name,
+                test_case.expected_count,
+                result.len()
             );
         }
     }
