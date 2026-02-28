@@ -32,7 +32,7 @@ use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
 use crate::types::PeerDownReason;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -412,6 +412,15 @@ impl ConnectionState {
         self.capabilities
             .as_ref()
             .is_some_and(|caps| caps.add_path_receive())
+    }
+
+    /// Returns the negotiated multiprotocol AFI/SAFIs, or empty set if none negotiated.
+    /// An empty set signals IPv4/Unicast-only fallback (RFC 4760).
+    pub fn negotiated_afi_safis(&self) -> HashSet<AfiSafi> {
+        self.capabilities
+            .as_ref()
+            .map(|caps| caps.multiprotocol.clone())
+            .unwrap_or_default()
     }
 
     /// MessageFormat for encoding outgoing messages to this peer
@@ -989,6 +998,8 @@ impl BgpServer {
 
             let send_format = conn.send_format();
 
+            let negotiated_afi_safis = conn.negotiated_afi_safis();
+
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
@@ -1001,8 +1012,10 @@ impl BgpServer {
                     .unwrap_or(local_addr),
                 export_policies: &export_policies,
                 rr_client: entry.config.rr_client,
+                rs_client: entry.config.rs_client,
                 cluster_id,
                 send_format,
+                negotiated_afi_safis: &negotiated_afi_safis,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);

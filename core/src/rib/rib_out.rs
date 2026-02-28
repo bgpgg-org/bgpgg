@@ -15,7 +15,7 @@
 use crate::bgp::multiprotocol::Afi;
 use crate::net::IpNetwork;
 use crate::rib::{Path, Route};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Adj-RIB-Out: Per-peer output routing table
@@ -69,6 +69,29 @@ impl AdjRibOut {
             .get(prefix)
             .map(|paths| paths.keys().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Get paths that are in adj-rib-out but not in the active set.
+    /// Used to identify stale routes that need to be withdrawn.
+    pub fn stale_paths(
+        &self,
+        prefix: &IpNetwork,
+        active: &[crate::rib::PrefixPath],
+    ) -> Vec<Arc<Path>> {
+        let Some(paths) = self.routes.get(prefix) else {
+            return vec![];
+        };
+
+        let active_ids: HashSet<u32> = active
+            .iter()
+            .filter_map(|pp| pp.path.local_path_id)
+            .collect();
+
+        paths
+            .iter()
+            .filter(|(pid, _)| !active_ids.contains(pid))
+            .map(|(_, path)| path.clone())
+            .collect()
     }
 
     /// Get all prefixes for a given AFI.
@@ -167,6 +190,78 @@ mod tests {
 
         rib.clear();
         assert_eq!(rib.get_routes().len(), 0);
+    }
+
+    #[test]
+    fn test_stale_paths() {
+        let prefix = prefix_v4("10.0.0.0/24");
+
+        struct Case {
+            name: &'static str,
+            in_rib: Vec<u32>,
+            active: Vec<u32>,
+            expected: Vec<u32>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "prefix not in rib",
+                in_rib: vec![],
+                active: vec![],
+                expected: vec![],
+            },
+            Case {
+                name: "all paths active",
+                in_rib: vec![1, 2],
+                active: vec![1, 2],
+                expected: vec![],
+            },
+            Case {
+                name: "some paths stale",
+                in_rib: vec![1, 2, 3],
+                active: vec![2],
+                expected: vec![1, 3],
+            },
+            Case {
+                name: "all paths stale",
+                in_rib: vec![1, 2],
+                active: vec![],
+                expected: vec![1, 2],
+            },
+            Case {
+                name: "active has ids not in rib",
+                in_rib: vec![1],
+                active: vec![1, 99],
+                expected: vec![],
+            },
+        ];
+
+        for tc in cases {
+            let mut rib = AdjRibOut::new();
+            for id in &tc.in_rib {
+                rib.insert(prefix, make_path(*id));
+            }
+            let active: Vec<crate::rib::PrefixPath> = tc
+                .active
+                .iter()
+                .map(|id| crate::rib::PrefixPath {
+                    prefix,
+                    path: make_path(*id),
+                })
+                .collect();
+
+            let mut stale_ids: Vec<u32> = rib
+                .stale_paths(&prefix, &active)
+                .iter()
+                .filter_map(|p| p.local_path_id)
+                .collect();
+            stale_ids.sort_unstable();
+
+            let mut expected = tc.expected.clone();
+            expected.sort_unstable();
+
+            assert_eq!(stale_ids, expected, "case: {}", tc.name);
+        }
     }
 
     #[test]

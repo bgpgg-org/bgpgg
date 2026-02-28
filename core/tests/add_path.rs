@@ -579,7 +579,7 @@ async fn test_addpath_soft_reset_withdraws_stale_paths() {
     send_and_validate_addpath_routes(&server1, &server2, &server3, &server4, &_server5).await;
 
     // Apply export policy on S3 -> S4 that rejects 10.0.0.0/24
-    apply_export_reject_policy(
+    apply_export_prefix_reject_policy(
         &server3,
         &server4_addr,
         "block-10",

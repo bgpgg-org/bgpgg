@@ -538,6 +538,19 @@ impl BgpServer {
         let capabilities = conn.capabilities.clone();
         let peer_tx = conn.peer_tx.clone();
 
+        // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
+        if peer.config.rs_client
+            && matches!(
+                peer.config.add_path_send,
+                crate::config::AddPathSend::Disabled
+            )
+        {
+            warn!(
+                %peer_ip,
+                "Route server could hide paths without add-path. Enable add-path send."
+            );
+        }
+
         // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
         // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
         let gr_cap = capabilities
@@ -586,6 +599,12 @@ impl BgpServer {
         bind_addr: SocketAddr,
     ) {
         info!(peer_addr = %addr, "adding peer via request");
+
+        // Validate peer configuration
+        if let Err(e) = config.validate() {
+            let _ = response.send(Err(e));
+            return;
+        }
 
         // Parse peer IP address
         let peer_ip: IpAddr = match addr.parse() {
@@ -941,6 +960,9 @@ impl BgpServer {
             .unwrap_or(self.local_addr);
 
         let export_policies = &peer_info.export_policies;
+
+        let negotiated_afi_safis = conn.negotiated_afi_safis();
+
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
             peer_tx: &peer_tx,
@@ -949,8 +971,10 @@ impl BgpServer {
             local_next_hop,
             export_policies,
             rr_client: peer_info.config.rr_client,
+            rs_client: peer_info.config.rs_client,
             cluster_id: self.config.cluster_id(),
             send_format,
+            negotiated_afi_safis: &negotiated_afi_safis,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);
@@ -1829,14 +1853,14 @@ fn peer_add_path_receive_mask(peer_info: &PeerInfo) -> AddPathMask {
 
 /// Convert routes to UpdateMessages, batching by shared path attributes
 fn routes_to_update_messages(routes: &[Route], format: MessageFormat) -> Vec<UpdateMessage> {
-    // Convert routes to (prefix, path) tuples for batching
+    // Convert routes to PrefixPath for batching
     let announcements: Vec<PrefixPath> = routes
         .iter()
         .flat_map(|route| {
-            route
-                .paths
-                .iter()
-                .map(|path| (route.prefix, Arc::clone(path)))
+            route.paths.iter().map(|path| PrefixPath {
+                prefix: route.prefix,
+                path: Arc::clone(path),
+            })
         })
         .collect();
 
