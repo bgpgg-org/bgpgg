@@ -1507,6 +1507,32 @@ impl FakePeer {
         }
     }
 
+    /// Connect and complete handshake with custom OPEN message
+    pub async fn connect_with_open(
+        local_ip: Option<&str>,
+        peer: &TestServer,
+        asn: u16,
+        router_id: u32,
+        open_options: RawOpenOptions,
+    ) -> Self {
+        // TCP connect
+        let mut fake_peer = Self::connect(local_ip, peer).await;
+
+        // Read server's OPEN
+        let _server_open = fake_peer.read_open().await;
+
+        // Send our custom OPEN
+        let custom_open = build_raw_open(asn, 180, router_id, open_options);
+        fake_peer.send_raw(&custom_open).await;
+
+        // Complete handshake
+        let _keepalive = fake_peer.read_keepalive().await;
+        fake_peer.send_keepalive().await;
+
+        fake_peer.asn = asn as u32;
+        fake_peer
+    }
+
     /// Create a FakePeer. Call accept() to accept the connection.
     pub async fn new(bind_addr: &str, local_asn: u32) -> Self {
         let listener = TcpListener::bind(bind_addr).await.unwrap();

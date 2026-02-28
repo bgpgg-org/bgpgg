@@ -989,6 +989,13 @@ impl BgpServer {
 
             let send_format = conn.send_format();
 
+            // Clone negotiated AFI/SAFIs to avoid borrow conflicts
+            let negotiated_afi_safis = conn
+                .capabilities
+                .as_ref()
+                .map(|caps| caps.multiprotocol.clone())
+                .unwrap_or_default();
+
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
@@ -1004,6 +1011,7 @@ impl BgpServer {
                 rs_client: entry.config.rs_client,
                 cluster_id,
                 send_format,
+                negotiated_afi_safis: &negotiated_afi_safis,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);

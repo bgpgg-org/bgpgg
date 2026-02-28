@@ -1946,3 +1946,57 @@ async fn test_peer_asn_validation() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_peer_without_capabilities() {
+    // Test RFC 4271 compliance: peer sends OPEN with no capabilities
+    // Should default to IPv4 unicast only (no multiprotocol extensions)
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        180,
+    ))
+    .await;
+
+    // Configure peer in passive mode
+    server
+        .client
+        .add_peer(
+            "127.0.0.1".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Connect old BGP-4 speaker (no capabilities)
+    let mut peer = FakePeer::connect_with_open(
+        None,
+        &server,
+        65002,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions::default(), // No capabilities!
+    )
+    .await;
+
+    // Add IPv4 route - should be propagated (default behavior)
+    announce_route(
+        &server,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Should receive IPv4 UPDATE
+    let update = peer.read_update().await;
+    assert!(
+        !update.nlri_prefixes().is_empty(),
+        "should receive IPv4 route"
+    );
+}

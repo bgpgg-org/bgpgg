@@ -960,6 +960,14 @@ impl BgpServer {
             .unwrap_or(self.local_addr);
 
         let export_policies = &peer_info.export_policies;
+
+        // Clone negotiated AFI/SAFIs to avoid borrow conflicts
+        let negotiated_afi_safis = conn
+            .capabilities
+            .as_ref()
+            .map(|caps| caps.multiprotocol.clone())
+            .unwrap_or_default();
+
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
             peer_tx: &peer_tx,
@@ -971,6 +979,7 @@ impl BgpServer {
             rs_client: peer_info.config.rs_client,
             cluster_id: self.config.cluster_id(),
             send_format,
+            negotiated_afi_safis: &negotiated_afi_safis,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);

@@ -31,7 +31,7 @@ use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
 
 #[cfg(test)]
 use crate::policy::Policy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use std::net::Ipv4Addr;
@@ -58,6 +58,19 @@ pub struct PeerExportContext<'a> {
     pub rs_client: bool,
     pub cluster_id: Ipv4Addr,
     pub send_format: MessageFormat,
+    pub negotiated_afi_safis: &'a HashSet<AfiSafi>,
+}
+
+impl<'a> PeerExportContext<'a> {
+    /// Returns AFI/SAFIs to propagate. Falls back to IPv4/Unicast if no multiprotocol
+    /// capabilities were negotiated (RFC 4760).
+    fn afi_safis(&self) -> Vec<AfiSafi> {
+        if self.negotiated_afi_safis.is_empty() {
+            vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]
+        } else {
+            self.negotiated_afi_safis.iter().copied().collect()
+        }
+    }
 }
 
 /// Check if a path should be exported to a peer (pre-policy filtering).
@@ -464,7 +477,7 @@ fn compute_export_path(
     prefix: &IpNetwork,
     path: &Arc<Path>,
     ctx: &PeerExportContext,
-) -> Option<PrefixPath> {
+) -> Option<Path> {
     if !should_export_to_peer(path, ctx) {
         return None;
     }
@@ -474,15 +487,12 @@ fn compute_export_path(
         return None;
     }
 
-    Some(PrefixPath::new(
-        *prefix,
-        Path {
-            local_path_id: exported.local_path_id,
-            remote_path_id: exported.remote_path_id,
-            attrs: build_export_attrs(&exported, ctx, prefix)?,
-            stale: false,
-        },
-    ))
+    Some(Path {
+        local_path_id: exported.local_path_id,
+        remote_path_id: exported.remote_path_id,
+        attrs: build_export_attrs(&exported, ctx, prefix)?,
+        stale: false,
+    })
 }
 
 /// Compute filtered and transformed routes for a peer
@@ -498,7 +508,9 @@ pub fn compute_routes_for_peer(
 ) -> Vec<PrefixPath> {
     to_announce
         .iter()
-        .filter_map(|PrefixPath { prefix, path }| compute_export_path(prefix, path, ctx))
+        .filter_map(|PrefixPath { prefix, path }| {
+            compute_export_path(prefix, path, ctx).map(|p| PrefixPath::new(*prefix, p))
+        })
         .collect()
 }
 
@@ -581,7 +593,9 @@ fn select_paths_for_export(
 
     candidates
         .iter()
-        .filter_map(|path| compute_export_path(prefix, path, ctx))
+        .filter_map(|path| {
+            compute_export_path(prefix, path, ctx).map(|p| PrefixPath::new(*prefix, p))
+        })
         .collect()
 }
 
@@ -632,8 +646,7 @@ pub fn propagate_routes_to_peer(
     let mut stale_entries: Vec<(IpNetwork, u32)> = Vec::new();
     let mut withdrawals = Vec::new();
 
-    for afi in [Afi::Ipv4, Afi::Ipv6] {
-        let afi_safi = AfiSafi::new(afi, Safi::Unicast);
+    for afi_safi in ctx.afi_safis() {
         let send_add_path = ctx.send_format.add_path.contains(&afi_safi);
         let prefixes = if send_add_path {
             &delta.changed
@@ -642,13 +655,13 @@ pub fn propagate_routes_to_peer(
         };
 
         for prefix in prefixes {
+            // Filter prefixes by AFI (IPv4 vs IPv6)
             if !matches!(
-                (prefix, afi),
+                (prefix, afi_safi.afi),
                 (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
             ) {
                 continue;
             }
-
             let export_paths = select_paths_for_export(prefix, send_add_path, loc_rib, ctx);
             let stale_paths = adj_rib_out.stale_paths(prefix, &export_paths);
 
@@ -687,6 +700,7 @@ mod tests {
     use super::*;
     use crate::bgp::msg::AddPathMask;
     use crate::bgp::msg_update::Origin;
+    use crate::bgp::multiprotocol::Safi;
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::policy::statement::Action;
     use crate::policy::Statement;
@@ -733,6 +747,16 @@ mod tests {
         // Leak the channel to get 'static lifetime for test
         let tx_static: &'static mpsc::UnboundedSender<PeerOp> = Box::leak(Box::new(tx));
 
+        // Default test setup: negotiate both IPv4 and IPv6 Unicast
+        let negotiated: &'static HashSet<AfiSafi> = Box::leak(Box::new(
+            vec![
+                AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+                AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+
         PeerExportContext {
             peer_addr: test_ip(1),
             peer_tx: tx_static,
@@ -748,6 +772,7 @@ mod tests {
                 add_path: AddPathMask::NONE,
                 is_ebgp: local_asn != peer_asn,
             },
+            negotiated_afi_safis: negotiated,
         }
     }
 
@@ -1463,6 +1488,12 @@ mod tests {
 
         // Send announcements - should skip due to size
         let policies = vec![policy];
+        let negotiated: HashSet<AfiSafi> = vec![
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+        ]
+        .into_iter()
+        .collect();
         let ctx = PeerExportContext {
             peer_addr,
             peer_tx: &tx,
@@ -1478,6 +1509,7 @@ mod tests {
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
             },
+            negotiated_afi_safis: &negotiated,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1635,6 +1667,12 @@ mod tests {
             vec![],
             NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
         );
+        let negotiated: HashSet<AfiSafi> = vec![
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+        ]
+        .into_iter()
+        .collect();
         let ctx = PeerExportContext {
             peer_addr: test_ip(2),
             peer_tx: &tokio::sync::mpsc::unbounded_channel().0,
@@ -1650,6 +1688,7 @@ mod tests {
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
             },
+            negotiated_afi_safis: &negotiated,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));
