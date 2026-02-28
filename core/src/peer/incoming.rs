@@ -18,7 +18,7 @@ use crate::bgp::msg_update_types::{PathAttrValue, AS_TRANS};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::config::MaxPrefixAction;
 use crate::log::{info, warn};
-use crate::rib::{Path, RouteSource};
+use crate::rib::{Path, PrefixPath, RouteSource};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -281,7 +281,7 @@ impl Peer {
             let path_arc = Arc::new(path.clone());
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "adding route to Adj-RIB-In");
             self.rib_in.add_route(entry.prefix, Arc::clone(&path_arc));
-            announced.push(crate::rib::PrefixPath {
+            announced.push(PrefixPath {
                 prefix: entry.prefix,
                 path: path_arc,
             });

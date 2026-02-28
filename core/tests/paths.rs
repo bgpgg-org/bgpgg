@@ -683,19 +683,21 @@ async fn test_med_not_propagated_via_ibgp_to_other_as() {
     //                                                    |
     //                                                 S4(AS65002)
     //
-    // Critical case: Route learned via eBGP, propagated via iBGP, then to different AS
+    // Route learned via eBGP, propagated via iBGP, then to different AS:
     // - S1 originates with MED=50
     // - S2 receives via eBGP (source=Ebgp, MED=50)
     // - S3 receives via iBGP (source=Ibgp, MED=50) <- source changed!
     // - S4 must receive with MED=None (route from AS65000 can't have MED in AS65002)
-    let server1 = start_test_server(test_config(65000, 1)).await;
-    let server2 = start_test_server(test_config(65001, 2)).await;
-    let server3 = start_test_server(test_config(65001, 3)).await; // Same AS as S2
-    let server4 = start_test_server(test_config(65002, 4)).await;
-
-    peer_servers(&server1, &server2).await; // S1 <-> S2 (eBGP)
-    peer_servers(&server2, &server3).await; // S2 <-> S3 (iBGP)
-    peer_servers(&server3, &server4).await; // S3 <-> S4 (eBGP)
+    let [server1, server2, server3, server4] = chain_servers(
+        [
+            start_test_server(test_config(65000, 1)).await,
+            start_test_server(test_config(65001, 2)).await,
+            start_test_server(test_config(65001, 3)).await, // Same AS as S2
+            start_test_server(test_config(65002, 4)).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
 
     announce_route(
         &server1,

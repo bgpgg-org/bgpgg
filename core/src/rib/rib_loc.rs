@@ -292,7 +292,7 @@ impl<A: PathIdAllocator> LocRib<A> {
         // Collect affected prefixes and snapshot old best BEFORE mutations
         let mut affected_set: HashSet<IpNetwork> = HashSet::new();
         affected_set.extend(withdrawn.iter().map(|(prefix, _)| *prefix));
-        affected_set.extend(announced.iter().map(|pp| pp.prefix));
+        affected_set.extend(announced.iter().map(|prefix_path| prefix_path.prefix));
         let affected: Vec<IpNetwork> = affected_set.into_iter().collect();
         let old_best: HashMap<IpNetwork, Arc<Path>> = affected
             .iter()

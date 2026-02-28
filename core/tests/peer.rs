@@ -1972,13 +1972,12 @@ async fn test_peer_without_capabilities() {
         .await
         .unwrap();
 
-    // Connect old BGP-4 speaker (no capabilities)
     let mut peer = FakePeer::connect_with_open(
         None,
         &server,
         65002,
         u32::from(Ipv4Addr::new(2, 2, 2, 2)),
-        RawOpenOptions::default(), // No capabilities!
+        RawOpenOptions::default(), // No capabilities
     )
     .await;
 

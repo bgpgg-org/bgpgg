@@ -523,10 +523,6 @@ async fn test_rs_unknown_attr_transparency() {
 /// Even though a conforming peer would not send NO_EXPORT routes to an eBGP neighbor,
 /// the RS must refuse to re-advertise them regardless.
 ///
-/// A clean probe route is sent after the community route. TCP ordering guarantees
-/// that once client2 receives the probe, the RS has already processed (and filtered)
-/// the community route.
-///
 /// FakePeer(AS65001, 127.0.0.5) -- RS(AS65000) -- Client2(AS65002)
 #[tokio::test]
 async fn test_rs_well_known_communities_block_propagation() {
@@ -536,9 +532,18 @@ async fn test_rs_well_known_communities_block_propagation() {
     }
 
     let cases = vec![
-        Case { name: "NO_EXPORT", community: NO_EXPORT },
-        Case { name: "NO_ADVERTISE", community: NO_ADVERTISE },
-        Case { name: "NO_EXPORT_SUBCONFED", community: NO_EXPORT_SUBCONFED },
+        Case {
+            name: "NO_EXPORT",
+            community: NO_EXPORT,
+        },
+        Case {
+            name: "NO_ADVERTISE",
+            community: NO_ADVERTISE,
+        },
+        Case {
+            name: "NO_EXPORT_SUBCONFED",
+            community: NO_EXPORT_SUBCONFED,
+        },
     ];
 
     for case in cases {

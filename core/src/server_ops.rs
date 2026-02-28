@@ -547,7 +547,7 @@ impl BgpServer {
         {
             warn!(
                 %peer_ip,
-                "Route server could hide paths without ADD-PATH. Set add-path-send: all"
+                "Route server could hide paths without add-path. Enable add-path send."
             );
         }
 
@@ -961,12 +961,7 @@ impl BgpServer {
 
         let export_policies = &peer_info.export_policies;
 
-        // Clone negotiated AFI/SAFIs to avoid borrow conflicts
-        let negotiated_afi_safis = conn
-            .capabilities
-            .as_ref()
-            .map(|caps| caps.multiprotocol.clone())
-            .unwrap_or_default();
+        let negotiated_afi_safis = conn.negotiated_afi_safis();
 
         let ctx = PeerExportContext {
             peer_addr: peer_ip,

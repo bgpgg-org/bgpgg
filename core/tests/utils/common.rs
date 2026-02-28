@@ -2255,7 +2255,7 @@ pub fn build_addpath_capability_ipv6_unicast() -> Vec<u8> {
 
 /// Create an export policy that rejects matching prefixes and accepts the rest,
 /// then assign it to the given peer.
-pub async fn apply_export_reject_policy(
+pub async fn apply_export_prefix_reject_policy(
     server: &TestServer,
     peer_addr: &str,
     policy_name: &str,
