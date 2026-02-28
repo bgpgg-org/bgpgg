@@ -276,18 +276,26 @@ pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -
 }
 
 /// Build unknown attributes for export to peer.
-/// RFC 7947 §2.2: Route servers preserve all unknown attributes (transitive and non-transitive).
+/// RFC 7947 Section 2.2: Route servers preserve all unknown attributes (transitive and non-transitive).
 /// RFC 4271: Normal eBGP only forwards optional transitive attributes.
 fn build_export_unknown_attrs(path: &Path, ctx: &PeerExportContext) -> Vec<PathAttribute> {
     if ctx.rs_client {
-        path.attrs.unknown_attrs.clone()
-    } else {
+        return path.attrs.unknown_attrs.clone();
+    }
+
+    let is_ebgp = ctx.local_asn != ctx.peer_asn;
+
+    if is_ebgp {
+        // eBGP: only forward optional transitive unknown attributes (RFC 4271)
         path.attrs
             .unknown_attrs
             .iter()
             .filter(|attr| attr.is_unknown_transitive())
             .cloned()
             .collect()
+    } else {
+        // iBGP: propagate all unknown attributes within the AS
+        path.attrs.unknown_attrs.clone()
     }
 }
 
@@ -1732,7 +1740,7 @@ mod tests {
                 expected_count: 2,
             },
             TestCase {
-                name: "RS client preserves all unknown attrs (RFC 7947 §2.2)",
+                name: "RS client preserves all unknown attrs (RFC 7947 Section 2.2)",
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: true,
