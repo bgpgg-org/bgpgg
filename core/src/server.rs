@@ -645,6 +645,21 @@ impl BgpServer {
         self.peers.contains_key(&peer_ip)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn setup_listener_tcp_md5(&mut self, listener: &TcpListener) {
+        self.listener_fd = Some(listener.as_raw_fd());
+        for peer_cfg in &self.config.peers.clone() {
+            let Ok(addr) = peer_cfg.socket_addr() else {
+                continue;
+            };
+            if let Some(key) = peer_cfg.read_md5_key() {
+                if let Err(e) = apply_tcp_md5(self.listener_fd.unwrap(), addr.ip(), &key) {
+                    error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!(listen_addr = %self.config.listen_addr, "BGP server starting");
 
@@ -654,19 +669,7 @@ impl BgpServer {
         self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            self.listener_fd = Some(listener.as_raw_fd());
-            for peer_cfg in &self.config.peers.clone() {
-                let Ok(addr) = peer_cfg.socket_addr() else {
-                    continue;
-                };
-                if let Some(key) = peer_cfg.read_md5_key() {
-                    if let Err(e) = apply_tcp_md5(self.listener_fd.unwrap(), addr.ip(), &key) {
-                        error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
-                    }
-                }
-            }
-        }
+        self.setup_listener_tcp_md5(&listener);
 
         let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);
