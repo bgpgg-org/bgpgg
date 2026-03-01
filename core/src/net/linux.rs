@@ -85,11 +85,11 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::os::unix::io::AsRawFd;
+    use std::ptr::addr_of;
     use tokio::net::TcpSocket;
 
     #[test]
     fn test_tcp_md5sig() {
-        use std::ptr::addr_of;
         let key = b"secret";
         let cases: &[(IpAddr, u16, u32)] = &[
             (

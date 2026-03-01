@@ -647,13 +647,14 @@ impl BgpServer {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn setup_listener_tcp_md5(&mut self, listener: &TcpListener) {
-        self.listener_fd = Some(listener.as_raw_fd());
-        for peer_cfg in &self.config.peers.clone() {
+        let fd = listener.as_raw_fd();
+        self.listener_fd = Some(fd);
+        for peer_cfg in &self.config.peers {
             let Ok(addr) = peer_cfg.socket_addr() else {
                 continue;
             };
             if let Some(key) = peer_cfg.read_md5_key() {
-                if let Err(e) = apply_tcp_md5(self.listener_fd.unwrap(), addr.ip(), &key) {
+                if let Err(e) = apply_tcp_md5(fd, addr.ip(), &key) {
                     error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
                 }
             }

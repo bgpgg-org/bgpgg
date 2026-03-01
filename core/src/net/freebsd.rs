@@ -326,8 +326,7 @@ fn sadb_send_one(sock: libc::c_int, buf: &[u8]) -> io::Result<()> {
 
 // Add an SA, replacing any existing one (handles EEXIST by retrying after delete).
 fn sadb_add(src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
-    // PF_KEY is a kernel key management socket (not a network socket); sending
-    // to it writes directly into the kernel SADB.
+    // PF_KEY is a kernel key management socket. Sending to it writes into the kernel SADB.
     let sock = unsafe { libc::socket(libc::PF_KEY, libc::SOCK_RAW, PF_KEY_V2) };
     if sock < 0 {
         return Err(io::Error::last_os_error());
