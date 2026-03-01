@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run test suite multiple times to check for flakey tests
 # Usage: ./scripts/test-repeat.sh [runs]
 

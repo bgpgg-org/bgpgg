@@ -19,16 +19,17 @@ use std::os::unix::io::RawFd;
 
 // Constants from <sys/net/pfkeyv2.h> and <sys/netipsec/ipsec.h>
 const PF_KEY_V2: libc::c_int = 2;
-const TCP_SIG_SPI: u32 = 0x1000; // well-known SPI for TCP MD5
+// FreeBSD requires SPI=0x1000 for TCP-MD5 (per tcp(4) man page).
+const TCP_SIG_SPI: u32 = 0x1000;
 const SADB_ADD: u8 = 3;
 const SADB_DELETE: u8 = 4;
-const SADB_X_SATYPE_TCPSIGNATURE: u8 = 8;
+const SADB_X_SATYPE_TCPSIGNATURE: u8 = 11;
 const SADB_EXT_SA: u16 = 1;
 const SADB_EXT_KEY_AUTH: u16 = 8;
 const SADB_EXT_ADDRESS_SRC: u16 = 5;
 const SADB_EXT_ADDRESS_DST: u16 = 6;
-const SADB_X_EXT_SA2: u16 = 0x8001;
-const SADB_X_AALG_TCP_MD5: u8 = 5;
+const SADB_X_EXT_SA2: u16 = 19;
+const SADB_X_AALG_TCP_MD5: u8 = 252;
 const SADB_EALG_NONE: u8 = 0;
 const SADB_X_EXT_CYCSEQ: u32 = 0x0020;
 const IPSEC_MODE_ANY: u8 = 0;
@@ -280,38 +281,87 @@ fn build_sadb_buf(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8>
     buf
 }
 
-// Send an SADB message via a PF_KEY socket.
-fn sadb_send(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
+// Get local address from a socket using getsockname.
+fn get_local_addr(fd: RawFd) -> io::Result<IpAddr> {
+    // Try IPv4 first
+    let mut addr4: libc::sockaddr_in = unsafe { mem::zeroed() };
+    let mut len4 = mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let ret =
+        unsafe { libc::getsockname(fd, &mut addr4 as *mut _ as *mut libc::sockaddr, &mut len4) };
+    if ret == 0 && addr4.sin_family == libc::AF_INET as u8 {
+        let octets = addr4.sin_addr.s_addr.to_ne_bytes();
+        return Ok(IpAddr::V4(Ipv4Addr::from(octets)));
+    }
+
+    // Try IPv6
+    let mut addr6: libc::sockaddr_in6 = unsafe { mem::zeroed() };
+    let mut len6 = mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+    let ret =
+        unsafe { libc::getsockname(fd, &mut addr6 as *mut _ as *mut libc::sockaddr, &mut len6) };
+    if ret == 0 && addr6.sin6_family == libc::AF_INET6 as u8 {
+        return Ok(IpAddr::V6(Ipv6Addr::from(addr6.sin6_addr.s6_addr)));
+    }
+
+    Err(io::Error::last_os_error())
+}
+
+// Send an SADB message via a PF_KEY socket and read the kernel's reply.
+fn sadb_send_one(sock: libc::c_int, buf: &[u8]) -> io::Result<()> {
+    let ret = unsafe { libc::send(sock, buf.as_ptr() as *const libc::c_void, buf.len(), 0) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Read kernel reply to check for errors
+    let mut reply = [0u8; 512];
+    let recv_ret = unsafe {
+        libc::recv(
+            sock,
+            reply.as_mut_ptr() as *mut libc::c_void,
+            reply.len(),
+            0,
+        )
+    };
+
+    if recv_ret < mem::size_of::<SadbMsg>() as isize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SADB reply too short",
+        ));
+    }
+
+    // Check errno field in reply header (byte 2 of SadbMsg)
+    let errno = reply[2];
+    if errno != 0 {
+        return Err(io::Error::from_raw_os_error(errno as i32));
+    }
+
+    Ok(())
+}
+
+// Add an SA, replacing any existing one (handles EEXIST by retrying after delete).
+fn sadb_add(src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
     let sock = unsafe { libc::socket(libc::PF_KEY, libc::SOCK_RAW, PF_KEY_V2) };
     if sock < 0 {
         return Err(io::Error::last_os_error());
     }
 
-    // For SADB_ADD, delete first to get replace semantics (avoid EEXIST).
-    // Build separate buffers so we don't mutate in place.
-    if msg_type == SADB_ADD {
-        let del_buf = build_sadb_buf(SADB_DELETE, src, dst, key);
-        unsafe {
-            libc::send(
-                sock,
-                del_buf.as_ptr() as *const libc::c_void,
-                del_buf.len(),
-                0,
-            )
-        };
-        // Ignore delete errors (SA may not exist yet)
-    }
+    let add_buf = build_sadb_buf(SADB_ADD, src, dst, key);
+    let result = sadb_send_one(sock, &add_buf);
 
-    let buf = build_sadb_buf(msg_type, src, dst, key);
-    let ret = unsafe { libc::send(sock, buf.as_ptr() as *const libc::c_void, buf.len(), 0) };
+    // If SA already exists (EEXIST), delete it and retry
+    if let Err(ref e) = result {
+        if e.raw_os_error() == Some(libc::EEXIST) {
+            let del_buf = build_sadb_buf(SADB_DELETE, src, dst, key);
+            let _ = sadb_send_one(sock, &del_buf);
+            let result = sadb_send_one(sock, &add_buf);
+            unsafe { libc::close(sock) };
+            return result;
+        }
+    }
 
     unsafe { libc::close(sock) };
-
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    result
 }
 
 /// Set TCP MD5 signature key on a socket for the given peer address (RFC 2385).
@@ -326,13 +376,11 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
         ));
     }
 
-    let local_addr = match peer_addr {
-        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    };
+    // Get local address from the socket (required - FreeBSD doesn't accept 0.0.0.0)
+    let local_addr = get_local_addr(fd)?;
 
-    sadb_send(SADB_ADD, local_addr, peer_addr, key)?;
-    sadb_send(SADB_ADD, peer_addr, local_addr, key)?;
+    sadb_add(local_addr, peer_addr, key)?;
+    sadb_add(peer_addr, local_addr, key)?;
 
     let enable: libc::c_int = 1;
     let ret = unsafe {

@@ -37,7 +37,9 @@ jobs:
     - uses: vmactions/freebsd-vm@v1
       with:
         usesh: true
+        copyback: false
         prepare: |
           pkg install -y bash protobuf rust gmake
+          ./script/setup-freebsd.sh
         run: |
           gmake test
