@@ -15,9 +15,9 @@
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+use tracing::error;
 
 /// Action to take when max prefix limit is reached
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -188,10 +188,15 @@ impl PeerConfig {
     }
 
     /// Read MD5 key bytes from file, trimming whitespace/newlines.
-    pub fn read_md5_key(&self) -> Option<io::Result<Vec<u8>>> {
-        self.md5_key_file
-            .as_ref()
-            .map(|path| fs::read_to_string(path).map(|s| s.trim().as_bytes().to_vec()))
+    pub fn read_md5_key(&self) -> Option<Vec<u8>> {
+        let path = self.md5_key_file.as_ref()?;
+        match fs::read_to_string(path) {
+            Ok(s) => Some(s.trim().as_bytes().to_vec()),
+            Err(e) => {
+                error!(peer_ip = %self.address, path = %path, error = %e, "failed to read MD5 key file");
+                None
+            }
+        }
     }
 
     /// Validate peer configuration
@@ -635,11 +640,13 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs::{self, File};
     use std::io::Write;
 
     fn write_temp_yaml(name: &str, content: &str) -> String {
-        let temp_file = std::env::temp_dir().join(name);
-        let mut file = std::fs::File::create(&temp_file).unwrap();
+        let temp_file = env::temp_dir().join(name);
+        let mut file = File::create(&temp_file).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         temp_file.to_str().unwrap().to_string()
     }
@@ -674,7 +681,7 @@ mod tests {
         assert_eq!(config.listen_addr, "10.0.0.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(10, 0, 0, 1));
 
-        std::fs::remove_file(temp_file).unwrap();
+        fs::remove_file(temp_file).unwrap();
     }
 
     #[test]
@@ -693,7 +700,7 @@ mod tests {
         let result = Config::from_file(&temp_file);
         assert!(result.is_err());
 
-        std::fs::remove_file(temp_file).unwrap();
+        fs::remove_file(temp_file).unwrap();
     }
 
     #[test]
@@ -720,8 +727,8 @@ mod tests {
 
     #[test]
     fn test_read_md5_key() {
-        let temp_path = std::env::temp_dir().join("test_bgp_md5.key");
-        let mut file = std::fs::File::create(&temp_path).unwrap();
+        let temp_path = env::temp_dir().join("test_bgp_md5.key");
+        let mut file = File::create(&temp_path).unwrap();
         writeln!(file, "my-secret-key").unwrap();
 
         let peer = PeerConfig {
@@ -729,14 +736,14 @@ mod tests {
             ..Default::default()
         };
 
-        let key = peer.read_md5_key().unwrap().unwrap();
+        let key = peer.read_md5_key().unwrap();
         assert_eq!(key, b"my-secret-key");
 
         // None when md5_key_file is not set
         let peer = PeerConfig::default();
         assert!(peer.read_md5_key().is_none());
 
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_file(temp_path).unwrap();
     }
 
     #[test]
@@ -745,8 +752,7 @@ mod tests {
             md5_key_file: Some("/nonexistent/path/bgp_md5.key".to_string()),
             ..Default::default()
         };
-        let result = peer.read_md5_key().unwrap();
-        assert!(result.is_err());
+        assert!(peer.read_md5_key().is_none());
     }
 
     #[test]

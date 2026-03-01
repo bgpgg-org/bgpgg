@@ -59,11 +59,7 @@ impl Peer {
             // No queued incoming, attempt outgoing TCP connection
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
-            let md5_key = self.config.read_md5_key().transpose().unwrap_or_else(|e| {
-                error!(peer_ip = %self.addr, error = %e, "failed to read MD5 key file");
-                None
-            });
-
+            let md5_key = self.config.read_md5_key();
             tokio::select! {
                 result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr, md5_key.as_deref()) => {
                     match result {

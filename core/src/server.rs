@@ -21,7 +21,7 @@ use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
 use crate::log::{error, info};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
@@ -37,7 +37,7 @@ use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -572,7 +572,7 @@ pub struct BgpServer {
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
-    /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers (Linux only)
+    /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
 }
 
@@ -645,6 +645,22 @@ impl BgpServer {
         self.peers.contains_key(&peer_ip)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn setup_listener_tcp_md5(&mut self, listener: &TcpListener) {
+        let fd = listener.as_raw_fd();
+        self.listener_fd = Some(fd);
+        for peer_cfg in &self.config.peers {
+            let Ok(addr) = peer_cfg.socket_addr() else {
+                continue;
+            };
+            if let Some(key) = peer_cfg.read_md5_key() {
+                if let Err(e) = apply_tcp_md5(fd, addr.ip(), &key) {
+                    error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), ServerError> {
         info!(listen_addr = %self.config.listen_addr, "BGP server starting");
 
@@ -653,20 +669,8 @@ impl BgpServer {
             .map_err(ServerError::BindError)?;
         self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
-        #[cfg(target_os = "linux")]
-        {
-            self.listener_fd = Some(listener.as_raw_fd());
-            for peer_cfg in &self.config.peers.clone() {
-                let Ok(addr) = peer_cfg.socket_addr() else {
-                    continue;
-                };
-                if let Some(Ok(key)) = peer_cfg.read_md5_key() {
-                    if let Err(e) = apply_tcp_md5(self.listener_fd.unwrap(), addr.ip(), &key) {
-                        error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
-                    }
-                }
-            }
-        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        self.setup_listener_tcp_md5(&listener);
 
         let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);

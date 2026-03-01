@@ -25,13 +25,10 @@ use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
-    let server1 = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    // Active state exits instantly.
+    config.connect_retry_secs = 0;
+    let server1 = start_test_server(config).await;
 
     // Initially no peers
     let peers = server1.client.get_peers().await.unwrap();
