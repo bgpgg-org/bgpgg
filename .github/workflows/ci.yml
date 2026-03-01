@@ -25,10 +25,19 @@ jobs:
     - name: Run smoke tests
       run: make smoketest
 
+  loadtest:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup dependencies
+      run: make setup
+
     - name: Run load tests
       run: make loadtest
 
-  test-freebsd:
+  freebsd:
     runs-on: ubuntu-latest
 
     steps:
