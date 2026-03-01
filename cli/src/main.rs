@@ -59,6 +59,9 @@ pub enum PeerCommands {
         /// Path to TCP MD5 key file (RFC 2385, chmod 600)
         #[arg(long)]
         md5_key_file: Option<String>,
+        /// Rewrite NEXT_HOP to local address when advertising to this peer
+        #[arg(long)]
+        next_hop_self: bool,
     },
 
     /// Remove a BGP peer
@@ -200,6 +203,7 @@ mod tests {
                 max_prefix_action,
                 port: _,
                 md5_key_file: _,
+                next_hop_self: _,
             }) => {
                 assert_eq!(address, "10.0.0.1");
                 assert_eq!(remote_as, 65002);

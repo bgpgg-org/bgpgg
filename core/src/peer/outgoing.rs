@@ -59,6 +59,7 @@ pub struct PeerExportContext<'a> {
     pub cluster_id: Ipv4Addr,
     pub send_format: MessageFormat,
     pub negotiated_afi_safis: &'a HashSet<AfiSafi>,
+    pub next_hop_self: bool,
 }
 
 impl<'a> PeerExportContext<'a> {
@@ -422,6 +423,8 @@ fn build_export_next_hop(
 
     if ctx.is_ebgp() {
         build_ebgp_next_hop(path, ctx.local_next_hop, prefix)
+    } else if ctx.next_hop_self {
+        Some(ctx.local_next_hop.into())
     } else {
         build_ibgp_next_hop(path, ctx.local_next_hop, prefix)
     }
@@ -788,6 +791,7 @@ mod tests {
         local_asn: u32,
         peer_asn: u32,
         rs_client: bool,
+        next_hop_self: bool,
     ) -> PeerExportContext<'static> {
         let (tx, _rx) = mpsc::unbounded_channel();
         // Leak the channel to get 'static lifetime for test
@@ -819,6 +823,7 @@ mod tests {
                 is_ebgp: local_asn != peer_asn,
             },
             negotiated_afi_safis: negotiated,
+            next_hop_self,
         }
     }
 
@@ -951,8 +956,12 @@ mod tests {
                 NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             );
 
-            let ctx =
-                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let ctx = make_peer_export_ctx(
+                test_case.local_asn,
+                test_case.peer_asn,
+                test_case.rs_client,
+                false,
+            );
             let result = build_export_as_path(&path, &ctx);
 
             // Convert result to Vec<Vec<u32>> for easier comparison
@@ -1058,7 +1067,7 @@ mod tests {
         );
 
         // Export to eBGP peer should prepend local ASN and preserve AS_SET
-        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let ctx = make_peer_export_ctx(65000, 65100, false, false);
         let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1091,7 +1100,7 @@ mod tests {
         );
 
         // Export to eBGP should create new AS_SEQUENCE segment for local ASN
-        let ctx = make_peer_export_ctx(65000, 65100, false);
+        let ctx = make_peer_export_ctx(65000, 65100, false, false);
         let result = build_export_as_path(&path_starting_with_as_set, &ctx);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1126,7 +1135,7 @@ mod tests {
         );
 
         // Export to iBGP peer should preserve AS_PATH unchanged
-        let ctx = make_peer_export_ctx(65000, 65000, false);
+        let ctx = make_peer_export_ctx(65000, 65000, false, false);
         let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1147,6 +1156,7 @@ mod tests {
             local_asn: u32,
             peer_asn: u32,
             rs_client: bool,
+            next_hop_self: bool,
             expected: NextHopAddr,
         }
 
@@ -1158,6 +1168,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65000,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(router_id),
             },
             TestCase {
@@ -1167,6 +1178,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65000,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             },
             TestCase {
@@ -1180,6 +1192,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65000,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 2, 1)),
             },
             TestCase {
@@ -1189,6 +1202,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(router_id),
             },
             TestCase {
@@ -1198,6 +1212,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(router_id),
             },
             TestCase {
@@ -1210,6 +1225,7 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: false,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(router_id),
             },
             TestCase {
@@ -1222,15 +1238,43 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: true,
+                next_hop_self: false,
                 expected: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 3, 1)),
+            },
+            TestCase {
+                name: "iBGP + next_hop_self: learned route -> rewrite to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 9, 1)),
+                path_source: RouteSource::Ebgp {
+                    peer_ip: test_ip(1),
+                    bgp_id: test_bgp_id(1),
+                },
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                next_hop_self: true,
+                expected: NextHopAddr::Ipv4(router_id),
+            },
+            TestCase {
+                name: "iBGP + next_hop_self: local route with unspecified NH -> set to local",
+                path_next_hop: NextHopAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
+                path_source: RouteSource::Local,
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                next_hop_self: true,
+                expected: NextHopAddr::Ipv4(router_id),
             },
         ];
 
         for test_case in test_cases {
             let path = make_path(test_case.path_source, vec![], test_case.path_next_hop);
 
-            let ctx =
-                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let ctx = make_peer_export_ctx(
+                test_case.local_asn,
+                test_case.peer_asn,
+                test_case.rs_client,
+                test_case.next_hop_self,
+            );
             let result = build_export_next_hop(&path, &ctx, &prefix);
 
             assert_eq!(
@@ -1269,11 +1313,11 @@ mod tests {
         };
 
         // iBGP: include LOCAL_PREF
-        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false);
+        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false, false);
         assert_eq!(build_export_local_pref(&path, &ctx_ibgp), Some(200));
 
         // eBGP: MUST NOT include LOCAL_PREF
-        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false);
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false, false);
         assert_eq!(build_export_local_pref(&path, &ctx_ebgp), None);
     }
 
@@ -1479,8 +1523,12 @@ mod tests {
                 },
             };
 
-            let ctx =
-                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let ctx = make_peer_export_ctx(
+                test_case.local_asn,
+                test_case.peer_asn,
+                test_case.rs_client,
+                false,
+            );
             let result = build_export_med(&path, &ctx);
             assert_eq!(
                 result, test_case.expected_med,
@@ -1556,6 +1604,7 @@ mod tests {
                 is_ebgp: false,
             },
             negotiated_afi_safis: &negotiated,
+            next_hop_self: false,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1687,8 +1736,12 @@ mod tests {
                 },
             };
 
-            let ctx =
-                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let ctx = make_peer_export_ctx(
+                test_case.local_asn,
+                test_case.peer_asn,
+                test_case.rs_client,
+                false,
+            );
             let result = build_export_extended_communities(&path, &ctx);
             assert_eq!(
                 result, test_case.expected,
@@ -1760,8 +1813,12 @@ mod tests {
             );
             path.attrs.unknown_attrs = vec![transitive_attr.clone(), non_transitive_attr.clone()];
 
-            let ctx =
-                make_peer_export_ctx(test_case.local_asn, test_case.peer_asn, test_case.rs_client);
+            let ctx = make_peer_export_ctx(
+                test_case.local_asn,
+                test_case.peer_asn,
+                test_case.rs_client,
+                false,
+            );
             let result = build_export_unknown_attrs(&path, &ctx);
             assert_eq!(
                 result.len(),
@@ -1811,6 +1868,7 @@ mod tests {
                 is_ebgp: false,
             },
             negotiated_afi_safis: &negotiated,
+            next_hop_self: false,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));
@@ -1881,11 +1939,11 @@ mod tests {
         )];
         let rs_ctx = PeerExportContext {
             export_policies: &policies,
-            ..make_peer_export_ctx(65000, 65003, true)
+            ..make_peer_export_ctx(65000, 65003, true, false)
         };
         let non_rs_ctx = PeerExportContext {
             export_policies: &policies,
-            ..make_peer_export_ctx(65000, 65003, false)
+            ..make_peer_export_ctx(65000, 65003, false, false)
         };
 
         // RS client iterates to path2 (passes policy)
@@ -1900,11 +1958,11 @@ mod tests {
 
     #[test]
     fn test_is_ebgp_is_ibgp() {
-        let ebgp_ctx = make_peer_export_ctx(65001, 65002, false);
+        let ebgp_ctx = make_peer_export_ctx(65001, 65002, false, false);
         assert!(ebgp_ctx.is_ebgp());
         assert!(!ebgp_ctx.is_ibgp());
 
-        let ibgp_ctx = make_peer_export_ctx(65001, 65001, false);
+        let ibgp_ctx = make_peer_export_ctx(65001, 65001, false, false);
         assert!(!ibgp_ctx.is_ebgp());
         assert!(ibgp_ctx.is_ibgp());
     }

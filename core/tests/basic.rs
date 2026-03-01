@@ -777,6 +777,102 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     );
 }
 
+/// Test next-hop-self: B rewrites NEXT_HOP to its own address before advertising
+/// iBGP-learned routes to peer C. Without it, C sees the original eBGP NEXT_HOP.
+///
+/// Topology: A(65001) --eBGP-- B(65002) --iBGP-- C(65002)
+/// A announces 10.0.0.0/24; B has next_hop_self toward C.
+#[tokio::test]
+async fn test_next_hop_self() {
+    struct TestCase {
+        name: &'static str,
+        next_hop_self: bool,
+    }
+
+    let test_cases = [
+        TestCase {
+            name: "with next_hop_self: C sees B's address",
+            next_hop_self: true,
+        },
+        TestCase {
+            name: "without next_hop_self: C sees A's original address",
+            next_hop_self: false,
+        },
+    ];
+
+    for tc in test_cases {
+        let server_a = start_test_server(test_config(65001, 1)).await;
+        let server_b = start_test_server(test_config(65002, 2)).await;
+        let server_c = start_test_server(test_config(65002, 3)).await;
+
+        // A <-> B: standard eBGP
+        server_a.add_peer(&server_b).await;
+        server_b.add_peer(&server_a).await;
+
+        // B -> C: iBGP with optional next_hop_self
+        server_b
+            .add_peer_with_config(
+                &server_c,
+                SessionConfig {
+                    next_hop_self: if tc.next_hop_self { Some(true) } else { None },
+                    ..Default::default()
+                },
+            )
+            .await;
+        server_c.add_peer(&server_b).await;
+
+        poll_until(
+            || async {
+                verify_peers(&server_a, vec![server_b.to_peer(BgpState::Established)]).await
+                    && verify_peers(
+                        &server_b,
+                        vec![
+                            server_a.to_peer(BgpState::Established),
+                            server_c.to_peer(BgpState::Established),
+                        ],
+                    )
+                    .await
+                    && verify_peers(&server_c, vec![server_b.to_peer(BgpState::Established)]).await
+            },
+            &format!("{}: timeout waiting for topology to establish", tc.name),
+        )
+        .await;
+
+        // A announces 10.0.0.0/24
+        announce_route(
+            &server_a,
+            RouteParams {
+                prefix: "10.0.0.0/24".to_string(),
+                next_hop: "192.168.1.1".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let expected_next_hop = if tc.next_hop_self {
+            server_b.address.to_string() // B rewrites to its own address
+        } else {
+            server_a.address.to_string() // C sees A's address (iBGP preserves NH)
+        };
+
+        poll_rib(&[(
+            &server_c,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: expected_next_hop,
+                    peer_address: server_b.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            }],
+        )])
+        .await;
+    }
+}
+
 // ---- TCP MD5 authentication (RFC 2385) ----
 // Requires CAP_NET_ADMIN (root on Linux): make test-md5
 

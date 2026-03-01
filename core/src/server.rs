@@ -1042,6 +1042,7 @@ impl BgpServer {
                 cluster_id,
                 send_format,
                 negotiated_afi_safis: &negotiated_afi_safis,
+                next_hop_self: entry.config.next_hop_self,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);
