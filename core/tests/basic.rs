@@ -17,7 +17,9 @@ pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
+use std::io::Write;
 use std::net::Ipv4Addr;
+use tokio::time::Duration;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -774,4 +776,79 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
         1,
         "adj-rib-out should have 1 path, not stale entries"
     );
+}
+
+// ---- TCP MD5 authentication (RFC 2385) ----
+// Requires CAP_NET_ADMIN (root on Linux): make test-md5
+
+fn write_key_file(suffix: &str, key: &[u8]) -> String {
+    let path = format!("/tmp/bgpgg-test-md5-{}.key", suffix);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(key).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn test_tcp_md5_matching_keys() {
+    let key_path = write_key_file("match", b"shared-bgp-secret");
+
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    peer_servers_with_config(
+        &server1,
+        &server2,
+        SessionConfig {
+            md5_key_file: Some(key_path.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    std::fs::remove_file(&key_path).ok();
+}
+
+#[tokio::test]
+async fn test_tcp_md5_mismatching_keys() {
+    let key_a = write_key_file("mismatch-a", b"server1-key");
+    let key_b = write_key_file("mismatch-b", b"server2-key");
+
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+
+    server1
+        .add_peer_with_config(
+            &server2,
+            SessionConfig {
+                md5_key_file: Some(key_a.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+    server2
+        .add_peer_with_config(
+            &server1,
+            SessionConfig {
+                md5_key_file: Some(key_b.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // The kernel drops TCP segments with an incorrect MD5 digest.
+    poll_while(
+        || async {
+            match server1.client.get_peers().await {
+                Ok(peers) => peers
+                    .iter()
+                    .all(|p| p.state != BgpState::Established as i32),
+                Err(_) => true,
+            }
+        },
+        Duration::from_secs(5),
+        "Session should not establish when MD5 keys do not match",
+    )
+    .await;
+
+    std::fs::remove_file(&key_a).ok();
+    std::fs::remove_file(&key_b).ok();
 }

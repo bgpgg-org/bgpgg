@@ -38,6 +38,6 @@ jobs:
       with:
         usesh: true
         prepare: |
-          pkg install -y protobuf rust
+          pkg install -y bash protobuf rust gmake
         run: |
-          make test
+          gmake test

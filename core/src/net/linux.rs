@@ -57,32 +57,6 @@ fn tcp_md5sig(peer_addr: IpAddr, key: &[u8]) -> TcpMd5sig {
 
 /// Set TCP MD5 signature key on a socket for the given peer address (RFC 2385).
 pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()> {
-    apply_tcp_md5_impl(fd, peer_addr, key, do_setsockopt)
-}
-
-fn do_setsockopt(fd: RawFd, sig: &TcpMd5sig) -> io::Result<()> {
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_MD5SIG,
-            sig as *const _ as *const libc::c_void,
-            mem::size_of_val(sig) as libc::socklen_t,
-        )
-    };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn apply_tcp_md5_impl(
-    fd: RawFd,
-    peer_addr: IpAddr,
-    key: &[u8],
-    mut apply_fn: impl FnMut(RawFd, &TcpMd5sig) -> io::Result<()>,
-) -> io::Result<()> {
     if key.len() > libc::TCP_MD5SIG_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -90,7 +64,20 @@ fn apply_tcp_md5_impl(
         ));
     }
     let sig = tcp_md5sig(peer_addr, key);
-    apply_fn(fd, &sig)
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_MD5SIG,
+            &sig as *const _ as *const libc::c_void,
+            mem::size_of_val(&sig) as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +92,6 @@ mod tests {
         use std::ptr::addr_of;
         let key = b"secret";
         let cases: &[(IpAddr, u16, u32)] = &[
-            // (addr, expected AF, expected s_addr)
             (
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 libc::AF_INET as u16,
@@ -129,39 +115,22 @@ mod tests {
         }
     }
 
-    // Verifies the sig is constructed correctly and passed to setsockopt, without
-    // requiring CAP_NET_ADMIN. The closure captures what apply_tcp_md5_impl hands off.
-    #[test]
-    fn test_apply_tcp_md5_v4() {
-        use std::ptr::addr_of;
-
-        let socket = TcpSocket::new_v4().unwrap();
-        let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
-        let key = b"test-bgp-md5-key";
-
-        let mut captured_family = 0u16;
-        let mut captured_keylen = 0u16;
-        let result = apply_tcp_md5_impl(socket.as_raw_fd(), peer_addr, key, |_fd, sig| {
-            unsafe {
-                let sa = addr_of!(sig.peer_addr) as *const libc::sockaddr_in;
-                captured_family = (*sa).sin_family;
-            }
-            captured_keylen = sig.keylen;
-            Ok(())
-        });
-
-        assert!(result.is_ok());
-        assert_eq!(captured_family, libc::AF_INET as u16);
-        assert_eq!(captured_keylen, key.len() as u16);
-    }
-
     #[test]
     fn test_apply_tcp_md5_key_too_long() {
         let socket = TcpSocket::new_v4().unwrap();
         let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
         let key = vec![0u8; 81]; // exceeds TCP_MD5SIG_MAXKEYLEN
-        let result = apply_tcp_md5_impl(socket.as_raw_fd(), peer_addr, &key, |_, _| Ok(()));
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, &key);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_apply_tcp_md5_v4() {
+        let socket = TcpSocket::new_v4().unwrap();
+        let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let key = b"test-bgp-md5-key";
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, key);
+        assert!(result.is_ok(), "apply_tcp_md5 failed: {:?}", result.err());
     }
 }

@@ -319,15 +319,6 @@ fn sadb_send(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<(
 /// On FreeBSD, keys are registered in the kernel SADB via PF_KEY, then the
 /// socket is enabled for TCP MD5 with TCP_MD5SIG setsockopt.
 pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()> {
-    apply_tcp_md5_impl(fd, peer_addr, key, sadb_send)
-}
-
-fn apply_tcp_md5_impl(
-    fd: RawFd,
-    peer_addr: IpAddr,
-    key: &[u8],
-    register: impl Fn(u8, IpAddr, IpAddr, &[u8]) -> io::Result<()>,
-) -> io::Result<()> {
     if key.len() > TCP_MD5_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -335,17 +326,14 @@ fn apply_tcp_md5_impl(
         ));
     }
 
-    // Derive unspecified address of same family as peer
     let local_addr = match peer_addr {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     };
 
-    // Register SADB entries in both directions
-    register(SADB_ADD, local_addr, peer_addr, key)?;
-    register(SADB_ADD, peer_addr, local_addr, key)?;
+    sadb_send(SADB_ADD, local_addr, peer_addr, key)?;
+    sadb_send(SADB_ADD, peer_addr, local_addr, key)?;
 
-    // Enable TCP MD5 on the socket
     let enable: libc::c_int = 1;
     let ret = unsafe {
         libc::setsockopt(
@@ -388,48 +376,17 @@ mod tests {
         let socket = TcpSocket::new_v4().unwrap();
         let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
         let key = vec![0u8; 81]; // exceeds TCP_MD5_MAXKEYLEN
-        let result = apply_tcp_md5_impl(socket.as_raw_fd(), peer_addr, &key, |_, _, _, _| Ok(()));
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, &key);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
-    // Verifies the SADB registration logic and setsockopt path without root.
-    // The register closure captures calls so we can assert both directions are registered.
     #[test]
     fn test_apply_tcp_md5_v4() {
-        use std::cell::RefCell;
-
         let socket = TcpSocket::new_v4().unwrap();
         let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
         let key = b"test-bgp-md5-key";
-
-        let calls: RefCell<Vec<(u8, IpAddr, IpAddr)>> = RefCell::new(vec![]);
-        let result = apply_tcp_md5_impl(
-            socket.as_raw_fd(),
-            peer_addr,
-            key,
-            |msg_type, src, dst, _key| {
-                calls.borrow_mut().push((msg_type, src, dst));
-                Ok(())
-            },
-        );
-
-        // SADB_ADD must be called for both directions
-        let calls = calls.into_inner();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(t, _, _)| *t == SADB_ADD));
-        assert!(calls.iter().any(|(_, src, dst)| {
-            *src == IpAddr::V4(Ipv4Addr::UNSPECIFIED) && *dst == peer_addr
-        }));
-        assert!(calls.iter().any(|(_, src, dst)| {
-            *src == peer_addr && *dst == IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-        }));
-
-        // setsockopt(TCP_MD5SIG) does not require root — just sets a flag on our socket
-        assert!(
-            result.is_ok(),
-            "apply_tcp_md5_impl failed: {:?}",
-            result.err()
-        );
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, key);
+        assert!(result.is_ok(), "apply_tcp_md5 failed: {:?}", result.err());
     }
 }
