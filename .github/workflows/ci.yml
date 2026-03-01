@@ -27,3 +27,17 @@ jobs:
 
     - name: Run load tests
       run: make loadtest
+
+  test-freebsd:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: vmactions/freebsd-vm@v1
+      with:
+        usesh: true
+        prepare: |
+          pkg install -y protobuf rust
+        run: |
+          make test

@@ -20,7 +20,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
@@ -640,7 +640,7 @@ impl BgpServer {
             PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
         );
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let (Some(fd), Some(Ok(key))) = (self.listener_fd, config.read_md5_key()) {
             if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
                 error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");

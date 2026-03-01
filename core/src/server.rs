@@ -21,7 +21,7 @@ use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
 use crate::log::{error, info};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
@@ -37,7 +37,7 @@ use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -572,7 +572,7 @@ pub struct BgpServer {
     op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
-    /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers (Linux only)
+    /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
 }
 
@@ -653,7 +653,7 @@ impl BgpServer {
             .map_err(ServerError::BindError)?;
         self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             self.listener_fd = Some(listener.as_raw_fd());
             for peer_cfg in &self.config.peers.clone() {
