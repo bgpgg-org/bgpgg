@@ -20,14 +20,14 @@ use tokio::net::{TcpSocket, TcpStream};
 use std::os::unix::io::AsRawFd;
 
 #[cfg(target_os = "freebsd")]
-mod freebsd;
+mod bsd;
 #[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(target_os = "freebsd")]
-pub use freebsd::apply_tcp_md5;
+pub use bsd::apply_tcp_md5;
 #[cfg(target_os = "freebsd")]
-pub use freebsd::remove_tcp_md5;
+pub use bsd::remove_tcp_md5;
 #[cfg(target_os = "linux")]
 pub use linux::apply_tcp_md5;
 

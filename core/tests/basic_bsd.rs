@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! FreeBSD-specific integration tests
+//! BSD-specific integration tests
 
 #![cfg(target_os = "freebsd")]
 
@@ -26,7 +26,7 @@ use std::net::Ipv4Addr;
 use std::process::Command;
 
 // Test that TCP MD5 keys are cleaned up from SADB when a peer is removed.
-// FreeBSD only: Linux TCP-MD5 uses socket options that are automatically cleaned up.
+// BSD only: Uses PF_KEY/SADB API. Linux TCP-MD5 uses socket options that are automatically cleaned up.
 #[tokio::test]
 async fn test_tcp_md5_cleanup_on_peer_removal() {
     // Flush SADB before test to start with clean state

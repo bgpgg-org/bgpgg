@@ -640,11 +640,13 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs::{self, File};
     use std::io::Write;
 
     fn write_temp_yaml(name: &str, content: &str) -> String {
-        let temp_file = std::env::temp_dir().join(name);
-        let mut file = std::fs::File::create(&temp_file).unwrap();
+        let temp_file = env::temp_dir().join(name);
+        let mut file = File::create(&temp_file).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         temp_file.to_str().unwrap().to_string()
     }
@@ -679,7 +681,7 @@ mod tests {
         assert_eq!(config.listen_addr, "10.0.0.1:179");
         assert_eq!(config.router_id, Ipv4Addr::new(10, 0, 0, 1));
 
-        std::fs::remove_file(temp_file).unwrap();
+        fs::remove_file(temp_file).unwrap();
     }
 
     #[test]
@@ -698,7 +700,7 @@ mod tests {
         let result = Config::from_file(&temp_file);
         assert!(result.is_err());
 
-        std::fs::remove_file(temp_file).unwrap();
+        fs::remove_file(temp_file).unwrap();
     }
 
     #[test]
@@ -725,8 +727,8 @@ mod tests {
 
     #[test]
     fn test_read_md5_key() {
-        let temp_path = std::env::temp_dir().join("test_bgp_md5.key");
-        let mut file = std::fs::File::create(&temp_path).unwrap();
+        let temp_path = env::temp_dir().join("test_bgp_md5.key");
+        let mut file = File::create(&temp_path).unwrap();
         writeln!(file, "my-secret-key").unwrap();
 
         let peer = PeerConfig {
@@ -741,7 +743,7 @@ mod tests {
         let peer = PeerConfig::default();
         assert!(peer.read_md5_key().is_none());
 
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_file(temp_path).unwrap();
     }
 
     #[test]

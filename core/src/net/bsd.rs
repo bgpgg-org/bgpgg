@@ -36,6 +36,10 @@ const SADB_EXT_SA: u16 = 1; // sadb_sa: SPI, auth/encrypt algorithm, flags
 const SADB_EXT_KEY_AUTH: u16 = 8; // sadb_key: authentication key bytes
 const SADB_EXT_ADDRESS_SRC: u16 = 5; // sadb_address: source address selector
 const SADB_EXT_ADDRESS_DST: u16 = 6; // sadb_address: destination address selector
+const SADB_X_EXT_SA2: u16 = 19; // sadb_x_sa2: IPsec mode extension
+
+// SA flags (sadb_sa.sadb_sa_flags)
+const SADB_X_EXT_CYCSEQ: u32 = 0x0040; // Allow cyclic sequence numbers
 
 // Authentication algorithm for TCP MD5 (sadb_sa.sadb_sa_auth). Value 252 is
 // a FreeBSD-specific extension; not a standard SADB_AALG_* value.
@@ -45,6 +49,8 @@ const SADB_EALG_NONE: u8 = 0;
 // Upper-layer protocol: match any. The SADB entry covers all TCP connections
 // to the peer address; port filtering is not used for TCP MD5.
 const IPSEC_ULPROTO_ANY: u8 = 255;
+// IPsec mode: wildcard/any (netipsec/ipsec.h: IPSEC_MODE_ANY)
+const IPSEC_MODE_ANY: u8 = 0;
 // Maximum key length in bytes (tcp(4)). Same limit as Linux TCP_MD5SIG_MAXKEYLEN.
 const TCP_MD5_MAXKEYLEN: usize = 80;
 
@@ -93,6 +99,19 @@ struct SadbAddress {
     proto: u8,
     prefixlen: u8,
     reserved: u16,
+}
+
+// SADB SA extension 2 (sys/net/pfkeyv2.h: sadb_x_sa2).
+// FreeBSD extension for IPsec mode and sequence number handling.
+#[repr(C)]
+struct SadbXSa2 {
+    len: u16,
+    exttype: u16,
+    mode: u8,
+    reserved1: u8,
+    reserved2: u16,
+    sequence: u32,
+    reqid: u32,
 }
 
 // Round up to 8-byte alignment (SADB extension boundary requirement)
@@ -158,7 +177,7 @@ fn addr_ext_size(addr: IpAddr) -> usize {
     mem::size_of::<SadbAddress>() + pfkey_align8(sockaddr_size)
 }
 
-// Shared helper: appends SA identity + src/dst address selectors and patches
+// Append SA identity + src/dst address selectors and patches
 // the total length into the SadbMsg header at offset 4.
 unsafe fn push_sa_and_addresses(buf: &mut Vec<u8>, src: IpAddr, dst: IpAddr) {
     push_struct(
@@ -171,7 +190,19 @@ unsafe fn push_sa_and_addresses(buf: &mut Vec<u8>, src: IpAddr, dst: IpAddr) {
             state: SADB_SASTATE_MATURE,
             auth: SADB_X_AALG_TCP_MD5,
             encrypt: SADB_EALG_NONE,
-            flags: 0,
+            flags: SADB_X_EXT_CYCSEQ,
+        },
+    );
+    push_struct(
+        buf,
+        SadbXSa2 {
+            len: pfkey_unit64(mem::size_of::<SadbXSa2>()),
+            exttype: SADB_X_EXT_SA2,
+            mode: IPSEC_MODE_ANY,
+            reserved1: 0,
+            reserved2: 0,
+            sequence: 0,
+            reqid: 0,
         },
     );
     push_struct(
@@ -323,7 +354,7 @@ fn sadb_send_one(sock: libc::c_int, buf: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-// Add an SA, replacing any existing one (handles EEXIST by retrying after delete).
+// Add an SA, replacing any existing one (DELETE then ADD, like BIRD).
 fn sadb_add(src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
     // PF_KEY is a kernel key management socket. Sending to it writes into the kernel SADB.
     let sock = unsafe { libc::socket(libc::PF_KEY, libc::SOCK_RAW, PF_KEY_V2) };
@@ -332,17 +363,17 @@ fn sadb_add(src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
     }
     // Closure ensures sock is closed exactly once regardless of which path is taken.
     let result = (|| {
-        let add_buf = build_sadb_add_buf(src, dst, key);
         // SADB entries persist across TCP connections and don't expire automatically.
-        // On reconnect the old entry is still present, so delete it and re-add.
-        if let Err(e) = sadb_send_one(sock, &add_buf) {
-            if e.raw_os_error() == Some(libc::EEXIST) {
-                let _ = sadb_send_one(sock, &build_sadb_del_buf(src, dst));
-                return sadb_send_one(sock, &add_buf);
+        // Always DELETE first to remove any stale entry, then ADD the new one.
+        // Ignore ESRCH (entry not found) from DELETE - it's expected on first connection.
+        let del_buf = build_sadb_del_buf(src, dst);
+        if let Err(e) = sadb_send_one(sock, &del_buf) {
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(e);
             }
-            return Err(e);
         }
-        Ok(())
+        // Now ADD the new entry
+        sadb_send_one(sock, &build_sadb_add_buf(src, dst, key))
     })();
     unsafe { libc::close(sock) };
     result

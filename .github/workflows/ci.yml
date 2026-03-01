@@ -37,7 +37,7 @@ jobs:
     - name: Run load tests
       run: make loadtest
 
-  freebsd:
+  bsd:
     runs-on: ubuntu-latest
 
     steps:
