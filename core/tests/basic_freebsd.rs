@@ -14,6 +14,8 @@
 
 //! FreeBSD-specific integration tests
 
+#![cfg(target_os = "freebsd")]
+
 mod utils;
 pub use utils::*;
 

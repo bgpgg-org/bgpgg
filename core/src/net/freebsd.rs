@@ -235,10 +235,8 @@ fn build_sadb_add_buf(src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8> {
     buf
 }
 
-// Build SADB_DELETE message: <base, address(SD)> - NO SA extension!
-// Omitting the SA extension makes this behave like "deleteall" - it deletes
-// ALL entries matching the address pair, regardless of SPI.
-// This is needed because FreeBSD assigns different SPIs to the two directions.
+// Build SADB_DELETE message: <base, SA, address(SD)> (RFC 2367 section 3.1.4).
+// No key extension needed: DELETE identifies the SA by SPI and address pair.
 fn build_sadb_del_buf(src: IpAddr, dst: IpAddr) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     unsafe {
@@ -255,31 +253,7 @@ fn build_sadb_del_buf(src: IpAddr, dst: IpAddr) -> Vec<u8> {
                 pid: libc::getpid() as u32,
             },
         );
-        // NO SA extension - this makes it delete all matching entries
-        push_struct(
-            &mut buf,
-            SadbAddress {
-                len: pfkey_unit64(addr_ext_size(src)),
-                exttype: SADB_EXT_ADDRESS_SRC,
-                proto: IPSEC_ULPROTO_ANY, // setkey uses ANY, not TCP
-                prefixlen: exact_prefixlen(src),
-                reserved: 0,
-            },
-        );
-        push_sockaddr(&mut buf, src);
-        push_struct(
-            &mut buf,
-            SadbAddress {
-                len: pfkey_unit64(addr_ext_size(dst)),
-                exttype: SADB_EXT_ADDRESS_DST,
-                proto: IPSEC_ULPROTO_ANY, // setkey uses ANY, not TCP
-                prefixlen: exact_prefixlen(dst),
-                reserved: 0,
-            },
-        );
-        push_sockaddr(&mut buf, dst);
-        let total_units = pfkey_unit64(buf.len()).to_ne_bytes();
-        buf[4..6].copy_from_slice(&total_units);
+        push_sa_and_addresses(&mut buf, src, dst);
     }
     buf
 }
