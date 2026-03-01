@@ -376,6 +376,7 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use std::os::unix::io::AsRawFd;
     use tokio::net::TcpSocket;
 
@@ -421,15 +422,50 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_tcp_md5_key_too_long() {
-        let socket = TcpSocket::new_v4().unwrap();
-        let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
-        let key = vec![0u8; 81]; // exceeds TCP_MD5_MAXKEYLEN
-        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, &key);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    fn test_exact_prefixlen() {
+        assert_eq!(exact_prefixlen("1.2.3.4".parse().unwrap()), 32);
+        assert_eq!(exact_prefixlen("::1".parse().unwrap()), 128);
     }
 
+    #[test]
+    fn test_addr_ext_size() {
+        let v4: IpAddr = "1.2.3.4".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(addr_ext_size(v4) % 8, 0);
+        assert_eq!(addr_ext_size(v6) % 8, 0);
+        assert!(addr_ext_size(v6) > addr_ext_size(v4));
+    }
+
+    #[test]
+    fn test_build_sadb_buf_v6() {
+        let src: IpAddr = "::1".parse().unwrap();
+        let dst: IpAddr = "::2".parse().unwrap();
+        let key = b"bgpsecret";
+
+        let buf = build_sadb_buf(SADB_ADD, src, dst, key);
+
+        assert_eq!(buf.len() % 8, 0);
+        assert_eq!(buf[1], SADB_ADD);
+        assert_eq!(buf[3], SADB_X_SATYPE_TCPSIGNATURE);
+        let msg_len = u16::from_ne_bytes([buf[4], buf[5]]);
+        assert_eq!(msg_len as usize, buf.len() / 8);
+    }
+
+    #[test]
+    fn test_get_local_addr_v4() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = get_local_addr(listener.as_raw_fd()).unwrap();
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_get_local_addr_v6() {
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let addr = get_local_addr(listener.as_raw_fd()).unwrap();
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+    }
+
+    // Requires root: PF_KEY socket needs elevated privileges. Run with sudo.
     #[test]
     fn test_apply_tcp_md5_v4() {
         let socket = TcpSocket::new_v4().unwrap();
@@ -437,5 +473,15 @@ mod tests {
         let key = b"test-bgp-md5-key";
         let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, key);
         assert!(result.is_ok(), "apply_tcp_md5 failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_apply_tcp_md5_key_too_long() {
+        let socket = TcpSocket::new_v4().unwrap();
+        let peer_addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let key = vec![0u8; 81]; // exceeds TCP_MD5_MAXKEYLEN
+        let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, &key);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 }

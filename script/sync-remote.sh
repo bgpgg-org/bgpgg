@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Sync local repo to/from a remote FreeBSD host for development.
+#
+# Usage:
+#   ./script/sync-remote.sh root@freebsd-virt        # local -> remote
+#   ./script/sync-remote.sh --from root@freebsd-virt # remote -> local
 
 set -e
 
