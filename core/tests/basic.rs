@@ -17,7 +17,6 @@ pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
-use std::io::Write;
 use std::net::Ipv4Addr;
 use tokio::time::Duration;
 
@@ -781,13 +780,6 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
 // ---- TCP MD5 authentication (RFC 2385) ----
 // Requires CAP_NET_ADMIN (root on Linux): make test-md5
 
-fn write_key_file(suffix: &str, key: &[u8]) -> String {
-    let path = format!("/tmp/bgpgg-test-md5-{}.key", suffix);
-    let mut file = std::fs::File::create(&path).unwrap();
-    file.write_all(key).unwrap();
-    path
-}
-
 #[tokio::test]
 async fn test_tcp_md5_matching_keys() {
     let key_path = write_key_file("match", b"shared-bgp-secret");
@@ -900,5 +892,3 @@ async fn test_tcp_md5_mismatching_keys() {
     std::fs::remove_file(&key_a).ok();
     std::fs::remove_file(&key_b).ok();
 }
-
-

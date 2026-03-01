@@ -2373,3 +2373,12 @@ pub async fn apply_export_neighbor_reject_policy(
         .await
         .unwrap();
 }
+
+/// Write a key to a temporary file for TCP MD5 authentication tests
+pub fn write_key_file(suffix: &str, key: &[u8]) -> String {
+    use std::io::Write;
+    let path = format!("/tmp/bgpgg-test-md5-{}.key", suffix);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(key).unwrap();
+    path
+}
