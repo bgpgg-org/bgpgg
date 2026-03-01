@@ -22,6 +22,8 @@ use std::ptr::{addr_of, addr_of_mut};
 const PF_KEY_V2: libc::c_int = 2;
 // FreeBSD requires SPI=0x1000 for TCP-MD5 (tcp(4)).
 const TCP_SIG_SPI: u32 = 0x1000;
+// SA state for SADB_ADD (RFC 2367 section 3.1.3).
+const SADB_SASTATE_MATURE: u8 = 1;
 // SADB message types (sadb_msg.sadb_msg_type): add or remove an SA.
 const SADB_ADD: u8 = 3;
 const SADB_DELETE: u8 = 4;
@@ -34,25 +36,18 @@ const SADB_EXT_SA: u16 = 1; // sadb_sa: SPI, auth/encrypt algorithm, flags
 const SADB_EXT_KEY_AUTH: u16 = 8; // sadb_key: authentication key bytes
 const SADB_EXT_ADDRESS_SRC: u16 = 5; // sadb_address: source address selector
 const SADB_EXT_ADDRESS_DST: u16 = 6; // sadb_address: destination address selector
-const SADB_X_EXT_SA2: u16 = 19; // sadb_x_sa2: mode and reqid (required by FreeBSD)
 // Authentication algorithm for TCP MD5 (sadb_sa.sadb_sa_auth). Value 252 is
 // a FreeBSD-specific extension; not a standard SADB_AALG_* value.
 const SADB_X_AALG_TCP_MD5: u8 = 252;
 // No encryption algorithm (sadb_sa.sadb_sa_encrypt). TCP MD5 is auth-only.
 const SADB_EALG_NONE: u8 = 0;
-// SA flag: allow sequence number cycling. Required for long-lived BGP sessions
-// where the 32-bit sequence counter would otherwise wrap and be rejected.
-const SADB_X_EXT_CYCSEQ: u32 = 0x0020;
-// IPsec mode: any (transport or tunnel). TCP MD5 uses transport mode but
-// IPSEC_MODE_ANY avoids having to specify it explicitly.
-const IPSEC_MODE_ANY: u8 = 0;
 // Upper-layer protocol: match any. The SADB entry covers all TCP connections
 // to the peer address; port filtering is not used for TCP MD5.
 const IPSEC_ULPROTO_ANY: u8 = 255;
 // Maximum key length in bytes (tcp(4)). Same limit as Linux TCP_MD5SIG_MAXKEYLEN.
 const TCP_MD5_MAXKEYLEN: usize = 80;
 
-// SADB message header (sys/net/pfkeyv2.h: sadb_msg). All len fields are in 64-bit units.
+// SADB message header (RFC 2367 section 2.2, sys/net/pfkeyv2.h: sadb_msg). All len fields are in 64-bit units.
 #[repr(C)]
 struct SadbMsg {
     version: u8,
@@ -86,18 +81,6 @@ struct SadbSa {
     auth: u8,
     encrypt: u8,
     flags: u32,
-}
-
-// SADB extended SA2 extension (sys/net/pfkeyv2.h: sadb_x_sa2).
-#[repr(C)]
-struct SadbXSa2 {
-    len: u16,
-    exttype: u16,
-    mode: u8,
-    reserved1: u8,
-    reserved2: u16,
-    sequence: u32,
-    reqid: u32,
 }
 
 // SADB address extension (sys/net/pfkeyv2.h: sadb_address).
@@ -218,36 +201,21 @@ fn build_sadb_buf(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8>
                 exttype: SADB_EXT_SA,
                 spi: TCP_SIG_SPI.to_be(),
                 replay: 0,
-                state: 0,
+                state: SADB_SASTATE_MATURE,
                 auth: SADB_X_AALG_TCP_MD5,
                 encrypt: SADB_EALG_NONE,
-                flags: SADB_X_EXT_CYCSEQ,
+                flags: 0,
             },
         );
 
-        // FreeBSD-required extension; kernel rejects SADB_ADD without it.
-        push_struct(
-            &mut buf,
-            SadbXSa2 {
-                len: pfkey_unit64(mem::size_of::<SadbXSa2>()),
-                exttype: SADB_X_EXT_SA2,
-                mode: IPSEC_MODE_ANY,
-                reserved1: 0,
-                reserved2: 0,
-                sequence: 0,
-                reqid: 0,
-            },
-        );
-
-        // Source address selector: prefixlen=0 wildcards the local address so the
-        // SA matches regardless of which local IP the connection uses.
+        // Source address selector: exact host match
         push_struct(
             &mut buf,
             SadbAddress {
                 len: pfkey_unit64(addr_ext_size(src)),
                 exttype: SADB_EXT_ADDRESS_SRC,
                 proto: IPSEC_ULPROTO_ANY,
-                prefixlen: 0,
+                prefixlen: exact_prefixlen(src),
                 reserved: 0,
             },
         );
