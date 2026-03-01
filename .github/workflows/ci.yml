@@ -25,5 +25,31 @@ jobs:
     - name: Run smoke tests
       run: make smoketest
 
+  loadtest:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup dependencies
+      run: make setup
+
     - name: Run load tests
       run: make loadtest
+
+  freebsd:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: vmactions/freebsd-vm@v1
+      with:
+        usesh: true
+        copyback: false
+        prepare: |
+          pkg install -y bash protobuf rust gmake sudo
+          ./script/setup-freebsd.sh
+        run: |
+          gmake test
+          gmake smoketest

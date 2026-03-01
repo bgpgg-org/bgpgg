@@ -226,7 +226,7 @@ async fn setup_rr_addpath_topology() -> (TestServer, TestServer, TestServer) {
         add_path_receive: Some(true),
         ..Default::default()
     };
-    rr.add_peer_with_config(&client1, rr_config).await;
+    rr.add_peer_with_config(&client1, rr_config.clone()).await;
     rr.add_peer_with_config(&client2, rr_config).await;
     client1.add_peer_with_config(&rr, addpath_config()).await;
     client2.add_peer_with_config(&rr, addpath_config()).await;

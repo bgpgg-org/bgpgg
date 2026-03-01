@@ -1,4 +1,4 @@
-// Copyright 2025 bgpgg Authors
+// Copyright 2026 bgpgg Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,19 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::os::unix::io::AsRawFd;
+
+#[cfg(target_os = "freebsd")]
+mod freebsd;
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "freebsd")]
+pub use freebsd::apply_tcp_md5;
+#[cfg(target_os = "linux")]
+pub use linux::apply_tcp_md5;
 
 /// BGP protocol port number
 pub const BGP_PORT: u16 = 179;
@@ -162,12 +175,14 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
 /// # Arguments
 /// * `local_addr` - Local address to bind to (typically IP:0 for automatic port selection)
 /// * `remote_addr` - Remote address to connect to (IP:179 for BGP)
+/// * `md5_key` - Optional TCP MD5 key bytes (RFC 2385, Linux and FreeBSD)
 ///
 /// # Returns
 /// `TcpStream` on success, or an `io::Error` on failure
 pub async fn create_and_bind_tcp_socket(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    md5_key: Option<&[u8]>,
 ) -> io::Result<TcpStream> {
     // Create appropriate socket based on remote address type
     let socket = if remote_addr.is_ipv4() {
@@ -178,6 +193,12 @@ pub async fn create_and_bind_tcp_socket(
 
     // Bind to local address
     socket.bind(local_addr)?;
+
+    // Apply TCP MD5 key before connect
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(key) = md5_key {
+        apply_tcp_md5(socket.as_raw_fd(), remote_addr.ip(), key)?;
+    }
 
     // Connect to remote peer
     socket.connect(remote_addr).await

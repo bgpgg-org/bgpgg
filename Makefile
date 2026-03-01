@@ -38,6 +38,6 @@ loadtest: setup
 	cargo build --bin bgpggd --release
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
 
-smoketest:
-	$(MAKE) build-docker version=smoke-test platform=linux/amd64
+smoketest: setup
+	cargo build --release --bin bgpggd --bin bgpgg
 	./smoketests/test.sh

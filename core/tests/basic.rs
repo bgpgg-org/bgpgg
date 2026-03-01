@@ -17,7 +17,9 @@ pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
+use std::io::Write;
 use std::net::Ipv4Addr;
+use tokio::time::Duration;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -698,14 +700,14 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     let [server1, hub, server2] = chain_servers(
         [
             start_test_server(test_config(65001, 1)).await,
-            start_test_server(test_config(65010, 10)).await,
+            start_test_server(test_config(65010, 3)).await,
             start_test_server(test_config(65002, 2)).await,
         ],
         PeerConfig::default(),
     )
     .await;
 
-    let downstream = start_test_server(test_config(65020, 20)).await;
+    let downstream = start_test_server(test_config(65020, 4)).await;
     hub.add_peer(&downstream).await;
     downstream.add_peer(&hub).await;
     poll_until(
@@ -774,4 +776,80 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
         1,
         "adj-rib-out should have 1 path, not stale entries"
     );
+}
+
+// ---- TCP MD5 authentication (RFC 2385) ----
+// Requires CAP_NET_ADMIN (root on Linux): make test-md5
+
+fn write_key_file(suffix: &str, key: &[u8]) -> String {
+    let path = format!("/tmp/bgpgg-test-md5-{}.key", suffix);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(key).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn test_tcp_md5_matching_keys() {
+    let key_path = write_key_file("match", b"shared-bgp-secret");
+
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    peer_servers_with_config(
+        &server1,
+        &server2,
+        SessionConfig {
+            md5_key_file: Some(key_path.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    std::fs::remove_file(&key_path).ok();
+}
+
+// Test that a peer expecting MD5 won't establish with a peer not using MD5.
+// Server1 expects MD5 auth, server2 sends without MD5 -> server1 drops packets.
+#[tokio::test]
+// Test that a peer expecting MD5 rejects unsigned packets.
+//
+// Note: FreeBSD TCP-MD5 requires SPI=0x1000 and is per-host only, so we cannot test
+// mismatched keys on a single machine (both servers share the same SADB and one key
+// overwrites the other). From tcp(4):
+//   "This entry must have an SPI of 0x1000 and can therefore only be specified
+//    on a per-host basis at this time."
+async fn test_tcp_md5_rejects_unsigned() {
+    let key_a = write_key_file("md5-unsigned", b"server1-key");
+
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+
+    // Server1 expects MD5 authentication
+    server1
+        .add_peer_with_config(
+            &server2,
+            SessionConfig {
+                md5_key_file: Some(key_a.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+    // Server2 does NOT use MD5 - sends unsigned packets
+    server2.add_peer(&server1).await;
+
+    // Server1 should drop unsigned packets from server2, preventing establishment.
+    poll_while(
+        || async {
+            match server1.client.get_peers().await {
+                Ok(peers) => peers
+                    .iter()
+                    .all(|p| p.state != BgpState::Established as i32),
+                Err(_) => true,
+            }
+        },
+        Duration::from_secs(5),
+        "Session should not establish when peer sends unsigned packets",
+    )
+    .await;
+
+    std::fs::remove_file(&key_a).ok();
 }
