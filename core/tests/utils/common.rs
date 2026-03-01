@@ -362,8 +362,11 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
 
     init_test_logging();
 
-    // Use fast connect retry for tests (default 30s is too slow)
-    config.connect_retry_secs = 1;
+    // Use fast connect retry for tests (default 30s is too slow).
+    // If the caller explicitly set a value, preserve it.
+    if config.connect_retry_secs == Config::default().connect_retry_secs {
+        config.connect_retry_secs = 1;
+    }
 
     let router_id = config.router_id;
     let asn = config.asn;
