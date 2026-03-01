@@ -16,7 +16,7 @@ use std::io;
 use std::mem;
 use std::net::IpAddr;
 use std::os::unix::io::RawFd;
-use std::ptr::addr_of_mut;
+use std::ptr::{addr_of, addr_of_mut};
 
 /// struct tcp_md5sig (linux/tcp.h)
 #[repr(C)]
@@ -69,7 +69,7 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
             fd,
             libc::IPPROTO_TCP,
             libc::TCP_MD5SIG,
-            &sig as *const _ as *const libc::c_void,
+            addr_of!(sig) as *const libc::c_void,
             mem::size_of_val(&sig) as libc::socklen_t,
         )
     };

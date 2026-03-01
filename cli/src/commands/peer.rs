@@ -26,19 +26,25 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
         PeerCommands::Add {
             address,
             remote_as: _,
+            port,
             max_prefix_limit,
             max_prefix_action,
         } => {
-            let config = max_prefix_limit.map(|limit| SessionConfig {
-                max_prefix: Some(MaxPrefixSetting {
-                    limit,
-                    action: match max_prefix_action.as_str() {
-                        "discard" => MaxPrefixAction::Discard.into(),
-                        _ => MaxPrefixAction::Terminate.into(),
-                    },
-                }),
-                ..Default::default()
-            });
+            let config = if port.is_some() || max_prefix_limit.is_some() {
+                Some(SessionConfig {
+                    port,
+                    max_prefix: max_prefix_limit.map(|limit| MaxPrefixSetting {
+                        limit,
+                        action: match max_prefix_action.as_str() {
+                            "discard" => MaxPrefixAction::Discard.into(),
+                            _ => MaxPrefixAction::Terminate.into(),
+                        },
+                    }),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
             match client.add_peer(address, config).await {
                 Ok(message) => println!("{}", message),
                 Err(e) => eprintln!("Error: {}", e.message()),
