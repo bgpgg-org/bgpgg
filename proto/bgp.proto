@@ -84,6 +84,7 @@ message SessionConfig {
     optional bool add_path_receive = 14;  // RFC 7911: Accept multiple paths from peer
     optional uint32 asn = 15;  // Expected peer ASN (reject OPEN if mismatched)
     optional bool enforce_first_as = 16;  // RFC 4271 6.3: Enforce first AS matches peer AS (default: true)
+    optional string md5_key_file = 17;   // RFC 2385: path to TCP MD5 key file (chmod 600)
 }
 
 // Add peer request/response

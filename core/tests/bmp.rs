@@ -101,11 +101,11 @@ async fn test_add_bmp_server_with_existing_peers() {
     setup_bmp_monitoring(&mut server, &mut bmp_server).await;
 
     // Should receive peer up for ONLY the 2 established peers (not the idle one)
-    let peer_up_1 = bmp_server.read_peer_up().await;
-    let peer_up_2 = bmp_server.read_peer_up().await;
-
-    // Sort peer_up messages by peer address
-    let mut peer_ups = [peer_up_1, peer_up_2];
+    // Read in any order then sort for comparison
+    let mut peer_ups = [
+        bmp_server.read_peer_up().await,
+        bmp_server.read_peer_up().await,
+    ];
     peer_ups.sort_by_key(|p| p.peer_header.peer_address);
 
     // Sort peers by address
@@ -136,29 +136,42 @@ async fn test_add_bmp_server_with_existing_peers() {
 
     // Should receive route monitoring messages (2 routes per peer = 4 total in mesh)
     // Each peer's Adj-RIB-In contains routes received from the other peer too
-    let rm1 = bmp_server.read_route_monitoring().await;
-    let rm2 = bmp_server.read_route_monitoring().await;
-    let rm3 = bmp_server.read_route_monitoring().await;
-    let rm4 = bmp_server.read_route_monitoring().await;
+    // Collect all 4 route monitoring messages in any order
+    let mut route_messages = Vec::new();
+    for _ in 0..4 {
+        route_messages.push(bmp_server.read_route_monitoring().await);
+    }
 
     // Both routes in mesh
-    let route_1 = [IpNetwork::V4(Ipv4Net {
+    let route_1 = IpNetwork::V4(Ipv4Net {
         address: Ipv4Addr::new(10, 0, 0, 0),
         prefix_length: 24,
-    })];
-    let route_2 = [IpNetwork::V4(Ipv4Net {
+    });
+    let route_2 = IpNetwork::V4(Ipv4Net {
         address: Ipv4Addr::new(10, 0, 1, 0),
         prefix_length: 24,
-    })];
+    });
 
-    // Verify each message
-    for rm in &[&rm1, &rm2, &rm3, &rm4] {
+    // Count occurrences of each route across all messages
+    let mut route_1_count = 0;
+    let mut route_2_count = 0;
+
+    for rm in &route_messages {
         let peer_addr = rm.peer_header().peer_address;
         let peer = peers.iter().find(|p| p.address == peer_addr).unwrap();
         let nlri = rm.bgp_update().nlri_prefixes();
 
+        // Each message should have exactly one route
+        assert_eq!(nlri.len(), 1, "Expected 1 NLRI per message");
+
         // Must be one of the two routes
-        assert!(nlri[..] == route_1[..] || nlri[..] == route_2[..]);
+        if nlri[0] == route_1 {
+            route_1_count += 1;
+        } else if nlri[0] == route_2 {
+            route_2_count += 1;
+        } else {
+            panic!("Unexpected route: {:?}", nlri[0]);
+        }
 
         assert_bmp_route_monitoring_msg(
             rm,
@@ -172,6 +185,10 @@ async fn test_add_bmp_server_with_existing_peers() {
             },
         );
     }
+
+    // Each route should appear twice (once per peer in mesh)
+    assert_eq!(route_1_count, 2, "Route 10.0.0.0/24 should appear twice");
+    assert_eq!(route_2_count, 2, "Route 10.0.1.0/24 should appear twice");
 }
 
 #[tokio::test]

@@ -47,12 +47,18 @@ pub enum PeerCommands {
         address: String,
         /// Remote AS number
         remote_as: u32,
+        /// Remote BGP port (default: 179)
+        #[arg(long)]
+        port: Option<u32>,
         /// Maximum number of prefixes to accept
         #[arg(long)]
         max_prefix_limit: Option<u32>,
         /// Action when limit reached: terminate (default) or discard
         #[arg(long, default_value = "terminate")]
         max_prefix_action: String,
+        /// Path to TCP MD5 key file (RFC 2385, chmod 600)
+        #[arg(long)]
+        md5_key_file: Option<String>,
     },
 
     /// Remove a BGP peer
@@ -192,6 +198,8 @@ mod tests {
                 remote_as,
                 max_prefix_limit,
                 max_prefix_action,
+                port: _,
+                md5_key_file: _,
             }) => {
                 assert_eq!(address, "10.0.0.1");
                 assert_eq!(remote_as, 65002);

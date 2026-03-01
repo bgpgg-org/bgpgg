@@ -362,8 +362,11 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
 
     init_test_logging();
 
-    // Use fast connect retry for tests (default 30s is too slow)
-    config.connect_retry_secs = 1;
+    // Use fast connect retry for tests (default 30s is too slow).
+    // If the caller explicitly set a value, preserve it.
+    if config.connect_retry_secs == Config::default().connect_retry_secs {
+        config.connect_retry_secs = 1;
+    }
 
     let router_id = config.router_id;
     let asn = config.asn;
@@ -504,7 +507,7 @@ pub async fn peer_servers_with_config(
     server2: &TestServer,
     config: SessionConfig,
 ) {
-    server1.add_peer_with_config(server2, config).await;
+    server1.add_peer_with_config(server2, config.clone()).await;
     server2.add_peer_with_config(server1, config).await;
 
     let peer_addr = server2.address.to_string();
@@ -1064,7 +1067,7 @@ pub async fn chain_servers<const N: usize>(
         let next_address = servers[i + 1].address.to_string();
 
         // Server i adds server i+1
-        let mut cfg = session_config;
+        let mut cfg = session_config.clone();
         cfg.port = Some(next_port as u32);
         servers[i]
             .client
@@ -1073,7 +1076,7 @@ pub async fn chain_servers<const N: usize>(
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i + 1, i));
 
         // Server i+1 adds server i
-        let mut cfg = session_config;
+        let mut cfg = session_config.clone();
         cfg.port = Some(curr_port as u32);
         servers[i + 1]
             .client
@@ -1279,7 +1282,7 @@ pub async fn mesh_servers<const N: usize>(
             let j_address = servers[j].address.to_string();
 
             // Server i adds server j
-            let mut cfg = session_config;
+            let mut cfg = session_config.clone();
             cfg.port = Some(j_port as u32);
             servers[i]
                 .client
@@ -1288,7 +1291,7 @@ pub async fn mesh_servers<const N: usize>(
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", j, i));
 
             // Server j adds server i
-            let mut cfg = session_config;
+            let mut cfg = session_config.clone();
             cfg.port = Some(i_port as u32);
             servers[j]
                 .client
@@ -1359,7 +1362,7 @@ pub async fn setup_rr(
 
     for (rr, rr_clients) in rrs.iter().zip(clients_per_rr.iter()) {
         for client in rr_clients {
-            rr.add_peer_with_config(client, rr_client_cfg).await;
+            rr.add_peer_with_config(client, rr_client_cfg.clone()).await;
             client.add_peer(rr).await;
         }
 
@@ -2369,4 +2372,13 @@ pub async fn apply_export_neighbor_reject_policy(
         )
         .await
         .unwrap();
+}
+
+/// Write a key to a temporary file for TCP MD5 authentication tests
+pub fn write_key_file(suffix: &str, key: &[u8]) -> String {
+    use std::io::Write;
+    let path = format!("/tmp/bgpgg-test-md5-{}.key", suffix);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(key).unwrap();
+    path
 }

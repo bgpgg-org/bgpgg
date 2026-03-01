@@ -20,6 +20,10 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::DefinedSetConfig;
 use crate::config::PeerConfig;
 use crate::log::{debug, error, info, warn};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::net::apply_tcp_md5;
+#[cfg(target_os = "freebsd")]
+use crate::net::remove_tcp_md5;
 use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, propagate_routes_to_peer, PeerExportContext,
@@ -638,6 +642,13 @@ impl BgpServer {
             PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
         );
 
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
+            if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
+                error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
+            }
+        }
+
         // RFC 4271: ManualStart for admin-added peers
         if config.passive_mode {
             let _ = peer_tx.send(PeerOp::ManualStartPassive);
@@ -685,6 +696,16 @@ impl BgpServer {
                         reason: PeerDownReason::PeerDeConfigured,
                         use_4byte_asn,
                     });
+                }
+            }
+        }
+
+        // Clean up SADB entries on FreeBSD when the peer had MD5 configured.
+        #[cfg(target_os = "freebsd")]
+        if let (Some(fd), Some(entry)) = (self.listener_fd, self.peers.get(&peer_ip)) {
+            if entry.config.md5_key_file.is_some() {
+                if let Err(e) = remove_tcp_md5(fd, peer_ip) {
+                    error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
                 }
             }
         }

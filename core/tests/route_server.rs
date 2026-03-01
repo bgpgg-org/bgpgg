@@ -61,7 +61,7 @@ async fn setup_rs(
             SessionConfig {
                 rs_client: Some(true),
                 asn: Some(client.asn),
-                ..rs_config
+                ..rs_config.clone()
             },
         )
         .await;
@@ -70,7 +70,7 @@ async fn setup_rs(
                 rs,
                 SessionConfig {
                     enforce_first_as: Some(false),
-                    ..client_config
+                    ..client_config.clone()
                 },
             )
             .await;
