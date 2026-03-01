@@ -807,16 +807,9 @@ async fn test_tcp_md5_matching_keys() {
     std::fs::remove_file(&key_path).ok();
 }
 
-// Test that a peer expecting MD5 won't establish with a peer not using MD5.
+// Test that a peer expecting MD5 rejects unsigned packets.
 // Server1 expects MD5 auth, server2 sends without MD5 -> server1 drops packets.
 #[tokio::test]
-// Test that a peer expecting MD5 rejects unsigned packets.
-//
-// Note: FreeBSD TCP-MD5 requires SPI=0x1000 and is per-host only, so we cannot test
-// mismatched keys on a single machine (both servers share the same SADB and one key
-// overwrites the other). From tcp(4):
-//   "This entry must have an SPI of 0x1000 and can therefore only be specified
-//    on a per-host basis at this time."
 async fn test_tcp_md5_rejects_unsigned() {
     let key_a = write_key_file("md5-unsigned", b"server1-key");
 
@@ -852,4 +845,58 @@ async fn test_tcp_md5_rejects_unsigned() {
     .await;
 
     std::fs::remove_file(&key_a).ok();
+}
+
+// Test that mismatched MD5 keys prevent session establishment.
+//
+// Linux only: FreeBSD TCP-MD5 requires SPI=0x1000 and is per-host only, so we cannot test
+// mismatched keys on a single machine (both servers share the same SADB and one key
+// overwrites the other). From tcp(4):
+//   "This entry must have an SPI of 0x1000 and can therefore only be specified
+//    on a per-host basis at this time."
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_tcp_md5_mismatching_keys() {
+    let key_a = write_key_file("mismatch-a", b"server1-key");
+    let key_b = write_key_file("mismatch-b", b"server2-key");
+
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+
+    server1
+        .add_peer_with_config(
+            &server2,
+            SessionConfig {
+                md5_key_file: Some(key_a.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+    server2
+        .add_peer_with_config(
+            &server1,
+            SessionConfig {
+                md5_key_file: Some(key_b.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // The kernel drops TCP segments with an incorrect MD5 digest.
+    poll_while(
+        || async {
+            match server1.client.get_peers().await {
+                Ok(peers) => peers
+                    .iter()
+                    .all(|p| p.state != BgpState::Established as i32),
+                Err(_) => true,
+            }
+        },
+        Duration::from_secs(5),
+        "Session should not establish when MD5 keys do not match",
+    )
+    .await;
+
+    std::fs::remove_file(&key_a).ok();
+    std::fs::remove_file(&key_b).ok();
 }
