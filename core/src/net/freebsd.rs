@@ -158,19 +158,57 @@ fn addr_ext_size(addr: IpAddr) -> usize {
     mem::size_of::<SadbAddress>() + pfkey_align8(sockaddr_size)
 }
 
-// Build the flat SADB message buffer for a given msg_type, src, dst, and key.
-// Message format follows RFC 2367 section 2.2: a fixed header followed by
-// variable-length extensions, each padded to 8-byte boundaries.
-fn build_sadb_buf(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8> {
-    let mut buf: Vec<u8> = Vec::new();
+// Shared helper: appends SA identity + src/dst address selectors and patches
+// the total length into the SadbMsg header at offset 4.
+unsafe fn push_sa_and_addresses(buf: &mut Vec<u8>, src: IpAddr, dst: IpAddr) {
+    push_struct(
+        buf,
+        SadbSa {
+            len: pfkey_unit64(mem::size_of::<SadbSa>()),
+            exttype: SADB_EXT_SA,
+            spi: TCP_SIG_SPI.to_be(),
+            replay: 0,
+            state: SADB_SASTATE_MATURE,
+            auth: SADB_X_AALG_TCP_MD5,
+            encrypt: SADB_EALG_NONE,
+            flags: 0,
+        },
+    );
+    push_struct(
+        buf,
+        SadbAddress {
+            len: pfkey_unit64(addr_ext_size(src)),
+            exttype: SADB_EXT_ADDRESS_SRC,
+            proto: IPSEC_ULPROTO_ANY,
+            prefixlen: exact_prefixlen(src),
+            reserved: 0,
+        },
+    );
+    push_sockaddr(buf, src);
+    push_struct(
+        buf,
+        SadbAddress {
+            len: pfkey_unit64(addr_ext_size(dst)),
+            exttype: SADB_EXT_ADDRESS_DST,
+            proto: IPSEC_ULPROTO_ANY,
+            prefixlen: exact_prefixlen(dst),
+            reserved: 0,
+        },
+    );
+    push_sockaddr(buf, dst);
+    let total_units = pfkey_unit64(buf.len()).to_ne_bytes();
+    buf[4..6].copy_from_slice(&total_units);
+}
 
+// Build SADB_ADD message: <base, key, SA, address(SD)> (RFC 2367 §3.1.3).
+fn build_sadb_add_buf(src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
     unsafe {
-        // Envelope: message type (ADD/DELETE), SA type (TCP-MD5), total length (patched below).
         push_struct(
             &mut buf,
             SadbMsg {
                 version: PF_KEY_V2 as u8,
-                msg_type,
+                msg_type: SADB_ADD,
                 errno: 0,
                 satype: SADB_X_SATYPE_TCPSIGNATURE,
                 len: 0,
@@ -179,7 +217,6 @@ fn build_sadb_buf(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8>
                 pid: libc::getpid() as u32,
             },
         );
-
         // Auth key header; raw key bytes follow immediately, padded to 8 bytes.
         let key_ext_size = pfkey_align8(mem::size_of::<SadbKey>() + key.len());
         push_struct(
@@ -193,54 +230,32 @@ fn build_sadb_buf(msg_type: u8, src: IpAddr, dst: IpAddr, key: &[u8]) -> Vec<u8>
         );
         buf.extend_from_slice(key);
         pad_to_8(&mut buf);
-
-        // SA identity: fixed SPI (0x1000), MD5 auth algorithm, no encryption.
-        push_struct(
-            &mut buf,
-            SadbSa {
-                len: pfkey_unit64(mem::size_of::<SadbSa>()),
-                exttype: SADB_EXT_SA,
-                spi: TCP_SIG_SPI.to_be(),
-                replay: 0,
-                state: SADB_SASTATE_MATURE,
-                auth: SADB_X_AALG_TCP_MD5,
-                encrypt: SADB_EALG_NONE,
-                flags: 0,
-            },
-        );
-
-        // Source address selector: exact host match
-        push_struct(
-            &mut buf,
-            SadbAddress {
-                len: pfkey_unit64(addr_ext_size(src)),
-                exttype: SADB_EXT_ADDRESS_SRC,
-                proto: IPSEC_ULPROTO_ANY,
-                prefixlen: exact_prefixlen(src),
-                reserved: 0,
-            },
-        );
-        push_sockaddr(&mut buf, src);
-
-        // Destination address selector: exact match so the SA applies only to
-        // traffic destined for this specific peer, not the whole subnet.
-        push_struct(
-            &mut buf,
-            SadbAddress {
-                len: pfkey_unit64(addr_ext_size(dst)),
-                exttype: SADB_EXT_ADDRESS_DST,
-                proto: IPSEC_ULPROTO_ANY,
-                prefixlen: exact_prefixlen(dst),
-                reserved: 0,
-            },
-        );
-        push_sockaddr(&mut buf, dst);
-
-        // Patch total message length into SadbMsg.len (offset 4, in 8-byte units).
-        let total_units = pfkey_unit64(buf.len()).to_ne_bytes();
-        buf[4..6].copy_from_slice(&total_units);
+        push_sa_and_addresses(&mut buf, src, dst);
     }
+    buf
+}
 
+// Build SADB_DELETE message: <base, SA, address(SD)> (RFC 2367 §3.1.4).
+// The key extension is absent: DELETE identifies the SA by address pair only
+// (FreeBSD key_delete() never reads SADB_EXT_KEY_AUTH).
+fn build_sadb_del_buf(src: IpAddr, dst: IpAddr) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    unsafe {
+        push_struct(
+            &mut buf,
+            SadbMsg {
+                version: PF_KEY_V2 as u8,
+                msg_type: SADB_DELETE,
+                errno: 0,
+                satype: SADB_X_SATYPE_TCPSIGNATURE,
+                len: 0,
+                reserved: 0,
+                seq: 0,
+                pid: libc::getpid() as u32,
+            },
+        );
+        push_sa_and_addresses(&mut buf, src, dst);
+    }
     buf
 }
 
@@ -317,22 +332,20 @@ fn sadb_add(src: IpAddr, dst: IpAddr, key: &[u8]) -> io::Result<()> {
     if sock < 0 {
         return Err(io::Error::last_os_error());
     }
-
-    let add_buf = build_sadb_buf(SADB_ADD, src, dst, key);
-    let result = sadb_send_one(sock, &add_buf);
-
-    // SADB entries persist across TCP connections and don't expire automatically.
-    // On reconnect the old entry is still present, so delete it and re-add.
-    if let Err(ref e) = result {
-        if e.raw_os_error() == Some(libc::EEXIST) {
-            let del_buf = build_sadb_buf(SADB_DELETE, src, dst, key);
-            let _ = sadb_send_one(sock, &del_buf);
-            let result = sadb_send_one(sock, &add_buf);
-            unsafe { libc::close(sock) };
-            return result;
+    // Closure ensures sock is closed exactly once regardless of which path is taken.
+    let result = (|| {
+        let add_buf = build_sadb_add_buf(src, dst, key);
+        // SADB entries persist across TCP connections and don't expire automatically.
+        // On reconnect the old entry is still present, so delete it and re-add.
+        if let Err(e) = sadb_send_one(sock, &add_buf) {
+            if e.raw_os_error() == Some(libc::EEXIST) {
+                let _ = sadb_send_one(sock, &build_sadb_del_buf(src, dst));
+                return sadb_send_one(sock, &add_buf);
+            }
+            return Err(e);
         }
-    }
-
+        Ok(())
+    })();
     unsafe { libc::close(sock) };
     result
 }
@@ -395,12 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sadb_buf() {
+    fn test_build_sadb_add_buf() {
         let src: IpAddr = "127.0.0.1".parse().unwrap();
         let dst: IpAddr = "127.0.0.2".parse().unwrap();
         let key = b"bgpsecret"; // 9 bytes
 
-        let buf = build_sadb_buf(SADB_ADD, src, dst, key);
+        let buf = build_sadb_add_buf(src, dst, key);
 
         // Total must be 8-byte aligned
         assert_eq!(buf.len() % 8, 0);
@@ -415,11 +428,24 @@ mod tests {
 
         // Key bytes start at offset 24: SadbMsg (16) + SadbKey header (8)
         assert_eq!(&buf[24..24 + key.len()], key);
+    }
 
-        // SADB_DELETE produces same size, different msg_type
-        let del_buf = build_sadb_buf(SADB_DELETE, src, dst, key);
-        assert_eq!(del_buf.len(), buf.len());
-        assert_eq!(del_buf[1], SADB_DELETE);
+    #[test]
+    fn test_build_sadb_del_buf() {
+        let src: IpAddr = "127.0.0.1".parse().unwrap();
+        let dst: IpAddr = "127.0.0.2".parse().unwrap();
+        let key = b"bgpsecret";
+
+        let buf = build_sadb_del_buf(src, dst);
+
+        assert_eq!(buf.len() % 8, 0);
+        assert_eq!(buf[1], SADB_DELETE);
+        assert_eq!(buf[3], SADB_X_SATYPE_TCPSIGNATURE);
+        let msg_len = u16::from_ne_bytes([buf[4], buf[5]]);
+        assert_eq!(msg_len as usize, buf.len() / 8);
+
+        // DELETE omits the key extension, so it must be smaller than ADD
+        assert!(buf.len() < build_sadb_add_buf(src, dst, key).len());
     }
 
     #[test]
@@ -438,12 +464,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sadb_buf_v6() {
+    fn test_build_sadb_add_buf_v6() {
         let src: IpAddr = "::1".parse().unwrap();
         let dst: IpAddr = "::2".parse().unwrap();
         let key = b"bgpsecret";
 
-        let buf = build_sadb_buf(SADB_ADD, src, dst, key);
+        let buf = build_sadb_add_buf(src, dst, key);
 
         assert_eq!(buf.len() % 8, 0);
         assert_eq!(buf[1], SADB_ADD);
