@@ -26,6 +26,8 @@ mod linux;
 
 #[cfg(target_os = "freebsd")]
 pub use freebsd::apply_tcp_md5;
+#[cfg(target_os = "freebsd")]
+pub use freebsd::remove_tcp_md5;
 #[cfg(target_os = "linux")]
 pub use linux::apply_tcp_md5;
 

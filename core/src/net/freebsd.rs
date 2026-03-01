@@ -386,6 +386,36 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
     }
 }
 
+// Delete a single SADB entry identified by src/dst address pair.
+fn sadb_del(src: IpAddr, dst: IpAddr) -> io::Result<()> {
+    let sock = unsafe { libc::socket(libc::PF_KEY, libc::SOCK_RAW, PF_KEY_V2) };
+    if sock < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = sadb_send_one(sock, &build_sadb_del_buf(src, dst));
+    unsafe { libc::close(sock) };
+    result
+}
+
+/// Remove TCP MD5 SADB entries for the given peer address (RFC 2385).
+///
+/// Deletes both directions registered by apply_tcp_md5. ESRCH (entry not found)
+/// is silently ignored since the entry may have already been removed.
+pub fn remove_tcp_md5(fd: RawFd, peer_addr: IpAddr) -> io::Result<()> {
+    let local_addr = get_local_addr(fd)?;
+    for result in [
+        sadb_del(local_addr, peer_addr),
+        sadb_del(peer_addr, local_addr),
+    ] {
+        if let Err(e) = result {
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
