@@ -660,7 +660,7 @@ impl BgpServer {
                 let Ok(addr) = peer_cfg.socket_addr() else {
                     continue;
                 };
-                if let Some(Ok(key)) = peer_cfg.read_md5_key() {
+                if let Some(key) = peer_cfg.read_md5_key() {
                     if let Err(e) = apply_tcp_md5(self.listener_fd.unwrap(), addr.ip(), &key) {
                         error!(peer = %addr, error = %e, "failed to set TCP MD5 on listener");
                     }

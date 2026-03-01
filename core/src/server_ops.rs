@@ -641,7 +641,7 @@ impl BgpServer {
         );
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let (Some(fd), Some(Ok(key))) = (self.listener_fd, config.read_md5_key()) {
+        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
             if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
                 error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
             }

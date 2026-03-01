@@ -15,9 +15,9 @@
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+use tracing::error;
 
 /// Action to take when max prefix limit is reached
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -188,10 +188,15 @@ impl PeerConfig {
     }
 
     /// Read MD5 key bytes from file, trimming whitespace/newlines.
-    pub fn read_md5_key(&self) -> Option<io::Result<Vec<u8>>> {
-        self.md5_key_file
-            .as_ref()
-            .map(|path| fs::read_to_string(path).map(|s| s.trim().as_bytes().to_vec()))
+    pub fn read_md5_key(&self) -> Option<Vec<u8>> {
+        let path = self.md5_key_file.as_ref()?;
+        match fs::read_to_string(path) {
+            Ok(s) => Some(s.trim().as_bytes().to_vec()),
+            Err(e) => {
+                error!(peer_ip = %self.address, path = %path, error = %e, "failed to read MD5 key file");
+                None
+            }
+        }
     }
 
     /// Validate peer configuration
@@ -729,7 +734,7 @@ mod tests {
             ..Default::default()
         };
 
-        let key = peer.read_md5_key().unwrap().unwrap();
+        let key = peer.read_md5_key().unwrap();
         assert_eq!(key, b"my-secret-key");
 
         // None when md5_key_file is not set
@@ -745,8 +750,7 @@ mod tests {
             md5_key_file: Some("/nonexistent/path/bgp_md5.key".to_string()),
             ..Default::default()
         };
-        let result = peer.read_md5_key().unwrap();
-        assert!(result.is_err());
+        assert!(peer.read_md5_key().is_none());
     }
 
     #[test]

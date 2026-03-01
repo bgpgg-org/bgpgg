@@ -36,6 +36,7 @@ const SADB_EXT_SA: u16 = 1; // sadb_sa: SPI, auth/encrypt algorithm, flags
 const SADB_EXT_KEY_AUTH: u16 = 8; // sadb_key: authentication key bytes
 const SADB_EXT_ADDRESS_SRC: u16 = 5; // sadb_address: source address selector
 const SADB_EXT_ADDRESS_DST: u16 = 6; // sadb_address: destination address selector
+
 // Authentication algorithm for TCP MD5 (sadb_sa.sadb_sa_auth). Value 252 is
 // a FreeBSD-specific extension; not a standard SADB_AALG_* value.
 const SADB_X_AALG_TCP_MD5: u8 = 252;
