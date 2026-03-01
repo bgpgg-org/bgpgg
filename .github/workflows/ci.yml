@@ -48,7 +48,8 @@ jobs:
         usesh: true
         copyback: false
         prepare: |
-          pkg install -y bash protobuf rust gmake
+          pkg install -y bash protobuf rust gmake sudo
           ./script/setup-freebsd.sh
         run: |
           gmake test
+          gmake smoketest

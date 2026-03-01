@@ -47,6 +47,9 @@ pub enum PeerCommands {
         address: String,
         /// Remote AS number
         remote_as: u32,
+        /// Remote BGP port (default: 179)
+        #[arg(long)]
+        port: Option<u32>,
         /// Maximum number of prefixes to accept
         #[arg(long)]
         max_prefix_limit: Option<u32>,
@@ -192,6 +195,7 @@ mod tests {
                 remote_as,
                 max_prefix_limit,
                 max_prefix_action,
+                port: _,
             }) => {
                 assert_eq!(address, "10.0.0.1");
                 assert_eq!(remote_as, 65002);

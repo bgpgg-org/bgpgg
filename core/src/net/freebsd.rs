@@ -158,7 +158,11 @@ unsafe fn push_sockaddr(buf: &mut Vec<u8>, addr: IpAddr) {
 
 // Prefix length for an exact host match (32 for IPv4, 128 for IPv6).
 fn exact_prefixlen(addr: IpAddr) -> u8 {
-    if addr.is_ipv4() { 32 } else { 128 }
+    if addr.is_ipv4() {
+        32
+    } else {
+        128
+    }
 }
 
 // Total size of an SADB address extension (header + padded sockaddr), in bytes.
@@ -276,9 +280,8 @@ fn get_local_addr(fd: RawFd) -> io::Result<IpAddr> {
     let mut storage: libc::sockaddr_storage = unsafe { mem::zeroed() };
     let mut len = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
-    let ret = unsafe {
-        libc::getsockname(fd, addr_of_mut!(storage) as *mut libc::sockaddr, &mut len)
-    };
+    let ret =
+        unsafe { libc::getsockname(fd, addr_of_mut!(storage) as *mut libc::sockaddr, &mut len) };
     if ret != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -390,7 +393,7 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
             fd,
             libc::IPPROTO_TCP,
             libc::TCP_MD5SIG,
-            &enable as *const _ as *const libc::c_void,
+            addr_of!(enable) as *const libc::c_void,
             mem::size_of_val(&enable) as libc::socklen_t,
         )
     };

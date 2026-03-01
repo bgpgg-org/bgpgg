@@ -1,72 +1,88 @@
 #!/usr/bin/env bash
-# Smoke test: verify basic functionality
+# Smoke test: start two bgpggd instances directly and verify basic BGP functionality.
+# No Docker required; tests the native binary on the current platform.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BGPGGD="${BGPGGD:-$PROJECT_DIR/target/release/bgpggd}"
+BGPGG="${BGPGG:-$PROJECT_DIR/target/release/bgpgg}"
+
+PEER1_IP=127.0.0.1
+PEER2_IP=127.0.0.2
+# Use high ports to avoid requiring root
+PEER1_BGP_PORT=11179
+PEER2_BGP_PORT=11179
+PEER1_GRPC="http://$PEER1_IP:50051"
+PEER2_GRPC="http://$PEER2_IP:50052"
+
+PEER1_PID=
+PEER2_PID=
+
+peer1() { "$BGPGG" --addr "$PEER1_GRPC" "$@"; }
+peer2() { "$BGPGG" --addr "$PEER2_GRPC" "$@"; }
 
 cleanup() {
-    echo ""
-    echo "Cleaning up..."
-    docker compose -f basic.yml down -v 2>/dev/null || true
+    [ -n "$PEER1_PID" ] && kill "$PEER1_PID" 2>/dev/null || true
+    [ -n "$PEER2_PID" ] && kill "$PEER2_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting containers..."
-docker compose -f basic.yml up -d
-sleep 2
+poll_until() {
+    local desc=$1 timeout=$2
+    shift 2
+    for _ in $(seq 1 "$timeout"); do
+        if eval "$*" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out: $desc"
+    return 1
+}
+
+echo "Starting peer1 (ASN 65001, $PEER1_IP:$PEER1_BGP_PORT)..."
+"$BGPGGD" \
+    --asn 65001 \
+    --router-id 1.1.1.1 \
+    --listen-addr "$PEER1_IP:$PEER1_BGP_PORT" \
+    --grpc-listen-addr "$PEER1_IP:50051" &
+PEER1_PID=$!
+
+echo "Starting peer2 (ASN 65002, $PEER2_IP:$PEER2_BGP_PORT)..."
+"$BGPGGD" \
+    --asn 65002 \
+    --router-id 2.2.2.2 \
+    --listen-addr "$PEER2_IP:$PEER2_BGP_PORT" \
+    --grpc-listen-addr "$PEER2_IP:50052" &
+PEER2_PID=$!
+
+echo "Waiting for gRPC..."
+poll_until "peer1 gRPC not ready" 10 "peer1 peer list"
+poll_until "peer2 gRPC not ready" 10 "peer2 peer list"
 
 echo "Adding peers..."
-docker compose -f basic.yml exec -T peer1 bgpgg peer add 172.30.0.20 65002
-docker compose -f basic.yml exec -T peer2 bgpgg peer add 172.30.0.10 65001
+peer1 peer add "$PEER2_IP" 65002 --port "$PEER2_BGP_PORT"
+peer2 peer add "$PEER1_IP" 65001 --port "$PEER1_BGP_PORT"
 
-echo "Polling for BGP peering (60 seconds)..."
-for i in $(seq 1 60); do
-    if docker compose -f basic.yml exec -T peer1 bgpgg peer list 2>/dev/null | grep -q Established; then
-        echo "Peering established"
-        break
-    fi
-    sleep 1
-done
+echo "Waiting for BGP session to establish..."
+poll_until "Peering failed to establish" 30 "peer1 peer list | grep -q Established"
+echo "  established"
 
-if ! docker compose -f basic.yml exec -T peer1 bgpgg peer list 2>/dev/null | grep -q Established; then
-    echo "Peering failed to establish"
-    docker compose -f basic.yml exec -T peer1 bgpgg peer list || true
-    exit 1
-fi
+echo "Announcing 10.99.0.0/24 from peer1..."
+peer1 global rib add 10.99.0.0/24 --nexthop 192.168.1.1
 
-echo "Announcing routes 10.99.0.0/24 and 10.99.1.0/24 from peer1..."
-docker compose -f basic.yml exec -T peer1 bgpgg global rib add 10.99.0.0/24 --nexthop 192.168.1.1
-docker compose -f basic.yml exec -T peer1 bgpgg global rib add 10.99.1.0/24 --nexthop 192.168.1.1
+echo "Waiting for route to propagate to peer2..."
+poll_until "Route did not propagate" 10 "peer2 global rib show | grep -q 10.99.0.0/24"
+echo "  propagated"
 
-echo "Polling for route propagation to peer2 (10 seconds)..."
-for i in $(seq 1 10); do
-    if docker compose -f basic.yml exec -T peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
-        echo "Routes propagated"
-        break
-    fi
-    sleep 1
-done
+echo "Withdrawing 10.99.0.0/24 from peer1..."
+peer1 global rib del 10.99.0.0/24
 
-if ! docker compose -f basic.yml exec -T peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
-    echo "Route did not propagate"
-    docker compose -f basic.yml exec -T peer2 bgpgg global rib show || true
-    exit 1
-fi
+echo "Waiting for route withdrawal on peer2..."
+poll_until "Route withdrawal failed" 10 "! peer2 global rib show | grep -q 10.99.0.0/24"
+echo "  withdrawn"
 
-echo "Withdrawing route 10.99.0.0/24 from peer1..."
-docker compose -f basic.yml exec -T peer1 bgpgg global rib del 10.99.0.0/24
-
-echo "Polling for route withdrawal on peer2 (10 seconds)..."
-for i in $(seq 1 10); do
-    if ! docker compose -f basic.yml exec -T peer2 bgpgg global rib show 2>/dev/null | grep -q 10.99.0.0/24; then
-        echo "Route withdrawn"
-        echo "Smoke tests passed"
-        exit 0
-    fi
-    sleep 1
-done
-
-echo "Route withdrawal failed"
-docker compose -f basic.yml exec -T peer2 bgpgg global rib show || true
-exit 1
+echo "Smoke tests passed"
