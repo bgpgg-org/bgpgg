@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
-use bgpgg::grpc::proto::{Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
 use tokio::time::Duration;
 
@@ -653,5 +653,110 @@ async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
             })],
         },
     )
+    .await;
+}
+
+/// RR with next_hop_self rewrites NEXT_HOP to the RR's address for clients that
+/// have it configured, while clients without it still receive the original eBGP
+/// NEXT_HOP. Both behaviors verified in the same topology.
+///
+/// Topology: client_nhs(65001) \
+///                               RR(65001) -- ebgp_peer(65002)
+///           client(65001)     /
+///
+/// client_nhs: rr_client + next_hop_self -> sees RR's address
+/// client:     rr_client only             -> sees eBGP peer's address
+#[tokio::test]
+async fn test_rr_next_hop_self() {
+    let client_nhs = start_test_server(test_config(65001, 1)).await;
+    let rr = start_test_server(test_config(65001, 2)).await;
+    let ebgp_peer = start_test_server(test_config(65002, 3)).await;
+    let client = start_test_server(test_config(65001, 4)).await;
+
+    // client_nhs: rr_client + next_hop_self
+    rr.add_peer_with_config(
+        &client_nhs,
+        SessionConfig {
+            rr_client: Some(true),
+            next_hop_self: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+    client_nhs.add_peer(&rr).await;
+
+    // client: rr_client only (no next_hop_self)
+    rr.add_peer_with_config(
+        &client,
+        SessionConfig {
+            rr_client: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+    client.add_peer(&rr).await;
+
+    // eBGP peer
+    rr.add_peer(&ebgp_peer).await;
+    ebgp_peer.add_peer(&rr).await;
+
+    poll_until(
+        || async {
+            verify_peers(
+                &rr,
+                vec![
+                    client_nhs.to_peer(BgpState::Established),
+                    client.to_peer(BgpState::Established),
+                    ebgp_peer.to_peer(BgpState::Established),
+                ],
+            )
+            .await
+        },
+        "Timeout waiting for RR topology to establish",
+    )
+    .await;
+
+    announce_route(
+        &ebgp_peer,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.3.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let path_base = PathParams {
+        as_path: vec![as_sequence(vec![65002])],
+        peer_address: rr.address.to_string(),
+        origin: Some(Origin::Igp),
+        local_pref: Some(100),
+        originator_id: None,
+        cluster_list: vec![],
+        ..Default::default()
+    };
+
+    poll_rib(&[
+        (
+            &client_nhs,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    next_hop: rr.address.to_string(), // rewritten to RR's address
+                    ..path_base.clone()
+                })],
+            }],
+        ),
+        (
+            &client,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    next_hop: ebgp_peer.address.to_string(), // original eBGP NH preserved
+                    ..path_base.clone()
+                })],
+            }],
+        ),
+    ])
     .await;
 }

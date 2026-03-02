@@ -996,6 +996,7 @@ impl BgpServer {
             cluster_id: self.config.cluster_id(),
             send_format,
             negotiated_afi_safis: &negotiated_afi_safis,
+            next_hop_self: peer_info.config.next_hop_self,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);

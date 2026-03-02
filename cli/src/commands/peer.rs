@@ -30,8 +30,13 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
             max_prefix_limit,
             max_prefix_action,
             md5_key_file,
+            next_hop_self,
         } => {
-            let config = if port.is_some() || max_prefix_limit.is_some() || md5_key_file.is_some() {
+            let config = if port.is_some()
+                || max_prefix_limit.is_some()
+                || md5_key_file.is_some()
+                || next_hop_self
+            {
                 Some(SessionConfig {
                     port,
                     max_prefix: max_prefix_limit.map(|limit| MaxPrefixSetting {
@@ -42,6 +47,7 @@ pub async fn handle(addr: String, cmd: PeerCommands) -> Result<(), Box<dyn std::
                         },
                     }),
                     md5_key_file,
+                    next_hop_self: if next_hop_self { Some(true) } else { None },
                     ..Default::default()
                 })
             } else {

@@ -144,6 +144,10 @@ pub struct PeerConfig {
     /// Path to file containing TCP MD5 key (RFC 2385). File should be chmod 600.
     #[serde(default)]
     pub md5_key_file: Option<String>,
+    /// Rewrite NEXT_HOP to local interface address when advertising to this peer.
+    /// Useful for iBGP peers that lack a route to the original NEXT_HOP.
+    #[serde(default)]
+    pub next_hop_self: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -237,6 +241,7 @@ impl Default for PeerConfig {
             add_path_receive: false,
             asn: None,
             md5_key_file: None,
+            next_hop_self: false,
         }
     }
 }
