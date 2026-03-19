@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::community;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode};
 use crate::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use crate::bgp::msg_update_types::{PathAttrValue, AS_TRANS};
@@ -246,6 +247,17 @@ impl Peer {
         if self.session_type == Some(SessionType::Ebgp) {
             path.attrs.originator_id = None;
             path.attrs.cluster_list.clear();
+        }
+
+        // RFC 8326 Section 4.1: on eBGP receive, set LOCAL_PREF = 0 when
+        // GRACEFUL_SHUTDOWN community is present.
+        if self.session_type == Some(SessionType::Ebgp)
+            && path
+                .attrs
+                .communities
+                .contains(&community::GRACEFUL_SHUTDOWN)
+        {
+            path.attrs.local_pref = Some(0);
         }
 
         // RFC 4271 5.1.3(a): NEXT_HOP must not be receiving speaker's IP

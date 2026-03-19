@@ -19,7 +19,8 @@ use super::proto::{
     ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
     ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
     RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest,
-    ResetPeerRequest, Route, SessionConfig, SetPolicyAssignmentRequest, StatementConfig,
+    ResetPeerRequest, Route, SessionConfig, SetPeerGracefulShutdownRequest,
+    SetPolicyAssignmentRequest, StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -740,5 +741,18 @@ impl BgpClient {
         } else {
             Err(tonic::Status::unknown(resp.message))
         }
+    }
+
+    /// RFC 8326: enable or disable graceful shutdown tagging for a peer
+    pub async fn set_peer_graceful_shutdown(
+        &self,
+        address: String,
+        enabled: bool,
+    ) -> Result<(), tonic::Status> {
+        self.inner
+            .clone()
+            .set_peer_graceful_shutdown(SetPeerGracefulShutdownRequest { address, enabled })
+            .await?;
+        Ok(())
     }
 }

@@ -234,6 +234,11 @@ pub enum MgmtOp {
         default_action: Option<crate::policy::PolicyResult>,
         response: oneshot::Sender<Result<(), String>>,
     },
+    SetPeerGracefulShutdown {
+        addr: String,
+        enabled: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 // Helper types for policy management operations
@@ -1043,6 +1048,7 @@ impl BgpServer {
                 send_format,
                 negotiated_afi_safis: &negotiated_afi_safis,
                 next_hop_self: entry.config.next_hop_self,
+                graceful_shutdown: entry.config.graceful_shutdown,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);

@@ -17,6 +17,7 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::community;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
@@ -1992,4 +1993,185 @@ async fn test_peer_without_capabilities() {
         !update.nlri_prefixes().is_empty(),
         "should receive IPv4 route"
     );
+}
+
+/// RFC 8326 Section 4.1: eBGP receiver MUST set LOCAL_PREF=0 when GRACEFUL_SHUTDOWN
+/// community is present. No configuration required.
+#[tokio::test]
+async fn test_graceful_session_shutdown_receiver() {
+    let (server, mut peer) = setup_server_and_fake_peer().await;
+
+    let next_hop = Ipv4Addr::new(127, 0, 0, 2);
+
+    // Send a route WITH GRACEFUL_SHUTDOWN community
+    let nlri_with_gshut = &[24u8, 10, 1, 0]; // 10.1.0.0/24
+    let update_gshut = build_ebgp_update_with_communities(
+        65002,
+        next_hop,
+        &[community::GRACEFUL_SHUTDOWN],
+        nlri_with_gshut,
+    );
+    peer.send_raw(&update_gshut).await;
+
+    // Send a route WITHOUT GRACEFUL_SHUTDOWN community
+    let nlri_no_gshut = &[24u8, 10, 2, 0]; // 10.2.0.0/24
+    let update_no_gshut = build_ebgp_update_with_communities(65002, next_hop, &[], nlri_no_gshut);
+    peer.send_raw(&update_no_gshut).await;
+
+    let next_hop_str = "127.0.0.2".to_string();
+    poll_rib(&[(
+        &server,
+        vec![
+            Route {
+                prefix: "10.1.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: next_hop_str.clone(),
+                    peer_address: peer.address.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(0),
+                    communities: vec![community::GRACEFUL_SHUTDOWN],
+                    ..Default::default()
+                })],
+            },
+            Route {
+                prefix: "10.2.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65002])],
+                    next_hop: next_hop_str,
+                    peer_address: peer.address.clone(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            },
+        ],
+    )])
+    .await;
+}
+
+/// RFC 8326: graceful_shutdown is per-peer on the sender side.
+/// Only the peer with the flag set receives the GRACEFUL_SHUTDOWN community.
+/// Other eBGP peers and iBGP peers must NOT receive it.
+///
+/// Topology:
+///   S1 (AS65001) -- eBGP -- S2 (AS65002)  [graceful_shutdown=true]
+///   S1 (AS65001) -- eBGP -- S3 (AS65003)  [graceful_shutdown=false]
+///   S1 (AS65001) -- iBGP -- S4 (AS65001)  [graceful_shutdown=false]
+#[tokio::test]
+async fn test_graceful_session_shutdown_initiator() {
+    let (server1, [server2, server3, server4]) =
+        setup_hub_spoke_servers(65001, [65002, 65003, 65001], PeerConfig::default()).await;
+
+    server1
+        .client
+        .set_peer_graceful_shutdown(server2.address.to_string(), true)
+        .await
+        .unwrap();
+
+    announce_route(
+        &server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    poll_rib(&[
+        (
+            &server2,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(0),
+                    communities: vec![community::GRACEFUL_SHUTDOWN],
+                    ..Default::default()
+                })],
+            }],
+        ),
+        (
+            &server3,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: server1.address.to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            }],
+        ),
+        (
+            &server4,
+            vec![Route {
+                prefix: "10.0.0.0/24".to_string(),
+                paths: vec![build_path(PathParams {
+                    next_hop: "192.168.1.1".to_string(),
+                    peer_address: server1.address.to_string(),
+                    origin: Some(Origin::Igp),
+                    local_pref: Some(100),
+                    ..Default::default()
+                })],
+            }],
+        ),
+    ])
+    .await;
+}
+
+/// RFC 8326: graceful shutdown can be enabled/disabled at runtime without
+/// tearing down the session. All existing routes are re-propagated.
+#[tokio::test]
+async fn test_dynamic_graceful_shutdown_toggle() {
+    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+
+    announce_route(
+        &server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let route_at = |communities: Vec<u32>, local_pref: u32| Route {
+        prefix: "10.0.0.0/24".to_string(),
+        paths: vec![build_path(PathParams {
+            as_path: vec![as_sequence(vec![65001])],
+            next_hop: server1.address.to_string(),
+            peer_address: server1.address.to_string(),
+            origin: Some(Origin::Igp),
+            local_pref: Some(local_pref),
+            communities,
+            ..Default::default()
+        })],
+    };
+
+    poll_rib(&[(&server2, vec![route_at(vec![], 100)])]).await;
+
+    server1
+        .client
+        .set_peer_graceful_shutdown(server2.address.to_string(), true)
+        .await
+        .unwrap();
+    poll_rib(&[(
+        &server2,
+        vec![route_at(vec![community::GRACEFUL_SHUTDOWN], 0)],
+    )])
+    .await;
+
+    server1
+        .client
+        .set_peer_graceful_shutdown(server2.address.to_string(), false)
+        .await
+        .unwrap();
+    poll_rib(&[(&server2, vec![route_at(vec![], 100)])]).await;
 }

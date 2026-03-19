@@ -32,6 +32,8 @@ pub const fn value(community: u32) -> u16 {
 pub const NO_EXPORT: u32 = 0xFFFFFF01;
 pub const NO_ADVERTISE: u32 = 0xFFFFFF02;
 pub const NO_EXPORT_SUBCONFED: u32 = 0xFFFFFF03;
+/// RFC 8326: well-known community for graceful BGP session shutdown
+pub const GRACEFUL_SHUTDOWN: u32 = 0xFFFF0000;
 
 #[cfg(test)]
 mod tests {
