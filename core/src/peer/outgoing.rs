@@ -14,6 +14,7 @@
 
 //! Route propagation logic for BGP UPDATE messages
 
+use crate::bgp::community;
 use crate::bgp::ext_community::is_transitive;
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
@@ -60,6 +61,8 @@ pub struct PeerExportContext<'a> {
     pub send_format: MessageFormat,
     pub negotiated_afi_safis: &'a HashSet<AfiSafi>,
     pub next_hop_self: bool,
+    /// RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community (65535:0).
+    pub graceful_shutdown: bool,
 }
 
 impl<'a> PeerExportContext<'a> {
@@ -279,6 +282,16 @@ pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -
     }
 }
 
+/// Build communities for export to peer.
+/// RFC 8326: inject GRACEFUL_SHUTDOWN community when the flag is set on this peer session.
+pub fn build_export_communities(path: &Path, ctx: &PeerExportContext) -> Vec<u32> {
+    let mut comms = path.attrs.communities.clone();
+    if ctx.graceful_shutdown && !comms.contains(&community::GRACEFUL_SHUTDOWN) {
+        comms.push(community::GRACEFUL_SHUTDOWN);
+    }
+    comms
+}
+
 /// Build unknown attributes for export to peer.
 /// RFC 7947 Section 2.2: Route servers preserve all unknown attributes (transitive and non-transitive).
 /// RFC 4271: Normal eBGP only forwards optional transitive attributes.
@@ -453,7 +466,7 @@ fn build_export_attrs(
         med: build_export_med(path, ctx),
         atomic_aggregate: path.attrs.atomic_aggregate,
         aggregator: path.attrs.aggregator.clone(),
-        communities: path.attrs.communities.clone(),
+        communities: build_export_communities(path, ctx),
         extended_communities: build_export_extended_communities(path, ctx),
         large_communities: path.attrs.large_communities.clone(),
         unknown_attrs: build_export_unknown_attrs(path, ctx),
@@ -824,6 +837,7 @@ mod tests {
             },
             negotiated_afi_safis: negotiated,
             next_hop_self,
+            graceful_shutdown: false,
         }
     }
 
@@ -1605,6 +1619,7 @@ mod tests {
             },
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,
+            graceful_shutdown: false,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1869,6 +1884,7 @@ mod tests {
             },
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,
+            graceful_shutdown: false,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));
@@ -1954,6 +1970,86 @@ mod tests {
         // Non-RS client only checks best path (path1) -> rejected
         let result = select_paths_for_export(&prefix, false, &loc_rib, &non_rs_ctx);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_export_communities() {
+        let make_path = |communities: Vec<u32>| Path {
+            local_path_id: None,
+            remote_path_id: None,
+            stale: false,
+            attrs: PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![],
+                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+                source: RouteSource::Local,
+                local_pref: None,
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities,
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+            },
+        };
+
+        struct TestCase {
+            name: &'static str,
+            graceful_shutdown: bool,
+            input_communities: Vec<u32>,
+            expected: Vec<u32>,
+        }
+
+        let other_community = 0x00010064u32; // 1:100
+        let gshut = community::GRACEFUL_SHUTDOWN;
+
+        let test_cases = vec![
+            TestCase {
+                name: "flag off, empty",
+                graceful_shutdown: false,
+                input_communities: vec![],
+                expected: vec![],
+            },
+            TestCase {
+                name: "flag on, empty: GRACEFUL_SHUTDOWN added",
+                graceful_shutdown: true,
+                input_communities: vec![],
+                expected: vec![gshut],
+            },
+            TestCase {
+                name: "flag on, already present: no duplicate",
+                graceful_shutdown: true,
+                input_communities: vec![gshut],
+                expected: vec![gshut],
+            },
+            TestCase {
+                name: "flag off, other community preserved unchanged",
+                graceful_shutdown: false,
+                input_communities: vec![other_community],
+                expected: vec![other_community],
+            },
+            TestCase {
+                name: "flag on, other community: GRACEFUL_SHUTDOWN appended",
+                graceful_shutdown: true,
+                input_communities: vec![other_community],
+                expected: vec![other_community, gshut],
+            },
+        ];
+
+        for test_case in test_cases {
+            let path = make_path(test_case.input_communities);
+            let mut ctx = make_peer_export_ctx(65001, 65002, false, false);
+            ctx.graceful_shutdown = test_case.graceful_shutdown;
+            let result = build_export_communities(&path, &ctx);
+            assert_eq!(
+                result, test_case.expected,
+                "Test case '{}' failed",
+                test_case.name
+            );
+        }
     }
 
     #[test]

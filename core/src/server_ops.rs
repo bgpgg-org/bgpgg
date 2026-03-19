@@ -176,6 +176,13 @@ impl BgpServer {
                     response,
                 );
             }
+            MgmtOp::SetPeerGracefulShutdown {
+                addr,
+                enabled,
+                response,
+            } => {
+                self.handle_set_peer_graceful_shutdown(addr, enabled, response);
+            }
         }
     }
 
@@ -997,6 +1004,7 @@ impl BgpServer {
             send_format,
             negotiated_afi_safis: &negotiated_afi_safis,
             next_hop_self: peer_info.config.next_hop_self,
+            graceful_shutdown: peer_info.config.graceful_shutdown,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);
@@ -1007,6 +1015,49 @@ impl BgpServer {
         propagate_routes_to_peer(&ctx, &delta, &self.loc_rib, &mut peer_info.adj_rib_out);
 
         info!(%peer_ip, ?afi, "resent routes to peer");
+    }
+
+    fn handle_set_peer_graceful_shutdown(
+        &mut self,
+        addr: String,
+        enabled: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let peer_ip: IpAddr = match addr.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = response.send(Err(format!("invalid peer address: {}", e)));
+                return;
+            }
+        };
+
+        if !self.peers.contains_key(&peer_ip) {
+            let _ = response.send(Err(format!("peer not found: {}", addr)));
+            return;
+        }
+
+        // Collect afi_safis before mutating so we avoid double-borrow.
+        let afi_safis: Vec<AfiSafi> = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.established_conn())
+            .map(|conn| conn.negotiated_afi_safis().into_iter().collect())
+            .unwrap_or_default();
+
+        self.peers
+            .get_mut(&peer_ip)
+            .expect("peer should exist after contains_key check")
+            .config
+            .graceful_shutdown = enabled;
+        info!(%peer_ip, enabled, "set graceful_shutdown");
+
+        // Resend all routes so the updated community list is propagated.
+        // Same pattern as handle_reset_soft_out.
+        for afi_safi in afi_safis {
+            self.resend_routes_to_peer(peer_ip, afi_safi.afi, afi_safi.safi);
+        }
+
+        let _ = response.send(Ok(()));
     }
 
     async fn handle_add_route(

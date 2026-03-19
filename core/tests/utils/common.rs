@@ -661,6 +661,51 @@ pub async fn setup_four_meshed_servers(
     (server1, server2, server3, server4)
 }
 
+/// Sets up a hub-and-spoke BGP topology.
+///
+/// The hub connects to each spoke; spokes are not connected to each other.
+/// All sessions use the same `config`. Returns when all sessions are Established.
+///
+/// Hub ASN and spoke ASNs are auto-assigned IPs (127.0.0.1 for hub, 127.0.0.2+ for spokes).
+///
+/// # Example
+/// ```
+/// // S1 (AS65001) connected to S2 (AS65002), S3 (AS65003), S4 (AS65001 iBGP)
+/// let (s1, [s2, s3, s4]) = setup_hub_spoke_servers(65001, [65002, 65003, 65001], PeerConfig::default()).await;
+/// ```
+pub async fn setup_hub_spoke_servers<const N: usize>(
+    hub_asn: u32,
+    spoke_asns: [u32; N],
+    config: PeerConfig,
+) -> (TestServer, [TestServer; N]) {
+    let hold = config.hold_timer_secs.unwrap_or(90) as u64;
+    let hub = start_test_server(Config::new(
+        hub_asn,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        hold,
+    ))
+    .await;
+    let mut spokes = Vec::new();
+    for (i, &asn) in spoke_asns.iter().enumerate() {
+        let octet = (i + 2) as u8;
+        spokes.push(
+            start_test_server(Config::new(
+                asn,
+                &format!("127.0.0.{}:0", octet),
+                Ipv4Addr::new(octet, octet, octet, octet),
+                hold,
+            ))
+            .await,
+        );
+    }
+    let spokes_array: [TestServer; N] = match spokes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => panic!("Failed to convert Vec to array"),
+    };
+    hub_spoke_servers(hub, spokes_array, config).await
+}
+
 /// Polls until each server's full RIB matches the expected routes exactly
 pub async fn poll_rib(expectations: &[(&TestServer, Vec<Route>)]) {
     poll_rib_with_timeout(expectations, 100).await;
@@ -1325,6 +1370,62 @@ pub async fn mesh_servers<const N: usize>(
     .await;
 
     servers
+}
+
+/// Connect a hub server to N spoke servers (spokes not connected to each other).
+/// Waits for all N hub-spoke sessions to reach Established.
+pub async fn hub_spoke_servers<const N: usize>(
+    hub: TestServer,
+    spokes: [TestServer; N],
+    config: PeerConfig,
+) -> (TestServer, [TestServer; N]) {
+    let session_config = SessionConfig {
+        graceful_restart: config.graceful_restart,
+        idle_hold_time_secs: config.idle_hold_time_secs,
+        min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        add_path_send: config.add_path_send.map(|v| {
+            if v {
+                AddPathSendMode::AddPathSendAll
+            } else {
+                AddPathSendMode::AddPathSendDisabled
+            }
+            .into()
+        }),
+        add_path_receive: config.add_path_receive,
+        ..Default::default()
+    };
+
+    for spoke in &spokes {
+        let mut cfg = session_config.clone();
+        cfg.port = Some(spoke.bgp_port as u32);
+        hub.client
+            .add_peer(spoke.address.to_string(), Some(cfg))
+            .await
+            .unwrap_or_else(|e| panic!("hub failed to add spoke: {}", e));
+
+        let mut cfg = session_config.clone();
+        cfg.port = Some(hub.bgp_port as u32);
+        spoke
+            .client
+            .add_peer(hub.address.to_string(), Some(cfg))
+            .await
+            .unwrap_or_else(|e| panic!("spoke failed to add hub: {}", e));
+    }
+
+    poll_until(
+        || async {
+            for spoke in &spokes {
+                if !verify_peers(spoke, vec![hub.to_peer(BgpState::Established)]).await {
+                    return false;
+                }
+            }
+            true
+        },
+        "Timeout waiting for hub-spoke topology to establish",
+    )
+    .await;
+
+    (hub, spokes)
 }
 
 /// Sets up route reflector topology with bidirectional peering and waits for Established.
@@ -2091,6 +2192,39 @@ pub fn attr_as_path_4byte(asns: Vec<u32>) -> Vec<u8> {
         value.len() as u8,
         &value,
     )
+}
+
+pub fn attr_communities(communities: &[u32]) -> Vec<u8> {
+    let mut value = Vec::new();
+    for &comm in communities {
+        value.extend_from_slice(&comm.to_be_bytes());
+    }
+    build_attr_bytes(
+        attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        attr_type_code::COMMUNITIES,
+        value.len() as u8,
+        &value,
+    )
+}
+
+/// Build a minimal eBGP UPDATE with the given communities and NLRI prefix.
+/// `from_asn` is 2-byte encoded.
+pub fn build_ebgp_update_with_communities(
+    from_asn: u16,
+    next_hop: Ipv4Addr,
+    communities: &[u32],
+    nlri: &[u8],
+) -> Vec<u8> {
+    let mut attrs: Vec<Vec<u8>> = vec![
+        attr_origin_igp(),
+        attr_as_path_2byte(vec![from_asn]),
+        attr_next_hop(next_hop),
+    ];
+    if !communities.is_empty() {
+        attrs.push(attr_communities(communities));
+    }
+    let attr_refs: Vec<&[u8]> = attrs.iter().map(|a| a.as_slice()).collect();
+    build_raw_update(&[], &attr_refs, nlri, None)
 }
 
 /// Build capability 65 (4-byte ASN support) for use with build_raw_open

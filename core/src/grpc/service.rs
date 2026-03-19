@@ -39,7 +39,8 @@ use super::proto::{
     RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
     RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, ResetPeerRequest,
     ResetPeerResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
-    SetPolicyAssignmentRequest, SetPolicyAssignmentResponse,
+    SetPeerGracefulShutdownRequest, SetPeerGracefulShutdownResponse, SetPolicyAssignmentRequest,
+    SetPolicyAssignmentResponse,
 };
 
 // Proto conversion functions from sibling modules
@@ -318,6 +319,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         asn: cfg.asn,
         md5_key_file: cfg.md5_key_file.or(defaults.md5_key_file),
         next_hop_self: cfg.next_hop_self.unwrap_or(defaults.next_hop_self),
+        graceful_shutdown: cfg.graceful_shutdown.unwrap_or(defaults.graceful_shutdown),
     }
 }
 
@@ -545,8 +547,8 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("failed to send request"))?;
 
         // Convert channel receiver to gRPC stream
-        let stream = UnboundedReceiverStream::new(rx).map(|peer| {
-            Ok(ProtoPeer {
+        let stream = UnboundedReceiverStream::new(rx)
+            .map(|peer| ProtoPeer {
                 address: peer.address,
                 asn: peer.asn.unwrap_or(0),
                 state: to_proto_state(peer.state),
@@ -554,7 +556,7 @@ impl BgpService for BgpGrpcService {
                 import_policies: peer.import_policies,
                 export_policies: peer.export_policies,
             })
-        });
+            .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -914,7 +916,7 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("failed to send request"))?;
 
         // Convert channel receiver to gRPC stream
-        let stream = UnboundedReceiverStream::new(rx).map(|route| Ok(route_to_proto(route)));
+        let stream = UnboundedReceiverStream::new(rx).map(route_to_proto).map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -1285,6 +1287,32 @@ impl BgpService for BgpGrpcService {
                 success: false,
                 message: e,
             })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn set_peer_graceful_shutdown(
+        &self,
+        request: Request<SetPeerGracefulShutdownRequest>,
+    ) -> Result<Response<SetPeerGracefulShutdownResponse>, Status> {
+        let inner = request.into_inner();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.mgmt_request_tx
+            .send(MgmtOp::SetPeerGracefulShutdown {
+                addr: inner.address,
+                enabled: inner.enabled,
+                response: tx,
+            })
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(SetPeerGracefulShutdownResponse {
+                success: true,
+                message: String::new(),
+            })),
+            Ok(Err(e)) => Err(Status::not_found(e)),
             Err(_) => Err(Status::internal("request processing failed")),
         }
     }

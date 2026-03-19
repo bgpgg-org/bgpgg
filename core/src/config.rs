@@ -148,6 +148,10 @@ pub struct PeerConfig {
     /// Useful for iBGP peers that lack a route to the original NEXT_HOP.
     #[serde(default)]
     pub next_hop_self: bool,
+    /// RFC 8326: tag outbound routes with GRACEFUL_SHUTDOWN community (65535:0).
+    /// Enable before taking the session down to let peers prefer alternate paths.
+    #[serde(default)]
+    pub graceful_shutdown: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -242,6 +246,7 @@ impl Default for PeerConfig {
             asn: None,
             md5_key_file: None,
             next_hop_self: false,
+            graceful_shutdown: false,
         }
     }
 }
