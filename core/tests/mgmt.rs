@@ -921,3 +921,26 @@ async fn test_peer_asn_api_fallback() {
         .unwrap();
     assert_eq!(peer_detail.unwrap().asn, 65002);
 }
+
+#[tokio::test]
+async fn test_add_peer_invalid_ttl_min() {
+    let server = start_test_server(test_config(65001, 1)).await;
+    for ttl in [0u32, 256, 1000] {
+        let result = server
+            .client
+            .add_peer(
+                "127.0.0.2".to_string(),
+                Some(SessionConfig {
+                    ttl_min: Some(ttl),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "ttl_min={ttl} should be rejected");
+        assert_eq!(
+            result.unwrap_err().code(),
+            tonic::Code::InvalidArgument,
+            "ttl_min={ttl}"
+        );
+    }
+}

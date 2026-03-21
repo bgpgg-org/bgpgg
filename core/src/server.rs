@@ -20,9 +20,13 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{Config, PeerConfig};
-use crate::log::{error, info};
+use crate::log::{error, info, warn};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::net::apply_gtsm;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::net::set_ttl_max;
 use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::outgoing::{
@@ -674,6 +678,14 @@ impl BgpServer {
             .map_err(ServerError::BindError)?;
         self.local_port = listener.local_addr().map_err(ServerError::IoError)?.port();
 
+        // Set outgoing TTL=255 on the listener so SYN-ACKs are sent with TTL=255.
+        // Remote peers that enforce GTSM by setting IP_MINTTL before connect() will
+        // otherwise drop our SYN-ACK (which arrives with the OS default TTL of 64).
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Err(e) = set_ttl_max(listener.as_raw_fd(), self.local_addr) {
+            warn!(error = %e, "failed to set TTL=255 on listener");
+        }
+
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         self.setup_listener_tcp_md5(&listener);
 
@@ -822,6 +834,14 @@ impl BgpServer {
             error!(%peer_ip, "accept_incoming_connection called for unconfigured peer");
             return;
         };
+
+        // Apply GTSM on the accepted socket if configured
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(min_ttl) = peer.config.ttl_min {
+            if let Err(e) = apply_gtsm(stream.as_raw_fd(), peer_ip, min_ttl) {
+                warn!(%peer_ip, error = %e, "failed to apply GTSM on incoming connection");
+            }
+        }
 
         // Passive mode with existing task: send connection to existing task
         if peer.config.passive_mode {

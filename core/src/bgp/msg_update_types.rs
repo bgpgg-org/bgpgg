@@ -457,6 +457,5 @@ impl AsPath {
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct Aggregator {
     pub asn: u32,
-    // TODO: support IPv6?
-    pub ip_addr: Ipv4Addr,
+    pub ip_addr: Ipv4Addr, // IPv4 only (RFC 4271)
 }

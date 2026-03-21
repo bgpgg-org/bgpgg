@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use super::utils::set_ttl_max;
+use super::utils::{setsockopt, TTL_MAX};
 use std::io;
 use std::mem;
 use std::net::IpAddr;
 use std::os::unix::io::RawFd;
-use std::ptr::{addr_of, addr_of_mut};
+use std::ptr::addr_of_mut;
 
 /// struct tcp_md5sig (linux/tcp.h)
 #[repr(C)]
@@ -55,6 +57,35 @@ fn tcp_md5sig(peer_addr: IpAddr, key: &[u8]) -> TcpMd5sig {
     sig
 }
 
+/// Enable GTSM (RFC 5082) on a socket for the given peer address.
+///
+/// Sets outgoing TTL to 255 (RFC 5082: sender must use TTL=255) and enforces
+/// a minimum inbound TTL so that packets arriving with TTL < min_ttl are
+/// dropped by the kernel.
+pub fn apply_gtsm(fd: RawFd, addr: IpAddr, min_ttl: u8) -> io::Result<()> {
+    match addr {
+        IpAddr::V4(_) => {
+            setsockopt(fd, libc::IPPROTO_IP, libc::IP_TTL, TTL_MAX)?;
+            setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_MINTTL,
+                min_ttl as libc::c_int,
+            )?;
+        }
+        IpAddr::V6(_) => {
+            setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS, TTL_MAX)?;
+            setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MINHOPCOUNT,
+                min_ttl as libc::c_int,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Set TCP MD5 signature key on a socket for the given peer address (RFC 2385).
 pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()> {
     if key.len() > libc::TCP_MD5SIG_MAXKEYLEN {
@@ -64,25 +95,13 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
         ));
     }
     let sig = tcp_md5sig(peer_addr, key);
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_MD5SIG,
-            addr_of!(sig) as *const libc::c_void,
-            mem::size_of_val(&sig) as libc::socklen_t,
-        )
-    };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_MD5SIG, sig)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::utils::getsockopt_int;
     use std::net::Ipv4Addr;
     use std::os::unix::io::AsRawFd;
     use std::ptr::addr_of;
@@ -132,5 +151,55 @@ mod tests {
         let key = b"test-bgp-md5-key";
         let result = apply_tcp_md5(socket.as_raw_fd(), peer_addr, key);
         assert!(result.is_ok(), "apply_tcp_md5 failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_apply_gtsm_v4() {
+        for min_ttl in [255u8, 254] {
+            let socket = TcpSocket::new_v4().unwrap();
+            let fd = socket.as_raw_fd();
+            apply_gtsm(fd, "127.0.0.1".parse().unwrap(), min_ttl).unwrap();
+            assert_eq!(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL), TTL_MAX);
+            assert_eq!(
+                getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_MINTTL),
+                min_ttl as libc::c_int,
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_gtsm_v6() {
+        let socket = TcpSocket::new_v6().unwrap();
+        let fd = socket.as_raw_fd();
+        apply_gtsm(fd, "::1".parse().unwrap(), 254).unwrap();
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
+            TTL_MAX,
+        );
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_MINHOPCOUNT),
+            254,
+        );
+    }
+
+    #[test]
+    fn test_set_ttl_max() {
+        let socket = TcpSocket::new_v4().unwrap();
+        set_ttl_max(socket.as_raw_fd(), "127.0.0.1".parse().unwrap()).unwrap();
+        assert_eq!(
+            getsockopt_int(socket.as_raw_fd(), libc::IPPROTO_IP, libc::IP_TTL),
+            TTL_MAX
+        );
+
+        let socket = TcpSocket::new_v6().unwrap();
+        set_ttl_max(socket.as_raw_fd(), "::1".parse().unwrap()).unwrap();
+        assert_eq!(
+            getsockopt_int(
+                socket.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_UNICAST_HOPS
+            ),
+            TTL_MAX,
+        );
     }
 }

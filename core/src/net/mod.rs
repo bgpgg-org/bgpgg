@@ -23,13 +23,26 @@ use std::os::unix::io::AsRawFd;
 mod bsd;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod utils;
+
+#[cfg(target_os = "freebsd")]
+pub use bsd::apply_gtsm;
+#[cfg(target_os = "linux")]
+pub use linux::apply_gtsm;
 
 #[cfg(target_os = "freebsd")]
 pub use bsd::apply_tcp_md5;
-#[cfg(target_os = "freebsd")]
-pub use bsd::remove_tcp_md5;
 #[cfg(target_os = "linux")]
 pub use linux::apply_tcp_md5;
+
+#[cfg(target_os = "freebsd")]
+pub use bsd::remove_tcp_md5;
+
+#[cfg(target_os = "freebsd")]
+pub use bsd::set_ttl_max;
+#[cfg(target_os = "linux")]
+pub use linux::set_ttl_max;
 
 /// BGP protocol port number
 pub const BGP_PORT: u16 = 179;
@@ -178,6 +191,7 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
 /// * `local_addr` - Local address to bind to (typically IP:0 for automatic port selection)
 /// * `remote_addr` - Remote address to connect to (IP:179 for BGP)
 /// * `md5_key` - Optional TCP MD5 key bytes (RFC 2385, Linux and FreeBSD)
+/// * `ttl_min` - Optional GTSM minimum inbound TTL (RFC 5082, Linux and FreeBSD)
 ///
 /// # Returns
 /// `TcpStream` on success, or an `io::Error` on failure
@@ -185,6 +199,7 @@ pub async fn create_and_bind_tcp_socket(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     md5_key: Option<&[u8]>,
+    ttl_min: Option<u8>,
 ) -> io::Result<TcpStream> {
     // Create appropriate socket based on remote address type
     let socket = if remote_addr.is_ipv4() {
@@ -203,7 +218,18 @@ pub async fn create_and_bind_tcp_socket(
     }
 
     // Connect to remote peer
-    socket.connect(remote_addr).await
+    let stream = socket.connect(remote_addr).await?;
+
+    // Apply GTSM after the TCP handshake completes. Setting IP_MINTTL before
+    // connect() causes the kernel to drop the SYN-ACK from the listener (which
+    // uses the OS default TTL). Applying it after connect protects BGP data while
+    // leaving the handshake unaffected.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(min_ttl) = ttl_min {
+        apply_gtsm(stream.as_raw_fd(), remote_addr.ip(), min_ttl)?;
+    }
+
+    Ok(stream)
 }
 
 /// Extract the peer IP address from a TcpStream.

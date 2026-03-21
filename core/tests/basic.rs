@@ -873,6 +873,87 @@ async fn test_next_hop_self() {
     }
 }
 
+// ---- GTSM TTL security (RFC 5082) ----
+
+// Happy path: both peers set ttl_min=255. Over loopback, TTL is not decremented,
+// so packets arrive with TTL=255 >= 255 and the session establishes normally.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[tokio::test]
+async fn test_gtsm_matching_both_peers() {
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+    peer_servers_with_config(
+        &server1,
+        &server2,
+        SessionConfig {
+            ttl_min: Some(255),
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+// Rejection path: server1 sets ttl_min=255 (IP_MINTTL=255), server2 uses default
+// TTL (64 on Linux). Over loopback the kernel does not decrement TTL, so server1
+// receives packets with TTL=64 < 255 and drops them. The session never establishes.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[tokio::test]
+async fn test_gtsm_rejects_low_ttl() {
+    let server1 = start_test_server(test_config(65001, 1)).await;
+    let server2 = start_test_server(test_config(65002, 2)).await;
+
+    // Server1 enforces GTSM; server2 sends with default OS TTL
+    server1
+        .add_peer_with_config(
+            &server2,
+            SessionConfig {
+                ttl_min: Some(255),
+                ..Default::default()
+            },
+        )
+        .await;
+    server2.add_peer(&server1).await;
+
+    poll_while(
+        || async {
+            match server1.client.get_peers().await {
+                Ok(peers) => peers
+                    .iter()
+                    .all(|p| p.state != BgpState::Established as i32),
+                Err(_) => true,
+            }
+        },
+        Duration::from_secs(5),
+        "Session should not establish when peer sends with low TTL",
+    )
+    .await;
+}
+
+// Interop: verify that the listener sends SYN-ACKs with TTL=255 so that a
+// FakePeer that sets IP_MINTTL=255 before connect() can complete the TCP
+// handshake. This is the behavior used by other BGP implementations that
+// enforce TTL security from the outset.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[tokio::test]
+async fn test_gtsm_incoming_connection() {
+    // Server configured with a passive GTSM peer at 127.0.0.1.
+    // The key property under test: listener must send SYN-ACKs with TTL=255.
+    let server = setup_server_with_passive_peer().await;
+
+    // connect_with_min_ttl sets IP_MINTTL=255 before connect(), simulating a
+    // remote peer that enforces GTSM from the start. The connect() succeeds
+    // only if the listener sends SYN-ACK with TTL >= 255.
+    let mut fake_peer = FakePeer::connect_with_min_ttl(None, &server, 255).await;
+
+    // Complete the BGP handshake and verify session reaches Established.
+    fake_peer
+        .handshake_open(65002, Ipv4Addr::new(2, 2, 2, 2), 300)
+        .await;
+    fake_peer.handshake_keepalive().await;
+
+    poll_peers(&server, vec![fake_peer.to_peer(BgpState::Established)]).await;
+}
+
 // ---- TCP MD5 authentication (RFC 2385) ----
 // Requires CAP_NET_ADMIN (root on Linux): make test-md5
 

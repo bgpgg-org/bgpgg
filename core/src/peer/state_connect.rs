@@ -60,8 +60,9 @@ impl Peer {
             let peer_addr = SocketAddr::new(self.addr, self.port);
 
             let md5_key = self.config.read_md5_key();
+            let ttl_min = self.config.ttl_min;
             tokio::select! {
-                result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr, md5_key.as_deref()) => {
+                result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr, md5_key.as_deref(), ttl_min) => {
                     match result {
                         Ok(stream) => {
                             info!(peer_ip = %self.addr, "TCP connection established");

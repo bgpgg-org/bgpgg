@@ -12,11 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use super::utils::set_ttl_max;
+use super::utils::{setsockopt, TTL_MAX};
+use crate::log::warn;
 use std::io;
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::RawFd;
 use std::ptr::{addr_of, addr_of_mut};
+
+// IP_MINTTL is not exported by libc for FreeBSD (sys/netinet/in.h: IP_MINTTL = 66).
+const IP_MINTTL: libc::c_int = 66;
+
+/// Enable GTSM (RFC 5082) on a socket for the given peer address.
+///
+/// Sets outgoing TTL to 255 and enforces a minimum inbound TTL for IPv4.
+/// IPv6 inbound hop-count filtering is not available on this platform
+/// (FreeBSD lacks IPV6_MINHOPCOUNT); only the outgoing hop count is set.
+pub fn apply_gtsm(fd: RawFd, addr: IpAddr, min_ttl: u8) -> io::Result<()> {
+    match addr {
+        IpAddr::V4(_) => {
+            setsockopt(fd, libc::IPPROTO_IP, libc::IP_TTL, TTL_MAX)?;
+            setsockopt(fd, libc::IPPROTO_IP, IP_MINTTL, min_ttl as libc::c_int)?;
+        }
+        IpAddr::V6(_) => {
+            warn!("IPv6 GTSM inbound filtering is not supported on this platform");
+            setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS, TTL_MAX)?;
+        }
+    }
+    Ok(())
+}
 
 // Constants from <sys/net/pfkeyv2.h> and <sys/netipsec/ipsec.h>
 const PF_KEY_V2: libc::c_int = 2;
@@ -398,22 +423,7 @@ pub fn apply_tcp_md5(fd: RawFd, peer_addr: IpAddr, key: &[u8]) -> io::Result<()>
     sadb_add(local_addr, peer_addr, key)?;
     sadb_add(peer_addr, local_addr, key)?;
 
-    let enable: libc::c_int = 1;
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_MD5SIG,
-            addr_of!(enable) as *const libc::c_void,
-            mem::size_of_val(&enable) as libc::socklen_t,
-        )
-    };
-
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_MD5SIG, 1i32)
 }
 
 // Delete a single SADB entry identified by src/dst address pair.
@@ -446,6 +456,7 @@ pub fn remove_tcp_md5(fd: RawFd, peer_addr: IpAddr) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::utils::getsockopt_int;
     use std::net::TcpListener;
     use std::os::unix::io::AsRawFd;
     use tokio::net::TcpSocket;
@@ -546,6 +557,53 @@ mod tests {
         let listener = TcpListener::bind("[::1]:0").unwrap();
         let addr = get_local_addr(listener.as_raw_fd()).unwrap();
         assert_eq!(addr, IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_apply_gtsm_v4() {
+        for min_ttl in [255u8, 254] {
+            let socket = TcpSocket::new_v4().unwrap();
+            // Bind required on FreeBSD before setsockopt in some cases
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let fd = socket.as_raw_fd();
+            apply_gtsm(fd, "127.0.0.1".parse().unwrap(), min_ttl).unwrap();
+            assert_eq!(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL), TTL_MAX);
+            assert_eq!(
+                getsockopt_int(fd, libc::IPPROTO_IP, IP_MINTTL),
+                min_ttl as libc::c_int,
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_gtsm_v6() {
+        let socket = TcpSocket::new_v6().unwrap();
+        socket.bind("[::1]:0".parse().unwrap()).unwrap();
+        let fd = socket.as_raw_fd();
+        // On FreeBSD, IPv6 GTSM only sets outgoing hops (no inbound filter).
+        apply_gtsm(fd, "::1".parse().unwrap(), 254).unwrap();
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
+            TTL_MAX,
+        );
+    }
+
+    #[test]
+    fn test_set_ttl_max() {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let fd = socket.as_raw_fd();
+        set_ttl_max(fd, "127.0.0.1".parse().unwrap()).unwrap();
+        assert_eq!(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL), TTL_MAX);
+
+        let socket = TcpSocket::new_v6().unwrap();
+        socket.bind("[::1]:0".parse().unwrap()).unwrap();
+        let fd = socket.as_raw_fd();
+        set_ttl_max(fd, "::1".parse().unwrap()).unwrap();
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
+            TTL_MAX,
+        );
     }
 
     // Requires root: PF_KEY socket needs elevated privileges. Run with sudo.
