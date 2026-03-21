@@ -320,6 +320,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         md5_key_file: cfg.md5_key_file.or(defaults.md5_key_file),
         next_hop_self: cfg.next_hop_self.unwrap_or(defaults.next_hop_self),
         graceful_shutdown: cfg.graceful_shutdown.unwrap_or(defaults.graceful_shutdown),
+        ttl_min: cfg.ttl_min.map(|v| v as u8).or(defaults.ttl_min),
     }
 }
 
@@ -345,6 +346,16 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<AddPeerResponse>, Status> {
         let inner = request.into_inner();
         let addr = inner.address;
+
+        if let Some(ref cfg) = inner.config {
+            if let Some(ttl) = cfg.ttl_min {
+                if ttl == 0 || ttl > 255 {
+                    return Err(Status::invalid_argument(
+                        "ttl_min must be between 1 and 255",
+                    ));
+                }
+            }
+        }
 
         let config = proto_to_peer_config(inner.config);
 
@@ -1314,6 +1325,29 @@ impl BgpService for BgpGrpcService {
             })),
             Ok(Err(e)) => Err(Status::not_found(e)),
             Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grpc::proto::SessionConfig;
+
+    #[test]
+    fn test_proto_to_peer_config_ttl_min() {
+        let cases: &[(Option<u32>, Option<u8>)] = &[
+            (Some(1), Some(1)),
+            (Some(254), Some(254)),
+            (Some(255), Some(255)),
+            (None, None),
+        ];
+        for (input, expected) in cases {
+            let config = proto_to_peer_config(Some(SessionConfig {
+                ttl_min: *input,
+                ..Default::default()
+            }));
+            assert_eq!(config.ttl_min, *expected);
         }
     }
 }

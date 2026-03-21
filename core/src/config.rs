@@ -152,6 +152,10 @@ pub struct PeerConfig {
     /// Enable before taking the session down to let peers prefer alternate paths.
     #[serde(default)]
     pub graceful_shutdown: bool,
+    /// RFC 5082: minimum inbound TTL for GTSM. None = disabled.
+    /// 255 = directly connected peer, 254 = 1 hop away, etc.
+    #[serde(default)]
+    pub ttl_min: Option<u8>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -247,6 +251,7 @@ impl Default for PeerConfig {
             md5_key_file: None,
             next_hop_self: false,
             graceful_shutdown: false,
+            ttl_min: None,
         }
     }
 }

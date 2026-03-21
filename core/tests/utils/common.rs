@@ -48,8 +48,12 @@ use bgpgg::grpc::proto::{
     PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
 };
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use bgpgg::net::apply_gtsm;
 use bgpgg::server::BgpServer;
 use std::net::Ipv4Addr;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::os::unix::io::AsRawFd;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout, Duration};
@@ -1600,6 +1604,44 @@ impl FakePeer {
         socket.bind(local_addr).unwrap();
         let stream = socket.connect(peer_addr).await.unwrap();
 
+        let address = stream.local_addr().unwrap().ip().to_string();
+        FakePeer {
+            stream: Some(stream),
+            address,
+            asn: 0,
+            listener: None,
+            supports_4byte_asn: false,
+            add_path: AddPathMask::NONE,
+        }
+    }
+
+    /// Connect with GTSM: sets IP_MINTTL before connect() to simulate peers that
+    /// enforce TTL security from the outset. The TCP handshake will fail if the
+    /// listener sends SYN-ACKs with TTL below min_ttl.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub async fn connect_with_min_ttl(
+        local_ip: Option<&str>,
+        peer: &TestServer,
+        min_ttl: u8,
+    ) -> Self {
+        use std::net::SocketAddr;
+        use tokio::net::TcpSocket;
+
+        let local_ip = local_ip.unwrap_or("0.0.0.0");
+        let local_addr: SocketAddr = format!("{}:0", local_ip).parse().unwrap();
+        let peer_addr: SocketAddr = format!("{}:{}", peer.address, peer.bgp_port)
+            .parse()
+            .unwrap();
+
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.bind(local_addr).unwrap();
+
+        // Set IP_MINTTL before connect() — connect() fails if the listener
+        // does not send SYN-ACK with TTL >= min_ttl.
+        apply_gtsm(socket.as_raw_fd(), peer_addr.ip(), min_ttl).expect("apply_gtsm failed");
+
+        let stream = socket.connect(peer_addr).await.unwrap();
         let address = stream.local_addr().unwrap().ip().to_string();
         FakePeer {
             stream: Some(stream),

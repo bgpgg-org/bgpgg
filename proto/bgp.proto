@@ -88,6 +88,7 @@ message SessionConfig {
     optional string md5_key_file = 17;   // RFC 2385: path to TCP MD5 key file (chmod 600)
     optional bool next_hop_self = 18;  // Rewrite NEXT_HOP to local address for iBGP peers
     optional bool graceful_shutdown = 19;  // RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community
+    optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
 }
 
 // Add peer request/response
