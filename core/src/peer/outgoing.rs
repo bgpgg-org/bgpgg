@@ -25,6 +25,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
+use crate::peer::PeerCapabilities;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::rib_loc::{LocRib, RouteDelta};
@@ -63,6 +64,8 @@ pub struct PeerExportContext<'a> {
     pub next_hop_self: bool,
     /// RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community (65535:0).
     pub graceful_shutdown: bool,
+    /// Negotiated capabilities for this peer
+    pub capabilities: &'a PeerCapabilities,
 }
 
 impl<'a> PeerExportContext<'a> {
@@ -99,6 +102,12 @@ fn should_export_to_peer(path: &Path, ctx: &PeerExportContext) -> bool {
 
     // RFC 1997: NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED
     if should_filter_by_community(path.communities(), ctx.local_asn, ctx.peer_asn) {
+        return false;
+    }
+
+    // RFC 9494 Section 4.3: LLGR_STALE routes SHOULD NOT be advertised to a peer
+    // from which LLGR capability was not received.
+    if path.communities().contains(&community::LLGR_STALE) && ctx.capabilities.llgr.is_none() {
         return false;
     }
 
@@ -820,6 +829,9 @@ mod tests {
             .collect(),
         ));
 
+        let capabilities: &'static PeerCapabilities =
+            Box::leak(Box::new(PeerCapabilities::default()));
+
         PeerExportContext {
             peer_addr: test_ip(1),
             peer_tx: tx_static,
@@ -838,6 +850,7 @@ mod tests {
             negotiated_afi_safis: negotiated,
             next_hop_self,
             graceful_shutdown: false,
+            capabilities,
         }
     }
 
@@ -1620,6 +1633,7 @@ mod tests {
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,
             graceful_shutdown: false,
+            capabilities: &PeerCapabilities::default(),
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1885,6 +1899,7 @@ mod tests {
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,
             graceful_shutdown: false,
+            capabilities: &PeerCapabilities::default(),
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));

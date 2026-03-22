@@ -971,25 +971,39 @@ impl BgpServer {
             return;
         }
 
-        let Some(conn) = peer_info.established_conn() else {
-            return;
+        // Extract values from conn before dropping the immutable borrow on peer_info,
+        // since propagate_routes_to_peer needs &mut peer_info.adj_rib_out.
+        let (peer_asn, peer_tx, capabilities, send_format, local_next_hop, negotiated_afi_safis) = {
+            let Some(conn) = peer_info.established_conn() else {
+                return;
+            };
+            let Some(peer_asn) = conn.asn else {
+                return;
+            };
+            let Some(peer_tx) = conn.peer_tx.clone() else {
+                return;
+            };
+            let Some(capabilities) = conn.capabilities.clone() else {
+                return;
+            };
+            let send_format = conn.send_format();
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|ci| ci.local_address)
+                .unwrap_or(self.local_addr);
+            let negotiated_afi_safis = conn.negotiated_afi_safis();
+            (
+                peer_asn,
+                peer_tx,
+                capabilities,
+                send_format,
+                local_next_hop,
+                negotiated_afi_safis,
+            )
         };
-        let Some(peer_asn) = conn.asn else {
-            return;
-        };
-        let Some(peer_tx) = conn.peer_tx.clone() else {
-            return;
-        };
-        let send_format = conn.send_format();
-        let local_next_hop = conn
-            .conn_info
-            .as_ref()
-            .map(|ci| ci.local_address)
-            .unwrap_or(self.local_addr);
 
         let export_policies = &peer_info.export_policies;
-
-        let negotiated_afi_safis = conn.negotiated_afi_safis();
 
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
@@ -1005,6 +1019,7 @@ impl BgpServer {
             negotiated_afi_safis: &negotiated_afi_safis,
             next_hop_self: peer_info.config.next_hop_self,
             graceful_shutdown: peer_info.config.graceful_shutdown,
+            capabilities: &capabilities,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);

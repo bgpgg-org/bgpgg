@@ -1040,6 +1040,18 @@ impl BgpServer {
             let Some(peer_tx) = conn.peer_tx.clone() else {
                 continue;
             };
+            let Some(capabilities) = conn.capabilities.clone() else {
+                continue;
+            };
+
+            let peer_asn = conn.asn.unwrap_or(local_asn);
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(local_addr);
+            let send_format = conn.send_format();
+            let negotiated_afi_safis = conn.negotiated_afi_safis();
 
             let export_policies = entry.policy_out().to_vec();
             if export_policies.is_empty() {
@@ -1047,20 +1059,12 @@ impl BgpServer {
                 continue;
             }
 
-            let send_format = conn.send_format();
-
-            let negotiated_afi_safis = conn.negotiated_afi_safis();
-
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
                 local_asn,
-                peer_asn: conn.asn.unwrap_or(local_asn),
-                local_next_hop: conn
-                    .conn_info
-                    .as_ref()
-                    .map(|conn_info| conn_info.local_address)
-                    .unwrap_or(local_addr),
+                peer_asn,
+                local_next_hop,
                 export_policies: &export_policies,
                 rr_client: entry.config.rr_client,
                 rs_client: entry.config.rs_client,
@@ -1069,6 +1073,7 @@ impl BgpServer {
                 negotiated_afi_safis: &negotiated_afi_safis,
                 next_hop_self: entry.config.next_hop_self,
                 graceful_shutdown: entry.config.graceful_shutdown,
+                capabilities: &capabilities,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);

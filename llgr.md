@@ -217,27 +217,28 @@ Unit test `test_llgr_stale_ordering` and integration test case in `test_best_pat
 
 ### `core/src/peer/outgoing.rs` — `PeerExportContext` and `should_filter_by_community()`
 
-Add `llgr_capable: bool` to `PeerExportContext` (a simple bool is enough — we only need
-to know whether the peer negotiated LLGR, not the full capability struct). This avoids
-threading `&PeerCapabilities` through, which would require lifetime gymnastics.
+Add `capabilities: &'a PeerCapabilities` to `PeerExportContext`. The struct already has
+lifetime `'a` and borrows other connection state. Not `Option` — `PeerExportContext` is
+only constructed for established peers, which always have capabilities. Passing the full
+struct is more extensible than individual bools — future capability-dependent export rules
+use the same field.
 
 **Call sites to update** (2 production, 5+ test):
-- `core/src/server.rs:1054` — `propagate_routes()` loop. `conn.capabilities` has the
-  LLGR info; set `llgr_capable: conn.capabilities.as_ref().and_then(|c| c.llgr.as_ref()).is_some()`
-- `core/src/server_ops.rs:994` — `export_all_routes_to_peer()` in `handle_peer_established()`.
-  Same pattern via `conn.capabilities`.
-- Test helpers: `make_peer_export_ctx()` in `outgoing.rs:808` — add `llgr_capable: false`
-  default. Inline test constructions at lines 1605, 1870, 1956, 1960 — add field.
-
-Then either update
-`should_filter_by_community()` to accept and check it, or perform the LLGR_STALE check at
-the call site before invoking `should_filter_by_community()`.
+- `core/src/server.rs:1054` — `propagate_routes()` loop. `conn.capabilities` is
+  `Option<PeerCapabilities>` but is always `Some` for established peers; use
+  `capabilities: conn.capabilities.as_ref().expect("established peer")` or guard earlier.
+- `core/src/server_ops.rs:994` — `export_all_routes_to_peer()`: `capabilities` is already
+  in scope from the established event.
+- Test helpers: `make_peer_export_ctx()` in `outgoing.rs` — add `capabilities` with a
+  `PeerCapabilities::default()`. Inline test constructions — add field.
 
 Add LLGR_STALE filter:
 ```rust
 // RFC 9494 Section 4.3: LLGR_STALE routes SHOULD NOT be advertised to a peer from which
 // LLGR capability was not received. Filter the route entirely, not strip the community.
-if attrs.communities.contains(&community::LLGR_STALE) && !peer_ctx.llgr_capable {
+if attrs.communities.contains(&community::LLGR_STALE)
+    && peer_ctx.capabilities.llgr.is_none()
+{
     return true;
 }
 ```
@@ -252,10 +253,9 @@ No stripping logic should be added to the export path for this community.
 
 **Incoming LLGR_STALE routes from LLGR peers**: RFC 9494 Section 4.3 applies equally when we
 *receive* a route that already carries LLGR_STALE (e.g., from a route reflector that tagged it
-upstream). No extra code is needed — the existing filter (`peer_ctx.capabilities.llgr.is_none()`)
-and `best_path_cmp()` operate on the stored community value regardless of who set it. The path
-is deprioritized in selection and suppressed from non-LLGR peers automatically. Covered by
-`test_llgr_stale_received_from_peer` below.
+upstream). No extra code is needed — the filter checks `peer_ctx.capabilities.llgr.is_none()`
+and `best_path_cmp()` operates on the stored community regardless of who set it. The path is deprioritized in selection and suppressed from non-LLGR peers
+automatically. Covered by `test_llgr_stale_received_from_peer` below.
 
 ---
 
