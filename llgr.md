@@ -176,13 +176,20 @@ pub const LLGR_STALE: u32 = 0xFFFF0006;
 pub const NO_LLGR: u32 = 0xFFFF0007;  // RFC 9494: do not retain this route during LLGR
 ```
 
+### `core/src/rib/stale.rs` (new)
+Extracted stale route logic into a dedicated module:
+- `StaleStrategy` enum: `Sweep` (GR) removes all stale paths, `TransitionToLlgr` removes NO_LLGR paths and tags rest with LLGR_STALE
+- `handle_stale_routes(table, peer_ip, path_ids, strategy) -> RouteDelta`: single-pass drain over stale paths, applies strategy, frees path IDs, recomputes best path
+- `mark_stale_in_table(table, peer_ip) -> usize`: marks all paths from peer as stale
+
+### `core/src/rib/path.rs`
+- Added `Path::is_from_peer(peer_ip) -> bool` method
+
 ### `core/src/rib/rib_loc.rs`
-Add function `apply_llgr(peer_ip, afi_safi) -> RouteDelta`:
-- Finds all paths from `peer_ip` where `stale = true` in the given AFI/SAFI table
-- **Removes paths that have `NO_LLGR` community** immediately (not retained during LLGR)
-- Adds `LLGR_STALE` community to remaining stale paths via `Arc::make_mut()`
-- Recomputes best path per prefix (LLGR_STALE routes are now least-preferred per Phase 3)
-- Returns a single RouteDelta covering both removed (NO_LLGR) and tagged (LLGR_STALE) prefixes
+`apply_llgr(peer_ip, &[AfiSafi]) -> RouteDelta`:
+- Takes a slice of AFI/SAFIs (same pattern as `remove_peer_routes_stale`)
+- Delegates to `handle_stale_routes` with `StaleStrategy::TransitionToLlgr`
+- Returns a single combined RouteDelta across all AFI/SAFIs
 
 **NO_LLGR from import policy**: RFC 9494 Section 4.2 says routes must be removed if they carry
 NO_LLGR "either as sent by the peer or as the result of a configured policy." Import policies in
@@ -197,19 +204,12 @@ Modify `upsert_path()` (used when peer re-sends routes):
 
 ---
 
-## Phase 3: Route Selection (least-preferred)
+## Phase 3: Route Selection (least-preferred) ✅
 
 ### `core/src/rib/path.rs` — `best_path_cmp()`
-Add as the first comparison step:
-```rust
-// RFC 9494: LLGR_STALE routes are least preferred
-let a_llgr = self.attrs.communities.contains(&LLGR_STALE);
-let b_llgr = other.attrs.communities.contains(&LLGR_STALE);
-if a_llgr != b_llgr {
-    // prefer non-stale (self wins if b is stale)
-    return if b_llgr { Ordering::Greater } else { Ordering::Less };
-}
-```
+Added LLGR_STALE check as the first comparison step (before LOCAL_PREF).
+Unit test `test_llgr_stale_ordering` and integration test case in `test_best_path_selection`
+(paths.rs) verify LLGR_STALE route with local_pref=200 loses to clean route with local_pref=100.
 
 ---
 
@@ -542,8 +542,9 @@ Cancellation for the normal case (session recovered) happens only in `GracefulRe
 | `core/src/peer/mod.rs` | PeerCapabilities.llgr, capture LLGR info in GR timer; handle restart_time=0 with nonzero LLST |
 | `core/src/peer/messages.rs` | Advertise + parse LLGR capability |
 | `core/src/peer/outgoing.rs` | Add `llgr_capable: bool` to `PeerExportContext`; filter LLGR_STALE routes for non-LLGR peers; preserve community |
-| `core/src/rib/path.rs` | LLGR_STALE deprioritization in best_path_cmp() |
-| `core/src/rib/rib_loc.rs` | `StaleStrategy` enum (Sweep/TransitionToLlgr), `handle_stale_routes()`, `apply_llgr(&[AfiSafi])` |
+| `core/src/rib/path.rs` | `is_from_peer()` method; LLGR_STALE deprioritization in best_path_cmp() |
+| `core/src/rib/stale.rs` | `StaleStrategy` enum (Sweep/TransitionToLlgr), `handle_stale_routes()`, `mark_stale_in_table()` |
+| `core/src/rib/rib_loc.rs` | `apply_llgr(&[AfiSafi])` delegates to stale.rs |
 | `core/src/server_ops.rs` | GR expiry splits LLGR/non-LLGR, `LlgrTimerExpired` handler, GracefulRestartComplete aborts timers, handle_peer_established() sweeps on F-bit=0/cap-absent, handle_remove_peer() aborts LLGR timers |
 | `core/src/server.rs` (`PeerInfo`) | `llgr_timers: HashMap<AfiSafi, JoinHandle<()>>` |
 | `proto/bgp.proto` | LlgrAfiSafiConfig, LlgrConfig messages |

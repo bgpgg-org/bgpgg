@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::community::LLGR_STALE;
 use crate::bgp::merge_as_paths;
 use crate::bgp::msg::AddPathMask;
 use crate::bgp::msg_update::{
@@ -270,6 +271,17 @@ impl Path {
     /// Compare paths for BGP best path selection per RFC 4271 Section 9.1.2.2
     /// Returns Ordering::Greater if self is better (higher preference)
     pub fn best_path_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // RFC 9494: LLGR_STALE routes are least preferred
+        let self_llgr = self.attrs.communities.contains(&LLGR_STALE);
+        let other_llgr = other.attrs.communities.contains(&LLGR_STALE);
+        if self_llgr != other_llgr {
+            return if other_llgr {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+
         // Step 1: Prefer the route with the highest degree of preference (LOCAL_PREF)
         let self_local_pref = self.local_pref().unwrap_or(100);
         let other_local_pref = other.local_pref().unwrap_or(100);
@@ -410,6 +422,47 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
             },
+        }
+    }
+
+    #[test]
+    fn test_llgr_stale_ordering() {
+        // (name, communities1, local_pref1, communities2, local_pref2, expected)
+        let tests = [
+            (
+                "non-stale preferred over stale",
+                vec![],
+                100,
+                vec![LLGR_STALE],
+                100,
+                Ordering::Greater,
+            ),
+            (
+                "stale loses to non-stale",
+                vec![LLGR_STALE],
+                100,
+                vec![],
+                100,
+                Ordering::Less,
+            ),
+            (
+                "both stale falls through to next tiebreaker",
+                vec![LLGR_STALE],
+                200,
+                vec![LLGR_STALE],
+                100,
+                Ordering::Greater,
+            ),
+        ];
+
+        for (name, communities1, lp1, communities2, lp2, expected) in tests {
+            let mut path1 = make_base_path();
+            let mut path2 = make_base_path();
+            path1.attrs.communities = communities1;
+            path1.attrs.local_pref = Some(lp1);
+            path2.attrs.communities = communities2;
+            path2.attrs.local_pref = Some(lp2);
+            assert_eq!(path1.best_path_cmp(&path2), expected, "test case: {}", name);
         }
     }
 
