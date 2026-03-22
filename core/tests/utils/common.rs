@@ -44,8 +44,9 @@ use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     defined_set_config, ActionsConfig, AddPathSendMode, AdminState, Aggregator, AsPathSegment,
     AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
-    GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, PrefixMatch,
-    PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
+    GracefulRestartConfig, LargeCommunity, LlgrConfig as ProtoLlgrConfig, Origin, Path, Peer,
+    PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig,
+    UnknownAttribute,
 };
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -141,6 +142,7 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
 pub struct PeerConfig {
     pub hold_timer_secs: Option<u16>,
     pub graceful_restart: Option<GracefulRestartConfig>,
+    pub llgr: Option<ProtoLlgrConfig>,
     pub idle_hold_time_secs: Option<u64>,
     pub min_route_advertisement_interval_secs: Option<u64>,
     pub add_path_send: Option<bool>,
@@ -1092,6 +1094,7 @@ pub async fn chain_servers<const N: usize>(
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1307,6 +1310,7 @@ pub async fn mesh_servers<const N: usize>(
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1384,6 +1388,7 @@ pub async fn hub_spoke_servers<const N: usize>(
 ) -> (TestServer, [TestServer; N]) {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1549,6 +1554,38 @@ pub async fn poll_peers_with_timeout(
         || async { verify_peers(server, expected_peers.clone()).await },
         "Timeout waiting for peers to match expected state",
         timeout,
+    )
+    .await;
+}
+
+/// Wait for a specific peer address to reach Established on a server.
+pub async fn poll_peer_established(server: &TestServer, peer_addr: &str) {
+    let addr = peer_addr.to_string();
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.address == addr && p.state == BgpState::Established as i32)
+            })
+        },
+        &format!("Timeout waiting for peer {addr} to establish"),
+    )
+    .await;
+}
+
+/// Wait for a specific peer to leave Established state.
+pub async fn poll_peer_not_established(server: &TestServer, peer_addr: &str) {
+    let addr = peer_addr.to_string();
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.address == addr && p.state != BgpState::Established as i32)
+            })
+        },
+        &format!("Timeout waiting for peer {addr} to leave Established"),
     )
     .await;
 }
@@ -2085,6 +2122,25 @@ impl FakePeer {
 
         peer.asn = asn;
         peer.supports_4byte_asn = supports_4byte_asn;
+        peer
+    }
+
+    /// Connect and complete GR+LLGR handshake for IPv4 Unicast.
+    pub async fn connect_and_handshake_llgr(
+        local_ip: Option<&str>,
+        server: &TestServer,
+        asn: u32,
+        router_id: Ipv4Addr,
+        gr_time: u16,
+        llst: u32,
+    ) -> Self {
+        let mut peer = Self::connect(local_ip, server).await;
+        peer.read_open().await;
+        peer.send_open_with_llgr(asn, router_id, 90, gr_time, llst)
+            .await;
+        peer.asn = asn;
+        peer.send_keepalive().await;
+        peer.read_keepalive().await;
         peer
     }
 

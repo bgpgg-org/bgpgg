@@ -666,9 +666,9 @@ impl BgpServer {
 
     /// Resolve import policies for a peer from config
     pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        let mut policies = vec![Arc::new(Policy::default_in())];
+        let mut policies = Vec::new();
 
-        // Append user-configured policies
+        // User policies run first
         for name in &peer_config.import_policy {
             if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
@@ -676,6 +676,9 @@ impl BgpServer {
                 error!(policy = name, "import policy not found");
             }
         }
+
+        // Unconditional accept as fallback
+        policies.push(Arc::new(Policy::default_in()));
 
         policies
     }

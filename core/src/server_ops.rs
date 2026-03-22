@@ -255,6 +255,10 @@ impl BgpServer {
                         withdrawn.clone(),
                         announced.clone(),
                         |prefix, path| {
+                            // Default LOCAL_PREF for routes that don't carry one (e.g. eBGP)
+                            if path.attrs.local_pref.is_none() {
+                                path.attrs.local_pref = Some(100);
+                            }
                             // Evaluate policies in order until Accept/Reject
                             for policy in import_policies {
                                 match policy.evaluate(prefix, path) {

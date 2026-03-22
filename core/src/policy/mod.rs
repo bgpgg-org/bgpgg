@@ -16,7 +16,8 @@ pub mod sets;
 pub mod statement;
 
 pub use sets::{DefinedSetType, DefinedSets};
-pub use statement::{stmt_default_local_pref, CommunityOp, RouteType, Statement};
+use statement::Action;
+pub use statement::{CommunityOp, RouteType, Statement};
 
 use crate::config::{Config, PolicyDefinitionConfig};
 use crate::net::IpNetwork;
@@ -71,17 +72,14 @@ impl Policy {
         &self.statements
     }
 
-    /// Create a default inbound policy with default local pref
+    /// Create a default inbound policy (unconditional accept)
     pub fn default_in() -> Self {
-        use statement::{stmt_default_local_pref, Action};
         Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
-            .with(stmt_default_local_pref(100))
             .with(Statement::new().then(Action::Accept))
     }
 
     /// Create a default outbound policy
     pub fn default_out() -> Self {
-        use statement::Action;
         Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
             .with(Statement::new().then(Action::Accept))
     }

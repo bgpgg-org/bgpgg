@@ -516,9 +516,16 @@ impl Peer {
         }
 
         if let Some(gr_cap) = &self.capabilities.graceful_restart {
-            // RFC 4724: Receiving Speaker mode
-            // Check if peer advertised restart_time > 0 and has AFI/SAFIs with GR
-            return gr_cap.restart_time > 0 && !gr_cap.afi_safi_list.is_empty();
+            if gr_cap.afi_safi_list.is_empty() {
+                return false;
+            }
+            if gr_cap.restart_time > 0 {
+                return true;
+            }
+            // RFC 9494 Section 4.2: restart_time=0 with nonzero LLST still preserves routes
+            if let Some(llgr_cap) = &self.capabilities.llgr {
+                return llgr_cap.entries.iter().any(|e| e.stale_time > 0);
+            }
         }
         false
     }
@@ -558,9 +565,11 @@ impl Peer {
             }
         }
 
-        // Spawn new restart timer
         let peer_ip = self.addr;
         let server_tx = self.server_tx.clone();
+
+        // Spawn restart timer. restart_time=0 with LLGR yields once to let
+        // PeerDisconnected mark routes stale before firing (RFC 9494 Section 4.2).
         let timer = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(restart_time as u64)).await;
             let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired {

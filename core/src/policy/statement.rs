@@ -540,18 +540,6 @@ impl Condition {
 }
 
 // ============================================================================
-// Public helper functions
-// ============================================================================
-
-/// Set default local preference if not already set
-pub fn stmt_default_local_pref(value: u32) -> Statement {
-    Statement::new().then(Action::SetLocalPref {
-        value,
-        force: false,
-    })
-}
-
-// ============================================================================
 // Internal functions (config parsing)
 // ============================================================================
 
@@ -992,17 +980,6 @@ mod tests {
         });
         assert!(policy.accept(&other_prefix, &mut path2));
         assert_eq!(path2.local_pref(), Some(100));
-    }
-
-    #[test]
-    fn test_stmt_default_local_pref() {
-        let policy = Policy::new("test".to_string()).with(stmt_default_local_pref(100));
-        let mut path = create_path(RouteSource::Ebgp {
-            peer_ip: test_ip(1),
-            bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
-        });
-        assert!(policy.accept(&test_prefix(), &mut path));
-        assert_eq!(path.local_pref(), Some(100));
     }
 
     #[test]
