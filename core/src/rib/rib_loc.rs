@@ -49,6 +49,11 @@ impl RouteDelta {
     pub fn has_changes(&self) -> bool {
         !self.best_changed.is_empty() || !self.changed.is_empty()
     }
+
+    pub fn extend(&mut self, other: RouteDelta) {
+        self.best_changed.extend(other.best_changed);
+        self.changed.extend(other.changed);
+    }
 }
 
 #[cfg(test)]
@@ -1385,5 +1390,31 @@ mod tests {
 
         // NO_LLGR route removed
         assert!(loc_rib.get_best_path(&prefix_no_llgr).is_none());
+    }
+
+    #[test]
+    fn test_route_delta_extend() {
+        let net1 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let net2 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 1, 0),
+            prefix_length: 24,
+        });
+
+        let mut delta1 = RouteDelta {
+            best_changed: vec![net1],
+            changed: vec![net1],
+        };
+        let delta2 = RouteDelta {
+            best_changed: vec![net2],
+            changed: vec![net2],
+        };
+
+        delta1.extend(delta2);
+
+        assert_eq!(delta1.best_changed, vec![net1, net2]);
+        assert_eq!(delta1.changed, vec![net1, net2]);
     }
 }

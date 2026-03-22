@@ -44,9 +44,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 /// Errors that can occur during server initialization or operation.
 #[derive(Debug)]
@@ -291,7 +293,7 @@ pub enum ServerOp {
     PeerDisconnected {
         peer_ip: IpAddr,
         reason: PeerDownReason,
-        gr_afi_safis: Vec<crate::bgp::multiprotocol::AfiSafi>,
+        gr_afi_safis: Vec<AfiSafi>,
         conn_type: ConnectionType,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
@@ -303,17 +305,17 @@ pub enum ServerOp {
         safi: Safi,
     },
     /// Graceful Restart timer expired for a peer (RFC 4724)
-    GracefulRestartTimerExpired { peer_ip: IpAddr },
+    GracefulRestartTimerExpired {
+        peer_ip: IpAddr,
+        /// RFC 9494: LLGR-capable AFI/SAFIs and their stale times from peer capability
+        llgr_afi_safis: Vec<(AfiSafi, u32)>,
+    },
+    /// RFC 9494: Long-Lived Graceful Restart stale timer expired for a peer's AFI/SAFI
+    LlgrTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Graceful Restart completed for a peer (all EORs received)
-    GracefulRestartComplete {
-        peer_ip: IpAddr,
-        afi_safi: crate::bgp::multiprotocol::AfiSafi,
-    },
+    GracefulRestartComplete { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Server signals peer that loc-rib has been sent
-    LocalRibSent {
-        peer_ip: IpAddr,
-        afi_safi: crate::bgp::multiprotocol::AfiSafi,
-    },
+    LocalRibSent { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {
         response: oneshot::Sender<Vec<BmpPeerStats>>,
@@ -470,6 +472,50 @@ pub struct PeerInfo {
     pub incoming: Option<ConnectionState>,
     /// Per-peer adj-rib-out: tracks routes actually exported to this peer.
     pub adj_rib_out: AdjRibOut,
+    /// RFC 9494: Running LLGR stale timers per AFI/SAFI
+    pub llgr_timers: LlgrTimers,
+}
+
+/// Manages per-AFI/SAFI LLGR stale timers for a peer (RFC 9494).
+#[derive(Default)]
+pub struct LlgrTimers {
+    timers: HashMap<AfiSafi, JoinHandle<()>>,
+}
+
+impl LlgrTimers {
+    pub fn new() -> Self {
+        Self {
+            timers: HashMap::new(),
+        }
+    }
+
+    /// Start a timer if not already running. Existing timers MUST NOT be updated (RFC 9494).
+    pub fn run(
+        &mut self,
+        afi_safi: AfiSafi,
+        llst: u32,
+        peer_ip: IpAddr,
+        server_tx: mpsc::UnboundedSender<ServerOp>,
+    ) {
+        self.timers.entry(afi_safi).or_insert_with(|| {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(llst as u64)).await;
+                let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
+            })
+        });
+    }
+
+    /// Cancel a running timer. No-op if not running.
+    pub fn cancel(&mut self, afi_safi: &AfiSafi) {
+        if let Some(handle) = self.timers.remove(afi_safi) {
+            handle.abort();
+        }
+    }
+
+    /// AFI/SAFIs with running timers.
+    pub fn afi_safis(&self) -> Vec<AfiSafi> {
+        self.timers.keys().copied().collect()
+    }
 }
 
 impl PeerInfo {
@@ -492,6 +538,7 @@ impl PeerInfo {
             outgoing,
             incoming,
             adj_rib_out: AdjRibOut::new(),
+            llgr_timers: LlgrTimers::new(),
         }
     }
 
@@ -578,7 +625,7 @@ pub struct BgpServer {
     pub(crate) local_port: u16,
     pub mgmt_tx: mpsc::Sender<MgmtOp>,
     mgmt_rx: mpsc::Receiver<MgmtOp>,
-    op_tx: mpsc::UnboundedSender<ServerOp>,
+    pub(crate) op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers

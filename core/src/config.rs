@@ -629,6 +629,10 @@ pub struct Config {
     /// RFC 4456: Cluster ID for route reflector. Defaults to router_id if not set.
     #[serde(default)]
     pub cluster_id: Option<Ipv4Addr>,
+    /// RFC 9494: Maximum LLGR stale time in seconds. Caps the peer's advertised LLST.
+    /// None means no cap (use peer's value as-is).
+    #[serde(default)]
+    pub max_llgr_stale_time: Option<u32>,
 }
 
 fn default_listen_addr() -> String {
@@ -669,6 +673,7 @@ impl Config {
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
             cluster_id: None,
+            max_llgr_stale_time: None,
         }
     }
 
@@ -730,6 +735,7 @@ impl Default for Config {
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
             cluster_id: None,
+            max_llgr_stale_time: None,
         }
     }
 }

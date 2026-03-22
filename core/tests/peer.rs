@@ -2180,3 +2180,78 @@ async fn test_dynamic_graceful_shutdown_toggle() {
         .unwrap();
     poll_rib(&[(&server2, vec![route_at(vec![], 100)])]).await;
 }
+
+/// RFC 4724: GR restart_time=0 should sweep stale routes immediately.
+/// When peer advertises restart_time=0, the GR timer fires instantly and
+/// routes are removed without any waiting period.
+#[tokio::test]
+async fn test_gr_restart_time_zero_sweeps_immediately() {
+    let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
+    let peer_port = peer.port();
+
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    server
+        .client
+        .add_peer(
+            "127.0.0.1".to_string(),
+            Some(SessionConfig {
+                port: Some(peer_port as u32),
+                graceful_restart: Some(GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(30),
+                }),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    peer.accept().await;
+    peer.read_open().await;
+
+    // Peer advertises restart_time=0
+    peer.send_open_with_gr(65002, Ipv4Addr::new(2, 2, 2, 2), 90, 0, false)
+        .await;
+    peer.asn = 65002;
+    peer.send_keepalive().await;
+    peer.read_keepalive().await;
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // Announce route
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_2byte(vec![65002]),
+            &attr_next_hop(Ipv4Addr::new(192, 168, 1, 1)),
+        ],
+        &[24, 10, 0, 0],
+        None,
+    );
+    peer.send_raw(&update).await;
+
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .ok()
+                .is_some_and(|r| r.len() == 1)
+        },
+        "route should be in RIB",
+    )
+    .await;
+
+    // Drop TCP - GR timer should fire immediately (restart_time=0), sweeping routes
+    drop(peer.stream.take());
+    poll_route_withdrawal(&[&server]).await;
+}

@@ -87,12 +87,6 @@ impl GracefulRestartCapability {
             .find(|(as_, _)| *as_ == afi_safi)
             .map(|(_, f_bit)| *f_bit)
     }
-
-    /// Check if stale routes for this AFI/SAFI should be cleared immediately (RFC 4724)
-    /// Returns true if AFI/SAFI is not in the capability or F-bit is 0
-    pub fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
-        self.forwarding_preserved(afi_safi) != Some(true)
-    }
 }
 
 /// RFC 9494: Per-AFI/SAFI entry in LLGR capability
@@ -111,11 +105,29 @@ pub struct LlgrCapability {
     pub(crate) entries: Vec<LlgrEntry>,
 }
 
-impl LlgrCapability {
-    /// Check if stale routes for this AFI/SAFI should be cleared immediately on reconnect
-    /// Returns true if AFI/SAFI is not in the capability or F-bit is false
-    pub fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
-        match self.entries.iter().find(|entry| entry.afi_safi == afi_safi) {
+/// F-bit based stale route filtering for GR and LLGR capabilities.
+pub trait StaleFilter {
+    /// Returns true if stale routes for this AFI/SAFI should be cleared on reconnect.
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool;
+
+    /// Filter stale AFI/SAFIs to those that should be cleared on reconnect.
+    fn filter_stale(&self, stale: Vec<AfiSafi>) -> Vec<AfiSafi> {
+        stale
+            .into_iter()
+            .filter(|a| self.should_clear_stale(*a))
+            .collect()
+    }
+}
+
+impl StaleFilter for GracefulRestartCapability {
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
+        self.forwarding_preserved(afi_safi) != Some(true)
+    }
+}
+
+impl StaleFilter for LlgrCapability {
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
+        match self.entries.iter().find(|e| e.afi_safi == afi_safi) {
             Some(entry) => !entry.forwarding_preserved,
             None => true,
         }

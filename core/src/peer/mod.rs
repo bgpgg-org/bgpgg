@@ -530,9 +530,6 @@ impl Peer {
         };
 
         let restart_time = gr_cap.restart_time;
-        if restart_time == 0 {
-            return;
-        }
 
         // Use the AFI/SAFIs the peer advertised for GR
         let gr_afi_safis: HashSet<_> = gr_cap.afi_safis().into_iter().collect();
@@ -540,6 +537,19 @@ impl Peer {
         if gr_afi_safis.is_empty() {
             return;
         }
+
+        // RFC 9494: Collect LLGR-capable AFI/SAFIs and their stale times from peer cap
+        let llgr_afi_safis: Vec<(AfiSafi, u32)> = self
+            .capabilities
+            .llgr
+            .as_ref()
+            .map(|cap| {
+                cap.entries
+                    .iter()
+                    .map(|entry| (entry.afi_safi, entry.stale_time))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Cancel existing timer if any
         if let Some(state) = &mut self.gr_state {
@@ -553,7 +563,10 @@ impl Peer {
         let server_tx = self.server_tx.clone();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(restart_time as u64)).await;
-            let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired { peer_ip });
+            let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired {
+                peer_ip,
+                llgr_afi_safis,
+            });
         });
 
         // Initialize or update GR state
