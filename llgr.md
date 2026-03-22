@@ -114,6 +114,14 @@ BgpCapabiltyCode::LlgrRestart => {
 
 **`enter_open_confirm()`**: include `llgr: peer_capabilities.llgr` in `self.capabilities`, add to `info!()` log.
 
+After setting all capabilities, enforce RFC 9494 Section 4.5:
+```rust
+// RFC 9494 Section 4.5: LLGR without GR MUST be ignored
+if capabilities.graceful_restart.is_none() {
+    capabilities.llgr = None;
+}
+```
+
 ### `proto/bgp.proto`
 ```protobuf
 message LlgrAfiSafiConfig {
@@ -151,6 +159,12 @@ In `core/src/peer/messages.rs`:
 - `test_llgr_capability_advertised`: non-empty entries + GR enabled → OPEN contains cap 71
 - `test_llgr_not_advertised_without_gr`: GR disabled → no cap 71 even if entries set
 
+In `core/tests/llgr.rs` (integration):
+- `test_llgr_ignored_without_gr`: FakePeer sends OPEN with LLGR cap (code 71) but no GR cap
+  (code 64) → server must ignore LLGR; after FakePeer drops, route is swept immediately (no
+  LLGR_STALE tag, no LLGR timer). Use `poll_route_withdrawal()` to confirm route gone within
+  GR sweep window, not retained.
+
 ---
 
 ## Phase 2: LLGR_STALE and NO_LLGR Communities
@@ -165,14 +179,17 @@ pub const NO_LLGR: u32 = 0xFFFF0007;  // RFC 9494: do not retain this route duri
 ### `core/src/rib/rib_loc.rs`
 Add function `mark_peer_routes_llgr_stale(peer_ip, afi_safi) -> RouteDelta`:
 - Finds all paths from `peer_ip` where `stale = true` in the given AFI/SAFI table
-- **Skip paths that have `NO_LLGR` community** — these are swept immediately (not retained)
+- **Removes paths that have `NO_LLGR` community** immediately (not retained during LLGR)
 - Adds `LLGR_STALE` community to remaining stale paths via `Arc::make_mut()`
 - Recomputes best path per prefix (LLGR_STALE routes are now least-preferred per Phase 3)
-- Returns RouteDelta: `best_changed` for prefixes where best flipped, `changed` for all tagged prefixes
+- Returns a single RouteDelta covering both removed (NO_LLGR) and tagged (LLGR_STALE) prefixes
 
-The function returns two deltas conceptually — one for swept (NO_LLGR) routes and one for
-tagged (LLGR_STALE) routes — but can be combined into a single RouteDelta since both result
-in propagation.
+**NO_LLGR from import policy**: RFC 9494 Section 4.2 says routes must be removed if they carry
+NO_LLGR "either as sent by the peer or as the result of a configured policy." Import policies in
+bgpgg take `path: &mut Path` and run before `upsert_path()` — they can attach NO_LLGR to the
+stored path. Since `mark_peer_routes_llgr_stale()` checks the stored community on the path
+regardless of source, policy-set NO_LLGR is covered transparently. No additional code is needed;
+this is worth an explicit integration test (see `test_llgr_no_llgr_from_policy` below).
 
 Modify `upsert_path()` (used when peer re-sends routes):
 - No change needed: when peer re-sends the same route without LLGR_STALE, `attrs != stored_attrs`
@@ -198,14 +215,29 @@ if a_llgr != b_llgr {
 
 ## Phase 4: Propagation Filtering
 
-### `core/src/peer/outgoing.rs` — `should_filter_by_community()`
-Add after existing community checks:
+### `core/src/peer/outgoing.rs` — `PeerExportContext` and `should_filter_by_community()`
+
+Add `llgr_capable: bool` to `PeerExportContext` (a simple bool is enough — we only need
+to know whether the peer negotiated LLGR, not the full capability struct). This avoids
+threading `&PeerCapabilities` through, which would require lifetime gymnastics.
+
+**Call sites to update** (2 production, 5+ test):
+- `core/src/server.rs:1054` — `propagate_routes()` loop. `conn.capabilities` has the
+  LLGR info; set `llgr_capable: conn.capabilities.as_ref().and_then(|c| c.llgr.as_ref()).is_some()`
+- `core/src/server_ops.rs:994` — `export_all_routes_to_peer()` in `handle_peer_established()`.
+  Same pattern via `conn.capabilities`.
+- Test helpers: `make_peer_export_ctx()` in `outgoing.rs:808` — add `llgr_capable: false`
+  default. Inline test constructions at lines 1605, 1870, 1956, 1960 — add field.
+
+Then either update
+`should_filter_by_community()` to accept and check it, or perform the LLGR_STALE check at
+the call site before invoking `should_filter_by_community()`.
+
+Add LLGR_STALE filter:
 ```rust
-// RFC 9494 Section 4.2: "MUST NOT advertise LLGR_STALE routes to a peer that has not
-// negotiated the LLGR capability." — filter the route entirely, not strip the community.
-if attrs.communities.contains(&community::LLGR_STALE)
-    && peer_ctx.capabilities.llgr.is_none()
-{
+// RFC 9494 Section 4.3: LLGR_STALE routes SHOULD NOT be advertised to a peer from which
+// LLGR capability was not received. Filter the route entirely, not strip the community.
+if attrs.communities.contains(&community::LLGR_STALE) && !peer_ctx.llgr_capable {
     return true;
 }
 ```
@@ -218,134 +250,108 @@ This naturally causes:
 peers. RFC 9494 Section 4.3: "MUST NOT be removed when the route is further advertised."
 No stripping logic should be added to the export path for this community.
 
-`PeerExportContext` already carries `capabilities: &PeerCapabilities` so no struct changes needed.
+**Incoming LLGR_STALE routes from LLGR peers**: RFC 9494 Section 4.3 applies equally when we
+*receive* a route that already carries LLGR_STALE (e.g., from a route reflector that tagged it
+upstream). No extra code is needed — the existing filter (`peer_ctx.capabilities.llgr.is_none()`)
+and `best_path_cmp()` operate on the stored community value regardless of who set it. The path
+is deprioritized in selection and suppressed from non-LLGR peers automatically. Covered by
+`test_llgr_stale_received_from_peer` below.
 
 ---
 
 ## Phase 5: LLGR Timer and GR Expiry Handling
 
-### Where LLGR expiry state lives
+### Where LLGR timer state lives
 
-LLGR expiry belongs in `PeerInfo` (not `Peer` task, not a top-level `BgpServer` field):
+LLGR timer handles live in `PeerInfo`:
 
 ```rust
 pub struct PeerInfo {
     ...
-    pub llgr_expiry: HashMap<AfiSafi, Instant>,  // non-empty = in LLGR phase
+    pub llgr_timers: HashMap<AfiSafi, JoinHandle<()>>,
 }
 ```
 
-**Why not `Peer` task?** LLGR expiry triggers RIB operations (`remove_peer_routes_stale`,
-`propagate_routes`) which are server-owned. The peer task has no RIB access — it would
-need to send a `ServerOp` anyway, negating any benefit of ownership there.
+**Why not `Peer` task?** The timer fires a `ServerOp` which triggers RIB operations
+(`remove_peer_routes_stale`, `propagate_routes`) — server-owned. The peer task has no
+RIB access, so it would need to send a `ServerOp` anyway.
 
 **Why not a top-level `BgpServer` field?** Per-peer state already lives in `PeerInfo`.
-A separate `HashMap<IpAddr, HashMap<AfiSafi, Instant>>` on `BgpServer` duplicates the
-peer key. Keeping it in `PeerInfo` means cancellation on reconnect is
-`peer_info.llgr_expiry.clear()`, and `on_tick` scans `self.peers` which it already
-iterates for other purposes.
+Cancellation on EoR is `peer_info.llgr_timers.remove(&afi_safi).map(|h| h.abort())`.
 
 ---
 
-### Approach A: Spawned tasks per AFI/SAFI (GoBGP style)
+### Spawned tasks per AFI/SAFI (chosen)
 
-GoBGP uses this approach: one goroutine per AFI/SAFI with a channel for cancellation.
+One task per AFI/SAFI with `JoinHandle` for cancellation. Fires `ServerOp::LlgrTimerExpired`
+on expiry. Clean lifecycle: spawn on GR expiry, abort on EoR.
 
 ```rust
-// PeerInfo carries JoinHandles instead of Instants
-pub llgr_timers: HashMap<AfiSafi, JoinHandle<()>>,
-```
-
-On GR expiry, for each LLGR AFI/SAFI:
-```rust
+// In GracefulRestartTimerExpired handler, for each LLGR AFI/SAFI:
 let handle = tokio::spawn(async move {
-    tokio::time::sleep(Duration::from_secs(llst)).await;
+    tokio::time::sleep(Duration::from_secs(llst as u64)).await;
     let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
 });
 peer_info.llgr_timers.insert(afi_safi, handle);
 ```
 
-New `ServerOp::LlgrTimerExpired` handler sweeps stale routes directly.
-
-Cancellation:
+Cancellation (EoR received for an AFI/SAFI):
 ```rust
-peer_info.llgr_timers.drain().for_each(|(_, h)| h.abort());
+peer_info.llgr_timers.remove(&afi_safi).map(|h| h.abort());
 ```
 
-**Tradeoffs:**
-- Timer fires precisely at LLST seconds
-- But the `ServerOp` still sits in `op_rx` queue behind any convergence burst — so
-  processing is delayed under load regardless
-- Requires `ServerOp::LlgrTimerExpired` variant, `JoinHandle` storage, `abort()` calls
-- Scattered: timer lifecycle spread across spawn site, handler, and cancellation sites
+### `core/src/server_ops.rs` — `LlgrTimerExpired`
+```rust
+ServerOp::LlgrTimerExpired { peer_ip, afi_safi } => {
+    info!(%peer_ip, %afi_safi, "LLGR stale timer expired");
+    let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+    self.propagate_routes(delta, Some(peer_ip)).await;
+}
+```
 
 ---
 
-### Approach B: Central `on_tick` in server loop (chosen)
+### F-bit on re-establishment (`core/src/server_ops.rs` — `handle_peer_established()`)
 
-A 1-second server_tick arm in `run()` checks `PeerInfo.llgr_expiry` for expired entries and
-handles them directly — no `ServerOp` round-trip needed since `on_tick` already has
-`&mut self`.
+RFC 9494 Section 4.2: "once the LLGR Period begins, the Helper MUST immediately remove all
+the stale routes from the peer that it is retaining for that address family if any of the
+following occur: the F bit for a specific address family is not set in the newly received
+LLGR Capability, or a specific address family is not included in the newly received LLGR
+Capability, or the LLGR and accompanying GR Capability are not received in the re-established
+session at all."
 
+"Newly received" means the OPEN from the reconnecting peer. `handle_peer_established()`
+already does the equivalent for GR stale routes (lines 565-578): it reads the new session's
+capabilities and sweeps stale routes where F-bit=0. LLGR timer handling belongs in the same
+function for the same reason — it's where the new capabilities are available.
+
+After the existing GR stale-clear block, add:
 ```rust
-// In run():
-let mut server_tick = tokio::time::interval(Duration::from_secs(1));
-server_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-loop {
-    tokio::select! {
-        Ok((stream, _)) = listener.accept() => { self.accept_peer(stream).await; }
-        Some(req) = self.mgmt_rx.recv() => { self.handle_mgmt_op(req, bind_addr).await; }
-        Some(op) = self.op_rx.recv() => { self.handle_server_op(op).await; }
-        _ = server_tick.tick() => {
-            self.on_tick().await;
-        }
-    }
-}
-```
-
-```rust
-async fn on_tick(&mut self) {
-    self.check_llgr_expiry().await;
-    // future: self.check_mrai_expiry().await;
-}
-
-async fn check_llgr_expiry(&mut self) {
-    let now = Instant::now();
-    let expired: Vec<(IpAddr, AfiSafi)> = self.peers.iter()
-        .flat_map(|(ip, p)| p.llgr_expiry.iter()
-            .filter(|(_, exp)| now >= **exp)
-            .map(move |(as_, _)| (*ip, *as_)))
+// RFC 9494 Section 4.2: if LLGR period is active for this peer, check the new LLGR cap.
+// Sweep and abort timer for any AFI/SAFI where: F-bit=0, not in new cap, or no LLGR+GR cap.
+if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+    let llgr_cap = capabilities.as_ref().and_then(|c| c.llgr.as_ref());
+    let to_sweep: Vec<AfiSafi> = peer_info.llgr_timers.keys().copied()
+        .filter(|afi_safi| {
+            match llgr_cap {
+                None => true,  // no LLGR cap in new OPEN
+                Some(cap) => cap.should_clear_stale(*afi_safi),  // F-bit=0 or absent
+            }
+        })
         .collect();
-
-    for (peer_ip, afi_safi) in expired {
-        self.peers.get_mut(&peer_ip).unwrap().llgr_expiry.remove(&afi_safi);
-        info!(%peer_ip, %afi_safi, "LLGR stale timer expired");
-        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+    for afi_safi in &to_sweep {
+        peer_info.llgr_timers.remove(afi_safi).map(|h| h.abort());
+    }
+    if !to_sweep.is_empty() {
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &to_sweep);
         self.propagate_routes(delta, Some(peer_ip)).await;
     }
 }
 ```
 
-**Tradeoffs vs Approach A:**
-- Up to 1s jitter on expiry — irrelevant for stale times in minutes/hours
-- Wakeup every second when LLGR is active — negligible cost
-- Under heavy convergence load, `on_tick` is delayed — but Approach A has the same
-  problem (the `ServerOp` queues behind the same burst)
-- No `ServerOp` variant, no `JoinHandle`, no `abort()` — simpler lifecycle
-- Centralised: all periodic server-side work in `on_tick`, easy to extend
-- Direct `&mut self` access: calls `loc_rib` and `propagate_routes` without a channel
-
----
-
-### F-bit on re-establishment (`core/src/peer/messages.rs` — `enter_open_confirm()`)
-When the peer reconnects and sends a new OPEN, check the LLGR F-bit per AFI/SAFI.
-If F-bit=0 for an AFI/SAFI that is in LLGR phase, sweep stale routes for it immediately
-(do not wait for the LLGR timer). Cancel its `llgr_expiry` entry.
-
-In practice: after `enter_open_confirm()` stores `peer_capabilities.llgr`, the server
-checks `PeerHandshakeComplete` and can inspect the new capability F-bits against any
-active `llgr_expiry` entries to decide which to clear immediately.
+`LlgrCapability` needs a `should_clear_stale(afi_safi) -> bool` method mirroring
+`GrCapability::should_clear_stale`: returns `true` if the AFI/SAFI is absent from entries
+or if its F-bit is `false`.
 
 ### LLST local cap (`core/src/config.rs` and `core/src/server_ops.rs`)
 Following FRR: received LLST from peer capability MAY be reduced by local config.
@@ -354,21 +360,59 @@ When scheduling expiry: `let llst = peer_llst.min(config.max_llgr_stale_time.unw
 Add to `proto/bgp.proto` server config if needed.
 
 ### Consecutive restart behavior
-If the peer drops again during LLGR (before `llgr_expiry` fires), the original timer
-must not be reset. This is handled by a single rule:
+RFC 9494: "The timer MUST NOT be updated until the peer has established and synchronized
+a new session." If the peer drops again during LLGR (before `llgr_expiry` fires), the
+original timer must not be reset. This is handled by a single rule:
 
-In `GracefulRestartTimerExpired`, use `entry().or_insert()` when scheduling expiry:
+In `GracefulRestartTimerExpired`, only spawn a timer if one is not already running:
 ```rust
-peer_info.llgr_expiry
-    .entry(*afi_safi)
-    .or_insert(Instant::now() + Duration::from_secs(*llst as u64));
+peer_info.llgr_timers.entry(*afi_safi).or_insert_with(|| {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(llst as u64)).await;
+        let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
+    })
+});
 ```
 
-Only sets expiry if not already running. `mark_peer_routes_llgr_stale()` is a no-op for
-routes already tagged. `PeerDisconnected` does not touch `llgr_expiry`. Only
-`PeerHandshakeComplete` (successful re-establishment) clears it.
+Only spawns if not already running. `mark_peer_routes_llgr_stale()` is a no-op for
+routes already tagged. `PeerDisconnected` does not touch `llgr_timers`. Only
+`GracefulRestartComplete` (EoR received) aborts and removes the handle.
+
+### "Session resets prior to becoming synchronized" (RFC 9494 Section 4.2)
+
+RFC 9494: "If the timer expires during synchronization with the peer, any stale routes
+that the peer has not refreshed are removed. If the session subsequently resets prior to
+becoming synchronized, any remaining routes (for the AFI/SAFI whose LLST timer expired)
+MUST be removed immediately."
+
+"Remaining routes" = routes still tagged LLGR_STALE at the time of the second disconnect
+(i.e. routes the peer never refreshed before the session dropped again). These are exactly
+the routes `on_tick` would sweep when the logically-expired timer is processed — no special
+handling in `PeerDisconnected` is needed. Within at most 1 second, `check_llgr_expiry()`
+fires and removes them. The `or_insert` rule ensures the timer is not restarted, so the
+sweep happens regardless of how many times the session drops.
 
 ### `core/src/peer/mod.rs` — `start_gr_restart_timer()`
+
+**Gap**: the existing implementation returns early when `restart_time == 0`, which means
+`GracefulRestartTimerExpired` never fires. Per RFC 9494 Section 4.2, if the GR Restart Time
+is zero but LLST is nonzero, the LLGR phase still applies (GR phase duration is zero, LLGR
+phase begins immediately). Fix: when restart_time=0 but there are LLGR entries with nonzero
+LLST, send `GracefulRestartTimerExpired` immediately with a 0-second sleep (or skip the timer
+and send directly):
+
+```rust
+if restart_time == 0 {
+    if !llgr_afi_safis.is_empty() {
+        let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired {
+            peer_ip,
+            llgr_afi_safis,
+        });
+    }
+    return;
+}
+```
+
 Capture LLGR info from `self.capabilities.llgr` when spawning the GR timer:
 ```rust
 let llgr_afi_safis: Vec<(AfiSafi, u32)> = self.capabilities.llgr
@@ -398,7 +442,11 @@ Handler:
 ```rust
 ServerOp::GracefulRestartTimerExpired { peer_ip, llgr_afi_safis } => {
     let stale_afi_safis = self.loc_rib.stale_afi_safis(peer_ip);
-    let llgr_map: HashMap<AfiSafi, u32> = llgr_afi_safis.into_iter().collect();
+    // RFC 9494 Section 4.2: LLST=0 means no LLGR phase for that AFI/SAFI.
+    // Those fall through to the immediate non-LLGR sweep path below.
+    let llgr_map: HashMap<AfiSafi, u32> = llgr_afi_safis.into_iter()
+        .filter(|(_, llst)| *llst > 0)
+        .collect();
 
     // Non-LLGR AFI/SAFIs: sweep immediately (existing behavior)
     let non_llgr: Vec<_> = stale_afi_safis.iter()
@@ -408,13 +456,19 @@ ServerOp::GracefulRestartTimerExpired { peer_ip, llgr_afi_safis } => {
     self.propagate_routes(delta, Some(peer_ip)).await;
 
     // LLGR AFI/SAFIs: tag with community, schedule expiry in PeerInfo
-    let mut llgr_delta = RouteDelta::default();
+    let mut llgr_delta = RouteDelta::new();
     if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
         for (afi_safi, llst) in &llgr_map {
             let delta = self.loc_rib.mark_peer_routes_llgr_stale(peer_ip, *afi_safi);
             llgr_delta.merge(delta);
-            peer_info.llgr_expiry.insert(*afi_safi,
-                Instant::now() + Duration::from_secs(*llst as u64));
+            let llst = *llst;
+            let afi_safi = *afi_safi;
+            peer_info.llgr_timers.entry(afi_safi).or_insert_with(|| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(llst as u64)).await;
+                    let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
+                })
+            });
         }
     }
     self.propagate_routes(llgr_delta, Some(peer_ip)).await;
@@ -424,22 +478,57 @@ ServerOp::GracefulRestartTimerExpired { peer_ip, llgr_afi_safis } => {
 ### `core/src/server_ops.rs` — `GracefulRestartComplete` (EOR received)
 ```rust
 ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
-    // Cancel LLGR expiry (peer recovered before timer fired)
+    // EoR received = session synchronized. Cancel LLGR timer and sweep remaining stale routes.
+    // If LLST already fired before EoR, abort() is a no-op and remove_peer_routes_stale() finds nothing.
     if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-        peer_info.llgr_expiry.remove(&afi_safi);
+        peer_info.llgr_timers.remove(&afi_safi).map(|h| h.abort());
     }
     let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
     self.propagate_routes(delta, Some(peer_ip)).await;
 }
 ```
 
-### `core/src/server_ops.rs` — `PeerHandshakeComplete`
+### Selection_Deferral_Timer
+
+RFC 9494 Section 4.2 defines two alternative synchronization signals for the Helper:
+
+> "The session is termed 'synchronized' for a given AFI/SAFI once the EoR for that AFI/SAFI
+> has been received from the peer **or** once the Selection_Deferral_Timer discussed in
+> [RFC4724] expires."
+
+**Not applicable to bgpgg.** The Selection_Deferral_Timer is defined in RFC 4724 Section 4.1
+as a Restarting Speaker obligation. bgpgg never acts as a Restarting Speaker — the R bit is
+hardcoded to `false` in `messages.rs`. bgpgg is a Helper only. No implementation needed.
+
+### LLGR timer cleanup on peer removal (`core/src/server_ops.rs` — `handle_remove_peer()`)
+
+When a peer is removed, `self.peers.remove(&peer_ip)` drops `PeerInfo`. Dropping a
+`JoinHandle` **detaches** the task (does not abort it). The orphaned LLGR timer would
+fire `LlgrTimerExpired` for a non-existent peer. Abort all LLGR timers before removing:
+
 ```rust
-// Cancel all LLGR expiry on reconnect
+// Abort any running LLGR timers before removing the peer
 if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-    peer_info.llgr_expiry.clear();
+    for (_, handle) in peer_info.llgr_timers.drain() {
+        handle.abort();
+    }
 }
 ```
+
+Insert this block just before `self.peers.remove(&peer_ip)` at line 721.
+
+---
+
+### Timer lifecycle across reconnect
+
+RFC 9494: "The timer continues to run once the session has re-established. The timer is
+neither stopped nor updated until the EoR marker is received."
+
+The LLST timer keeps running across reconnect **unless** the F-bit/cap check in
+`handle_peer_established()` above triggers a sweep (which also aborts the timer). For
+AFI/SAFIs that pass that check (F-bit=1, still in new LLGR cap), the timer runs undisturbed.
+Cancellation for the normal case (session recovered) happens only in `GracefulRestartComplete`
+(EoR received).
 
 ---
 
@@ -447,17 +536,16 @@ if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
 
 | File | Changes |
 |------|---------|
-| `core/src/bgp/msg_open_types.rs` | LlgrCapability struct, cap 71 encode/decode |
+| `core/src/bgp/msg_open_types.rs` | LlgrCapability struct, cap 71 encode/decode, should_clear_stale() |
 | `core/src/bgp/community.rs` | LLGR_STALE (0xFFFF0006) and NO_LLGR (0xFFFF0007) constants |
 | `core/src/config.rs` | LlgrAfiSafiConfig, LlgrConfig, PeerConfig.llgr |
-| `core/src/peer/mod.rs` | PeerCapabilities.llgr, capture LLGR info in GR timer |
-| `core/src/peer/messages.rs` | Advertise + parse LLGR capability; F-bit=0 sweep on re-establishment |
-| `core/src/peer/outgoing.rs` | Filter LLGR_STALE routes for non-LLGR peers; preserve community |
+| `core/src/peer/mod.rs` | PeerCapabilities.llgr, capture LLGR info in GR timer; handle restart_time=0 with nonzero LLST |
+| `core/src/peer/messages.rs` | Advertise + parse LLGR capability |
+| `core/src/peer/outgoing.rs` | Add `llgr_capable: bool` to `PeerExportContext`; filter LLGR_STALE routes for non-LLGR peers; preserve community |
 | `core/src/rib/path.rs` | LLGR_STALE deprioritization in best_path_cmp() |
-| `core/src/rib/rib_loc.rs` | mark_peer_routes_llgr_stale() — skips NO_LLGR routes |
-| `core/src/server.rs` | on_tick() arm in run(), check_llgr_expiry() |
-| `core/src/server_ops.rs` | GR expiry splits LLGR/non-LLGR, GracefulRestartComplete cancels expiry |
-| `core/src/server.rs` (`PeerInfo`) | llgr_expiry: HashMap<AfiSafi, Instant> |
+| `core/src/rib/rib_loc.rs` | `mark_peer_routes_llgr_stale()` — removes NO_LLGR routes, tags rest; add `RouteDelta::new()` and `RouteDelta::merge()` |
+| `core/src/server_ops.rs` | GR expiry splits LLGR/non-LLGR, `LlgrTimerExpired` handler, GracefulRestartComplete aborts timers, handle_peer_established() sweeps on F-bit=0/cap-absent, handle_remove_peer() aborts LLGR timers |
+| `core/src/server.rs` (`PeerInfo`) | `llgr_timers: HashMap<AfiSafi, JoinHandle<()>>` |
 | `proto/bgp.proto` | LlgrAfiSafiConfig, LlgrConfig messages |
 | `core/src/grpc/service.rs` | proto_to_peer_config() LLGR mapping |
 | `core/src/config.rs` (`Config`) | max_llgr_stale_time: Option<u32> server-level LLST cap |
@@ -466,12 +554,88 @@ if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
 ```
 make test
 ```
-Integration test: two servers with LLGR configured, peer drops, GR timer elapses, verify:
-1. Routes tagged with LLGR_STALE community
-2. Routes with NO_LLGR community swept immediately (not retained)
-3. LLGR_STALE routes not advertised to third peer without LLGR
-4. LLGR_STALE community preserved unchanged when advertised to LLGR-capable peer
-5. LLGR timer elapses → routes withdrawn
-6. Peer reconnects before LLGR timer → routes restored, community removed
-7. Peer reconnects with F-bit=0 → stale routes swept immediately for that AFI/SAFI
-8. Peer drops again during LLGR → original timer continues, not reset
+
+Integration tests live in `core/tests/llgr.rs`. All use `FakePeer` for precise control
+over capability negotiation, UPDATE content, and TCP disconnect timing. No `sleep()` —
+use `poll_until()` / `poll_route_withdrawal()`.
+
+### New FakePeer helper (`core/tests/utils/common.rs`)
+
+`send_open_with_llgr(asn, router_id, hold_time, gr_time, llst_secs)` — sends OPEN with
+GR capability (code 64) + LLGR capability (code 71) for IPv4 unicast. Add alongside
+`send_open_with_gr`.
+
+### Tests
+
+**`test_llgr_zero_stale_time`** — covers: LLST=0 AFI/SAFI swept immediately at GR expiry, not LLGR phase
+- FakePeer sends OPEN with GR (restart_time=1s) + LLGR cap with stale_time=0 for IPv4 unicast
+- FakePeer announces a prefix, then drops TCP
+- After GR timer fires, verify route is withdrawn (not tagged with LLGR_STALE)
+- Confirm no LLGR timer running (route gone, not retained)
+
+**`test_llgr_stale_community`** — covers: LLGR_STALE tagged, NO_LLGR swept
+- FakePeer (GR=1s, LLST=10s) announces prefix A (clean) and prefix B (NO_LLGR community)
+- FakePeer drops TCP
+- Poll until prefix A has LLGR_STALE community (`0xFFFF0006`)
+- Verify prefix B is gone (swept immediately)
+
+**`test_llgr_not_propagated_to_non_llgr_peer`** — covers: propagation filtering
+- S1 (GR + LLGR), S2 (GR only) peered together
+- FakePeer connects to S1, announces a route
+- Verify S2 receives the route initially
+- FakePeer drops TCP → LLGR phase on S1
+- Verify S1 has route with LLGR_STALE, S2 no longer has the route
+
+**`test_llgr_timer_expiry`** — covers: LLST sweeps routes
+- FakePeer (GR=1s, LLST=2s) announces route, drops TCP
+- Verify route tagged LLGR_STALE after GR expires
+- Verify route gone after LLST expires (`poll_route_withdrawal`)
+
+**`test_llgr_peer_recovery`** — covers: EoR cancels timer, community removed
+- FakePeer (GR=1s, LLST=30s) announces route, drops TCP → LLGR phase
+- FakePeer reconnects with `send_open_with_llgr`, re-announces route, sends EoR
+- Verify route present with no LLGR_STALE community
+
+**`test_llgr_sweep_on_reconnect`** — covers: RFC 9494 Section 4.2 immediate sweep on reconnect
+Three table-driven cases, all share the same setup: FakePeer (GR=1s, LLST=30s) announces
+route, drops TCP → LLGR phase active, route tagged LLGR_STALE. Then FakePeer reconnects
+with a different OPEN:
+
+| case | reconnect OPEN | expected |
+|------|---------------|----------|
+| `f_bit_zero` | LLGR cap present, F-bit=0 for IPv4 unicast | route swept immediately |
+| `afi_safi_absent` | LLGR cap present but IPv4 unicast not listed | route swept immediately |
+| `no_llgr_cap` | no GR or LLGR capability | route swept immediately |
+
+For each case: `poll_route_withdrawal()` confirms route gone promptly (not after 30s LLST).
+The 30s LLST makes the distinction obvious — if the timer was not aborted, the route would
+linger.
+
+**`test_llgr_stale_received_from_peer`** — covers: RFC 9494 Section 4.3 incoming LLGR_STALE
+Two LLGR-capable servers S1 and S2, plus a non-LLGR server S3, all peered:
+- FakePeer connects to S1 with `send_open_with_llgr`
+- FakePeer sends a route that already carries LLGR_STALE community (`0xFFFF0006`) in its attrs
+- Verify S1 stores the route with LLGR_STALE (not stripped)
+- Verify S2 (LLGR-capable) receives the route with LLGR_STALE community intact
+- Verify S3 (non-LLGR) does NOT receive the route (`poll_route_withdrawal` or route never arrives)
+- Verify the route is deprioritized: add a competing route without LLGR_STALE from another peer
+  and confirm the clean route is selected as best
+
+**`test_llgr_no_llgr_from_policy`** — covers: RFC 9494 Section 4.2 NO_LLGR via import policy
+- Configure an import policy on S1 that adds NO_LLGR community (`0xFFFF0007`) to all routes
+  from FakePeer's address
+- FakePeer connects with `send_open_with_llgr` (GR=1s, LLST=30s), announces a route *without*
+  NO_LLGR in its attrs
+- Verify the route is accepted (policy adds NO_LLGR but doesn't reject it)
+- FakePeer drops TCP → LLGR phase begins on S1
+- Verify the route is removed immediately (the stored path carries NO_LLGR from the import
+  policy; `mark_peer_routes_llgr_stale` sweeps it), NOT retained for 30s
+- Use `poll_route_withdrawal()` to confirm prompt removal
+
+**`test_llgr_consecutive_restart`** — covers: RFC 9494 Section 4.2 timer MUST NOT be reset
+- FakePeer (GR=1s, LLST=4s) announces route, drops TCP → LLGR phase starts
+- Wait ~2s (half of LLST), then FakePeer drops TCP again (second disconnect during LLGR)
+- The LLGR timer MUST NOT be restarted — original 4s deadline still applies
+- `poll_route_withdrawal()` confirms route is swept at ~4s from initial LLGR start, not at
+  ~6s (which would indicate the timer was reset on the second disconnect)
+- Use a 30s LLST to make the distinction unambiguous if preferred (route gone at ~30s not ~32s)
