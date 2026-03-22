@@ -177,7 +177,7 @@ pub const NO_LLGR: u32 = 0xFFFF0007;  // RFC 9494: do not retain this route duri
 ```
 
 ### `core/src/rib/rib_loc.rs`
-Add function `mark_peer_routes_llgr_stale(peer_ip, afi_safi) -> RouteDelta`:
+Add function `apply_llgr(peer_ip, afi_safi) -> RouteDelta`:
 - Finds all paths from `peer_ip` where `stale = true` in the given AFI/SAFI table
 - **Removes paths that have `NO_LLGR` community** immediately (not retained during LLGR)
 - Adds `LLGR_STALE` community to remaining stale paths via `Arc::make_mut()`
@@ -187,7 +187,7 @@ Add function `mark_peer_routes_llgr_stale(peer_ip, afi_safi) -> RouteDelta`:
 **NO_LLGR from import policy**: RFC 9494 Section 4.2 says routes must be removed if they carry
 NO_LLGR "either as sent by the peer or as the result of a configured policy." Import policies in
 bgpgg take `path: &mut Path` and run before `upsert_path()` — they can attach NO_LLGR to the
-stored path. Since `mark_peer_routes_llgr_stale()` checks the stored community on the path
+stored path. Since `apply_llgr()` checks the stored community on the path
 regardless of source, policy-set NO_LLGR is covered transparently. No additional code is needed;
 this is worth an explicit integration test (see `test_llgr_no_llgr_from_policy` below).
 
@@ -374,7 +374,7 @@ peer_info.llgr_timers.entry(*afi_safi).or_insert_with(|| {
 });
 ```
 
-Only spawns if not already running. `mark_peer_routes_llgr_stale()` is a no-op for
+Only spawns if not already running. `apply_llgr()` is a no-op for
 routes already tagged. `PeerDisconnected` does not touch `llgr_timers`. Only
 `GracefulRestartComplete` (EoR received) aborts and removes the handle.
 
@@ -456,11 +456,11 @@ ServerOp::GracefulRestartTimerExpired { peer_ip, llgr_afi_safis } => {
     self.propagate_routes(delta, Some(peer_ip)).await;
 
     // LLGR AFI/SAFIs: tag with community, schedule expiry in PeerInfo
-    let mut llgr_delta = RouteDelta::new();
+    let llgr_afi_safis: Vec<AfiSafi> = llgr_map.keys().copied().collect();
+    let llgr_delta = self.loc_rib.apply_llgr(peer_ip, &llgr_afi_safis);
+
     if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
         for (afi_safi, llst) in &llgr_map {
-            let delta = self.loc_rib.mark_peer_routes_llgr_stale(peer_ip, *afi_safi);
-            llgr_delta.merge(delta);
             let llst = *llst;
             let afi_safi = *afi_safi;
             peer_info.llgr_timers.entry(afi_safi).or_insert_with(|| {
@@ -543,7 +543,7 @@ Cancellation for the normal case (session recovered) happens only in `GracefulRe
 | `core/src/peer/messages.rs` | Advertise + parse LLGR capability |
 | `core/src/peer/outgoing.rs` | Add `llgr_capable: bool` to `PeerExportContext`; filter LLGR_STALE routes for non-LLGR peers; preserve community |
 | `core/src/rib/path.rs` | LLGR_STALE deprioritization in best_path_cmp() |
-| `core/src/rib/rib_loc.rs` | `mark_peer_routes_llgr_stale()` — removes NO_LLGR routes, tags rest; add `RouteDelta::new()` and `RouteDelta::merge()` |
+| `core/src/rib/rib_loc.rs` | `StaleStrategy` enum (Sweep/TransitionToLlgr), `handle_stale_routes()`, `apply_llgr(&[AfiSafi])` |
 | `core/src/server_ops.rs` | GR expiry splits LLGR/non-LLGR, `LlgrTimerExpired` handler, GracefulRestartComplete aborts timers, handle_peer_established() sweeps on F-bit=0/cap-absent, handle_remove_peer() aborts LLGR timers |
 | `core/src/server.rs` (`PeerInfo`) | `llgr_timers: HashMap<AfiSafi, JoinHandle<()>>` |
 | `proto/bgp.proto` | LlgrAfiSafiConfig, LlgrConfig messages |
@@ -629,7 +629,7 @@ Two LLGR-capable servers S1 and S2, plus a non-LLGR server S3, all peered:
 - Verify the route is accepted (policy adds NO_LLGR but doesn't reject it)
 - FakePeer drops TCP → LLGR phase begins on S1
 - Verify the route is removed immediately (the stored path carries NO_LLGR from the import
-  policy; `mark_peer_routes_llgr_stale` sweeps it), NOT retained for 30s
+  policy; `apply_llgr` sweeps it), NOT retained for 30s
 - Use `poll_route_withdrawal()` to confirm prompt removal
 
 **`test_llgr_consecutive_restart`** — covers: RFC 9494 Section 4.2 timer MUST NOT be reset

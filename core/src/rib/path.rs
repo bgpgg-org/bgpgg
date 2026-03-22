@@ -21,6 +21,7 @@ use crate::bgp::msg_update_types::{AsPath, LargeCommunity, AS_TRANS};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::rib::types::RouteSource;
 use std::cmp::Ordering;
+use std::net::IpAddr;
 
 /// BGP path attributes - all BGP protocol attributes for a path.
 /// Compiler-checked equality (no manual PartialEq needed).
@@ -75,6 +76,10 @@ impl Path {
 
     pub fn source(&self) -> RouteSource {
         self.attrs.source
+    }
+
+    pub fn is_from_peer(&self, peer_ip: IpAddr) -> bool {
+        self.attrs.source.peer_ip() == Some(peer_ip)
     }
 
     pub fn local_pref(&self) -> Option<u32> {
@@ -818,5 +823,12 @@ mod tests {
             bgp_id: test_bgp_id(2),
         };
         assert!(!path3.matches_remote(&path4));
+    }
+
+    #[test]
+    fn test_is_from_peer() {
+        let path = make_base_path(); // source peer_ip = test_ip(1)
+        assert!(path.is_from_peer(test_ip(1)));
+        assert!(!path.is_from_peer(test_ip(2)));
     }
 }

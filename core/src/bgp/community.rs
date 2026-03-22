@@ -34,6 +34,10 @@ pub const NO_ADVERTISE: u32 = 0xFFFFFF02;
 pub const NO_EXPORT_SUBCONFED: u32 = 0xFFFFFF03;
 /// RFC 8326: well-known community for graceful BGP session shutdown
 pub const GRACEFUL_SHUTDOWN: u32 = 0xFFFF0000;
+/// RFC 9494: route was retained during Long-Lived Graceful Restart
+pub const LLGR_STALE: u32 = 0xFFFF0006;
+/// RFC 9494: do not retain this route during Long-Lived Graceful Restart
+pub const NO_LLGR: u32 = 0xFFFF0007;
 
 #[cfg(test)]
 mod tests {
