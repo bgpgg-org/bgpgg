@@ -375,7 +375,7 @@ async fn test_collision_connect_state() {
             peers.len() == 1 && peers[0].state == BgpState::Connect as i32
         },
         "Timeout waiting for Connect state",
-        10,
+        Duration::from_secs(1),
     )
     .await;
 

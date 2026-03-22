@@ -18,7 +18,6 @@ pub use utils::*;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
-use tokio::time::Duration;
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -211,7 +210,7 @@ async fn test_announce_withdraw_four_node_mesh() {
             true
         },
         "Timeout waiting for route withdrawal",
-        400,
+        Duration::from_secs(40),
     )
     .await;
     // Active-active: all peers have configured=true

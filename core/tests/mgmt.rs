@@ -20,7 +20,6 @@ pub use utils::*;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
-use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -301,7 +300,7 @@ async fn test_disable_enable_peer() {
         .unwrap();
 
     // Peer should reconnect and reach Established with admin_state Up
-    // Use longer timeout (300 iterations = 30s) to account for damping and retries
+    // Use longer timeout to account for damping and retries
     poll_until_with_timeout(
         || async {
             let peers1 = server1.client.get_peers().await.unwrap();
@@ -319,7 +318,7 @@ async fn test_disable_enable_peer() {
                 && peers1[0].admin_state == AdminState::Up as i32
         },
         "Peer should be Established with admin_state Up",
-        300, // 30 seconds
+        Duration::from_secs(30),
     )
     .await;
 }

@@ -20,7 +20,6 @@ pub use utils::*;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
 use std::net::Ipv4Addr;
-use tokio::time::Duration;
 
 /// RFC 4456 Section 8: ORIGINATOR_ID loop detection.
 /// A route arriving with ORIGINATOR_ID equal to the RR's own router-id must be rejected.

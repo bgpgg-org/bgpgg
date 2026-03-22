@@ -15,7 +15,7 @@
 use crate::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
+use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability, LlgrCapability};
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
@@ -71,6 +71,8 @@ pub struct PeerCapabilities {
     /// ADD-PATH capability (RFC 7911)
     /// Contains the negotiated ADD-PATH send/receive per AFI/SAFI
     pub add_path: Option<AddPathCapability>,
+    /// Long-Lived Graceful Restart capability (RFC 9494)
+    pub llgr: Option<LlgrCapability>,
 }
 
 impl PeerCapabilities {

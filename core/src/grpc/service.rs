@@ -15,7 +15,8 @@
 use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
-use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::config::{LlgrAfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::PathAttrs;
@@ -259,10 +260,10 @@ fn to_proto_admin_state(state: AdminState) -> i32 {
 }
 
 /// Convert proto SessionConfig to internal PeerConfig
-fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
+fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig, String> {
     let defaults = PeerConfig::default();
     let Some(cfg) = proto else {
-        return defaults;
+        return Ok(defaults);
     };
 
     let max_prefix = cfg.max_prefix.map(|p| MaxPrefixSetting {
@@ -285,7 +286,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         defaults.graceful_restart
     };
 
-    PeerConfig {
+    Ok(PeerConfig {
         address: String::new(),
         port: cfg.port.map(|p| p as u16).unwrap_or(defaults.port),
         idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
@@ -321,7 +322,32 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         next_hop_self: cfg.next_hop_self.unwrap_or(defaults.next_hop_self),
         graceful_shutdown: cfg.graceful_shutdown.unwrap_or(defaults.graceful_shutdown),
         ttl_min: cfg.ttl_min.map(|v| v as u8).or(defaults.ttl_min),
+        llgr: proto_to_llgr_config(cfg.llgr)?.unwrap_or(defaults.llgr),
+    })
+}
+
+fn proto_to_llgr_config(proto: Option<proto::LlgrConfig>) -> Result<Option<LlgrConfig>, String> {
+    let Some(llgr) = proto else {
+        return Ok(None);
+    };
+
+    let mut entries = Vec::new();
+    for entry in llgr.entries {
+        let afi_val = entry.afi.ok_or("LLGR entry missing afi")?;
+        let safi_val = entry.safi.ok_or("LLGR entry missing safi")?;
+        let stale_time = entry
+            .stale_time_secs
+            .ok_or("LLGR entry missing stale_time_secs")?;
+        let afi = Afi::try_from(afi_val as u16)
+            .map_err(|_| format!("LLGR entry has invalid afi: {afi_val}"))?;
+        let safi = Safi::try_from(safi_val as u8)
+            .map_err(|_| format!("LLGR entry has invalid safi: {safi_val}"))?;
+        entries.push(
+            LlgrAfiSafiConfig::new(AfiSafi::new(afi, safi), stale_time)
+                .map_err(|err| format!("LLGR entry: {err}"))?,
+        );
     }
+    Ok(Some(LlgrConfig { entries }))
 }
 
 #[derive(Clone)]
@@ -357,7 +383,7 @@ impl BgpService for BgpGrpcService {
             }
         }
 
-        let config = proto_to_peer_config(inner.config);
+        let config = proto_to_peer_config(inner.config).map_err(Status::invalid_argument)?;
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1332,7 +1358,7 @@ impl BgpService for BgpGrpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::proto::SessionConfig;
+    use crate::grpc::proto::{self, SessionConfig};
 
     #[test]
     fn test_proto_to_peer_config_ttl_min() {
@@ -1346,8 +1372,86 @@ mod tests {
             let config = proto_to_peer_config(Some(SessionConfig {
                 ttl_min: *input,
                 ..Default::default()
-            }));
+            }))
+            .unwrap();
             assert_eq!(config.ttl_min, *expected);
         }
+    }
+
+    #[test]
+    fn test_proto_to_peer_config_llgr() {
+        // Valid entry
+        let config = proto_to_peer_config(Some(SessionConfig {
+            llgr: Some(proto::LlgrConfig {
+                entries: vec![proto::LlgrEntry {
+                    afi: Some(1),
+                    safi: Some(1),
+                    stale_time_secs: Some(3600),
+                }],
+            }),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(config.llgr.entries.len(), 1);
+        assert_eq!(config.llgr.entries[0].afi, 1);
+        assert_eq!(config.llgr.entries[0].safi, 1);
+        assert_eq!(config.llgr.entries[0].stale_time, 3600);
+
+        // Invalid/incomplete entries are rejected
+        let rejected_cases = [
+            (
+                "missing afi",
+                proto::LlgrEntry {
+                    afi: None,
+                    safi: Some(1),
+                    stale_time_secs: Some(100),
+                },
+            ),
+            (
+                "missing safi",
+                proto::LlgrEntry {
+                    afi: Some(1),
+                    safi: None,
+                    stale_time_secs: Some(100),
+                },
+            ),
+            (
+                "missing stale_time",
+                proto::LlgrEntry {
+                    afi: Some(1),
+                    safi: Some(1),
+                    stale_time_secs: None,
+                },
+            ),
+            (
+                "invalid afi",
+                proto::LlgrEntry {
+                    afi: Some(999),
+                    safi: Some(1),
+                    stale_time_secs: Some(100),
+                },
+            ),
+            (
+                "stale_time overflow",
+                proto::LlgrEntry {
+                    afi: Some(1),
+                    safi: Some(1),
+                    stale_time_secs: Some(0xFFFFFF + 1),
+                },
+            ),
+        ];
+        for (name, entry) in rejected_cases {
+            let result = proto_to_peer_config(Some(SessionConfig {
+                llgr: Some(proto::LlgrConfig {
+                    entries: vec![entry],
+                }),
+                ..Default::default()
+            }));
+            assert!(result.is_err(), "{name}: should be rejected");
+        }
+
+        // No LLGR config -> default empty
+        let config = proto_to_peer_config(Some(SessionConfig::default())).unwrap();
+        assert!(config.llgr.entries.is_empty());
     }
 }

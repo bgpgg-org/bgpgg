@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_open_types::LlgrEntry;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -66,6 +68,69 @@ impl Default for GracefulRestartConfig {
             enabled: default_gr_enabled(),
             restart_time: default_gr_restart_time(),
         }
+    }
+}
+
+/// RFC 9494: Per-AFI/SAFI LLGR configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LlgrAfiSafiConfig {
+    /// AFI value (1=IPv4, 2=IPv6)
+    pub afi: u16,
+    /// SAFI value (1=Unicast)
+    pub safi: u8,
+    /// Long-Lived Stale Time in seconds (24-bit max: 16777215)
+    pub stale_time: u32,
+}
+
+impl LlgrAfiSafiConfig {
+    const MAX_STALE_TIME: u32 = 0xFFFFFF; // 24-bit max
+
+    pub fn new(afi_safi: AfiSafi, stale_time: u32) -> Result<Self, String> {
+        if stale_time > Self::MAX_STALE_TIME {
+            return Err(format!(
+                "LLGR stale_time {} exceeds 24-bit maximum ({})",
+                stale_time,
+                Self::MAX_STALE_TIME
+            ));
+        }
+        Ok(Self {
+            afi: afi_safi.afi as u16,
+            safi: afi_safi.safi as u8,
+            stale_time,
+        })
+    }
+
+    /// Get AfiSafi from config, returns None if AFI/SAFI values are invalid
+    pub fn afi_safi(&self) -> Option<AfiSafi> {
+        let afi = Afi::try_from(self.afi).ok()?;
+        let safi = Safi::try_from(self.safi).ok()?;
+        Some(AfiSafi::new(afi, safi))
+    }
+}
+
+/// RFC 9494: Long-Lived Graceful Restart configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LlgrConfig {
+    #[serde(default)]
+    pub entries: Vec<LlgrAfiSafiConfig>,
+}
+
+impl LlgrConfig {
+    /// Convert validated config entries to capability entries for OPEN message building.
+    /// Skips entries with invalid AFI/SAFI (should not happen after validate()).
+    pub fn to_llgr_entries(&self) -> Vec<LlgrEntry> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                Some(LlgrEntry {
+                    afi_safi: entry.afi_safi()?,
+                    forwarding_preserved: false,
+                    stale_time: entry.stale_time,
+                })
+            })
+            .collect()
     }
 }
 
@@ -156,6 +221,9 @@ pub struct PeerConfig {
     /// 255 = directly connected peer, 254 = 1 hop away, etc.
     #[serde(default)]
     pub ttl_min: Option<u8>,
+    /// RFC 9494: Long-Lived Graceful Restart configuration
+    #[serde(default)]
+    pub llgr: LlgrConfig,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -222,6 +290,19 @@ impl PeerConfig {
                 "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)".to_string(),
             );
         }
+        for entry in &self.llgr.entries {
+            if entry.afi_safi().is_none() {
+                return Err(format!(
+                    "LLGR entry has invalid AFI/SAFI: afi={}, safi={}",
+                    entry.afi, entry.safi
+                ));
+            }
+        }
+        if !self.llgr.entries.is_empty() && !self.graceful_restart.enabled {
+            return Err(
+                "LLGR requires graceful-restart to be enabled (RFC 9494 Section 4.5)".to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -252,6 +333,7 @@ impl Default for PeerConfig {
             next_hop_self: false,
             graceful_shutdown: false,
             ttl_min: None,
+            llgr: LlgrConfig::default(),
         }
     }
 }
@@ -832,5 +914,79 @@ mod tests {
             result.unwrap_err(),
             "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)"
         );
+    }
+
+    #[test]
+    fn test_llgr_stale_time_validation() {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+
+        let cases = [
+            (0, true),
+            (3600, true),
+            (0xFFFFFF, true),      // 24-bit max
+            (0xFFFFFF + 1, false), // exceeds 24-bit
+            (u32::MAX, false),
+        ];
+        for (stale_time, should_ok) in cases {
+            let result = LlgrAfiSafiConfig::new(ipv4_unicast, stale_time);
+            assert_eq!(
+                result.is_ok(),
+                should_ok,
+                "stale_time={stale_time} expected ok={should_ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_llgr_requires_graceful_restart() {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+
+        // LLGR with GR enabled -> ok
+        let peer = PeerConfig {
+            llgr: LlgrConfig {
+                entries: vec![LlgrAfiSafiConfig::new(ipv4_unicast, 3600).unwrap()],
+            },
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // LLGR with GR disabled -> error
+        let peer = PeerConfig {
+            graceful_restart: GracefulRestartConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            llgr: LlgrConfig {
+                entries: vec![LlgrAfiSafiConfig::new(ipv4_unicast, 3600).unwrap()],
+            },
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("LLGR requires graceful-restart"));
+    }
+
+    #[test]
+    fn test_llgr_rejects_invalid_afi_safi() {
+        // Construct directly with invalid AFI/SAFI (bypassing new())
+        let peer = PeerConfig {
+            llgr: LlgrConfig {
+                entries: vec![LlgrAfiSafiConfig {
+                    afi: 999,
+                    safi: 1,
+                    stale_time: 3600,
+                }],
+            },
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid AFI/SAFI"));
     }
 }

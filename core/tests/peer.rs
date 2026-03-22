@@ -116,7 +116,7 @@ async fn test_peer_down() {
             routes.is_empty()
         },
         "Timeout waiting for route withdrawal after GR timer expires",
-        50, // 5 seconds = 3s GR timer + 2s buffer
+        Duration::from_secs(5), // 3s GR timer + 2s buffer
     )
     .await;
 }
@@ -1357,7 +1357,7 @@ async fn test_graceful_restart() {
                     "{}: timeout waiting for route withdrawal after GR timer",
                     tc.name
                 ),
-                50, // 5s = 3s GR timer + 2s buffer
+                Duration::from_secs(5), // 3s GR timer + 2s buffer
             )
             .await;
 
@@ -1366,7 +1366,12 @@ async fn test_graceful_restart() {
         } else {
             // No GR: Wait for peer to detect disconnect and routes to be withdrawn
             // Configured peer goes to Idle
-            poll_peers_with_timeout(&server2, vec![server1.to_peer(BgpState::Idle)], 40).await;
+            poll_peers_with_timeout(
+                &server2,
+                vec![server1.to_peer(BgpState::Idle)],
+                Duration::from_secs(4),
+            )
+            .await;
 
             // Routes should be withdrawn immediately
             poll_route_withdrawal(&[&server2]).await;
@@ -1521,7 +1526,7 @@ async fn test_graceful_restart_reconnect() {
     );
 
     // Server should send End-of-RIB marker after initial update
-    use tokio::time::{timeout, Duration};
+    use tokio::time::timeout;
     let eor_result = timeout(Duration::from_secs(2), peer.read_update()).await;
     assert!(
         eor_result.is_ok(),

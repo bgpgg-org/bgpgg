@@ -23,7 +23,6 @@ use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
 use bgpgg::grpc::proto::BgpState;
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 /// RFC 7606: missing well-known mandatory attribute -> treat-as-withdraw (session stays up)
 #[tokio::test]
