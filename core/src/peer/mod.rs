@@ -15,11 +15,11 @@
 use crate::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability};
+use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability, LlgrCapability};
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
-use crate::config::PeerConfig;
+use crate::config::{LlgrConfig, PeerConfig};
 use crate::log::{debug, error, info};
 use crate::net::IpNetwork;
 use crate::rib::rib_in::AdjRibIn;
@@ -71,6 +71,8 @@ pub struct PeerCapabilities {
     /// ADD-PATH capability (RFC 7911)
     /// Contains the negotiated ADD-PATH send/receive per AFI/SAFI
     pub add_path: Option<AddPathCapability>,
+    /// Long-Lived Graceful Restart capability (RFC 9494)
+    pub llgr: Option<LlgrCapability>,
 }
 
 impl PeerCapabilities {
@@ -190,6 +192,8 @@ pub struct LocalConfig {
     pub hold_time: u16,
     pub addr: SocketAddr,
     pub cluster_id: std::net::Ipv4Addr,
+    /// Resolved LLGR config (server + peer merged). None = disabled.
+    pub llgr: Option<LlgrConfig>,
 }
 
 /// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
@@ -514,9 +518,16 @@ impl Peer {
         }
 
         if let Some(gr_cap) = &self.capabilities.graceful_restart {
-            // RFC 4724: Receiving Speaker mode
-            // Check if peer advertised restart_time > 0 and has AFI/SAFIs with GR
-            return gr_cap.restart_time > 0 && !gr_cap.afi_safi_list.is_empty();
+            if gr_cap.afi_safi_list.is_empty() {
+                return false;
+            }
+            if gr_cap.restart_time > 0 {
+                return true;
+            }
+            // RFC 9494 Section 4.2: restart_time=0 with nonzero LLST still preserves routes
+            if let Some(llgr_cap) = &self.capabilities.llgr {
+                return llgr_cap.entries.iter().any(|e| e.stale_time > 0);
+            }
         }
         false
     }
@@ -528,9 +539,6 @@ impl Peer {
         };
 
         let restart_time = gr_cap.restart_time;
-        if restart_time == 0 {
-            return;
-        }
 
         // Use the AFI/SAFIs the peer advertised for GR
         let gr_afi_safis: HashSet<_> = gr_cap.afi_safis().into_iter().collect();
@@ -539,6 +547,19 @@ impl Peer {
             return;
         }
 
+        // RFC 9494: Collect LLGR-capable AFI/SAFIs and their stale times from peer cap
+        let llgr_afi_safis: Vec<(AfiSafi, u32)> = self
+            .capabilities
+            .llgr
+            .as_ref()
+            .map(|cap| {
+                cap.entries
+                    .iter()
+                    .map(|entry| (entry.afi_safi, entry.stale_time))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Cancel existing timer if any
         if let Some(state) = &mut self.gr_state {
             if let Some(timer) = state.restart_timer.take() {
@@ -546,12 +567,17 @@ impl Peer {
             }
         }
 
-        // Spawn new restart timer
         let peer_ip = self.addr;
         let server_tx = self.server_tx.clone();
+
+        // Spawn restart timer. restart_time=0 with LLGR yields once to let
+        // PeerDisconnected mark routes stale before firing (RFC 9494 Section 4.2).
         let timer = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(restart_time as u64)).await;
-            let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired { peer_ip });
+            let _ = server_tx.send(ServerOp::GracefulRestartTimerExpired {
+                peer_ip,
+                llgr_afi_safis,
+            });
         });
 
         // Initialize or update GR state
@@ -845,6 +871,7 @@ pub mod test_helpers {
             hold_time: 180,
             addr: SocketAddr::new(local_ip, 0),
             cluster_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            llgr: None,
         };
         Peer {
             addr: addr.ip(),

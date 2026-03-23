@@ -209,7 +209,7 @@ async fn test_remove_peer_four_node_mesh() {
                 }],
             ),
         ],
-        200,
+        Duration::from_secs(20),
     )
     .await;
 

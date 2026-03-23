@@ -20,7 +20,6 @@ pub use utils::*;
 use bgpgg::grpc::proto::{
     ActionsConfig, ConditionsConfig, DefinedSetConfig, Origin, Route, StatementConfig,
 };
-use tokio::time::Duration;
 
 #[tokio::test]
 async fn test_export_policy_prefix_match() {

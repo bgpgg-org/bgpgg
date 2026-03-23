@@ -24,6 +24,7 @@ pub mod path_id;
 pub mod rib_in;
 pub mod rib_loc;
 pub mod rib_out;
+mod stale;
 mod types;
 
 // Re-exports

@@ -87,11 +87,50 @@ impl GracefulRestartCapability {
             .find(|(as_, _)| *as_ == afi_safi)
             .map(|(_, f_bit)| *f_bit)
     }
+}
 
-    /// Check if stale routes for this AFI/SAFI should be cleared immediately (RFC 4724)
-    /// Returns true if AFI/SAFI is not in the capability or F-bit is 0
-    pub fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
+/// RFC 9494: Per-AFI/SAFI entry in LLGR capability
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LlgrEntry {
+    pub afi_safi: AfiSafi,
+    /// F-bit: forwarding state preserved during LLGR
+    pub forwarding_preserved: bool,
+    /// Long-Lived Stale Time in seconds (24-bit on wire)
+    pub stale_time: u32,
+}
+
+/// RFC 9494: Long-Lived Graceful Restart capability information
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LlgrCapability {
+    pub(crate) entries: Vec<LlgrEntry>,
+}
+
+/// F-bit based stale route filtering for GR and LLGR capabilities.
+pub trait StaleFilter {
+    /// Returns true if stale routes for this AFI/SAFI should be cleared on reconnect.
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool;
+
+    /// Filter stale AFI/SAFIs to those that should be cleared on reconnect.
+    fn filter_stale(&self, stale: Vec<AfiSafi>) -> Vec<AfiSafi> {
+        stale
+            .into_iter()
+            .filter(|a| self.should_clear_stale(*a))
+            .collect()
+    }
+}
+
+impl StaleFilter for GracefulRestartCapability {
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
         self.forwarding_preserved(afi_safi) != Some(true)
+    }
+}
+
+impl StaleFilter for LlgrCapability {
+    fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool {
+        match self.entries.iter().find(|e| e.afi_safi == afi_safi) {
+            Some(entry) => !entry.forwarding_preserved,
+            None => true,
+        }
     }
 }
 
@@ -102,6 +141,7 @@ pub(crate) enum BgpCapabiltyCode {
     GracefulRestart = 64,
     FourOctetAsn = 65,
     AddPath = 69,
+    Llgr = 71,
     Unknown,
 }
 
@@ -113,6 +153,7 @@ impl From<u8> for BgpCapabiltyCode {
             64 => BgpCapabiltyCode::GracefulRestart,
             65 => BgpCapabiltyCode::FourOctetAsn,
             69 => BgpCapabiltyCode::AddPath,
+            71 => BgpCapabiltyCode::Llgr,
             _ => BgpCapabiltyCode::Unknown,
         }
     }
@@ -126,6 +167,7 @@ impl BgpCapabiltyCode {
             BgpCapabiltyCode::GracefulRestart => 64,
             BgpCapabiltyCode::FourOctetAsn => 65,
             BgpCapabiltyCode::AddPath => 69,
+            BgpCapabiltyCode::Llgr => 71,
             BgpCapabiltyCode::Unknown => 0,
         }
     }
@@ -237,6 +279,10 @@ impl Capability {
             None
         }
     }
+
+    // RFC 9494 LLGR capability format constants
+    const LLGR_TUPLE_LEN: usize = 7; // AFI(2) + SAFI(1) + Flags(1) + StaleTime(3)
+    const LLGR_F_FLAG: u8 = 0x80; // F bit (MSB): forwarding state preserved
 
     // RFC 7911 ADD-PATH capability format constants
     const ADD_PATH_TUPLE_LEN: usize = 4; // AFI(2) + SAFI(1) + Send/Receive(1)
@@ -383,6 +429,62 @@ impl Capability {
             restart_state,
             afi_safi_list,
         })
+    }
+
+    /// Create a Long-Lived Graceful Restart capability (RFC 9494)
+    pub(crate) fn new_llgr(entries: &[LlgrEntry]) -> Self {
+        let mut val = Vec::new();
+        for entry in entries {
+            let afi_bytes = (entry.afi_safi.afi as u16).to_be_bytes();
+            val.push(afi_bytes[0]);
+            val.push(afi_bytes[1]);
+            val.push(entry.afi_safi.safi as u8);
+            let flags = if entry.forwarding_preserved {
+                Self::LLGR_F_FLAG
+            } else {
+                0x00
+            };
+            val.push(flags);
+            // Stale time: 3 bytes big-endian
+            val.push((entry.stale_time >> 16) as u8);
+            val.push((entry.stale_time >> 8) as u8);
+            val.push(entry.stale_time as u8);
+        }
+        Capability {
+            code: BgpCapabiltyCode::Llgr,
+            len: val.len() as u8,
+            val,
+        }
+    }
+
+    /// Extract LLGR capability info if this is an Llgr capability
+    pub(crate) fn as_llgr(&self) -> Option<LlgrCapability> {
+        if !matches!(self.code, BgpCapabiltyCode::Llgr) {
+            return None;
+        }
+
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        while offset + Self::LLGR_TUPLE_LEN <= self.val.len() {
+            let afi_val = u16::from_be_bytes([self.val[offset], self.val[offset + 1]]);
+            let safi_val = self.val[offset + 2];
+            let flags = self.val[offset + 3];
+            let stale_time = ((self.val[offset + 4] as u32) << 16)
+                | ((self.val[offset + 5] as u32) << 8)
+                | (self.val[offset + 6] as u32);
+
+            if let (Ok(afi), Ok(safi)) = (Afi::try_from(afi_val), Safi::try_from(safi_val)) {
+                entries.push(LlgrEntry {
+                    afi_safi: AfiSafi::new(afi, safi),
+                    forwarding_preserved: (flags & Self::LLGR_F_FLAG) != 0,
+                    stale_time,
+                });
+            }
+
+            offset += Self::LLGR_TUPLE_LEN;
+        }
+
+        Some(LlgrCapability { entries })
     }
 }
 
@@ -542,6 +644,84 @@ mod tests {
             let parsed = cap.as_add_path().expect("should parse ADD-PATH capability");
             assert_eq!(parsed.entries, entries);
         }
+    }
+
+    #[test]
+    fn test_llgr_capability_roundtrip() {
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+
+        let entry = |afi_safi, forwarding_preserved, stale_time| LlgrEntry {
+            afi_safi,
+            forwarding_preserved,
+            stale_time,
+        };
+
+        let cases = vec![
+            vec![entry(ipv4_unicast, false, 3600)],
+            vec![
+                entry(ipv4_unicast, false, 120),
+                entry(ipv6_unicast, true, 86400),
+            ],
+            vec![entry(ipv4_unicast, true, 0xFFFFFF)],
+            vec![entry(ipv4_unicast, false, 0)],
+        ];
+
+        for entries in cases {
+            let cap = Capability::new_llgr(&entries);
+            let parsed = cap.as_llgr().expect("should parse LLGR capability");
+            assert_eq!(parsed.entries, entries);
+        }
+    }
+
+    #[test]
+    fn test_llgr_capability_f_bit() {
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+
+        let cap = Capability::new_llgr(&[LlgrEntry {
+            afi_safi: ipv4_unicast,
+            forwarding_preserved: true,
+            stale_time: 100,
+        }]);
+        let parsed = cap.as_llgr().unwrap();
+        assert!(parsed.entries[0].forwarding_preserved);
+
+        let cap = Capability::new_llgr(&[LlgrEntry {
+            afi_safi: ipv4_unicast,
+            forwarding_preserved: false,
+            stale_time: 100,
+        }]);
+        let parsed = cap.as_llgr().unwrap();
+        assert!(!parsed.entries[0].forwarding_preserved);
+    }
+
+    #[test]
+    fn test_llgr_should_clear_stale() {
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv6_unicast = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
+        let ipv4_multicast = AfiSafi::new(Afi::Ipv4, Safi::Multicast);
+
+        let llgr = LlgrCapability {
+            entries: vec![
+                LlgrEntry {
+                    afi_safi: ipv4_unicast,
+                    forwarding_preserved: true,
+                    stale_time: 3600,
+                },
+                LlgrEntry {
+                    afi_safi: ipv6_unicast,
+                    forwarding_preserved: false,
+                    stale_time: 3600,
+                },
+            ],
+        };
+
+        // F-bit=true -> don't clear
+        assert!(!llgr.should_clear_stale(ipv4_unicast));
+        // F-bit=false -> clear
+        assert!(llgr.should_clear_stale(ipv6_unicast));
+        // Not in cap -> clear
+        assert!(llgr.should_clear_stale(ipv4_multicast));
     }
 
     #[test]

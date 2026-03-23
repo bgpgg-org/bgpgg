@@ -17,6 +17,7 @@ use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::Withdrawal;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
+use crate::rib::stale::{handle_stale_routes, mark_stale_in_table, StaleStrategy};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -31,9 +32,27 @@ pub struct RouteDelta {
     pub changed: Vec<IpNetwork>,
 }
 
+impl Default for RouteDelta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouteDelta {
+    pub fn new() -> Self {
+        Self {
+            best_changed: Vec::new(),
+            changed: Vec::new(),
+        }
+    }
+
     pub fn has_changes(&self) -> bool {
         !self.best_changed.is_empty() || !self.changed.is_empty()
+    }
+
+    pub fn extend(&mut self, other: RouteDelta) {
+        self.best_changed.extend(other.best_changed);
+        self.changed.extend(other.changed);
     }
 }
 
@@ -114,10 +133,6 @@ fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
     freed_path_ids
 }
 
-fn is_path_from_peer(path: &Path, peer_ip: IpAddr) -> bool {
-    path.attrs.source.peer_ip() == Some(peer_ip)
-}
-
 /// Remove all paths from a peer and return their local_path_ids for freeing.
 fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> Vec<u32> {
     let mut freed_path_ids = Vec::new();
@@ -126,75 +141,13 @@ fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: I
             route
                 .paths
                 .iter()
-                .filter(|p| is_path_from_peer(p, peer_ip))
+                .filter(|p| p.is_from_peer(peer_ip))
                 .filter_map(|p| p.local_path_id),
         );
-        route.paths.retain(|p| !is_path_from_peer(p, peer_ip));
+        route.paths.retain(|p| !p.is_from_peer(peer_ip));
     }
     table.retain(|_, route| !route.paths.is_empty());
     freed_path_ids
-}
-
-fn mark_stale_in_table<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> usize {
-    let mut count = 0;
-    for route in table.values_mut() {
-        for path in &mut route.paths {
-            if is_path_from_peer(path, peer_ip) {
-                Arc::make_mut(path).stale = true;
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-fn sweep_stale_in_table<K: Eq + Hash + Copy>(
-    table: &mut HashMap<K, Route>,
-    peer_ip: IpAddr,
-) -> (RouteDelta, Vec<u32>) {
-    let mut stale_entries: Vec<(K, IpNetwork)> = Vec::new();
-    for (key, route) in table.iter() {
-        if route
-            .paths
-            .iter()
-            .any(|p| is_path_from_peer(p, peer_ip) && p.stale)
-        {
-            stale_entries.push((*key, route.prefix));
-        }
-    }
-
-    let mut freed_path_ids = Vec::new();
-    let mut best_changed = Vec::new();
-    let mut changed = Vec::new();
-
-    for (key, prefix) in stale_entries {
-        let old_best = table
-            .get(&key)
-            .and_then(|r| r.paths.first())
-            .map(Arc::clone);
-
-        let freed = remove_paths(table, &key, |p| is_path_from_peer(p, peer_ip) && p.stale);
-        freed_path_ids.extend(freed);
-
-        changed.push(prefix);
-
-        let new_best = table.get(&key).and_then(|r| r.paths.first());
-        let best_did_change = match (old_best.as_ref(), new_best) {
-            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-            (None, None) => false,
-            _ => true,
-        };
-        if best_did_change {
-            best_changed.push(prefix);
-        }
-    }
-    (
-        RouteDelta {
-            best_changed,
-            changed,
-        },
-        freed_path_ids,
-    )
 }
 
 impl<A: PathIdAllocator> LocRib<A> {
@@ -221,13 +174,13 @@ impl<A: PathIdAllocator> LocRib<A> {
         let mut prefixes = Vec::new();
 
         for (prefix, route) in &self.ipv4_unicast {
-            if route.paths.iter().any(|p| is_path_from_peer(p, peer_ip)) {
+            if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V4(*prefix));
             }
         }
 
         for (prefix, route) in &self.ipv6_unicast {
-            if route.paths.iter().any(|p| is_path_from_peer(p, peer_ip)) {
+            if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V6(*prefix));
             }
         }
@@ -253,8 +206,7 @@ impl<A: PathIdAllocator> LocRib<A> {
         remote_path_id: Option<u32>,
     ) -> bool {
         let predicate = |p: &Path| {
-            is_path_from_peer(p, peer_ip)
-                && remote_path_id.is_none_or(|id| p.remote_path_id == Some(id))
+            p.is_from_peer(peer_ip) && remote_path_id.is_none_or(|id| p.remote_path_id == Some(id))
         };
         let freed_path_ids = match prefix {
             IpNetwork::V4(v4_prefix) => remove_paths(&mut self.ipv4_unicast, &v4_prefix, predicate),
@@ -538,8 +490,39 @@ impl<A: PathIdAllocator> LocRib<A> {
         count
     }
 
+    /// RFC 9494: Transition stale paths from GR to LLGR phase for the given AFI/SAFIs.
+    /// - Removes paths carrying NO_LLGR community (not retained during LLGR)
+    /// - Adds LLGR_STALE community to remaining stale paths
+    /// - Recomputes best path (LLGR_STALE routes are deprioritized)
+    pub fn apply_llgr(&mut self, peer_ip: IpAddr, afi_safis: &[AfiSafi]) -> RouteDelta {
+        let mut combined = RouteDelta::new();
+
+        for afi_safi in afi_safis {
+            let delta = match (afi_safi.afi, afi_safi.safi) {
+                (Afi::Ipv4, Safi::Unicast) => handle_stale_routes(
+                    &mut self.ipv4_unicast,
+                    peer_ip,
+                    &mut self.path_ids,
+                    &StaleStrategy::TransitionToLlgr,
+                ),
+                (Afi::Ipv6, Safi::Unicast) => handle_stale_routes(
+                    &mut self.ipv6_unicast,
+                    peer_ip,
+                    &mut self.path_ids,
+                    &StaleStrategy::TransitionToLlgr,
+                ),
+                _ => continue,
+            };
+
+            combined.best_changed.extend(delta.best_changed);
+            combined.changed.extend(delta.changed);
+        }
+
+        combined
+    }
+
     /// Remove all stale paths from a peer for the given AFI/SAFIs.
-    /// Removes paths where `is_path_from_peer && path.stale`.
+    /// Removes paths where `path.is_from_peer(peer_ip) && path.stale`.
     pub fn remove_peer_routes_stale(
         &mut self,
         peer_ip: IpAddr,
@@ -551,17 +534,21 @@ impl<A: PathIdAllocator> LocRib<A> {
         };
 
         for afi_safi in afi_safis {
-            let (delta, freed_path_ids) = match (afi_safi.afi, afi_safi.safi) {
-                (Afi::Ipv4, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv4_unicast, peer_ip),
-                (Afi::Ipv6, Safi::Unicast) => sweep_stale_in_table(&mut self.ipv6_unicast, peer_ip),
+            let delta = match (afi_safi.afi, afi_safi.safi) {
+                (Afi::Ipv4, Safi::Unicast) => handle_stale_routes(
+                    &mut self.ipv4_unicast,
+                    peer_ip,
+                    &mut self.path_ids,
+                    &StaleStrategy::Sweep,
+                ),
+                (Afi::Ipv6, Safi::Unicast) => handle_stale_routes(
+                    &mut self.ipv6_unicast,
+                    peer_ip,
+                    &mut self.path_ids,
+                    &StaleStrategy::Sweep,
+                ),
                 _ => continue,
             };
-
-            if !freed_path_ids.is_empty() {
-                info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = freed_path_ids.len(),
-                      "removed stale paths after GR timer expiry/EOR");
-                self.path_ids.free_all(freed_path_ids);
-            }
 
             combined.best_changed.extend(delta.best_changed);
             combined.changed.extend(delta.changed);
@@ -576,7 +563,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             route
                 .paths
                 .iter()
-                .any(|p| is_path_from_peer(p, peer_ip) && p.stale)
+                .any(|p| p.is_from_peer(peer_ip) && p.stale)
         };
         let mut result = Vec::new();
         if self.ipv4_unicast.values().any(has_stale) {
@@ -1373,5 +1360,61 @@ mod tests {
             Some(peer_low),
             "best path should be from peer with lower bgp_id"
         );
+    }
+
+    #[test]
+    fn test_apply_llgr() {
+        use crate::bgp::community;
+
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let peer_ip = test_peer_ip();
+        let prefix = create_test_prefix_n(1);
+        let prefix_no_llgr = create_test_prefix_n(2);
+        let afi_safi = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+
+        loc_rib.upsert_path(prefix, create_test_path(peer_ip, test_bgp_id()));
+        loc_rib.upsert_path(
+            prefix_no_llgr,
+            create_test_path_with(peer_ip, test_bgp_id(), |p| {
+                p.attrs.communities.push(community::NO_LLGR);
+            }),
+        );
+        loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+
+        let delta = loc_rib.apply_llgr(peer_ip, &[afi_safi]);
+        assert!(delta.has_changes());
+
+        // Clean route tagged with LLGR_STALE
+        let path = loc_rib.get_best_path(&prefix).unwrap();
+        assert!(path.attrs.communities.contains(&community::LLGR_STALE));
+
+        // NO_LLGR route removed
+        assert!(loc_rib.get_best_path(&prefix_no_llgr).is_none());
+    }
+
+    #[test]
+    fn test_route_delta_extend() {
+        let net1 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let net2 = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 1, 0),
+            prefix_length: 24,
+        });
+
+        let mut delta1 = RouteDelta {
+            best_changed: vec![net1],
+            changed: vec![net1],
+        };
+        let delta2 = RouteDelta {
+            best_changed: vec![net2],
+            changed: vec![net2],
+        };
+
+        delta1.extend(delta2);
+
+        assert_eq!(delta1.best_changed, vec![net1, net2]);
+        assert_eq!(delta1.changed, vec![net1, net2]);
     }
 }

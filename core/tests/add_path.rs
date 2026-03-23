@@ -18,7 +18,6 @@ pub use utils::*;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, ResetType, Route, SessionConfig};
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 /// ADD-PATH config: send all paths + receive path IDs
 fn addpath_config() -> SessionConfig {

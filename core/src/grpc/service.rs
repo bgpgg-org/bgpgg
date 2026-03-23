@@ -15,7 +15,8 @@
 use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
-use crate::config::{MaxPrefixAction, MaxPrefixSetting, PeerConfig};
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::PathAttrs;
@@ -259,10 +260,10 @@ fn to_proto_admin_state(state: AdminState) -> i32 {
 }
 
 /// Convert proto SessionConfig to internal PeerConfig
-fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
+fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig, String> {
     let defaults = PeerConfig::default();
     let Some(cfg) = proto else {
-        return defaults;
+        return Ok(defaults);
     };
 
     let max_prefix = cfg.max_prefix.map(|p| MaxPrefixSetting {
@@ -285,7 +286,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         defaults.graceful_restart
     };
 
-    PeerConfig {
+    Ok(PeerConfig {
         address: String::new(),
         port: cfg.port.map(|p| p as u16).unwrap_or(defaults.port),
         idle_hold_time_secs: cfg.idle_hold_time_secs.or(defaults.idle_hold_time_secs),
@@ -309,10 +310,8 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         rs_client: cfg.rs_client.unwrap_or(defaults.rs_client),
         enforce_first_as: cfg.enforce_first_as.unwrap_or(defaults.enforce_first_as),
         add_path_send: match cfg.add_path_send {
-            Some(v) if v == proto::AddPathSendMode::AddPathSendAll as i32 => {
-                crate::config::AddPathSend::All
-            }
-            Some(_) => crate::config::AddPathSend::Disabled,
+            Some(v) if v == proto::AddPathSendMode::AddPathSendAll as i32 => AddPathSend::All,
+            Some(_) => AddPathSend::Disabled,
             None => defaults.add_path_send,
         },
         add_path_receive: cfg.add_path_receive.unwrap_or(defaults.add_path_receive),
@@ -321,6 +320,98 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> PeerConfig {
         next_hop_self: cfg.next_hop_self.unwrap_or(defaults.next_hop_self),
         graceful_shutdown: cfg.graceful_shutdown.unwrap_or(defaults.graceful_shutdown),
         ttl_min: cfg.ttl_min.map(|v| v as u8).or(defaults.ttl_min),
+        llgr: proto_to_llgr_config(cfg.llgr)?,
+    })
+}
+
+fn proto_to_llgr_config(proto: Option<proto::LlgrConfig>) -> Result<Option<LlgrConfig>, String> {
+    let Some(llgr) = proto else {
+        return Ok(None);
+    };
+
+    let afi_safis = if llgr.afi_safis.is_empty() {
+        None
+    } else {
+        let mut parsed = Vec::new();
+        for entry in &llgr.afi_safis {
+            let afi = Afi::try_from(entry.afi as u16)
+                .map_err(|_| format!("LLGR: unknown AFI {}", entry.afi))?;
+            let safi = Safi::try_from(entry.safi as u8)
+                .map_err(|_| format!("LLGR: unknown SAFI {}", entry.safi))?;
+            parsed.push(AfiSafi::new(afi, safi));
+        }
+        Some(parsed)
+    };
+
+    Ok(Some(LlgrConfig {
+        enabled: llgr.enabled.unwrap_or(true),
+        stale_time: llgr.stale_time_secs,
+        afi_safis,
+    }))
+}
+
+/// Convert internal PeerConfig to proto SessionConfig
+fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
+    let max_prefix = config
+        .max_prefix
+        .as_ref()
+        .map(|mp| proto::MaxPrefixSetting {
+            limit: mp.limit,
+            action: match mp.action {
+                MaxPrefixAction::Terminate => 0,
+                MaxPrefixAction::Discard => 1,
+            },
+        });
+
+    let graceful_restart = Some(proto::GracefulRestartConfig {
+        enabled: Some(config.graceful_restart.enabled),
+        restart_time_secs: Some(config.graceful_restart.restart_time as u32),
+    });
+
+    let llgr = config.llgr.as_ref().map(|llgr| proto::LlgrConfig {
+        enabled: Some(llgr.enabled),
+        stale_time_secs: llgr.stale_time,
+        afi_safis: llgr
+            .afi_safis
+            .as_ref()
+            .map(|afis| {
+                afis.iter()
+                    .map(|afi_safi| proto::AfiSafi {
+                        afi: afi_safi.afi as u16 as u32,
+                        safi: afi_safi.safi as u8 as u32,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    });
+
+    let add_path_send = match config.add_path_send {
+        AddPathSend::All => Some(proto::AddPathSendMode::AddPathSendAll as i32),
+        AddPathSend::Disabled => Some(proto::AddPathSendMode::AddPathSendDisabled as i32),
+    };
+
+    ProtoSessionConfig {
+        idle_hold_time_secs: config.idle_hold_time_secs,
+        damp_peer_oscillations: Some(config.damp_peer_oscillations),
+        allow_automatic_stop: Some(config.allow_automatic_stop),
+        passive_mode: Some(config.passive_mode),
+        delay_open_time_secs: config.delay_open_time_secs,
+        max_prefix,
+        send_notification_without_open: Some(config.send_notification_without_open),
+        min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
+        graceful_restart,
+        port: Some(config.port as u32),
+        rr_client: Some(config.rr_client),
+        rs_client: Some(config.rs_client),
+        add_path_send,
+        add_path_receive: Some(config.add_path_receive),
+        asn: config.asn,
+        enforce_first_as: Some(config.enforce_first_as),
+        md5_key_file: config.md5_key_file.clone(),
+        next_hop_self: Some(config.next_hop_self),
+        graceful_shutdown: Some(config.graceful_shutdown),
+        ttl_min: config.ttl_min.map(|v| v as u32),
+        llgr,
     }
 }
 
@@ -357,7 +448,7 @@ impl BgpService for BgpGrpcService {
             }
         }
 
-        let config = proto_to_peer_config(inner.config);
+        let config = proto_to_peer_config(inner.config).map_err(Status::invalid_argument)?;
 
         // Send request to BGP server via channel
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -535,6 +626,7 @@ impl BgpService for BgpGrpcService {
                 admin_state: to_proto_admin_state(peer.admin_state),
                 import_policies: peer.import_policies.clone(),
                 export_policies: peer.export_policies.clone(),
+                session_config: None,
             })
             .collect();
 
@@ -566,6 +658,7 @@ impl BgpService for BgpGrpcService {
                 admin_state: to_proto_admin_state(peer.admin_state),
                 import_policies: peer.import_policies,
                 export_policies: peer.export_policies,
+                session_config: None,
             })
             .map(Ok);
 
@@ -604,6 +697,7 @@ impl BgpService for BgpGrpcService {
                     admin_state: to_proto_admin_state(peer.admin_state),
                     import_policies: peer.import_policies.clone(),
                     export_policies: peer.export_policies.clone(),
+                    session_config: Some(peer_config_to_proto(&peer.config)),
                 };
 
                 let proto_statistics = ProtoPeerStatistics {
@@ -1332,7 +1426,8 @@ impl BgpService for BgpGrpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::proto::SessionConfig;
+    use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+    use crate::grpc::proto::{self, SessionConfig};
 
     #[test]
     fn test_proto_to_peer_config_ttl_min() {
@@ -1346,8 +1441,57 @@ mod tests {
             let config = proto_to_peer_config(Some(SessionConfig {
                 ttl_min: *input,
                 ..Default::default()
-            }));
+            }))
+            .unwrap();
             assert_eq!(config.ttl_min, *expected);
         }
+    }
+
+    #[test]
+    fn test_proto_to_peer_config_llgr() {
+        // Valid config with afi_safis
+        let config = proto_to_peer_config(Some(SessionConfig {
+            llgr: Some(proto::LlgrConfig {
+                enabled: Some(true),
+                stale_time_secs: Some(3600),
+                afi_safis: vec![proto::AfiSafi { afi: 1, safi: 1 }],
+            }),
+            ..Default::default()
+        }))
+        .unwrap();
+        let llgr = config.llgr.unwrap();
+        assert!(llgr.enabled);
+        assert_eq!(llgr.stale_time, Some(3600));
+        let afi_safis = llgr.afi_safis.unwrap();
+        assert_eq!(afi_safis.len(), 1);
+        assert_eq!(afi_safis[0], AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+
+        // Invalid AFI is rejected
+        let result = proto_to_peer_config(Some(SessionConfig {
+            llgr: Some(proto::LlgrConfig {
+                enabled: Some(true),
+                stale_time_secs: Some(100),
+                afi_safis: vec![proto::AfiSafi { afi: 99, safi: 1 }],
+            }),
+            ..Default::default()
+        }));
+        assert!(result.is_err());
+
+        // enabled: false
+        let config = proto_to_peer_config(Some(SessionConfig {
+            llgr: Some(proto::LlgrConfig {
+                enabled: Some(false),
+                stale_time_secs: None,
+                afi_safis: vec![],
+            }),
+            ..Default::default()
+        }))
+        .unwrap();
+        let llgr = config.llgr.unwrap();
+        assert!(!llgr.enabled);
+
+        // No LLGR config -> None
+        let config = proto_to_peer_config(Some(SessionConfig::default())).unwrap();
+        assert!(config.llgr.is_none());
     }
 }

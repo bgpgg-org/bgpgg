@@ -366,6 +366,7 @@ mod tests {
                 four_octet_asn: None,
                 graceful_restart: None,
                 add_path: None,
+                llgr: None,
             };
             peer.disabled_afi_safi = disabled.into_iter().collect();
 

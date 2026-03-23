@@ -19,7 +19,7 @@ use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
-use crate::config::{Config, PeerConfig};
+use crate::config::{get_peer_llgr, Config, PeerConfig};
 use crate::log::{error, info, warn};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_gtsm;
@@ -44,9 +44,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 /// Errors that can occur during server initialization or operation.
 #[derive(Debug)]
@@ -116,6 +118,7 @@ pub struct GetPeerResponse {
     pub import_policies: Vec<String>,
     pub export_policies: Vec<String>,
     pub statistics: PeerStatistics,
+    pub config: PeerConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -291,7 +294,7 @@ pub enum ServerOp {
     PeerDisconnected {
         peer_ip: IpAddr,
         reason: PeerDownReason,
-        gr_afi_safis: Vec<crate::bgp::multiprotocol::AfiSafi>,
+        gr_afi_safis: Vec<AfiSafi>,
         conn_type: ConnectionType,
     },
     /// Set peer's admin state (e.g., when max prefix limit exceeded)
@@ -303,17 +306,17 @@ pub enum ServerOp {
         safi: Safi,
     },
     /// Graceful Restart timer expired for a peer (RFC 4724)
-    GracefulRestartTimerExpired { peer_ip: IpAddr },
+    GracefulRestartTimerExpired {
+        peer_ip: IpAddr,
+        /// RFC 9494: LLGR-capable AFI/SAFIs and their stale times from peer capability
+        llgr_afi_safis: Vec<(AfiSafi, u32)>,
+    },
+    /// RFC 9494: Long-Lived Graceful Restart stale timer expired for a peer's AFI/SAFI
+    LlgrTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Graceful Restart completed for a peer (all EORs received)
-    GracefulRestartComplete {
-        peer_ip: IpAddr,
-        afi_safi: crate::bgp::multiprotocol::AfiSafi,
-    },
+    GracefulRestartComplete { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Server signals peer that loc-rib has been sent
-    LocalRibSent {
-        peer_ip: IpAddr,
-        afi_safi: crate::bgp::multiprotocol::AfiSafi,
-    },
+    LocalRibSent { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Query BMP statistics for all established peers
     GetBmpStatistics {
         response: oneshot::Sender<Vec<BmpPeerStats>>,
@@ -470,6 +473,50 @@ pub struct PeerInfo {
     pub incoming: Option<ConnectionState>,
     /// Per-peer adj-rib-out: tracks routes actually exported to this peer.
     pub adj_rib_out: AdjRibOut,
+    /// RFC 9494: Running LLGR stale timers per AFI/SAFI
+    pub llgr_timers: LlgrTimers,
+}
+
+/// Manages per-AFI/SAFI LLGR stale timers for a peer (RFC 9494).
+#[derive(Default)]
+pub struct LlgrTimers {
+    timers: HashMap<AfiSafi, JoinHandle<()>>,
+}
+
+impl LlgrTimers {
+    pub fn new() -> Self {
+        Self {
+            timers: HashMap::new(),
+        }
+    }
+
+    /// Start a timer if not already running. Existing timers MUST NOT be updated (RFC 9494).
+    pub fn run(
+        &mut self,
+        afi_safi: AfiSafi,
+        llst: u32,
+        peer_ip: IpAddr,
+        server_tx: mpsc::UnboundedSender<ServerOp>,
+    ) {
+        self.timers.entry(afi_safi).or_insert_with(|| {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(llst as u64)).await;
+                let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
+            })
+        });
+    }
+
+    /// Cancel a running timer. No-op if not running.
+    pub fn cancel(&mut self, afi_safi: &AfiSafi) {
+        if let Some(handle) = self.timers.remove(afi_safi) {
+            handle.abort();
+        }
+    }
+
+    /// AFI/SAFIs with running timers.
+    pub fn afi_safis(&self) -> Vec<AfiSafi> {
+        self.timers.keys().copied().collect()
+    }
 }
 
 impl PeerInfo {
@@ -492,6 +539,7 @@ impl PeerInfo {
             outgoing,
             incoming,
             adj_rib_out: AdjRibOut::new(),
+            llgr_timers: LlgrTimers::new(),
         }
     }
 
@@ -578,7 +626,7 @@ pub struct BgpServer {
     pub(crate) local_port: u16,
     pub mgmt_tx: mpsc::Sender<MgmtOp>,
     mgmt_rx: mpsc::Receiver<MgmtOp>,
-    op_tx: mpsc::UnboundedSender<ServerOp>,
+    pub(crate) op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
@@ -619,9 +667,9 @@ impl BgpServer {
 
     /// Resolve import policies for a peer from config
     pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        let mut policies = vec![Arc::new(Policy::default_in())];
+        let mut policies = Vec::new();
 
-        // Append user-configured policies
+        // User policies run first
         for name in &peer_config.import_policy {
             if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
@@ -629,6 +677,9 @@ impl BgpServer {
                 error!(policy = name, "import policy not found");
             }
         }
+
+        // Unconditional accept as fallback
+        policies.push(Arc::new(Policy::default_in()));
 
         policies
     }
@@ -780,12 +831,14 @@ impl BgpServer {
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
+        let llgr = get_peer_llgr(&self.config.llgr, &config.llgr);
         let local_config = LocalConfig {
             asn: self.config.asn,
             bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
             hold_time: self.config.hold_time_secs as u16,
             addr: bind_addr,
             cluster_id: self.config.cluster_id(),
+            llgr,
         };
         let peer = Peer::new(
             addr.ip(),
@@ -934,12 +987,14 @@ impl BgpServer {
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
+        let llgr = get_peer_llgr(&self.config.llgr, &config.llgr);
         let local_config = LocalConfig {
             asn: self.config.asn,
             bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
             hold_time: self.config.hold_time_secs as u16,
             addr: local_addr,
             cluster_id: self.config.cluster_id(),
+            llgr,
         };
         let peer = Peer::new(
             peer_ip,
@@ -1040,6 +1095,18 @@ impl BgpServer {
             let Some(peer_tx) = conn.peer_tx.clone() else {
                 continue;
             };
+            let Some(capabilities) = conn.capabilities.clone() else {
+                continue;
+            };
+
+            let peer_asn = conn.asn.unwrap_or(local_asn);
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|conn_info| conn_info.local_address)
+                .unwrap_or(local_addr);
+            let send_format = conn.send_format();
+            let negotiated_afi_safis = conn.negotiated_afi_safis();
 
             let export_policies = entry.policy_out().to_vec();
             if export_policies.is_empty() {
@@ -1047,20 +1114,12 @@ impl BgpServer {
                 continue;
             }
 
-            let send_format = conn.send_format();
-
-            let negotiated_afi_safis = conn.negotiated_afi_safis();
-
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
                 local_asn,
-                peer_asn: conn.asn.unwrap_or(local_asn),
-                local_next_hop: conn
-                    .conn_info
-                    .as_ref()
-                    .map(|conn_info| conn_info.local_address)
-                    .unwrap_or(local_addr),
+                peer_asn,
+                local_next_hop,
                 export_policies: &export_policies,
                 rr_client: entry.config.rr_client,
                 rs_client: entry.config.rs_client,
@@ -1069,6 +1128,7 @@ impl BgpServer {
                 negotiated_afi_safis: &negotiated_afi_safis,
                 next_hop_self: entry.config.next_hop_self,
                 graceful_shutdown: entry.config.graceful_shutdown,
+                capabilities: &capabilities,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);

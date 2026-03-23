@@ -115,6 +115,7 @@ async fn test_max_prefix_limit() {
                             admin_state: AdminState::PrefixLimitExceeded.into(),
                             import_policies: vec![],
                             export_policies: vec![],
+                            session_config: None,
                         }],
                     )
                     .await
@@ -375,7 +376,7 @@ async fn test_collision_connect_state() {
             peers.len() == 1 && peers[0].state == BgpState::Connect as i32
         },
         "Timeout waiting for Connect state",
-        10,
+        Duration::from_secs(1),
     )
     .await;
 

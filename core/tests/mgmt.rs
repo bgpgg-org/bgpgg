@@ -18,9 +18,11 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    AdminState, AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig,
+    LlgrConfig as ProtoLlgrConfig, Origin, Route, SessionConfig,
+};
 use std::net::Ipv4Addr;
-use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -301,7 +303,7 @@ async fn test_disable_enable_peer() {
         .unwrap();
 
     // Peer should reconnect and reach Established with admin_state Up
-    // Use longer timeout (300 iterations = 30s) to account for damping and retries
+    // Use longer timeout to account for damping and retries
     poll_until_with_timeout(
         || async {
             let peers1 = server1.client.get_peers().await.unwrap();
@@ -319,7 +321,7 @@ async fn test_disable_enable_peer() {
                 && peers1[0].admin_state == AdminState::Up as i32
         },
         "Peer should be Established with admin_state Up",
-        300, // 30 seconds
+        Duration::from_secs(30),
     )
     .await;
 }
@@ -943,4 +945,45 @@ async fn test_add_peer_invalid_ttl_min() {
             "ttl_min={ttl}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_add_peer_with_llgr() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    // Add passive peer with GR + LLGR via gRPC
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                passive_mode: Some(true),
+                graceful_restart: Some(GracefulRestartConfig {
+                    enabled: Some(true),
+                    restart_time_secs: Some(90),
+                }),
+                llgr: Some(ProtoLlgrConfig {
+                    enabled: Some(true),
+                    stale_time_secs: Some(3600),
+                    afi_safis: vec![ProtoAfiSafi { afi: 1, safi: 1 }],
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Verify get_peer returns the LLGR config
+    let (peer, _) = server
+        .client
+        .get_peer("127.0.0.2".to_string())
+        .await
+        .unwrap();
+    let session_config = peer.unwrap().session_config.unwrap();
+    let llgr = session_config.llgr.unwrap();
+    assert_eq!(llgr.enabled, Some(true));
+    assert_eq!(llgr.stale_time_secs, Some(3600));
+    assert_eq!(llgr.afi_safis.len(), 1);
+    assert_eq!(llgr.afi_safis[0].afi, 1);
+    assert_eq!(llgr.afi_safis[0].safi, 1);
 }

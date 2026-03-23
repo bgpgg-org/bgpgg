@@ -44,8 +44,9 @@ use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     defined_set_config, ActionsConfig, AddPathSendMode, AdminState, Aggregator, AsPathSegment,
     AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
-    GracefulRestartConfig, LargeCommunity, Origin, Path, Peer, PeerStatistics, PrefixMatch,
-    PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
+    GracefulRestartConfig, LargeCommunity, LlgrConfig as ProtoLlgrConfig, Origin, Path, Peer,
+    PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig,
+    UnknownAttribute,
 };
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -56,7 +57,8 @@ use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, timeout, Duration};
+pub use tokio::time::Duration;
+use tokio::time::{sleep, timeout};
 
 /// Test server handle that includes runtime for killing the server
 pub struct TestServer {
@@ -102,6 +104,7 @@ impl TestServer {
             admin_state: AdminState::Up.into(),
             import_policies: vec![],
             export_policies: vec![],
+            session_config: None,
         }
     }
 
@@ -140,6 +143,7 @@ pub fn peer_in_state(peer: &Peer, state: BgpState) -> bool {
 pub struct PeerConfig {
     pub hold_timer_secs: Option<u16>,
     pub graceful_restart: Option<GracefulRestartConfig>,
+    pub llgr: Option<ProtoLlgrConfig>,
     pub idle_hold_time_secs: Option<u64>,
     pub min_route_advertisement_interval_secs: Option<u64>,
     pub add_path_send: Option<bool>,
@@ -712,7 +716,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
 
 /// Polls until each server's full RIB matches the expected routes exactly
 pub async fn poll_rib(expectations: &[(&TestServer, Vec<Route>)]) {
-    poll_rib_with_timeout(expectations, 100).await;
+    poll_rib_with_timeout(expectations, Duration::from_secs(10)).await;
 }
 
 /// Polls until each server's RIB matches expected routes using ADD-PATH comparison.
@@ -735,11 +739,8 @@ pub async fn poll_rib_addpath(expectations: &[(&TestServer, Vec<Route>)]) {
     .await;
 }
 
-/// Polls until each server's full RIB matches exactly, with custom timeout (iterations x 100ms)
-pub async fn poll_rib_with_timeout(
-    expectations: &[(&TestServer, Vec<Route>)],
-    max_iterations: usize,
-) {
+/// Polls until each server's full RIB matches exactly, with custom timeout
+pub async fn poll_rib_with_timeout(expectations: &[(&TestServer, Vec<Route>)], timeout: Duration) {
     poll_until_with_timeout(
         || async {
             for (server, expected_routes) in expectations {
@@ -754,7 +755,7 @@ pub async fn poll_rib_with_timeout(
             true
         },
         "Timeout waiting for routes to propagate",
-        max_iterations,
+        timeout,
     )
     .await;
 }
@@ -919,13 +920,14 @@ pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
 /// # Arguments
 /// * `check` - Async function that returns true when condition is met
 /// * `timeout_message` - Message to display if timeout occurs
-/// * `max_iterations` - Maximum number of polling attempts (default: 100)
-pub async fn poll_until_with_timeout<F, Fut>(check: F, timeout_message: &str, max_iterations: usize)
+/// * `timeout` - Maximum time to wait before panicking
+pub async fn poll_until_with_timeout<F, Fut>(check: F, timeout_message: &str, timeout: Duration)
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..max_iterations {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
         if check().await {
             return;
         }
@@ -941,7 +943,7 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    poll_until_with_timeout(check, timeout_message, 100).await;
+    poll_until_with_timeout(check, timeout_message, Duration::from_secs(10)).await;
 }
 
 /// Poll to verify a condition stays true for a duration.
@@ -1093,6 +1095,7 @@ pub async fn chain_servers<const N: usize>(
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1308,6 +1311,7 @@ pub async fn mesh_servers<const N: usize>(
 ) -> [TestServer; N] {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1385,6 +1389,7 @@ pub async fn hub_spoke_servers<const N: usize>(
 ) -> (TestServer, [TestServer; N]) {
     let session_config = SessionConfig {
         graceful_restart: config.graceful_restart,
+        llgr: config.llgr,
         idle_hold_time_secs: config.idle_hold_time_secs,
         min_route_advertisement_interval_secs: config.min_route_advertisement_interval_secs,
         add_path_send: config.add_path_send.map(|v| {
@@ -1544,12 +1549,44 @@ pub async fn poll_peers(server: &TestServer, expected_peers: Vec<Peer>) {
 pub async fn poll_peers_with_timeout(
     server: &TestServer,
     expected_peers: Vec<Peer>,
-    max_iterations: usize,
+    timeout: Duration,
 ) {
     poll_until_with_timeout(
         || async { verify_peers(server, expected_peers.clone()).await },
         "Timeout waiting for peers to match expected state",
-        max_iterations,
+        timeout,
+    )
+    .await;
+}
+
+/// Wait for a specific peer address to reach Established on a server.
+pub async fn poll_peer_established(server: &TestServer, peer_addr: &str) {
+    let addr = peer_addr.to_string();
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.address == addr && p.state == BgpState::Established as i32)
+            })
+        },
+        &format!("Timeout waiting for peer {addr} to establish"),
+    )
+    .await;
+}
+
+/// Wait for a specific peer to leave Established state.
+pub async fn poll_peer_not_established(server: &TestServer, peer_addr: &str) {
+    let addr = peer_addr.to_string();
+    poll_until(
+        || async {
+            server.client.get_peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|p| p.address == addr && p.state != BgpState::Established as i32)
+            })
+        },
+        &format!("Timeout waiting for peer {addr} to leave Established"),
     )
     .await;
 }
@@ -1859,6 +1896,7 @@ impl FakePeer {
             admin_state: AdminState::Up.into(),
             import_policies: vec![],
             export_policies: vec![],
+            session_config: None,
         }
     }
 
@@ -1925,6 +1963,30 @@ impl FakePeer {
             u32::from(router_id),
             RawOpenOptions {
                 capabilities: Some(vec![mp_cap, gr_cap]),
+                ..Default::default()
+            },
+        );
+        self.send_raw(&open).await;
+    }
+
+    /// Send an OPEN message with GR + LLGR capabilities for IPv4 Unicast
+    pub async fn send_open_with_llgr(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        hold_time: u16,
+        gr_time: u16,
+        llst_secs: u32,
+    ) {
+        let gr_cap = build_gr_capability(gr_time, false);
+        let llgr_cap = build_llgr_capability(false, llst_secs);
+        let mp_cap = build_multiprotocol_capability_ipv4_unicast();
+        let open = build_raw_open(
+            asn as u16,
+            hold_time,
+            u32::from(router_id),
+            RawOpenOptions {
+                capabilities: Some(vec![mp_cap, gr_cap, llgr_cap]),
                 ..Default::default()
             },
         );
@@ -2062,6 +2124,25 @@ impl FakePeer {
 
         peer.asn = asn;
         peer.supports_4byte_asn = supports_4byte_asn;
+        peer
+    }
+
+    /// Connect and complete GR+LLGR handshake for IPv4 Unicast.
+    pub async fn connect_and_handshake_llgr(
+        local_ip: Option<&str>,
+        server: &TestServer,
+        asn: u32,
+        router_id: Ipv4Addr,
+        gr_time: u16,
+        llst: u32,
+    ) -> Self {
+        let mut peer = Self::connect(local_ip, server).await;
+        peer.read_open().await;
+        peer.send_open_with_llgr(asn, router_id, 90, gr_time, llst)
+            .await;
+        peer.asn = asn;
+        peer.send_keepalive().await;
+        peer.read_keepalive().await;
         peer
     }
 
@@ -2430,6 +2511,27 @@ pub fn build_addpath_capability_ipv6_unicast() -> Vec<u8> {
         1, // SAFI = 1 (Unicast)
         3, // Send + Receive
     ]
+}
+
+/// Build LLGR capability bytes (RFC 9494) for IPv4 Unicast
+/// f_bit: forwarding state preserved
+/// stale_time_secs: 24-bit LLST value
+pub fn build_llgr_capability(f_bit: bool, stale_time_secs: u32) -> Vec<u8> {
+    let mut cap = vec![71u8]; // Capability code 71 = LLGR
+    cap.push(7); // Length: 7 bytes (one AFI/SAFI tuple)
+
+    // AFI/SAFI tuple: IPv4 Unicast
+    cap.push(0); // AFI high byte
+    cap.push(1); // AFI low byte (IPv4)
+    cap.push(1); // SAFI (Unicast)
+    cap.push(if f_bit { 0x80 } else { 0x00 }); // Flags (F-bit)
+
+    // Stale time: 3 bytes big-endian
+    cap.push((stale_time_secs >> 16) as u8);
+    cap.push((stale_time_secs >> 8) as u8);
+    cap.push(stale_time_secs as u8);
+
+    cap
 }
 
 /// Create an export policy that rejects matching prefixes and accepts the rest,

@@ -67,6 +67,18 @@ message GracefulRestartConfig {
     optional uint32 restart_time_secs = 2;  // Max 4095 per RFC 4724
 }
 
+// RFC 9494: Long-Lived Graceful Restart configuration
+message LlgrConfig {
+    optional bool enabled = 1;
+    optional uint32 stale_time_secs = 2;  // 24-bit max (16777215)
+    repeated AfiSafi afi_safis = 3;
+}
+
+message AfiSafi {
+    uint32 afi = 1;   // IANA Address Family Identifier
+    uint32 safi = 2;  // IANA Subsequent Address Family Identifier
+}
+
 // Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
 message SessionConfig {
     optional uint64 idle_hold_time_secs = 1;      // Auto-reconnect delay. Unset disables (default: 30s)
@@ -89,6 +101,7 @@ message SessionConfig {
     optional bool next_hop_self = 18;  // Rewrite NEXT_HOP to local address for iBGP peers
     optional bool graceful_shutdown = 19;  // RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
+    optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
 }
 
 // Add peer request/response
@@ -209,6 +222,7 @@ message Peer {
     AdminState admin_state = 4;
     repeated string import_policies = 5;  // Names of import policies assigned to this peer
     repeated string export_policies = 6;  // Names of export policies assigned to this peer
+    optional SessionConfig session_config = 7;
 }
 
 // Add route request/response

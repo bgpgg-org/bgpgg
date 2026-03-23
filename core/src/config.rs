@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::msg_open_types::LlgrEntry;
+use crate::bgp::multiprotocol::{default_afi_safis, AfiSafi};
 use crate::net::bind_addr_from_ip;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -67,6 +69,79 @@ impl Default for GracefulRestartConfig {
             restart_time: default_gr_restart_time(),
         }
     }
+}
+
+const MAX_LLGR_STALE_TIME: u32 = 0xFFFFFF; // 24-bit max
+
+fn default_llgr_enabled() -> bool {
+    true
+}
+
+/// RFC 9494: Long-Lived Graceful Restart configuration.
+/// Used at both server level and per-peer level.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LlgrConfig {
+    /// Enable LLGR (default: true). Set to false to explicitly disable.
+    #[serde(default = "default_llgr_enabled")]
+    pub enabled: bool,
+    /// Long-Lived Stale Time in seconds (24-bit max: 16777215)
+    pub stale_time: Option<u32>,
+    /// AFI/SAFIs to enable LLGR for. None = use default_afi_safis().
+    #[serde(default)]
+    pub afi_safis: Option<Vec<AfiSafi>>,
+}
+
+impl LlgrConfig {
+    /// Convert to capability entries for OPEN message building.
+    pub fn to_llgr_entries(&self) -> Vec<LlgrEntry> {
+        let stale_time = self.stale_time.unwrap_or(0);
+        let afi_safis = self.afi_safis.as_deref().unwrap_or(&[]);
+        afi_safis
+            .iter()
+            .map(|afi_safi| LlgrEntry {
+                afi_safi: *afi_safi,
+                forwarding_preserved: false,
+                stale_time,
+            })
+            .collect()
+    }
+}
+
+/// Resolve LLGR config from server-level and peer-level settings.
+/// - No server + no peer = disabled (None)
+/// - Server + no peer = inherit server
+/// - Peer enabled: false = disabled regardless of server
+/// - Peer overrides server fields (stale_time, afi_safis)
+pub fn get_peer_llgr(
+    server_llgr: &Option<LlgrConfig>,
+    peer_llgr: &Option<LlgrConfig>,
+) -> Option<LlgrConfig> {
+    let effective = match (server_llgr, peer_llgr) {
+        (None, None) => return None,
+        (Some(server), None) => server,
+        (_, Some(peer)) => {
+            if !peer.enabled {
+                return None;
+            }
+            peer
+        }
+    };
+
+    if !effective.enabled {
+        return None;
+    }
+
+    Some(LlgrConfig {
+        enabled: true,
+        stale_time: effective.stale_time,
+        afi_safis: Some(
+            effective
+                .afi_safis
+                .clone()
+                .unwrap_or_else(default_afi_safis),
+        ),
+    })
 }
 
 /// RFC 7911: ADD-PATH send mode
@@ -156,6 +231,9 @@ pub struct PeerConfig {
     /// 255 = directly connected peer, 254 = 1 hop away, etc.
     #[serde(default)]
     pub ttl_min: Option<u8>,
+    /// RFC 9494: Long-Lived Graceful Restart configuration
+    #[serde(default)]
+    pub llgr: Option<LlgrConfig>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -222,6 +300,22 @@ impl PeerConfig {
                 "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)".to_string(),
             );
         }
+        if let Some(llgr) = &self.llgr {
+            if let Some(stale_time) = llgr.stale_time {
+                if stale_time > MAX_LLGR_STALE_TIME {
+                    return Err(format!(
+                        "LLGR stale_time {} exceeds 24-bit maximum ({})",
+                        stale_time, MAX_LLGR_STALE_TIME
+                    ));
+                }
+            }
+            if llgr.enabled && !self.graceful_restart.enabled {
+                return Err(
+                    "LLGR requires graceful-restart to be enabled (RFC 9494 Section 4.5)"
+                        .to_string(),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -252,6 +346,7 @@ impl Default for PeerConfig {
             next_hop_self: false,
             graceful_shutdown: false,
             ttl_min: None,
+            llgr: None,
         }
     }
 }
@@ -547,6 +642,9 @@ pub struct Config {
     /// RFC 4456: Cluster ID for route reflector. Defaults to router_id if not set.
     #[serde(default)]
     pub cluster_id: Option<Ipv4Addr>,
+    /// RFC 9494: Server-level LLGR configuration. Peers inherit this unless overridden.
+    #[serde(default)]
+    pub llgr: Option<LlgrConfig>,
 }
 
 fn default_listen_addr() -> String {
@@ -587,6 +685,7 @@ impl Config {
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
             cluster_id: None,
+            llgr: None,
         }
     }
 
@@ -648,6 +747,7 @@ impl Default for Config {
             defined_sets: DefinedSetsConfig::default(),
             policy_definitions: Vec::new(),
             cluster_id: None,
+            llgr: None,
         }
     }
 }
@@ -832,5 +932,147 @@ mod tests {
             result.unwrap_err(),
             "rs-client peers must not use add-path-receive (route server uses send-only ADD-PATH mode per RFC 7947)"
         );
+    }
+
+    #[test]
+    fn test_llgr_stale_time_validation() {
+        let cases = [
+            (0, true),
+            (3600, true),
+            (0xFFFFFF, true),      // 24-bit max
+            (0xFFFFFF + 1, false), // exceeds 24-bit
+            (u32::MAX, false),
+        ];
+        for (stale_time, should_ok) in cases {
+            let peer = PeerConfig {
+                llgr: Some(LlgrConfig {
+                    enabled: true,
+                    stale_time: Some(stale_time),
+                    afi_safis: None,
+                }),
+                ..Default::default()
+            };
+            assert_eq!(
+                peer.validate().is_ok(),
+                should_ok,
+                "stale_time={stale_time} expected ok={should_ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_llgr_requires_graceful_restart() {
+        // LLGR with GR enabled -> ok
+        let peer = PeerConfig {
+            llgr: Some(LlgrConfig {
+                enabled: true,
+                stale_time: Some(3600),
+                afi_safis: None,
+            }),
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+
+        // LLGR with GR disabled -> error
+        let peer = PeerConfig {
+            graceful_restart: GracefulRestartConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            llgr: Some(LlgrConfig {
+                enabled: true,
+                stale_time: Some(3600),
+                afi_safis: None,
+            }),
+            ..Default::default()
+        };
+        let result = peer.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("LLGR requires graceful-restart"));
+    }
+
+    #[test]
+    fn test_llgr_disabled_skips_gr_check() {
+        // LLGR explicitly disabled with GR disabled -> ok (no conflict)
+        let peer = PeerConfig {
+            graceful_restart: GracefulRestartConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            llgr: Some(LlgrConfig {
+                enabled: false,
+                stale_time: Some(3600),
+                afi_safis: None,
+            }),
+            ..Default::default()
+        };
+        assert!(peer.validate().is_ok());
+    }
+
+    #[test]
+    fn test_get_peer_llgr() {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+
+        // No server + no peer = disabled
+        assert!(get_peer_llgr(&None, &None).is_none());
+
+        // Server configured, no peer override = inherit
+        let server = Some(LlgrConfig {
+            enabled: true,
+            stale_time: Some(3600),
+            afi_safis: Some(vec![ipv4_unicast]),
+        });
+        let merged = get_peer_llgr(&server, &None).expect("should be enabled");
+        assert_eq!(merged.stale_time, Some(3600));
+        assert_eq!(merged.afi_safis, Some(vec![ipv4_unicast]));
+
+        // Peer override with different stale_time
+        let peer = Some(LlgrConfig {
+            enabled: true,
+            stale_time: Some(7200),
+            afi_safis: Some(vec![ipv4_unicast]),
+        });
+        let merged = get_peer_llgr(&server, &peer).expect("should be enabled");
+        assert_eq!(merged.stale_time, Some(7200));
+        assert_eq!(merged.afi_safis, Some(vec![ipv4_unicast]));
+
+        // Peer disabled overrides server
+        let peer_disabled = Some(LlgrConfig {
+            enabled: false,
+            stale_time: None,
+            afi_safis: None,
+        });
+        assert!(get_peer_llgr(&server, &peer_disabled).is_none());
+    }
+
+    #[test]
+    fn test_llgr_yaml_deserialization() {
+        use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+
+        let yaml = r#"
+llgr:
+  stale-time: 3600
+  afi-safis:
+    - afi: 1
+      safi: 1
+    - afi: 2
+      safi: 1
+"#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            llgr: Option<LlgrConfig>,
+        }
+        let wrapper: Wrapper = serde_yaml::from_str(yaml).unwrap();
+        let llgr = wrapper.llgr.unwrap();
+        assert!(llgr.enabled); // default true
+        assert_eq!(llgr.stale_time, Some(3600));
+        let afi_safis = llgr.afi_safis.unwrap();
+        assert_eq!(afi_safis.len(), 2);
+        assert_eq!(afi_safis[0], AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        assert_eq!(afi_safis[1], AfiSafi::new(Afi::Ipv6, Safi::Unicast));
     }
 }

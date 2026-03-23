@@ -22,7 +22,7 @@ use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError};
 use bgpgg::config::Config;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout, Duration};
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_invalid_marker() {

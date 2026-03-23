@@ -14,6 +14,7 @@
 
 use crate::bgp::msg::{AddPathMask, MessageFormat};
 use crate::bgp::msg_notification::CeaseSubcode;
+use crate::bgp::msg_open_types::StaleFilter;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::msg_update_types::Nlri;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
@@ -28,7 +29,7 @@ use crate::net::IpNetwork;
 use crate::peer::outgoing::{
     batch_announcements_by_path, propagate_routes_to_peer, PeerExportContext,
 };
-use crate::peer::{BgpState, PeerOp, Withdrawal};
+use crate::peer::{BgpState, PeerCapabilities, PeerOp, Withdrawal};
 use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
     PrefixSet,
@@ -43,6 +44,7 @@ use crate::server::{
 };
 use crate::types::PeerDownReason;
 use regex::Regex;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -253,6 +255,10 @@ impl BgpServer {
                         withdrawn.clone(),
                         announced.clone(),
                         |prefix, path| {
+                            // Default LOCAL_PREF for routes that don't carry one (e.g. eBGP)
+                            if path.attrs.local_pref.is_none() {
+                                path.attrs.local_pref = Some(100);
+                            }
                             // Evaluate policies in order until Accept/Reject
                             for policy in import_policies {
                                 match policy.evaluate(prefix, path) {
@@ -398,27 +404,19 @@ impl BgpServer {
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
             }
-            ServerOp::GracefulRestartTimerExpired { peer_ip } => {
-                info!(%peer_ip, "Graceful Restart timer expired - removing stale routes");
-
-                // Remove stale routes for all AFI/SAFIs that have stale routes
-                // (the stale flag was set at disconnect time based on GR capabilities)
-                let stale_afi_safis = self.loc_rib.stale_afi_safis(peer_ip);
-                let delta = self
-                    .loc_rib
-                    .remove_peer_routes_stale(peer_ip, &stale_afi_safis);
-
-                // Propagate withdrawals if any routes were removed
-                self.propagate_routes(delta, Some(peer_ip)).await;
+            ServerOp::GracefulRestartTimerExpired {
+                peer_ip,
+                llgr_afi_safis,
+            } => {
+                self.handle_gr_timer_expired(peer_ip, llgr_afi_safis).await;
             }
             ServerOp::GracefulRestartComplete { peer_ip, afi_safi } => {
-                info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI - removing remaining stale routes");
-
-                // Remove stale routes for this specific AFI/SAFI
-                let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
-
-                // Propagate withdrawals if any routes were removed
-                self.propagate_routes(delta, Some(peer_ip)).await;
+                info!(%peer_ip, %afi_safi, "Graceful Restart completed for AFI/SAFI");
+                self.clear_stale_afi_safi(peer_ip, afi_safi).await;
+            }
+            ServerOp::LlgrTimerExpired { peer_ip, afi_safi } => {
+                info!(%peer_ip, %afi_safi, "LLGR stale timer expired");
+                self.clear_stale_afi_safi(peer_ip, afi_safi).await;
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
                 if let Some(peer) = self.peers.get(&peer_ip) {
@@ -545,8 +543,11 @@ impl BgpServer {
             });
         }
 
-        // Extract capabilities and peer_tx before propagate_routes
-        let capabilities = conn.capabilities.clone();
+        // Extract capabilities and peer_tx before propagate_routes.
+        // Capabilities are always present for an established connection.
+        let Some(capabilities) = conn.capabilities.clone() else {
+            return;
+        };
         let peer_tx = conn.peer_tx.clone();
 
         // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
@@ -562,32 +563,10 @@ impl BgpServer {
             );
         }
 
-        // RFC 4724 Section 4.2: Check F-bit on reconnect for stale route handling
-        // If F=0, AFI/SAFI not in GR cap, or no GR cap: immediately clear stale routes
-        let gr_cap = capabilities
-            .as_ref()
-            .and_then(|c| c.graceful_restart.as_ref());
-        let afi_safis_to_clear: Vec<_> = match gr_cap {
-            Some(cap) => self
-                .loc_rib
-                .stale_afi_safis(peer_ip)
-                .into_iter()
-                .filter(|afi_safi| cap.should_clear_stale(*afi_safi))
-                .collect(),
-            None => self.loc_rib.stale_afi_safis(peer_ip),
-        };
-
-        let delta = self
-            .loc_rib
-            .remove_peer_routes_stale(peer_ip, &afi_safis_to_clear);
-
-        self.propagate_routes(delta, Some(peer_ip)).await;
+        self.sweep_stale(peer_ip, &capabilities).await;
 
         // Send full loc-rib to the newly established peer
-        let negotiated_afi_safis = capabilities
-            .as_ref()
-            .map(|caps| caps.afi_safis())
-            .unwrap_or_else(|| vec![AfiSafi::new(Afi::Ipv4, Safi::Unicast)]);
+        let negotiated_afi_safis = capabilities.afi_safis();
         for afi_safi in &negotiated_afi_safis {
             self.resend_routes_to_peer(peer_ip, afi_safi.afi, afi_safi.safi);
         }
@@ -600,6 +579,94 @@ impl BgpServer {
                 });
             }
         }
+    }
+
+    /// GR timer expired: sweep non-LLGR stale routes, transition LLGR-capable ones.
+    async fn handle_gr_timer_expired(
+        &mut self,
+        peer_ip: IpAddr,
+        llgr_afi_safis: Vec<(AfiSafi, u32)>,
+    ) {
+        info!(%peer_ip, "Graceful Restart timer expired");
+
+        let stale_afi_safis = self.loc_rib.stale_afi_safis(peer_ip);
+
+        // RFC 9494 Section 4.2: LLST=0 means no LLGR phase for that AFI/SAFI.
+        let llgr_map: HashMap<AfiSafi, u32> = llgr_afi_safis
+            .into_iter()
+            .filter(|(afi_safi, llst)| {
+                if *llst == 0 {
+                    info!(
+                        "Peer {}: LLGR disabled for {:?} (LLST=0)",
+                        peer_ip, afi_safi
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        let (llgr, gr): (Vec<_>, Vec<_>) = stale_afi_safis
+            .iter()
+            .partition(|afi_safi| llgr_map.contains_key(afi_safi));
+
+        // GR-only: sweep stale routes immediately. LLGR: transition and schedule expiry.
+        let mut delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &gr);
+        delta.extend(self.loc_rib.apply_llgr(peer_ip, &llgr));
+
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            for (afi_safi, llst) in llgr_map {
+                peer_info
+                    .llgr_timers
+                    .run(afi_safi, llst, peer_ip, self.op_tx.clone());
+            }
+        }
+        self.propagate_routes(delta, Some(peer_ip)).await;
+    }
+
+    /// Cancel LLGR timer (if any) and sweep remaining stale routes for this AFI/SAFI.
+    async fn clear_stale_afi_safi(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) {
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            peer_info.llgr_timers.cancel(&afi_safi);
+        }
+
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+        self.propagate_routes(delta, Some(peer_ip)).await;
+    }
+
+    /// Sweep stale routes on reconnect (GR + LLGR) and propagate.
+    async fn sweep_stale(&mut self, peer_ip: IpAddr, capabilities: &PeerCapabilities) {
+        let mut delta = self.sweep_gr_stale(peer_ip, capabilities);
+        delta.extend(self.sweep_llgr_stale(peer_ip, capabilities));
+        self.propagate_routes(delta, Some(peer_ip)).await;
+    }
+
+    /// RFC 4724 Section 4.2: Sweep stale routes where F-bit=0,
+    /// AFI/SAFI is absent from GR cap, or no GR cap at all.
+    fn sweep_gr_stale(&mut self, peer_ip: IpAddr, capabilities: &PeerCapabilities) -> RouteDelta {
+        let stale = self.loc_rib.stale_afi_safis(peer_ip);
+        let to_clear = match &capabilities.graceful_restart {
+            Some(cap) => cap.filter_stale(stale),
+            None => stale,
+        };
+        self.loc_rib.remove_peer_routes_stale(peer_ip, &to_clear)
+    }
+
+    /// RFC 9494 Section 4.2: Abort LLGR timers and sweep stale routes where
+    /// F-bit=0, AFI/SAFI is absent from LLGR cap, or no LLGR cap at all.
+    fn sweep_llgr_stale(&mut self, peer_ip: IpAddr, capabilities: &PeerCapabilities) -> RouteDelta {
+        let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
+            return RouteDelta::new();
+        };
+        let stale = peer_info.llgr_timers.afi_safis();
+        let to_clear = match &capabilities.llgr {
+            Some(cap) => cap.filter_stale(stale),
+            None => stale,
+        };
+        for afi_safi in &to_clear {
+            peer_info.llgr_timers.cancel(afi_safi);
+        }
+        self.loc_rib.remove_peer_routes_stale(peer_ip, &to_clear)
     }
 
     async fn handle_add_peer(
@@ -714,6 +781,13 @@ impl BgpServer {
                 if let Err(e) = remove_tcp_md5(fd, peer_ip) {
                     error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
                 }
+            }
+        }
+
+        // Cancel any running LLGR timers before removing the peer
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            for afi_safi in peer_info.llgr_timers.afi_safis() {
+                peer_info.llgr_timers.cancel(&afi_safi);
             }
         }
 
@@ -971,25 +1045,39 @@ impl BgpServer {
             return;
         }
 
-        let Some(conn) = peer_info.established_conn() else {
-            return;
+        // Extract values from conn before dropping the immutable borrow on peer_info,
+        // since propagate_routes_to_peer needs &mut peer_info.adj_rib_out.
+        let (peer_asn, peer_tx, capabilities, send_format, local_next_hop, negotiated_afi_safis) = {
+            let Some(conn) = peer_info.established_conn() else {
+                return;
+            };
+            let Some(peer_asn) = conn.asn else {
+                return;
+            };
+            let Some(peer_tx) = conn.peer_tx.clone() else {
+                return;
+            };
+            let Some(capabilities) = conn.capabilities.clone() else {
+                return;
+            };
+            let send_format = conn.send_format();
+            let local_next_hop = conn
+                .conn_info
+                .as_ref()
+                .map(|ci| ci.local_address)
+                .unwrap_or(self.local_addr);
+            let negotiated_afi_safis = conn.negotiated_afi_safis();
+            (
+                peer_asn,
+                peer_tx,
+                capabilities,
+                send_format,
+                local_next_hop,
+                negotiated_afi_safis,
+            )
         };
-        let Some(peer_asn) = conn.asn else {
-            return;
-        };
-        let Some(peer_tx) = conn.peer_tx.clone() else {
-            return;
-        };
-        let send_format = conn.send_format();
-        let local_next_hop = conn
-            .conn_info
-            .as_ref()
-            .map(|ci| ci.local_address)
-            .unwrap_or(self.local_addr);
 
         let export_policies = &peer_info.export_policies;
-
-        let negotiated_afi_safis = conn.negotiated_afi_safis();
 
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
@@ -1005,6 +1093,7 @@ impl BgpServer {
             negotiated_afi_safis: &negotiated_afi_safis,
             next_hop_self: peer_info.config.next_hop_self,
             graceful_shutdown: peer_info.config.graceful_shutdown,
+            capabilities: &capabilities,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);
@@ -1153,6 +1242,7 @@ impl BgpServer {
                 .map(|p| p.name.clone())
                 .collect(),
             statistics: stats,
+            config: entry.config.clone(),
         }));
     }
 
@@ -1907,7 +1997,6 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     ))
 }
 
-/// Determine if peer supports 4-byte ASN for BMP encoding
 fn peer_supports_4byte_asn(peer_info: &PeerInfo) -> bool {
     peer_info
         .established_conn()
