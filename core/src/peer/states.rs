@@ -413,6 +413,7 @@ pub(super) mod tests {
             hold_time: 180,
             addr: SocketAddr::new(local_ip, 0),
             cluster_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            llgr: None,
         };
         Peer {
             addr: addr.ip(),

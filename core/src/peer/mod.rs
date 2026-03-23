@@ -19,7 +19,7 @@ use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability, L
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
-use crate::config::PeerConfig;
+use crate::config::{LlgrConfig, PeerConfig};
 use crate::log::{debug, error, info};
 use crate::net::IpNetwork;
 use crate::rib::rib_in::AdjRibIn;
@@ -192,6 +192,8 @@ pub struct LocalConfig {
     pub hold_time: u16,
     pub addr: SocketAddr,
     pub cluster_id: std::net::Ipv4Addr,
+    /// Resolved LLGR config (server + peer merged). None = disabled.
+    pub llgr: Option<LlgrConfig>,
 }
 
 /// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
@@ -869,6 +871,7 @@ pub mod test_helpers {
             hold_time: 180,
             addr: SocketAddr::new(local_ip, 0),
             cluster_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            llgr: None,
         };
         Peer {
             addr: addr.ip(),

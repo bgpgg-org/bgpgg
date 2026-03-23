@@ -22,7 +22,8 @@ use crate::bgp::msg_open_types::{
     AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
 };
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
-use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
+use crate::config::LlgrConfig;
 use crate::log::{debug, info, warn};
 use crate::server::ServerOp;
 use std::collections::HashSet;
@@ -34,14 +35,6 @@ use crate::config::{AddPathSend, PeerConfig};
 
 use super::{Peer, RouteChanges, SessionType};
 
-/// Default AFI/SAFIs to advertise via multiprotocol capability
-fn default_afi_safis() -> Vec<AfiSafi> {
-    vec![
-        AfiSafi::new(Afi::Ipv4, Safi::Unicast),
-        AfiSafi::new(Afi::Ipv6, Safi::Unicast),
-    ]
-}
-
 /// Negotiate multiprotocol capabilities (intersection of local and peer)
 fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSet<AfiSafi> {
     let local_set: HashSet<_> = local.iter().copied().collect();
@@ -49,7 +42,11 @@ fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSe
 }
 
 /// Build complete list of optional parameters for OPEN message
-fn build_optional_params(asn: u32, config: &PeerConfig) -> Vec<OptionalParam> {
+fn build_optional_params(
+    asn: u32,
+    config: &PeerConfig,
+    llgr: &Option<LlgrConfig>,
+) -> Vec<OptionalParam> {
     let afi_safis = default_afi_safis();
     let mut optional_params = Vec::new();
 
@@ -87,8 +84,11 @@ fn build_optional_params(asn: u32, config: &PeerConfig) -> Vec<OptionalParam> {
         Capability::new_four_octet_asn(asn),
     ));
 
-    // RFC 9494: Emit LLGR capability (GR and AFI/SAFI validated at config time)
-    let llgr_entries = config.llgr.to_llgr_entries();
+    // RFC 9494: Emit LLGR capability from resolved config
+    let llgr_entries = llgr
+        .as_ref()
+        .map(|llgr| llgr.to_llgr_entries())
+        .unwrap_or_default();
     if !llgr_entries.is_empty() {
         optional_params.push(OptionalParam::new_capability(Capability::new_llgr(
             &llgr_entries,
@@ -162,8 +162,9 @@ fn create_open_message(
     hold_time: u16,
     router_id: Ipv4Addr,
     config: &PeerConfig,
+    llgr: &Option<LlgrConfig>,
 ) -> OpenMessage {
-    let optional_params = build_optional_params(asn, config);
+    let optional_params = build_optional_params(asn, config, llgr);
 
     // Calculate total optional params length
     let optional_params_len = optional_params
@@ -193,6 +194,7 @@ impl Peer {
             self.local_config.hold_time,
             self.local_config.bgp_id,
             &self.config,
+            &self.local_config.llgr,
         );
         self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
@@ -624,7 +626,7 @@ mod tests {
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
     use crate::bgp::DEFAULT_FORMAT;
-    use crate::config::{LlgrAfiSafiConfig, LlgrConfig};
+    use crate::config::LlgrConfig;
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
     use crate::rib::{Path, PathAttrs, RouteSource};
@@ -661,7 +663,7 @@ mod tests {
     #[test]
     fn test_extract_capabilities() {
         let config = PeerConfig::default();
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);
         let capabilities = extract_capabilities(&open_msg);
 
         // Check multiprotocol capabilities
@@ -703,7 +705,8 @@ mod tests {
                 add_path_receive: receive,
                 ..PeerConfig::default()
             };
-            let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
+            let open_msg =
+                create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);
             let caps = extract_capabilities(&open_msg);
             let add_path = caps
                 .add_path
@@ -848,16 +851,17 @@ mod tests {
     fn test_llgr_capability_advertised() {
         let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
 
-        let config = PeerConfig {
-            llgr: LlgrConfig {
-                entries: vec![LlgrAfiSafiConfig::new(ipv4_unicast, 3600).unwrap()],
-            },
-            ..PeerConfig::default()
-        };
+        let llgr = Some(LlgrConfig {
+            enabled: true,
+            stale_time: Some(3600),
+            afi_safis: Some(vec![ipv4_unicast]),
+        });
+
+        let config = PeerConfig::default();
         // GR is enabled by default
         assert!(config.graceful_restart.enabled);
 
-        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config);
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &llgr);
 
         // Find LLGR capability (code 71) in OPEN
         let has_llgr = open_msg.optional_params.iter().any(|param| {

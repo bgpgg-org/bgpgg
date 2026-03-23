@@ -592,11 +592,8 @@ impl BgpServer {
         let stale_afi_safis = self.loc_rib.stale_afi_safis(peer_ip);
 
         // RFC 9494 Section 4.2: LLST=0 means no LLGR phase for that AFI/SAFI.
-        // Cap peer's LLST by local config if set.
-        let max_llst = self.config.max_llgr_stale_time.unwrap_or(u32::MAX);
         let llgr_map: HashMap<AfiSafi, u32> = llgr_afi_safis
             .into_iter()
-            .map(|(afi_safi, llst)| (afi_safi, llst.min(max_llst)))
             .filter(|(afi_safi, llst)| {
                 if *llst == 0 {
                     info!(
@@ -1245,6 +1242,7 @@ impl BgpServer {
                 .map(|p| p.name.clone())
                 .collect(),
             statistics: stats,
+            config: entry.config.clone(),
         }));
     }
 

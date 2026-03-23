@@ -115,6 +115,7 @@ async fn test_max_prefix_limit() {
                             admin_state: AdminState::PrefixLimitExceeded.into(),
                             import_policies: vec![],
                             export_policies: vec![],
+                            session_config: None,
                         }],
                     )
                     .await

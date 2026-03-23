@@ -19,7 +19,7 @@ use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
-use crate::config::{Config, PeerConfig};
+use crate::config::{get_peer_llgr, Config, PeerConfig};
 use crate::log::{error, info, warn};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_gtsm;
@@ -118,6 +118,7 @@ pub struct GetPeerResponse {
     pub import_policies: Vec<String>,
     pub export_policies: Vec<String>,
     pub statistics: PeerStatistics,
+    pub config: PeerConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -830,12 +831,14 @@ impl BgpServer {
     ) -> mpsc::UnboundedSender<PeerOp> {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
 
+        let llgr = get_peer_llgr(&self.config.llgr, &config.llgr);
         let local_config = LocalConfig {
             asn: self.config.asn,
             bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
             hold_time: self.config.hold_time_secs as u16,
             addr: bind_addr,
             cluster_id: self.config.cluster_id(),
+            llgr,
         };
         let peer = Peer::new(
             addr.ip(),
@@ -984,12 +987,14 @@ impl BgpServer {
 
         let (tcp_rx, tcp_tx) = stream.into_split();
 
+        let llgr = get_peer_llgr(&self.config.llgr, &config.llgr);
         let local_config = LocalConfig {
             asn: self.config.asn,
             bgp_id: Ipv4Addr::from(self.local_bgp_id.to_be_bytes()),
             hold_time: self.config.hold_time_secs as u16,
             addr: local_addr,
             cluster_id: self.config.cluster_id(),
+            llgr,
         };
         let peer = Peer::new(
             peer_ip,

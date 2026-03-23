@@ -14,6 +14,7 @@
 
 use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
 use crate::bgp::utils::ParserError;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Address Family Identifier per IANA registry
@@ -22,6 +23,19 @@ use std::fmt;
 pub enum Afi {
     Ipv4 = 1,
     Ipv6 = 2,
+}
+
+impl Serialize for Afi {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(*self as u16)
+    }
+}
+
+impl<'de> Deserialize<'de> for Afi {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u16::deserialize(deserializer)?;
+        Afi::try_from(value).map_err(|_| serde::de::Error::custom(format!("unknown AFI: {value}")))
+    }
 }
 
 impl fmt::Display for Afi {
@@ -57,6 +71,26 @@ pub enum Safi {
     MplsLabel = 4,
 }
 
+impl From<Safi> for u8 {
+    fn from(safi: Safi) -> u8 {
+        safi as u8
+    }
+}
+
+impl Serialize for Safi {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for Safi {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u8::deserialize(deserializer)?;
+        Safi::try_from(value)
+            .map_err(|_| serde::de::Error::custom(format!("unknown SAFI: {value}")))
+    }
+}
+
 impl fmt::Display for Safi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -84,7 +118,7 @@ impl TryFrom<u8> for Safi {
 }
 
 /// Combined AFI/SAFI for capability tracking
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AfiSafi {
     pub afi: Afi,
     pub safi: Safi,
@@ -117,6 +151,14 @@ impl fmt::Display for AfiSafi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.afi, self.safi)
     }
+}
+
+/// Default AFI/SAFIs: IPv4 Unicast + IPv6 Unicast
+pub fn default_afi_safis() -> Vec<AfiSafi> {
+    vec![
+        AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+        AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+    ]
 }
 
 #[cfg(test)]
@@ -163,6 +205,21 @@ mod tests {
         // Unknown SAFI
         let bytes = [0x00, 0x01, 0x00, 0x99];
         assert!(AfiSafi::from_capability_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_afi_safi_serde_roundtrip() {
+        let cases = vec![
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv4, Safi::Multicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Multicast),
+        ];
+        for afi_safi in cases {
+            let json = serde_json::to_string(&afi_safi).unwrap();
+            let parsed: AfiSafi = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, afi_safi);
+        }
     }
 
     #[test]

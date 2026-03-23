@@ -430,7 +430,7 @@ impl BgpggProcess {
             sys_descr: None,
             log_level: "error".to_string(),
             cluster_id: None,
-            max_llgr_stale_time: None,
+            llgr: None,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();

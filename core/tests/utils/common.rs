@@ -104,6 +104,7 @@ impl TestServer {
             admin_state: AdminState::Up.into(),
             import_policies: vec![],
             export_policies: vec![],
+            session_config: None,
         }
     }
 
@@ -1895,6 +1896,7 @@ impl FakePeer {
             admin_state: AdminState::Up.into(),
             import_policies: vec![],
             export_policies: vec![],
+            session_config: None,
         }
     }
 

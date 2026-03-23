@@ -18,9 +18,10 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::{LlgrAfiSafiConfig, LlgrConfig};
+use bgpgg::config::LlgrConfig;
 use bgpgg::grpc::proto::{
-    BgpState, GracefulRestartConfig, LlgrConfig as ProtoLlgrConfig, LlgrEntry, SessionConfig,
+    AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig, LlgrConfig as ProtoLlgrConfig,
+    SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -44,9 +45,11 @@ async fn setup_llgr_server(
             enabled: true,
             restart_time: gr_restart_time,
         },
-        llgr: LlgrConfig {
-            entries: vec![LlgrAfiSafiConfig::new(ipv4_unicast, llgr_stale_time).unwrap()],
-        },
+        llgr: Some(LlgrConfig {
+            enabled: true,
+            stale_time: Some(llgr_stale_time),
+            afi_safis: Some(vec![ipv4_unicast]),
+        }),
         ..Default::default()
     });
     start_test_server(config).await
@@ -289,11 +292,9 @@ async fn test_llgr_not_propagated_to_non_llgr_peer() {
                     restart_time_secs: Some(1),
                 }),
                 llgr: Some(ProtoLlgrConfig {
-                    entries: vec![LlgrEntry {
-                        afi: Some(1),
-                        safi: Some(1),
-                        stale_time_secs: Some(30),
-                    }],
+                    enabled: Some(true),
+                    stale_time_secs: Some(30),
+                    afi_safis: vec![ProtoAfiSafi { afi: 1, safi: 1 }],
                 }),
                 ..Default::default()
             }),
@@ -545,11 +546,9 @@ async fn test_llgr_stale_received_from_peer() {
         restart_time_secs: Some(120),
     });
     let llgr_config = Some(ProtoLlgrConfig {
-        entries: vec![LlgrEntry {
-            afi: Some(1),
-            safi: Some(1),
-            stale_time_secs: Some(30),
-        }],
+        enabled: Some(true),
+        stale_time_secs: Some(30),
+        afi_safis: vec![ProtoAfiSafi { afi: 1, safi: 1 }],
     });
 
     let server1 = start_test_server(test_config(65001, 1)).await;
