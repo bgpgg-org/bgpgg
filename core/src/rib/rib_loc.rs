@@ -86,7 +86,7 @@ fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
     mut path: Arc<Path>,
     path_ids: &mut A,
 ) {
-    let route = table.get_or_insert_with(key, || Route {
+    let route = table.get_or_insert(key, Route {
         prefix,
         paths: vec![],
     });

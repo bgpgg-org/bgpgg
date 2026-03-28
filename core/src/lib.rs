@@ -21,6 +21,7 @@ pub mod net;
 pub mod peer;
 pub mod policy;
 pub mod rib;
+pub mod rpki;
 pub mod server;
 pub mod server_ops;
 pub mod table;

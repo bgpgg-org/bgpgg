@@ -77,13 +77,14 @@ impl<K: Prefix + Eq + Hash, V> PrefixMap<K, V> {
     }
 
     /// Get or insert a value, keeping the trie in sync for new keys.
-    pub fn get_or_insert_with(&mut self, key: K, f: impl FnOnce() -> V) -> &mut V {
-        if !self.map.contains_key(&key) {
-            self.trie.insert(key, ());
-            self.map.insert(key, f());
+    pub fn get_or_insert(&mut self, key: K, value: V) -> &mut V {
+        match self.map.entry(key) {
+            hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            hash_map::Entry::Vacant(entry) => {
+                self.trie.insert(key, ());
+                entry.insert(value)
+            }
         }
-        // Safe: we just ensured key exists above
-        self.map.get_mut(&key).unwrap()
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
@@ -217,17 +218,17 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_with() {
+    fn test_get_or_insert() {
         let mut table: PrefixMap<Ipv4Net, i32> = PrefixMap::new();
         let prefix = ipv4net(10, 0, 0, 0, 8);
 
         // Inserts when missing
-        let val = table.get_or_insert_with(prefix, || 42);
+        let val = table.get_or_insert(prefix, 42);
         assert_eq!(*val, 42);
         assert_eq!(table.len(), 1);
 
-        // Returns existing, doesn't call closure
-        let val = table.get_or_insert_with(prefix, || panic!("should not be called"));
+        // Returns existing, ignores new value
+        let val = table.get_or_insert(prefix, 99);
         assert_eq!(*val, 42);
         assert_eq!(table.len(), 1);
 
