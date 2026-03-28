@@ -23,6 +23,7 @@ pub mod policy;
 pub mod rib;
 pub mod server;
 pub mod server_ops;
+pub mod table;
 pub mod types;
 
 #[cfg(test)]
