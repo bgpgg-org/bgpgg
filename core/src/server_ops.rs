@@ -430,6 +430,13 @@ impl BgpServer {
             ServerOp::GetBmpStatistics { response } => {
                 self.handle_get_bmp_statistics(response).await;
             }
+            ServerOp::VrpUpdate { added, removed } => {
+                info!(
+                    added = added.len(),
+                    removed = removed.len(),
+                    "received VRP update from RTR manager"
+                );
+            }
         }
     }
 

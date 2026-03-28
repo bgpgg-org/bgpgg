@@ -16,14 +16,12 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{TcpSocket, TcpStream};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 
 #[cfg(target_os = "freebsd")]
 mod bsd;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod utils;
 
 #[cfg(target_os = "freebsd")]
@@ -43,6 +41,8 @@ pub use bsd::remove_tcp_md5;
 pub use bsd::set_ttl_max;
 #[cfg(target_os = "linux")]
 pub use linux::set_ttl_max;
+
+pub use utils::set_tcp_keepalive;
 
 /// BGP protocol port number
 pub const BGP_PORT: u16 = 179;

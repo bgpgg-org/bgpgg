@@ -359,6 +359,26 @@ pub struct BmpConfig {
     pub statistics_timeout: Option<u64>,
 }
 
+/// Configuration for an RPKI cache server (RTR, RFC 8210).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RpkiCacheConfig {
+    /// Address in "host:port" format (e.g. "127.0.0.1:8282").
+    pub address: String,
+    /// Preference tier. Lower values are preferred; only the lowest tier is active at startup.
+    #[serde(default)]
+    pub preference: u8,
+    /// Override cache-provided retry interval (seconds).
+    #[serde(default)]
+    pub retry_interval: Option<u64>,
+    /// Override cache-provided refresh interval (seconds).
+    #[serde(default)]
+    pub refresh_interval: Option<u64>,
+    /// Override cache-provided expire interval (seconds).
+    #[serde(default)]
+    pub expire_interval: Option<u64>,
+}
+
 /// Container for all defined sets used in policy matching (YAML representation)
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -624,6 +644,9 @@ pub struct Config {
     pub peers: Vec<PeerConfig>,
     #[serde(default)]
     pub bmp_servers: Vec<BmpConfig>,
+    /// RPKI cache servers for RTR (RFC 8210).
+    #[serde(default)]
+    pub rpki_caches: Vec<RpkiCacheConfig>,
     /// BMP sysName (RFC 7854). Defaults to "bgpgg {router_id}".
     #[serde(default)]
     pub sys_name: Option<String>,
@@ -679,6 +702,7 @@ impl Config {
             connect_retry_secs: default_connect_retry_time(),
             peers: Vec::new(),
             bmp_servers: Vec::new(),
+            rpki_caches: Vec::new(),
             sys_name: None,
             sys_descr: None,
             log_level: default_log_level(),
@@ -741,6 +765,7 @@ impl Default for Config {
             connect_retry_secs: default_connect_retry_time(),
             peers: Vec::new(),
             bmp_servers: Vec::new(),
+            rpki_caches: Vec::new(),
             sys_name: None,
             sys_descr: None,
             log_level: default_log_level(),

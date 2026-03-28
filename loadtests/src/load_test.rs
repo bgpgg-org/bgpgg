@@ -424,6 +424,7 @@ impl BgpggProcess {
             connect_retry_secs: 30,
             peers: vec![],
             bmp_servers: vec![],
+            rpki_caches: vec![],
             defined_sets: Default::default(),
             policy_definitions: vec![],
             sys_name: None,

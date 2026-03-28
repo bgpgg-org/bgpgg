@@ -55,6 +55,11 @@ pub fn set_ttl_max(fd: RawFd, addr: IpAddr) -> io::Result<()> {
     }
 }
 
+/// Enable TCP keep-alive on a socket (RFC 8210 Section 7).
+pub fn set_tcp_keepalive(fd: RawFd) -> io::Result<()> {
+    setsockopt(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1 as libc::c_int)
+}
+
 #[cfg(test)]
 pub(crate) fn getsockopt_int(fd: RawFd, level: libc::c_int, opt: libc::c_int) -> libc::c_int {
     let mut val: libc::c_int = 0;

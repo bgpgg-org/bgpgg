@@ -37,6 +37,8 @@ use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics, W
 use crate::policy::{DefinedSetType, Policy, PolicyContext};
 use crate::rib::rib_loc::LocRib;
 use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
+use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
+use crate::rpki::vrp::Vrp;
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -321,6 +323,8 @@ pub enum ServerOp {
     GetBmpStatistics {
         response: oneshot::Sender<Vec<BmpPeerStats>>,
     },
+    /// VRP table update from RtrManager (RPKI).
+    VrpUpdate { added: Vec<Vrp>, removed: Vec<Vrp> },
 }
 
 // BMP operations sent from server to BMP sender task
@@ -629,6 +633,8 @@ pub struct BgpServer {
     pub(crate) op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
+    /// Channel to send operations to the RtrManager (RPKI).
+    pub(crate) rpki_tx: Option<mpsc::UnboundedSender<RpkiOp>>,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
 }
@@ -661,6 +667,7 @@ impl BgpServer {
             op_tx,
             op_rx,
             bmp_tasks: HashMap::new(),
+            rpki_tx: None,
             listener_fd: None,
         })
     }
@@ -743,6 +750,7 @@ impl BgpServer {
         let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);
         self.init_configured_bmp_servers();
+        self.init_configured_rpki_caches();
 
         loop {
             tokio::select! {
@@ -819,6 +827,43 @@ impl BgpServer {
 
             info!(%addr, "configured BMP server");
         }
+    }
+
+    fn init_configured_rpki_caches(&mut self) {
+        if self.config.rpki_caches.is_empty() {
+            return;
+        }
+
+        let rpki_tx = self.spawn_rtr_manager();
+
+        for rpki_cfg in &self.config.rpki_caches.clone() {
+            let Ok(addr) = rpki_cfg.address.parse::<SocketAddr>() else {
+                error!(addr = %rpki_cfg.address, "invalid RPKI cache address in config");
+                continue;
+            };
+
+            let cache_config = RtrCacheConfig {
+                address: addr,
+                preference: rpki_cfg.preference,
+                retry_interval: rpki_cfg.retry_interval,
+                refresh_interval: rpki_cfg.refresh_interval,
+                expire_interval: rpki_cfg.expire_interval,
+            };
+            let _ = rpki_tx.send(RpkiOp::AddCache(cache_config));
+            info!(%addr, "configured RPKI cache");
+        }
+    }
+
+    fn spawn_rtr_manager(&mut self) -> mpsc::UnboundedSender<RpkiOp> {
+        let (rpki_tx, rpki_rx) = mpsc::unbounded_channel();
+        let manager = RtrManager::new(rpki_rx, self.op_tx.clone());
+
+        tokio::spawn(async move {
+            manager.run().await;
+        });
+
+        self.rpki_tx = Some(rpki_tx.clone());
+        rpki_tx
     }
 
     /// Spawn a new Peer task in Idle state

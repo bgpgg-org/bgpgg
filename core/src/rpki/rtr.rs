@@ -18,7 +18,9 @@
 //! Protocol version 1 only -- v0 messages are rejected with Error Report
 //! code 4 (Unsupported Protocol Version).
 
+use crate::log::warn;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use tokio::io::AsyncReadExt;
 
 /// RTR protocol version 1 (RFC 8210).
 pub const PROTOCOL_VERSION: u8 = 1;
@@ -29,6 +31,37 @@ pub const HEADER_SIZE: usize = 8;
 /// Maximum message size. RFC 8210 doesn't set a hard max, but Error Report
 /// contains variable-length text. Cap at 64KB to bound memory usage.
 pub const MAX_MESSAGE_SIZE: u32 = 65536;
+
+/// Default refresh interval in seconds (RFC 8210 Section 6).
+pub const DEFAULT_REFRESH_INTERVAL: u64 = 3600;
+
+/// Default retry interval in seconds (RFC 8210 Section 6).
+pub const DEFAULT_RETRY_INTERVAL: u64 = 600;
+
+/// Default expire interval in seconds (RFC 8210 Section 6).
+pub const DEFAULT_EXPIRE_INTERVAL: u64 = 7200;
+
+/// RTR serial number with RFC 1982 comparison semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Serial(pub u32);
+
+impl PartialOrd for Serial {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Serial {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.0 == other.0 {
+            std::cmp::Ordering::Equal
+        } else if (other.0.wrapping_sub(self.0) as i32) > 0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    }
+}
 
 /// RTR message type codes (RFC 8210 Section 5).
 #[repr(u8)]
@@ -124,14 +157,14 @@ pub enum ParseError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerialNotify {
     pub session_id: u16,
-    pub serial: u32,
+    pub serial: Serial,
 }
 
 impl SerialNotify {
     const TYPE_CODE: u8 = MessageType::SerialNotify as u8;
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.serial.to_be_bytes().to_vec()
+        self.serial.0.to_be_bytes().to_vec()
     }
 
     fn parse(session_id: u16, length: u32, body: &[u8]) -> Result<Self, ParseError> {
@@ -141,7 +174,7 @@ impl SerialNotify {
                 length,
             });
         }
-        let serial = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        let serial = Serial(u32::from_be_bytes([body[0], body[1], body[2], body[3]]));
         Ok(SerialNotify { session_id, serial })
     }
 }
@@ -149,14 +182,14 @@ impl SerialNotify {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerialQuery {
     pub session_id: u16,
-    pub serial: u32,
+    pub serial: Serial,
 }
 
 impl SerialQuery {
     const TYPE_CODE: u8 = MessageType::SerialQuery as u8;
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.serial.to_be_bytes().to_vec()
+        self.serial.0.to_be_bytes().to_vec()
     }
 
     fn parse(session_id: u16, length: u32, body: &[u8]) -> Result<Self, ParseError> {
@@ -166,7 +199,7 @@ impl SerialQuery {
                 length,
             });
         }
-        let serial = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        let serial = Serial(u32::from_be_bytes([body[0], body[1], body[2], body[3]]));
         Ok(SerialQuery { session_id, serial })
     }
 }
@@ -219,6 +252,10 @@ pub struct Ipv4Prefix {
 impl Ipv4Prefix {
     const TYPE_CODE: u8 = MessageType::Ipv4Prefix as u8;
 
+    pub fn is_announcement(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut body = Vec::with_capacity(12);
         body.push(self.flags);
@@ -259,6 +296,10 @@ pub struct Ipv6Prefix {
 impl Ipv6Prefix {
     const TYPE_CODE: u8 = MessageType::Ipv6Prefix as u8;
 
+    pub fn is_announcement(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut body = Vec::with_capacity(24);
         body.push(self.flags);
@@ -292,7 +333,7 @@ impl Ipv6Prefix {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndOfData {
     pub session_id: u16,
-    pub serial: u32,
+    pub serial: Serial,
     pub refresh_interval: u32,
     pub retry_interval: u32,
     pub expire_interval: u32,
@@ -301,9 +342,49 @@ pub struct EndOfData {
 impl EndOfData {
     const TYPE_CODE: u8 = MessageType::EndOfData as u8;
 
+    /// Return validated (refresh, retry, expire) intervals per RFC 8210 Section 6.
+    /// Out-of-range values are clamped and logged.
+    pub fn get_timers(&self) -> (u64, u64, u64) {
+        let refresh = (self.refresh_interval as u64).clamp(1, 86400);
+        if refresh != self.refresh_interval as u64 {
+            warn!(
+                raw = self.refresh_interval,
+                clamped = refresh,
+                "refresh interval out of range, clamped"
+            );
+        }
+
+        let retry = (self.retry_interval as u64).clamp(1, 7200);
+        if retry != self.retry_interval as u64 {
+            warn!(
+                raw = self.retry_interval,
+                clamped = retry,
+                "retry interval out of range, clamped"
+            );
+        }
+
+        let mut expire = (self.expire_interval as u64).clamp(600, 172800);
+        if expire != self.expire_interval as u64 {
+            warn!(
+                raw = self.expire_interval,
+                clamped = expire,
+                "expire interval out of range, clamped"
+            );
+        }
+
+        // expire must be > max(refresh, retry)
+        let min_expire = refresh.max(retry) + 1;
+        if expire < min_expire {
+            warn!(expire, min_expire, "expire interval too small, adjusted");
+            expire = min_expire;
+        }
+
+        (refresh, retry, expire)
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut body = Vec::with_capacity(16);
-        body.extend_from_slice(&self.serial.to_be_bytes());
+        body.extend_from_slice(&self.serial.0.to_be_bytes());
         body.extend_from_slice(&self.refresh_interval.to_be_bytes());
         body.extend_from_slice(&self.retry_interval.to_be_bytes());
         body.extend_from_slice(&self.expire_interval.to_be_bytes());
@@ -319,7 +400,7 @@ impl EndOfData {
         }
         Ok(EndOfData {
             session_id,
-            serial: u32::from_be_bytes([body[0], body[1], body[2], body[3]]),
+            serial: Serial(u32::from_be_bytes([body[0], body[1], body[2], body[3]])),
             refresh_interval: u32::from_be_bytes([body[4], body[5], body[6], body[7]]),
             retry_interval: u32::from_be_bytes([body[8], body[9], body[10], body[11]]),
             expire_interval: u32::from_be_bytes([body[12], body[13], body[14], body[15]]),
@@ -573,9 +654,176 @@ impl Message {
     }
 }
 
+/// Read buffer size for RTR PDU ingestion.
+const READ_BUF_SIZE: usize = 4096;
+
+/// Errors from reading RTR messages off a stream.
+#[derive(Debug)]
+pub enum RtrReadError {
+    /// Connection closed cleanly (EOF).
+    Eof,
+    /// IO error during read.
+    Io(std::io::Error),
+    /// RTR parse error on a complete PDU.
+    Parse(ParseError),
+    /// Message length field exceeds MAX_MESSAGE_SIZE.
+    MessageTooLarge(usize),
+}
+
+/// Buffered reader that extracts complete RTR messages from a byte stream.
+pub struct RtrReader<R> {
+    reader: R,
+    buf: Vec<u8>,
+}
+
+impl<R: AsyncReadExt + Unpin> RtrReader<R> {
+    pub fn new(reader: R) -> Self {
+        RtrReader {
+            reader,
+            buf: Vec::with_capacity(READ_BUF_SIZE),
+        }
+    }
+
+    /// Read the next complete RTR message from the stream.
+    pub async fn next_message(&mut self) -> Result<Message, RtrReadError> {
+        loop {
+            // Try to extract a complete message from the buffer
+            if self.buf.len() >= HEADER_SIZE {
+                let msg_len =
+                    u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+                        as usize;
+                if msg_len > MAX_MESSAGE_SIZE as usize {
+                    return Err(RtrReadError::MessageTooLarge(msg_len));
+                }
+                if self.buf.len() >= msg_len {
+                    let (msg, consumed) =
+                        Message::from_bytes(&self.buf[..msg_len]).map_err(RtrReadError::Parse)?;
+                    self.buf.drain(..consumed);
+                    return Ok(msg);
+                }
+            }
+
+            // Need more data
+            let mut read_buf = [0u8; READ_BUF_SIZE];
+            match self.reader.read(&mut read_buf).await {
+                Ok(0) => return Err(RtrReadError::Eof),
+                Ok(n) => self.buf.extend_from_slice(&read_buf[..n]),
+                Err(err) => return Err(RtrReadError::Io(err)),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_end_of_data_get_timers() {
+        let make_eod = |refresh, retry, expire| EndOfData {
+            session_id: 0,
+            serial: Serial(0),
+            refresh_interval: refresh,
+            retry_interval: retry,
+            expire_interval: expire,
+        };
+        let cases = vec![
+            ("defaults", make_eod(3600, 600, 7200), (3600, 600, 7200)),
+            (
+                "clamp refresh too low",
+                make_eod(0, 600, 7200),
+                (1, 600, 7200),
+            ),
+            (
+                "clamp refresh too high",
+                make_eod(100000, 600, 7200),
+                (86400, 600, 86401),
+            ),
+            (
+                "clamp retry too low",
+                make_eod(3600, 0, 7200),
+                (3600, 1, 7200),
+            ),
+            (
+                "clamp retry too high",
+                make_eod(3600, 10000, 7200),
+                (3600, 7200, 7201),
+            ),
+            (
+                "clamp expire too low",
+                make_eod(3600, 600, 100),
+                (3600, 600, 3601),
+            ),
+            (
+                "clamp expire too high",
+                make_eod(3600, 600, 200000),
+                (3600, 600, 172800),
+            ),
+            (
+                "expire must exceed max(refresh, retry)",
+                make_eod(3600, 600, 3600),
+                (3600, 600, 3601),
+            ),
+        ];
+        for (name, eod, expected) in cases {
+            assert_eq!(eod.get_timers(), expected, "case: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_serial_compare() {
+        use std::cmp::Ordering;
+        let cases = vec![
+            ("equal", 100, 100, Ordering::Equal),
+            ("simple less", 1, 2, Ordering::Less),
+            ("simple greater", 2, 1, Ordering::Greater),
+            ("wraparound less", u32::MAX, 0, Ordering::Less),
+            ("wraparound greater", 0, u32::MAX, Ordering::Greater),
+            ("large gap less", 1, u32::MAX / 2, Ordering::Less),
+            // s1=2^31+1, s2=1: difference is exactly 2^31, undefined in RFC 1982
+            ("large gap boundary", u32::MAX / 2 + 2, 1, Ordering::Greater),
+            ("zero and one", 0, 1, Ordering::Less),
+            ("max and max-1", u32::MAX, u32::MAX - 1, Ordering::Greater),
+        ];
+        for (name, s1, s2, expected) in cases {
+            assert_eq!(
+                Serial(s1).cmp(&Serial(s2)),
+                expected,
+                "case: {} (s1={}, s2={})",
+                name,
+                s1,
+                s2
+            );
+        }
+    }
+
+    #[test]
+    fn test_prefix_is_announcement() {
+        let cases = vec![
+            ("flags 0 is withdrawal", 0u8, false),
+            ("flags 1 is announcement", 1, true),
+            ("only low bit matters", 0xFE, false),
+            ("low bit set with others", 0xFF, true),
+        ];
+        for (name, flags, expected) in cases {
+            let v4 = Ipv4Prefix {
+                flags,
+                prefix_length: 24,
+                max_length: 24,
+                prefix: Ipv4Addr::LOCALHOST,
+                asn: 0,
+            };
+            let v6 = Ipv6Prefix {
+                flags,
+                prefix_length: 48,
+                max_length: 48,
+                prefix: Ipv6Addr::LOCALHOST,
+                asn: 0,
+            };
+            assert_eq!(v4.is_announcement(), expected, "v4 case: {}", name);
+            assert_eq!(v6.is_announcement(), expected, "v6 case: {}", name);
+        }
+    }
 
     fn roundtrip(msg: &Message) -> Message {
         let bytes = msg.serialize();
@@ -587,9 +835,9 @@ mod tests {
     #[test]
     fn test_serial_notify_roundtrip() {
         let cases = vec![
-            ("zero serial", 0u16, 0u32),
-            ("typical", 1234, 56789),
-            ("max values", u16::MAX, u32::MAX),
+            ("zero serial", 0u16, Serial(0)),
+            ("typical", 1234, Serial(56789)),
+            ("max values", u16::MAX, Serial(u32::MAX)),
         ];
         for (name, session_id, serial) in cases {
             let msg = Message::SerialNotify(SerialNotify { session_id, serial });
@@ -601,9 +849,9 @@ mod tests {
     #[test]
     fn test_serial_query_roundtrip() {
         let cases = vec![
-            ("zero", 0u16, 0u32),
-            ("typical", 42, 100),
-            ("max", u16::MAX, u32::MAX),
+            ("zero", 0u16, Serial(0)),
+            ("typical", 42, Serial(100)),
+            ("max", u16::MAX, Serial(u32::MAX)),
         ];
         for (name, session_id, serial) in cases {
             let msg = Message::SerialQuery(SerialQuery { session_id, serial });
@@ -710,9 +958,16 @@ mod tests {
     #[test]
     fn test_end_of_data_roundtrip() {
         let cases = vec![
-            ("defaults", 1u16, 1u32, 3600u32, 600u32, 7200u32),
-            ("custom", 42, 999, 1800, 300, 14400),
-            ("max", u16::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX),
+            ("defaults", 1u16, Serial(1), 3600u32, 600u32, 7200u32),
+            ("custom", 42, Serial(999), 1800, 300, 14400),
+            (
+                "max",
+                u16::MAX,
+                Serial(u32::MAX),
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+            ),
         ];
         for (name, session_id, serial, refresh, retry, expire) in cases {
             let msg = Message::EndOfData(EndOfData {
@@ -863,7 +1118,7 @@ mod tests {
         });
         let msg3 = Message::EndOfData(EndOfData {
             session_id: 1,
-            serial: 42,
+            serial: Serial(42),
             refresh_interval: 3600,
             retry_interval: 600,
             expire_interval: 7200,
@@ -929,7 +1184,7 @@ mod tests {
                 "Serial Notify",
                 Message::SerialNotify(SerialNotify {
                     session_id: 0,
-                    serial: 0,
+                    serial: Serial(0),
                 }),
                 12,
             ),
@@ -937,7 +1192,7 @@ mod tests {
                 "Serial Query",
                 Message::SerialQuery(SerialQuery {
                     session_id: 0,
-                    serial: 0,
+                    serial: Serial(0),
                 }),
                 12,
             ),
@@ -973,7 +1228,7 @@ mod tests {
                 "End of Data",
                 Message::EndOfData(EndOfData {
                     session_id: 0,
-                    serial: 0,
+                    serial: Serial(0),
                     refresh_interval: 3600,
                     retry_interval: 600,
                     expire_interval: 7200,
@@ -1037,5 +1292,49 @@ mod tests {
         if let Message::Ipv4Prefix(m) = parsed_withdraw {
             assert_eq!(m.flags, 0, "withdraw flag should be 0");
         }
+    }
+
+    #[tokio::test]
+    async fn test_rtr_reader() {
+        use tokio::io::AsyncWriteExt;
+
+        let reset_query = Message::ResetQuery(ResetQuery);
+        let cache_resp = Message::CacheResponse(CacheResponse { session_id: 1 });
+        let prefix = Message::Ipv4Prefix(Ipv4Prefix {
+            flags: 1,
+            prefix_length: 24,
+            max_length: 24,
+            prefix: Ipv4Addr::new(10, 0, 0, 0),
+            asn: 65001,
+        });
+        let eod = Message::EndOfData(EndOfData {
+            session_id: 1,
+            serial: Serial(42),
+            refresh_interval: 3600,
+            retry_interval: 600,
+            expire_interval: 7200,
+        });
+
+        // Write all messages, then EOF
+        let (client, server) = tokio::io::duplex(1024);
+        let (mut writer, reader) = (client, server);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&reset_query.serialize());
+        buf.extend_from_slice(&cache_resp.serialize());
+        buf.extend_from_slice(&prefix.serialize());
+        buf.extend_from_slice(&eod.serialize());
+        writer.write_all(&buf).await.unwrap();
+        drop(writer); // EOF
+
+        let mut rtr_reader = RtrReader::new(reader);
+        assert_eq!(rtr_reader.next_message().await.unwrap(), reset_query);
+        assert_eq!(rtr_reader.next_message().await.unwrap(), cache_resp);
+        assert_eq!(rtr_reader.next_message().await.unwrap(), prefix);
+        assert_eq!(rtr_reader.next_message().await.unwrap(), eod);
+        assert!(matches!(
+            rtr_reader.next_message().await,
+            Err(RtrReadError::Eof)
+        ));
     }
 }
