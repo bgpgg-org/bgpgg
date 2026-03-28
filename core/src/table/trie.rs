@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Binary Patricia trie for IP prefix lookups.
+//! Patricia trie for IP prefix lookups.
 //!
 //! Supports subtree (more-specific) and covering (less-specific) queries.
 //! Arena-allocated with implicit path compression.
@@ -106,6 +106,7 @@ pub struct PrefixTrie<K: Prefix, V> {
     len: usize,
 }
 
+#[allow(dead_code)]
 impl<K: Prefix, V> PrefixTrie<K, V> {
     pub fn new() -> Self {
         PrefixTrie {

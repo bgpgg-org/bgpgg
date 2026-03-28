@@ -19,6 +19,7 @@ use crate::peer::Withdrawal;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::stale::{handle_stale_routes, mark_stale_in_table, StaleStrategy};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
+use crate::table::{Prefix, PrefixMap};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::IpAddr;
@@ -64,9 +65,9 @@ use std::net::Ipv4Addr;
 /// Contains the best paths selected after applying import policies
 /// and the BGP best path selection algorithm.
 pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
-    // Per-AFI/SAFI tables
-    ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
-    ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
+    // Per-AFI/SAFI tables (HashMap + trie for subtree/covering queries)
+    ipv4_unicast: PrefixMap<Ipv4Net, Route>,
+    ipv6_unicast: PrefixMap<Ipv6Net, Route>,
 
     /// ADD-PATH local path ID allocator (RFC 7911)
     path_ids: A,
@@ -78,14 +79,14 @@ pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
 /// - If a matching path exists (same source, same remote_path_id) and attrs differ,
 ///   replace it while inheriting the existing local_path_id.
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
-    table: &mut HashMap<K, Route>,
+fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
+    table: &mut PrefixMap<K, Route>,
     key: K,
     prefix: IpNetwork,
     mut path: Arc<Path>,
     path_ids: &mut A,
 ) {
-    let route = table.entry(key).or_insert_with(|| Route {
+    let route = table.get_or_insert_with(key, || Route {
         prefix,
         paths: vec![],
     });
@@ -110,8 +111,8 @@ fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
 }
 
 /// Remove paths matching a predicate and return their freed local_path_ids.
-fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
-    table: &mut HashMap<K, Route>,
+fn remove_paths<K: Eq + Hash + Prefix, F: Fn(&Path) -> bool>(
+    table: &mut PrefixMap<K, Route>,
     key: &K,
     should_remove: F,
 ) -> Vec<u32> {
@@ -134,7 +135,10 @@ fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
 }
 
 /// Remove all paths from a peer and return their local_path_ids for freeing.
-fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> Vec<u32> {
+fn remove_all_peer_paths<K: Eq + Hash + Prefix>(
+    table: &mut PrefixMap<K, Route>,
+    peer_ip: IpAddr,
+) -> Vec<u32> {
     let mut freed_path_ids = Vec::new();
     for route in table.values_mut() {
         freed_path_ids.extend(
@@ -173,13 +177,13 @@ impl<A: PathIdAllocator> LocRib<A> {
     fn get_prefixes_from_peer(&self, peer_ip: IpAddr) -> Vec<IpNetwork> {
         let mut prefixes = Vec::new();
 
-        for (prefix, route) in &self.ipv4_unicast {
+        for (prefix, route) in self.ipv4_unicast.iter() {
             if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V4(*prefix));
             }
         }
 
-        for (prefix, route) in &self.ipv6_unicast {
+        for (prefix, route) in self.ipv6_unicast.iter() {
             if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V6(*prefix));
             }
@@ -295,8 +299,8 @@ impl Default for LocRib {
 impl LocRib {
     pub fn new() -> Self {
         LocRib {
-            ipv4_unicast: HashMap::new(),
-            ipv6_unicast: HashMap::new(),
+            ipv4_unicast: PrefixMap::new(),
+            ipv6_unicast: PrefixMap::new(),
             path_ids: BitmapPathIdAllocator::new(),
         }
     }
@@ -305,8 +309,8 @@ impl LocRib {
 impl<A: PathIdAllocator> LocRib<A> {
     pub fn with_path_ids(path_ids: A) -> Self {
         LocRib {
-            ipv4_unicast: HashMap::new(),
-            ipv6_unicast: HashMap::new(),
+            ipv4_unicast: PrefixMap::new(),
+            ipv6_unicast: PrefixMap::new(),
             path_ids,
         }
     }
@@ -579,6 +583,25 @@ impl<A: PathIdAllocator> LocRib<A> {
             });
         }
         result
+    }
+
+    /// Find all prefixes in the RIB that are subnets of (or equal to) the given prefix.
+    /// Used for RPKI re-evaluation when a VRP changes.
+    pub fn subtree_prefixes(&self, prefix: &IpNetwork) -> Vec<IpNetwork> {
+        match prefix {
+            IpNetwork::V4(v4) => self
+                .ipv4_unicast
+                .subtree(v4)
+                .into_iter()
+                .map(|k| IpNetwork::V4(*k))
+                .collect(),
+            IpNetwork::V6(v6) => self
+                .ipv6_unicast
+                .subtree(v6)
+                .into_iter()
+                .map(|k| IpNetwork::V6(*k))
+                .collect(),
+        }
     }
 }
 

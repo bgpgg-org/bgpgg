@@ -15,7 +15,7 @@
 use crate::bgp::community;
 use crate::rib::path_id::PathIdAllocator;
 use crate::rib::{Path, Route, RouteDelta};
-use std::collections::HashMap;
+use crate::table::{Prefix, PrefixMap};
 use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -47,8 +47,8 @@ impl StaleStrategy {
     }
 }
 
-pub(crate) fn mark_stale_in_table<K: Eq + Hash>(
-    table: &mut HashMap<K, Route>,
+pub(crate) fn mark_stale_in_table<K: Eq + Hash + Prefix>(
+    table: &mut PrefixMap<K, Route>,
     peer_ip: IpAddr,
 ) -> usize {
     let mut count = 0;
@@ -63,7 +63,10 @@ pub(crate) fn mark_stale_in_table<K: Eq + Hash>(
     count
 }
 
-fn peer_stale_keys<K: Eq + Hash + Copy>(table: &HashMap<K, Route>, peer_ip: IpAddr) -> Vec<K> {
+fn peer_stale_keys<K: Eq + Hash + Copy + Prefix>(
+    table: &PrefixMap<K, Route>,
+    peer_ip: IpAddr,
+) -> Vec<K> {
     table
         .iter()
         .filter(|(_, r)| r.paths.iter().any(|p| p.is_from_peer(peer_ip) && p.stale))
@@ -79,8 +82,8 @@ fn best_path_changed(old: Option<&Arc<Path>>, new: Option<&Arc<Path>>) -> bool {
     }
 }
 
-pub(crate) fn handle_stale_routes<K: Eq + Hash + Copy, A: PathIdAllocator>(
-    table: &mut HashMap<K, Route>,
+pub(crate) fn handle_stale_routes<K: Eq + Hash + Copy + Prefix, A: PathIdAllocator>(
+    table: &mut PrefixMap<K, Route>,
     peer_ip: IpAddr,
     path_ids: &mut A,
     strategy: &StaleStrategy,
@@ -156,8 +159,8 @@ mod tests {
         (net, IpNetwork::V4(net))
     }
 
-    fn make_table(entries: Vec<(Ipv4Net, IpNetwork, Vec<Arc<Path>>)>) -> HashMap<Ipv4Net, Route> {
-        let mut table = HashMap::new();
+    fn make_table(entries: Vec<(Ipv4Net, IpNetwork, Vec<Arc<Path>>)>) -> PrefixMap<Ipv4Net, Route> {
+        let mut table = PrefixMap::new();
         for (key, ip_prefix, paths) in entries {
             table.insert(
                 key,
@@ -184,8 +187,8 @@ mod tests {
 
         let count = mark_stale_in_table(&mut table, peer_ip());
         assert_eq!(count, 1);
-        assert!(table[&key].paths[0].stale);
-        assert!(!table[&key].paths[1].stale);
+        assert!(table.get(&key).unwrap().paths[0].stale);
+        assert!(!table.get(&key).unwrap().paths[1].stale);
     }
 
     #[test]
@@ -227,8 +230,8 @@ mod tests {
         let delta = handle_stale_routes(&mut table, peer_ip(), &mut alloc, &StaleStrategy::Sweep);
 
         // Mixed: stale path removed, other peer's path kept
-        assert_eq!(table[&key_mixed].paths.len(), 1);
-        assert!(table[&key_mixed].paths[0].is_from_peer(other_peer_ip()));
+        assert_eq!(table.get(&key_mixed).unwrap().paths.len(), 1);
+        assert!(table.get(&key_mixed).unwrap().paths[0].is_from_peer(other_peer_ip()));
         assert!(alloc.freed.contains(&42));
 
         // Only stale: route removed entirely
@@ -236,7 +239,7 @@ mod tests {
         assert!(alloc.freed.contains(&43));
 
         // Non-stale: untouched
-        assert_eq!(table[&key_not_stale].paths.len(), 1);
+        assert_eq!(table.get(&key_not_stale).unwrap().paths.len(), 1);
 
         assert!(delta.changed.contains(&prefix_mixed));
         assert!(delta.changed.contains(&prefix_only_stale));
@@ -289,7 +292,7 @@ mod tests {
         );
 
         // Clean path tagged with LLGR_STALE
-        assert!(table[&key_clean].paths[0]
+        assert!(table.get(&key_clean).unwrap().paths[0]
             .attrs
             .communities
             .contains(&community::LLGR_STALE));
@@ -299,7 +302,9 @@ mod tests {
         assert!(alloc.freed.contains(&2));
 
         // Already-tagged path: exactly one LLGR_STALE, not doubled
-        let communities = &table[&key_already_tagged].paths[0].attrs.communities;
+        let communities = &table.get(&key_already_tagged).unwrap().paths[0]
+            .attrs
+            .communities;
         assert_eq!(
             communities
                 .iter()

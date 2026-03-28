@@ -322,52 +322,24 @@ picks up where it left off; if session is stale, Cache Reset + full re-sync.
 
 ## Implementation Phases
 
-### Phase 0: Rib Trie (prerequisite)
+### Phase 0: Rib Trie (prerequisite) -- COMPLETE
 
-Replace the HashMap in LocRib with a prefix trie. One structure for
-exact lookup, subtree, and covering queries -- no dual structure to sync.
+Custom Patricia trie at `core/src/table.rs` with arena allocation and
+implicit path compression. Shared by LocRib (prefix index) and future
+VrpTable.
 
-Custom Patricia trie with arena allocation (no crate -- existing crates
-optimize for longest-match only, we need subtree and covering iteration).
-Both LocRib and VrpTable share this same trie implementation
-(`core/src/rib/prefix_trie.rs` or similar).
+LocRib uses dual structure: HashMap for hot-path reads/writes,
+PrefixTrie<K, ()> as secondary index for subtree/covering queries.
+Trie synced inside LocRib's private helpers -- callers don't see it.
 
-Path compression (Patricia): skip runs of single-child nodes. A /24 with
-no intermediate prefixes stored is one node with "skip 24 bits", not 24
-nodes. Internet routing table is sparse -- most lookups hit ~5-10 nodes.
-
-Arena allocation: all nodes in a contiguous `Vec<TrieNode>`, children are
-`u32` indices, not `Box` pointers. Nodes packed in memory -> CPU cache
-prefetches adjacent nodes during walks. No per-node heap allocation.
-
-```rust
-struct PrefixTrie<V> {
-    nodes: Vec<TrieNode<V>>,  // contiguous memory
-}
-struct TrieNode<V> {
-    children: [Option<u32>; 2],  // indices into nodes vec
-    skip_bits: u8,               // path compression
-    prefix_len: u8,              // where this node sits in the trie
-    value: Option<V>,            // stored data (Route, Vrp, etc.)
-}
-```
-
-No performance tradeoff vs HashMap: HashMap "O(1)" still hashes the full
-key (address + prefix length), plus collision handling. Patricia trie walks
-~5-10 compressed nodes with good cache locality.
-
-Operations (replacing HashMap equivalents):
-- `insert(prefix, value)` / `remove(prefix)`
-- `get(prefix)` -> exact lookup
-- `subtree(prefix)` -> all stored prefixes that are subnets of prefix
-- `covering(prefix)` -> all stored prefixes that contain prefix
-- `iter()` -> all entries
+Operations:
+- `insert` / `remove` / `get` / `get_mut` -- exact prefix
+- `subtree(prefix)` -- all stored prefixes that are subnets of prefix
+- `covering(prefix)` -- all stored prefixes that contain prefix
+- `iter()` -- all entries
 
 Two separate tries per AFI (IPv4 and IPv6), matching LocRib's existing
 per-AFI storage pattern.
-
-Unit tests: insert/remove, get exact, subtree, covering, overlapping
-prefixes, edge cases (/0, /32, /128), empty trie, single entry.
 
 Useful beyond RPKI: longer-prefixes/shorter-prefixes CLI queries.
 
@@ -817,4 +789,25 @@ Test cases (table-driven where possible):
 8. **iBGP validation state community (RFC 8097).** Two servers, iBGP
    peered. Configure send_rpki_community on exporting peer. Verify
    receiving peer gets the extended community and uses it for rpki_state.
+
+### Performance: Dual HashMap + PrefixTrie
+
+Trie-only LocRib was 68% slower (24.7s vs 14.7s for 1M routes). Profiling
+(flamegraph at `../perf/trie/summary.md`) showed trie lookups added ~9.4%
+CPU, spread across millions of O(depth) calls vs HashMap O(1). The
+bottleneck was `get_best_path` (3.74%) and `PrefixTrie::get` (3.61%),
+not insert.
+
+FRR uses a dual structure (trie + hashmap on same nodes). BIRD uses
+hashmap only. GoBGP uses hashmap + ephemeral trie.
+
+Solution: HashMap for all hot-path reads/writes, PrefixTrie as secondary
+index storing `()` for subtree/covering queries only. Trie is synced
+inside LocRib's private helpers -- callers don't know about it.
+
+| Version | Route processing (1M routes) |
+|---------|------------------------------|
+| HashMap only (master) | 14.73s |
+| Trie only | 24.72s (+68%) |
+| **Dual (HashMap + trie)** | **15.05s (+2%)** |
 
