@@ -23,3 +23,4 @@ mod trie;
 
 pub use prefix_map::PrefixMap;
 pub use trie::Prefix;
+pub(crate) use trie::PrefixTrie;

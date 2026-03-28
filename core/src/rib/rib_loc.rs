@@ -86,10 +86,13 @@ fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
     mut path: Arc<Path>,
     path_ids: &mut A,
 ) {
-    let route = table.get_or_insert(key, Route {
-        prefix,
-        paths: vec![],
-    });
+    let route = table.get_or_insert(
+        key,
+        Route {
+            prefix,
+            paths: vec![],
+        },
+    );
 
     match route.paths.iter_mut().find(|p| p.matches_remote(&path)) {
         Some(existing) => {

@@ -115,10 +115,10 @@ logic, server owns the instance and calls the API.
 ```rust
 // core/src/rpki/vrp.rs -- defined in RPKI module
 impl VrpTable {
-    fn add(&mut self, vrps: &[Vrp])
-    fn remove(&mut self, vrps: &[Vrp])
-    fn validate(&self, prefix: IpNetwork, origin_as: u32) -> RpkiValidation
-    fn covering_vrps(&self, prefix: IpNetwork) -> Vec<Vrp>  // diagnostics
+    pub fn add(&mut self, vrps: &[Vrp])
+    pub fn remove(&mut self, vrps: &[Vrp])
+    pub fn validate(&self, prefix: IpNetwork, origin_as: u32) -> RpkiValidation
+    fn covering_vrps(&self, prefix: IpNetwork) -> Vec<Vrp>  // private, promote when needed
 }
 ```
 
@@ -343,7 +343,7 @@ per-AFI storage pattern.
 
 Useful beyond RPKI: longer-prefixes/shorter-prefixes CLI queries.
 
-### Phase 1: RTR Codec (`core/src/rpki/rtr.rs`)
+### Phase 1: RTR Codec (`core/src/rpki/rtr.rs`) -- COMPLETE
 
 PDU types (RFC 8210):
 - Serial Notify, Serial Query, Reset Query
@@ -359,22 +359,25 @@ not implement BGPsec. CacheSession logs receipt and drops the data.
 
 Tests: round-trip encode/decode for each PDU type.
 
-### Phase 2: VrpTable (`core/src/rpki/vrp.rs`)
+### Phase 2: VrpTable (`core/src/rpki/vrp.rs`) -- COMPLETE
 
-`VrpTable` -- `PrefixTrie<Vec<Vrp>>` storing VRP tuples. Multiple VRPs
-can share the same prefix (different max_length or origin_as), so each
-trie node stores a list. Defined in the RPKI module, instance owned by
-Server.
+`VrpTable` -- per-AFI `PrefixTrie<Vec<Vrp>>` storing VRP tuples. Multiple
+VRPs can share the same prefix (different max_length or origin_as), so
+each trie node stores a list. Defined in the RPKI module, instance owned
+by Server.
 
 API:
-- `add(vrps: &[Vrp])` / `remove(vrps: &[Vrp])` -- batch insert/remove
+- `add(vrps: &[Vrp])` / `remove(vrps: &[Vrp])` -- batch insert/remove with dedup
 - `validate(prefix, origin_as) -> RpkiValidation` -- RFC 6811 Section 2
-- `covering_vrps(prefix) -> Vec<Vrp>` -- diagnostics/CLI
+- `Vrp::covers(route_prefix_len, origin_as) -> bool` -- single VRP match check
+
+`covering_vrps()` is private for now; will be promoted to pub when gRPC
+diagnostics need it.
 
 Validation logic (RFC 6811 Section 2):
 - Find all VRPs whose prefix covers route_prefix
-- For each covering VRP: check route prefix length <= max_length AND
-  origin_as matches AND origin_as != 0 AND route_origin_as != NONE
+- For each covering VRP: `Vrp::covers()` checks route prefix length
+  <= max_length AND origin_as matches AND origin_as != 0
 - If any match: Valid
 - If covering VRPs exist but none match: Invalid
 - If no covering VRPs at all: NotFound
@@ -384,6 +387,7 @@ Edge cases (RFC 6811 Section 2):
   but never "matched" -- treated as covering-only for Invalid detection)
 - Route with origin AS "NONE" (final segment is AS_SET) cannot be
   Matched by any VRP
+- origin_as == 0 passed to validate() -> always NotFound (short-circuit)
 
 ### Phase 3: RtrManager + CacheSession (`core/src/rpki/task.rs`)
 
