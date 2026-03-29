@@ -14,7 +14,8 @@
 
 use bgpgg::net::IpNetwork;
 use bgpgg::rpki::rtr::{
-    CacheResponse, EndOfData, Ipv4Prefix, Ipv6Prefix, Message, ParseError, Serial,
+    CacheReset, CacheResponse, EndOfData, ErrorCode, ErrorReport, Ipv4Prefix, Ipv6Prefix, Message,
+    ParseError, Serial, SerialNotify,
 };
 use bgpgg::rpki::vrp::Vrp;
 use russh::keys::ssh_key::{self, rand_core::OsRng};
@@ -75,26 +76,47 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FakeCache<S> {
         );
     }
 
+    /// Read and expect a Serial Query from the CacheSession.
+    pub async fn read_serial_query(&mut self) -> Serial {
+        let msg = self.read_message().await;
+        match msg {
+            Message::SerialQuery(sq) => sq.serial,
+            other => panic!("expected SerialQuery, got {:?}", other),
+        }
+    }
+
     /// Send VRPs as a complete sync: Cache Response + prefix PDUs + End of Data.
     pub async fn send_vrps(&mut self, vrps: &[Vrp]) {
+        self.send_sync(self.session_id, vrps, 1).await;
+    }
+
+    /// Send VRP withdrawals: Cache Response + prefix PDUs (flags=0) + End of Data.
+    pub async fn send_vrp_withdrawals(&mut self, vrps: &[Vrp]) {
+        self.send_sync(self.session_id, vrps, 0).await;
+    }
+
+    /// Send VRPs using a specific session_id (for session ID mismatch testing).
+    pub async fn send_vrps_with_session_id(&mut self, session_id: u16, vrps: &[Vrp]) {
+        self.send_sync(session_id, vrps, 1).await;
+    }
+
+    async fn send_sync(&mut self, session_id: u16, vrps: &[Vrp], flags: u8) {
         let stream = self.stream.as_mut().expect("not connected");
 
-        let cache_response = Message::CacheResponse(CacheResponse {
-            session_id: self.session_id,
-        });
+        let cache_response = Message::CacheResponse(CacheResponse { session_id });
         stream.write_all(&cache_response.serialize()).await.unwrap();
 
         for vrp in vrps {
             let msg = match vrp.prefix {
                 IpNetwork::V4(v4) => Message::Ipv4Prefix(Ipv4Prefix {
-                    flags: 1,
+                    flags,
                     prefix_length: v4.prefix_length,
                     max_length: vrp.max_length,
                     prefix: v4.address,
                     asn: vrp.origin_as,
                 }),
                 IpNetwork::V6(v6) => Message::Ipv6Prefix(Ipv6Prefix {
-                    flags: 1,
+                    flags,
                     prefix_length: v6.prefix_length,
                     max_length: vrp.max_length,
                     prefix: v6.address,
@@ -106,13 +128,46 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FakeCache<S> {
 
         self.serial += 1;
         let end_of_data = Message::EndOfData(EndOfData {
-            session_id: self.session_id,
+            session_id,
             serial: Serial(self.serial),
             refresh_interval: 3600,
             retry_interval: 600,
             expire_interval: 7200,
         });
         stream.write_all(&end_of_data.serialize()).await.unwrap();
+    }
+
+    /// Send a Cache Reset PDU to force the client to do a full re-sync.
+    pub async fn send_cache_reset(&mut self) {
+        let stream = self.stream.as_mut().expect("not connected");
+        let msg = Message::CacheReset(CacheReset);
+        stream.write_all(&msg.serialize()).await.unwrap();
+    }
+
+    /// Send a Serial Notify PDU to trigger an immediate client query.
+    pub async fn send_notify(&mut self) {
+        let stream = self.stream.as_mut().expect("not connected");
+        let msg = Message::SerialNotify(SerialNotify {
+            session_id: self.session_id,
+            serial: Serial(self.serial + 1),
+        });
+        stream.write_all(&msg.serialize()).await.unwrap();
+    }
+
+    /// Send an Error Report PDU.
+    pub async fn send_error(&mut self, code: ErrorCode) {
+        let stream = self.stream.as_mut().expect("not connected");
+        let msg = Message::ErrorReport(ErrorReport {
+            error_code: code,
+            erroneous_pdu: None,
+            error_text: String::new(),
+        });
+        stream.write_all(&msg.serialize()).await.unwrap();
+    }
+
+    /// Drop the TCP connection.
+    pub fn disconnect(&mut self) {
+        self.stream = None;
     }
 }
 
@@ -148,8 +203,36 @@ impl FakeTcpCache {
         self.cache.read_reset_query().await;
     }
 
+    pub async fn read_serial_query(&mut self) -> Serial {
+        self.cache.read_serial_query().await
+    }
+
     pub async fn send_vrps(&mut self, vrps: &[Vrp]) {
         self.cache.send_vrps(vrps).await;
+    }
+
+    pub async fn send_vrp_withdrawals(&mut self, vrps: &[Vrp]) {
+        self.cache.send_vrp_withdrawals(vrps).await;
+    }
+
+    pub async fn send_cache_reset(&mut self) {
+        self.cache.send_cache_reset().await;
+    }
+
+    pub async fn send_notify(&mut self) {
+        self.cache.send_notify().await;
+    }
+
+    pub async fn send_error(&mut self, code: ErrorCode) {
+        self.cache.send_error(code).await;
+    }
+
+    pub async fn send_vrps_with_session_id(&mut self, session_id: u16, vrps: &[Vrp]) {
+        self.cache.send_vrps_with_session_id(session_id, vrps).await;
+    }
+
+    pub fn disconnect(&mut self) {
+        self.cache.disconnect();
     }
 }
 

@@ -419,12 +419,7 @@ impl CacheSession {
                 .await
             }
             Message::EndOfData(eod) => self.handle_msg_end_of_data(eod, writer).await,
-            Message::CacheReset(_) => {
-                info!(addr = %self.config.address, "cache reset received");
-                self.local_vrps.clear();
-                self.reset_session();
-                Some(SessionResult::Disconnected)
-            }
+            Message::CacheReset(_) => self.handle_msg_cache_reset(writer).await,
             Message::ErrorReport(report) => self.handle_msg_error_report(report),
             Message::RouterKey(_) => {
                 debug!(addr = %self.config.address, "router key received (ignored, no BGPsec)");
@@ -541,7 +536,19 @@ impl CacheSession {
                     .protocol_error(
                         writer,
                         ErrorCode::DuplicateAnnouncementReceived,
-                        "duplicate announcement",
+                        "duplicate announcement in sync cycle",
+                    )
+                    .await;
+            }
+            // RFC 8210 Section 5.6: router SHOULD raise error if it already
+            // holds this VRP from a previous sync (incremental only).
+            if self.has_serial() && self.local_vrps.contains(&vrp) {
+                warn!(%addr, ?vrp, "duplicate announcement of existing VRP");
+                return self
+                    .protocol_error(
+                        writer,
+                        ErrorCode::DuplicateAnnouncementReceived,
+                        "duplicate announcement of existing VRP",
                     )
                     .await;
             }
@@ -649,6 +656,27 @@ impl CacheSession {
                 )))
             }
         }
+    }
+
+    /// RFC 8210 Section 8.3: Cache Reset received in response to Serial Query.
+    /// Send Reset Query on the same connection to get a full re-sync.
+    async fn handle_msg_cache_reset<W: AsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> Option<SessionResult> {
+        let addr = self.config.address;
+        info!(%addr, "cache reset received, sending reset query on same connection");
+
+        self.local_vrps.clear();
+        self.reset_session();
+
+        let query = Message::ResetQuery(ResetQuery);
+        if let Err(err) = writer.write_all(&query.serialize()).await {
+            warn!(%addr, %err, "failed to send reset query after cache reset");
+            return Some(SessionResult::Disconnected);
+        }
+        self.syncing = false;
+        None
     }
 
     /// Send an Error Report PDU to the cache.

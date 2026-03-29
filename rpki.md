@@ -639,8 +639,8 @@ If policy changes attrs based on rpki_state (e.g. LOCAL_PREF), attrs differ
 Proto `RpkiValidation` enum + `rpki_validation` field on proto Path message
 already wired in gRPC service (pulled forward from Phase 9).
 
-FakeCache test helper at `core/tests/utils/rtr.rs`. Phase 10 test case 1
-(basic validation: Valid/Invalid/NotFound) implemented in Phase 5.
+FakeCache test helper at `core/tests/utils/rtr.rs`. All Phase 10 integration
+tests complete (see Phase 10 section below).
 
 Validation on export (RFC 8893): not yet implemented. `apply_import` only
 runs on import. Export-time validation to be added when AS_PATH modification
@@ -835,93 +835,104 @@ preservation). VRP re-evaluation after routes arrived was silently
 dropped. Fixed by mutating `rpki_state` in place via `Arc::make_mut`
 on the existing path, preserving Arc identity for ADD-PATH.
 
-### Phase 9: gRPC/Config Integration
+### Phase 9: gRPC/Config Integration -- COMPLETE
 
-- AddRpkiCache / RemoveRpkiCache gRPC calls
-- Config file `[[rpki_caches]]` section
-- GetRpkiState for diagnostics (cache status, VRP count, last sync time)
-- GetRpkiValidation for per-prefix validation state lookup
-- Proto Path message `rpki_validation` field: done in Phase 5.
-  Satisfies RFC 8893 SHOULD: "An implementation SHOULD be able to
-  list announcements that were not sent to a peer, e.g., because they
-  were marked Invalid."
+Four gRPC RPCs following the BMP management pattern (gRPC handler ->
+MgmtOp -> server handler -> oneshot response):
 
-### Phase 10: Integration Tests (`core/tests/rpki.rs`)
+**AddRpkiCache / RemoveRpkiCache**: Runtime cache management. Add
+parses address to SocketAddr, builds `RtrCacheConfig` with transport
+validation (SSH requires username + private key file, TCP ignores SSH
+fields). Server lazy-spawns RtrManager on first add if `rpki_tx` is
+None. Remove is fire-and-forget to the manager.
+
+**ListRpkiCaches**: Two-hop query: server sends `RpkiOp::GetState` to
+RtrManager, awaits `RpkiManagerState` (per-cache address, preference,
+transport, session_active, vrp_count), combines with `vrp_table.len()`.
+`session_active` reflects whether the cache's preference tier is
+currently spawned (useful for debugging failover).
+
+**GetRpkiValidation**: Server-local query on VrpTable. Returns
+validation state + covering VRPs for debugging (e.g. why a prefix is
+Invalid). `covering_vrps()` promoted to pub for this.
+
+`RtrTransport::to_str()` returns `&'static str` for transport name
+in diagnostics (no allocation).
+
+**CLI** (`cli/src/commands/rpki.rs`): `bgpgg rpki add|del|list|validate`
+subcommands. List shows table of caches with preference, transport,
+active status, VRP count. Validate shows verdict + covering VRPs.
+
+**Config**: `rpki-caches` YAML section already done in Phase 3.
+Proto `Path.rpki_validation` field already done in Phase 5.
+
+Proto messages: `AddRpkiCacheRequest/Response`, `RemoveRpkiCacheRequest/
+Response`, `ListRpkiCachesRequest/Response` (with `RpkiCacheInfo`),
+`GetRpkiValidationRequest/Response` (with `RpkiVrp`).
+
+Tests: management tests (add/list/remove, SSH validation) in
+`core/tests/mgmt.rs`. GetRpkiValidation test (with FakeCache + VRP
+injection) in `core/tests/rpki.rs`. CLI parse tests in `cli/src/main.rs`.
+
+### Phase 10: Integration Tests (`core/tests/rpki.rs`) -- COMPLETE
 
 **FakeCache** (`core/tests/utils/rtr.rs`) -- test helper that speaks
-RTR protocol, same pattern as FakePeer. Listens on a TCP port, server's
-CacheSession connects to it. Basic implementation done in Phase 5.
-
-```rust
-struct FakeCache {
-    listener: TcpListener,
-    stream: Option<TcpStream>,
-    session_id: u16,
-    serial: u32,
-}
-```
+RTR protocol, same pattern as FakePeer. Generic over stream type
+(`FakeCache<S>`), wrapped by `FakeTcpCache` and `FakeSshCache`.
 
 Implemented methods:
 - `listen() -> Self` -- bind to random port
 - `accept()` -- accept CacheSession connection
 - `read_message()` -- read any RTR PDU from client
 - `read_reset_query()` -- read and assert Reset Query
+- `read_serial_query()` -- read and assert Serial Query, return serial
 - `send_vrps(vrps: &[Vrp])` -- send Cache Response + prefix PDUs + End
   of Data as one batch
-
-Methods to add for remaining test cases:
-- `read_serial_query()` -- read Serial Query from client
+- `send_vrp_withdrawals(vrps: &[Vrp])` -- same but with flags=0
 - `send_cache_reset()` -- force client to do full re-sync
-- `send_error(code)` -- simulate cache error (No Data Available, etc.)
 - `send_notify()` -- Serial Notify to trigger immediate client query
 - `disconnect()` -- drop TCP connection
 
-Test cases (table-driven where possible):
+Test cases (all passing):
 
-1. **Basic validation state (done in Phase 5).** Start server + FakeCache.
-   Inject VRPs via FakeCache. Announce routes from peers. Verify rpki_state
-   on received routes (Valid/Invalid/NotFound) via poll_rib with
-   rpki_validation field.
+1. **Basic validation state** (`test_rpki_basic_validation_tcp`,
+   `test_rpki_basic_validation_ssh`). Inject VRPs, announce routes,
+   verify Valid/Invalid/NotFound via poll_rib. Tests both TCP and SSH transport.
 
-2. **VRP update re-evaluation.** Announce routes, verify NotFound. Then
-   inject covering VRPs via FakeCache. Verify routes transition to
-   Valid/Invalid. Then withdraw VRPs. Verify routes go back to NotFound.
+2. **VRP update re-evaluation** (`test_rpki_vrp_update_reevaluation`).
+   Routes start NotFound. Inject VRPs via Serial Notify -> Serial Query
+   incremental sync. Routes become Valid. Withdraw VRPs. Routes return
+   to NotFound.
 
-3. **Tier failover.** Configure two FakeCaches with different preferences.
-   Preferred cache syncs, verify routes validated. Disconnect preferred
-   cache, let expire_interval hit. Verify fallback cache activates and
-   routes stay validated.
+3. **Tier failover** (`test_rpki_tier_failover`). Preferred cache
+   (preference=0) syncs. Disconnect preferred. Fallback (preference=1)
+   activates. Routes stay validated through fallback.
 
-4. **Tier recovery.** After failover to less-preferred cache, reconnect
-   preferred cache. Verify preferred tier reactivates, less-preferred
-   sessions killed.
+4. **Tier recovery** (`test_rpki_tier_recovery`). After failover,
+   preferred cache reconnects (Serial Query, not Reset Query -- session
+   state preserved). Preferred reactivates, fallback killed.
 
-5. **Multi-cache merge.** Two FakeCaches same preference. Each provides
-   different VRPs. Verify both VRP sets merged for validation. Kill one
-   cache, verify its VRPs removed but other cache's VRPs still work.
-   Verify via `poll_rib()` -- proto Path already has `rpki_validation`
-   field (done in Phase 5), checked in routes_match() comparison.
+5. **Multi-cache merge** (`test_rpki_multi_cache_merge`). Two caches
+   same preference, different VRPs. Both merged for validation. Remove
+   one via gRPC, its VRPs gone, other's still work.
 
-6. **Cache reset.** FakeCache sends Cache Reset mid-session. Verify
-   CacheSession does full re-sync (Reset Query) and VRPs are correct
-   after re-sync.
+6. **Cache reset** (`test_rpki_cache_reset`). Send CacheReset mid-session.
+   CacheSession reconnects with Reset Query. Re-sync with different VRP
+   set, routes re-validated.
 
-7. **Import policy on rpki_state (done in Phase 6).** Three-statement
-   policy: reject Invalid, tag Valid with community 65001:1, tag NotFound
-   with 65001:2. Verifies all three match conditions and absence of
-   rejected route. Test: `core/tests/policy.rs::test_import_policy_rpki_validation`.
+7. **Import policy on rpki_state** (`core/tests/policy.rs::test_import_policy_rpki_validation`).
+   Three-statement policy: reject Invalid, tag Valid/NotFound with communities.
 
-8. **RPKI state extended community send (RFC 8097).** Two servers, iBGP peered.
-   Configure send_rpki_community on exporting peer. Verify receiving
-   peer gets the `rpki:valid` / `rpki:invalid` / `rpki:not-found` ext
-   community.
+8. **RPKI state ext community send + eBGP stripping**
+   (`test_rpki_state_community_send_and_strip`). iBGP peer gets rpki:not-found
+   community. eBGP peer gets no RPKI community (non-transitive stripped).
 
-9. **RPKI state receive via policy.** Import policy matches RPKI state ext community
-   and sets rpki_state via SetRpkiState action. Verify path gets the
-   correct rpki_state on the receiving router.
+9. **RPKI state receive via policy** (`core/tests/policy.rs::test_rpki_state_community_set_policy`).
+   Import policy matches RPKI state ext community, sets rpki_state via
+   SetRpkiState action.
 
-10. **eBGP RPKI state stripping.** eBGP peer sends RPKI state community. Verify it
-    is stripped before policy evaluation.
+10. **gRPC GetRpkiValidation** (`test_rpki_grpc_get_validation`). Query
+    validation state and covering VRPs via gRPC API.
 
 ### Performance: Dual HashMap + PrefixTrie
 

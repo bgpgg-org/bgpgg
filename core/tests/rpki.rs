@@ -19,13 +19,79 @@ use bgpgg::bgp::ext_community::from_rpki_state_community;
 use bgpgg::config::{Config, RpkiCacheConfig, TransportType};
 use bgpgg::grpc::proto::{
     extended_community::{Community, Opaque},
-    ExtendedCommunity, RpkiValidation, SessionConfig,
+    ExtendedCommunity, Route, RpkiValidation, SessionConfig,
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::rpki::rtr::ErrorCode;
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::rtr::{FakeCache, FakeSshCache, FakeTcpCache};
+
+fn vrp4(a: u8, b: u8, c: u8, d: u8, prefix_length: u8, max_length: u8, origin_as: u32) -> Vrp {
+    Vrp {
+        prefix: IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(a, b, c, d),
+            prefix_length,
+        }),
+        max_length,
+        origin_as,
+    }
+}
+
+/// Build an expected route with rpki_validation state from a given peer.
+fn rpki_route(prefix: &str, state: RpkiValidation, peer: &TestServer) -> Route {
+    expected_route(
+        prefix,
+        PathParams {
+            rpki_validation: state as i32,
+            ..PathParams::from_peer(peer)
+        },
+    )
+}
+
+/// Start a server with RPKI caches and a single peer, chained together.
+async fn setup_rpki_peer(
+    rpki_caches: Vec<RpkiCacheConfig>,
+    peer_asn: u32,
+) -> (TestServer, TestServer) {
+    let server1 = start_test_server(Config {
+        asn: 65001,
+        listen_addr: "127.0.0.1:0".to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        rpki_caches,
+        ..Default::default()
+    })
+    .await;
+    let server2 = start_test_server(Config::new(
+        peer_asn,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+    let [server2, server1] = chain_servers([server2, server1], PeerConfig::default()).await;
+    (server1, server2)
+}
+
+/// Announce a route from `from` and verify it arrives at `on` with the given RPKI state.
+async fn announce_and_verify_rpki(
+    from: &TestServer,
+    on: &TestServer,
+    prefix: &str,
+    state: RpkiValidation,
+) {
+    announce_route(
+        from,
+        RouteParams {
+            prefix: prefix.to_string(),
+            next_hop: from.address.to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+    poll_rib(&[(on, vec![rpki_route(prefix, state, from)])]).await;
+}
 
 fn rpki_state_ext_community(state: RpkiState) -> ExtendedCommunity {
     let ec = from_rpki_state_community(state.to_u8());
@@ -48,16 +114,7 @@ async fn verify_basic_validation<S: AsyncRead + AsyncWrite + Unpin>(
     cache.read_reset_query().await;
 
     // VRP: 10.0.0.0/8 max /24 AS 65002
-    cache
-        .send_vrps(&[Vrp {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            max_length: 24,
-            origin_as: 65002,
-        }])
-        .await;
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
 
     // Announce routes:
     //   10.0.0.0/24 from AS 65002 -> Valid (VRP covers, origin matches)
@@ -82,27 +139,9 @@ async fn verify_basic_validation<S: AsyncRead + AsyncWrite + Unpin>(
     poll_rib(&[(
         server1,
         vec![
-            expected_route(
-                "10.0.0.0/24",
-                PathParams {
-                    rpki_validation: RpkiValidation::RpkiValid as i32,
-                    ..PathParams::from_peer(server2)
-                },
-            ),
-            expected_route(
-                "192.168.1.0/24",
-                PathParams {
-                    rpki_validation: RpkiValidation::RpkiNotFound as i32,
-                    ..PathParams::from_peer(server2)
-                },
-            ),
-            expected_route(
-                "10.1.0.0/24",
-                PathParams {
-                    rpki_validation: RpkiValidation::RpkiInvalid as i32,
-                    ..PathParams::from_peer(server3)
-                },
-            ),
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, server2),
+            rpki_route("192.168.1.0/24", RpkiValidation::RpkiNotFound, server2),
+            rpki_route("10.1.0.0/24", RpkiValidation::RpkiInvalid, server3),
         ],
     )])
     .await;
@@ -237,16 +276,7 @@ async fn test_rpki_state_community_send_and_strip() {
     // Accept RPKI cache and provide VRPs
     cache.accept().await;
     cache.read_reset_query().await;
-    cache
-        .send_vrps(&[Vrp {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            max_length: 24,
-            origin_as: 65001,
-        }])
-        .await;
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65001)]).await;
 
     // Validator announces its own route: 10.0.0.0/24 (Valid per VRP, origin AS matches)
     announce_route(
@@ -311,16 +341,7 @@ async fn test_rpki_grpc_get_validation() {
     cache.read_reset_query().await;
 
     // Inject VRP: 10.0.0.0/8 max /24 AS 65002
-    cache
-        .send_vrps(&[Vrp {
-            prefix: IpNetwork::V4(Ipv4Net {
-                address: Ipv4Addr::new(10, 0, 0, 0),
-                prefix_length: 8,
-            }),
-            max_length: 24,
-            origin_as: 65002,
-        }])
-        .await;
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
 
     // Wait for VRPs to be applied
     poll_until(
@@ -361,4 +382,389 @@ async fn test_rpki_grpc_get_validation() {
         .unwrap();
     assert_eq!(resp.validation, RpkiValidation::RpkiNotFound as i32);
     assert!(resp.covering_vrps.is_empty());
+}
+
+/// VRP update re-evaluation.
+/// Routes start NotFound, then VRPs arrive making them Valid,
+/// then VRPs are withdrawn making them NotFound again.
+#[tokio::test]
+async fn test_rpki_vrp_update_reevaluation() {
+    let mut cache = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        65002,
+    )
+    .await;
+
+    // Accept cache, send empty VRP set so cache session is established
+    cache.accept().await;
+    cache.read_reset_query().await;
+    cache.send_vrps(&[]).await;
+
+    // Announce routes before any VRPs exist -> all NotFound
+    for prefix in ["10.0.0.0/24", "10.1.0.0/24"] {
+        announce_route(
+            &server2,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: server2.address.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+        ],
+    )])
+    .await;
+
+    // Inject VRP: 10.0.0.0/8 max /24 AS 65002 -> both routes become Valid
+    let vrp = vrp4(10, 0, 0, 0, 8, 24, 65002);
+    cache.send_notify().await;
+    cache.read_serial_query().await;
+    cache.send_vrps(std::slice::from_ref(&vrp)).await;
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_route("10.1.0.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
+
+    // Withdraw VRPs -> routes go back to NotFound
+    cache.send_notify().await;
+    cache.read_serial_query().await;
+    cache.send_vrp_withdrawals(std::slice::from_ref(&vrp)).await;
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+        ],
+    )])
+    .await;
+}
+
+/// Multi-cache merge.
+/// Two FakeCaches at same preference, each provides different VRPs.
+/// Verify both VRP sets merged for validation.
+/// Kill one cache, verify its VRPs removed but other's still work.
+#[tokio::test]
+async fn test_rpki_multi_cache_merge() {
+    let mut cache_a = FakeTcpCache::listen().await;
+    let mut cache_b = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![
+            RpkiCacheConfig {
+                address: cache_a.address(),
+                ..Default::default()
+            },
+            RpkiCacheConfig {
+                address: cache_b.address(),
+                ..Default::default()
+            },
+        ],
+        65002,
+    )
+    .await;
+
+    // Both caches connect with different VRP sets
+    cache_a.accept().await;
+    cache_b.accept().await;
+    cache_a.read_reset_query().await;
+    cache_a.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
+    cache_b.read_reset_query().await;
+    cache_b
+        .send_vrps(&[vrp4(192, 168, 0, 0, 16, 24, 65002)])
+        .await;
+
+    // Announce routes: both should be Valid from merged VRP sets
+    for prefix in ["10.0.0.0/24", "192.168.1.0/24"] {
+        announce_route(
+            &server2,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: server2.address.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
+
+    // Kill cache A -> its VRPs removed, cache B's still present
+    server1
+        .client
+        .remove_rpki_cache(cache_a.address())
+        .await
+        .unwrap();
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
+}
+
+/// Cache reset mid-session.
+/// FakeCache sends Cache Reset. Verify CacheSession does full re-sync
+/// (sends Reset Query) and VRPs are correct after re-sync.
+#[tokio::test]
+async fn test_rpki_cache_reset() {
+    let mut cache = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        65002,
+    )
+    .await;
+
+    cache.accept().await;
+    cache.read_reset_query().await;
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
+
+    announce_and_verify_rpki(&server2, &server1, "10.0.0.0/24", RpkiValidation::RpkiValid).await;
+
+    // Send Cache Reset -> CacheSession sends Reset Query on same connection
+    cache.send_cache_reset().await;
+    cache.read_reset_query().await;
+
+    // Re-sync with different VRPs -- 192.168.0.0/16 instead of 10.0.0.0/8
+    cache
+        .send_vrps(&[vrp4(192, 168, 0, 0, 16, 24, 65002)])
+        .await;
+
+    // Announce a route covered by the new VRPs
+    announce_route(
+        &server2,
+        RouteParams {
+            prefix: "192.168.1.0/24".to_string(),
+            next_hop: server2.address.to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Old route lost coverage, new route is covered
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
+}
+
+/// Cache preference failover and recovery.
+/// Preferred cache (preference=0) syncs, validates routes. Preferred cache
+/// disconnects, fallback (preference=1) activates. Then preferred reconnects,
+/// fallback is killed.
+#[tokio::test]
+async fn test_rpki_cache_failover() {
+    let mut preferred = FakeTcpCache::listen().await;
+    let mut fallback = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![
+            RpkiCacheConfig {
+                address: preferred.address(),
+                preference: 0,
+                expire_interval: Some(2),
+                ..Default::default()
+            },
+            RpkiCacheConfig {
+                address: fallback.address(),
+                preference: 1,
+                ..Default::default()
+            },
+        ],
+        65002,
+    )
+    .await;
+
+    // Only preferred (preference=0) connects at startup
+    let vrp = vrp4(10, 0, 0, 0, 8, 24, 65002);
+    preferred.accept().await;
+    preferred.read_reset_query().await;
+    preferred.send_vrps(std::slice::from_ref(&vrp)).await;
+
+    announce_and_verify_rpki(&server2, &server1, "10.0.0.0/24", RpkiValidation::RpkiValid).await;
+
+    // Disconnect preferred -> fallback activates with same VRPs
+    preferred.disconnect();
+    fallback.accept().await;
+    fallback.read_reset_query().await;
+    fallback.send_vrps(std::slice::from_ref(&vrp)).await;
+
+    // Routes stay Valid through fallback (longer timeout for expire_interval=2s)
+    poll_rib_with_timeout(
+        &[(
+            &server1,
+            vec![rpki_route(
+                "10.0.0.0/24",
+                RpkiValidation::RpkiValid,
+                &server2,
+            )],
+        )],
+        Duration::from_secs(15),
+    )
+    .await;
+
+    // Preferred comes back (Serial Query -- session state preserved)
+    preferred.accept().await;
+    preferred.read_serial_query().await;
+    preferred.send_vrps(&[vrp]).await;
+
+    // Routes stay valid, preferred reactivated, fallback killed
+    poll_rib(&[(
+        &server1,
+        vec![rpki_route(
+            "10.0.0.0/24",
+            RpkiValidation::RpkiValid,
+            &server2,
+        )],
+    )])
+    .await;
+
+    poll_until(
+        || async {
+            let resp = server1.client.list_rpki_caches().await.unwrap();
+            resp.caches
+                .iter()
+                .any(|c| c.address == preferred.address() && c.vrp_count > 0)
+        },
+        "preferred cache did not reactivate",
+    )
+    .await;
+}
+
+/// RFC 8210 Section 8.4: Cache responds with No Data Available error.
+/// Session stays open, router retries on next refresh.
+#[tokio::test]
+async fn test_rpki_no_data_available() {
+    let mut cache = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        65002,
+    )
+    .await;
+
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // Cache says "no data available" instead of responding with VRPs
+    cache.send_error(ErrorCode::NoDataAvailable).await;
+
+    // Announce route -- should be NotFound (no VRPs)
+    announce_and_verify_rpki(
+        &server2,
+        &server1,
+        "10.0.0.0/24",
+        RpkiValidation::RpkiNotFound,
+    )
+    .await;
+
+    // Session should stay alive. Send notify to trigger Serial Query,
+    // but session was reset so it sends Reset Query.
+    cache.send_notify().await;
+    cache.read_reset_query().await;
+
+    // Now provide VRPs -- route should become Valid
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
+
+    poll_rib(&[(
+        &server1,
+        vec![rpki_route(
+            "10.0.0.0/24",
+            RpkiValidation::RpkiValid,
+            &server2,
+        )],
+    )])
+    .await;
+}
+
+/// RFC 8210 Section 5.1: Session ID mismatch in Cache Response.
+/// Router must flush all data and reset.
+#[tokio::test]
+async fn test_rpki_session_id_mismatch() {
+    let mut cache = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        65002,
+    )
+    .await;
+
+    // Initial sync with valid VRPs
+    cache.accept().await;
+    cache.read_reset_query().await;
+    cache.send_vrps(&[vrp4(10, 0, 0, 0, 8, 24, 65002)]).await;
+
+    announce_and_verify_rpki(&server2, &server1, "10.0.0.0/24", RpkiValidation::RpkiValid).await;
+
+    // Trigger incremental sync but respond with wrong session ID.
+    // Router should detect mismatch, flush data, and reconnect.
+    cache.send_notify().await;
+    cache.read_serial_query().await;
+    cache
+        .send_vrps_with_session_id(999, &[vrp4(10, 0, 0, 0, 8, 24, 65002)])
+        .await;
+
+    // Session will reconnect with Reset Query after detecting mismatch
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // Re-sync with different VRPs to confirm old data was flushed
+    cache
+        .send_vrps(&[vrp4(192, 168, 0, 0, 16, 24, 65002)])
+        .await;
+
+    // Old VRP gone (10.0.0.0/8), new VRP active (192.168.0.0/16)
+    announce_route(
+        &server2,
+        RouteParams {
+            prefix: "192.168.1.0/24".to_string(),
+            next_hop: server2.address.to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
 }
