@@ -788,11 +788,52 @@ strip RPKI state communities before policy evaluation.
 5. **ovs parse/format roundtrip**: `rpki:valid`, `rpki:not-found`,
    `rpki:invalid` all roundtrip through parse/format.
 
-### Phase 8: SSH Transport (deferred)
+### Phase 8: SSH Transport (RFC 8210 Section 10) -- COMPLETE
 
-SSH via `russh` crate, subsystem "rpki-rtr".
-Config: host, port, username, private key path, known hosts path.
-Low priority -- TCP is what's used in practice.
+SSH transport via `russh` crate. CacheSession connects over SSH,
+authenticates with a private key, and requests the `rpki-rtr`
+subsystem (RFC 8210 Section 10). Data flows over the SSH channel's
+`ChannelStream` which implements `AsyncRead + AsyncWrite` -- same
+interface as TCP, so `run_session()` is unchanged.
+
+Transport selection:
+- `RtrTransport` enum in `manager.rs`: `Tcp` or `Ssh(SshTransport)`
+- `TransportType` enum in `config.rs` for YAML: `tcp` (default) or `ssh`
+- `RpkiCacheConfig::to_rtr_transport()` validates and converts
+
+SSH connection flow (`session.rs::connect_ssh()`):
+1. Load private key from file (`russh::keys::load_secret_key`)
+2. SSH handshake (`russh::client::connect`) with `SshHandler` for
+   host key verification (known_hosts file or accept-all with warning)
+3. Authenticate (`handle.authenticate_publickey`)
+4. Open session channel, request `rpki-rtr` subsystem
+5. `channel.into_stream()` -> split into reader/writer for `run_session()`
+6. SSH `Handle` kept alive alongside stream (dropped on disconnect)
+
+`run()` dispatches on `config.transport`: TCP calls `connect_tcp()`,
+SSH calls `connect_ssh()`. Both feed into the same `run_session()`.
+
+YAML config:
+```yaml
+rpki-caches:
+  - address: "10.0.0.2:22"
+    transport: ssh
+    ssh-username: rpki
+    ssh-private-key-file: /etc/bgp/rpki_ssh.key
+    ssh-known-hosts-file: /etc/bgp/rpki_known_hosts  # optional
+```
+
+Test: `FakeSshCache` in `tests/utils/rtr.rs` -- SSH server using
+`russh::server` that accepts any auth and the `rpki-rtr` subsystem.
+`FakeCache<S>` generic struct holds shared RTR protocol logic.
+`verify_basic_validation()` helper runs the same validation test
+across both TCP and SSH transports.
+
+Bug fix during SSH work: `upsert_path` in `rib_loc.rs` was not
+updating `rpki_state` when attrs were unchanged (Arc identity
+preservation). VRP re-evaluation after routes arrived was silently
+dropped. Fixed by mutating `rpki_state` in place via `Arc::make_mut`
+on the existing path, preserving Arc identity for ADD-PATH.
 
 ### Phase 9: gRPC/Config Integration
 

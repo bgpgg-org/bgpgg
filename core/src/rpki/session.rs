@@ -14,24 +14,28 @@
 
 //! CacheSession: manages a single RTR (RFC 8210) connection to an RPKI cache server.
 //!
-//! Handles TCP connection, RTR protocol state machine, sync cycles,
+//! Handles TCP and SSH connections, RTR protocol state machine, sync cycles,
 //! timer management, backoff, and error reporting.
 
 use crate::log::{debug, error, info, warn};
 use crate::net::set_tcp_keepalive;
 use crate::net::IpNetwork;
-use crate::rpki::manager::{CacheEvent, RtrCacheConfig, VrpBatch};
+use crate::rpki::manager::{CacheEvent, RtrCacheConfig, RtrTransport, SshTransport, VrpBatch};
 use crate::rpki::rtr::{
     self, CacheResponse, EndOfData, ErrorCode, ErrorReport, Message, ResetQuery, RtrReadError,
     RtrReader, Serial, SerialNotify, SerialQuery, DEFAULT_EXPIRE_INTERVAL,
     DEFAULT_REFRESH_INTERVAL, DEFAULT_RETRY_INTERVAL,
 };
 use crate::rpki::vrp::Vrp;
+use russh::client::{self, AuthResult, Handle, Msg};
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
+use russh::ChannelStream;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{self as tokio_io, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -39,6 +43,9 @@ use tokio::time::{self, Instant};
 
 /// Maximum backoff for reconnection attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// SSH subsystem name for RTR (RFC 8210 Section 10).
+const RTR_SSH_SUBSYSTEM: &str = "rpki-rtr";
 
 /// Manages a single RTR connection to an RPKI cache server.
 pub struct CacheSession {
@@ -104,9 +111,18 @@ impl CacheSession {
         info!(%addr, "cache session starting");
 
         loop {
-            let result = match self.connect_tcp().await {
-                Ok((reader, writer)) => self.run_session(reader, writer).await,
-                Err(session_result) => session_result,
+            let result = match &self.config.transport {
+                RtrTransport::Tcp => match self.connect_tcp().await {
+                    Ok((reader, writer)) => self.run_session(reader, writer).await,
+                    Err(err) => err,
+                },
+                RtrTransport::Ssh(ssh) => {
+                    let ssh = ssh.clone();
+                    match self.connect_ssh(&ssh).await {
+                        Ok((reader, writer, _handle)) => self.run_session(reader, writer).await,
+                        Err(err) => err,
+                    }
+                }
             };
 
             if self.handle_disconnect(result).await {
@@ -175,8 +191,111 @@ impl CacheSession {
         Ok(stream.into_split())
     }
 
+    /// Establish an SSH connection to the cache server and request the rpki-rtr subsystem.
+    ///
+    /// Returns the channel stream split into read/write halves plus the SSH handle.
+    /// The handle must be kept alive for the channel to function.
+    async fn connect_ssh(
+        &mut self,
+        ssh: &SshTransport,
+    ) -> Result<
+        (
+            tokio_io::ReadHalf<ChannelStream<Msg>>,
+            tokio_io::WriteHalf<ChannelStream<Msg>>,
+            Handle<SshHandler>,
+        ),
+        SessionResult,
+    > {
+        let addr = self.config.address;
+
+        // Load private key from file.
+        let key = match load_secret_key(&ssh.private_key_file, None) {
+            Ok(key) => Arc::new(key),
+            Err(err) => {
+                error!(%addr, %err, path = %ssh.private_key_file, "failed to load SSH private key");
+                return Err(SessionResult::FatalError(format!(
+                    "SSH key load failed: {err}"
+                )));
+            }
+        };
+
+        let config = client::Config {
+            keepalive_interval: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+
+        let handler = SshHandler {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            known_hosts_file: ssh.known_hosts_file.clone(),
+        };
+
+        // Connect via SSH.
+        let mut handle = tokio::select! {
+            result = client::connect(Arc::new(config), addr, handler) => {
+                match result {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        warn!(%addr, %err, "SSH connect failed");
+                        return Err(SessionResult::Disconnected);
+                    }
+                }
+            }
+            _ = &mut self.shutdown_rx => {
+                return Err(SessionResult::Shutdown);
+            }
+        };
+
+        // Authenticate with public key.
+        let key_with_alg = PrivateKeyWithHashAlg::new(key, None);
+        match handle
+            .authenticate_publickey(&ssh.username, key_with_alg)
+            .await
+        {
+            Ok(AuthResult::Success) => {}
+            Ok(AuthResult::Failure { .. }) => {
+                error!(%addr, user = %ssh.username, "SSH authentication rejected");
+                return Err(SessionResult::FatalError(
+                    "SSH authentication rejected".into(),
+                ));
+            }
+            Err(err) => {
+                error!(%addr, %err, "SSH authentication error");
+                return Err(SessionResult::FatalError(format!(
+                    "SSH authentication error: {err}"
+                )));
+            }
+        }
+
+        // Open session channel and request rpki-rtr subsystem.
+        let channel = match handle.channel_open_session().await {
+            Ok(channel) => channel,
+            Err(err) => {
+                error!(%addr, %err, "SSH channel open failed");
+                return Err(SessionResult::FatalError(format!(
+                    "SSH channel open failed: {err}"
+                )));
+            }
+        };
+
+        if let Err(err) = channel.request_subsystem(true, RTR_SSH_SUBSYSTEM).await {
+            error!(%addr, %err, "SSH rpki-rtr subsystem request failed");
+            return Err(SessionResult::FatalError(format!(
+                "SSH subsystem request failed: {err}"
+            )));
+        }
+
+        let stream = channel.into_stream();
+        let (reader, writer) = tokio_io::split(stream);
+
+        info!(%addr, "connected to RTR cache via SSH");
+        self.reconnect_delay = Duration::from_secs(1);
+
+        Ok((reader, writer, handle))
+    }
+
     /// Run the RTR protocol over an established connection.
-    /// Generic over reader/writer to support both TCP and future SSH transport.
+    /// Generic over reader/writer to support both TCP and SSH transport.
     async fn run_session<R, W>(&mut self, reader: R, mut writer: W) -> SessionResult
     where
         R: tokio::io::AsyncRead + Unpin,
@@ -598,6 +717,56 @@ fn make_ip_network(addr: IpAddr, prefix_len: u8) -> Option<IpNetwork> {
             }
             let net = format!("{}/{}", v6, prefix_len);
             net.parse::<IpNetwork>().ok()
+        }
+    }
+}
+
+/// SSH client handler for RTR cache connections.
+///
+/// Handles host key verification. All other callbacks use defaults.
+pub struct SshHandler {
+    host: String,
+    port: u16,
+    known_hosts_file: Option<String>,
+}
+
+impl client::Handler for SshHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        match &self.known_hosts_file {
+            Some(path) => {
+                match russh::keys::known_hosts::check_known_hosts_path(
+                    &self.host,
+                    self.port,
+                    server_public_key,
+                    path,
+                ) {
+                    Ok(found) => {
+                        if !found {
+                            warn!(
+                                path = %path,
+                                host = %self.host,
+                                "SSH server key not found in known_hosts"
+                            );
+                        }
+                        Ok(found)
+                    }
+                    Err(err) => {
+                        error!(path = %path, %err, "SSH known_hosts verification failed");
+                        Ok(false)
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    "accepting SSH host key without verification (no known-hosts-file configured)"
+                );
+                Ok(true)
+            }
         }
     }
 }

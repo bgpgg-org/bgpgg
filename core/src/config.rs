@@ -364,6 +364,15 @@ pub struct BmpConfig {
     pub statistics_timeout: Option<u64>,
 }
 
+/// Transport type for RTR cache connections.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransportType {
+    #[default]
+    Tcp,
+    Ssh,
+}
+
 /// Configuration for an RPKI cache server (RTR, RFC 8210).
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -373,6 +382,18 @@ pub struct RpkiCacheConfig {
     /// Preference tier. Lower values are preferred; only the lowest tier is active at startup.
     #[serde(default)]
     pub preference: u8,
+    /// Transport type: "tcp" (default) or "ssh".
+    #[serde(default)]
+    pub transport: TransportType,
+    /// SSH username (required when transport is "ssh").
+    #[serde(default)]
+    pub ssh_username: Option<String>,
+    /// Path to SSH private key file (required when transport is "ssh").
+    #[serde(default)]
+    pub ssh_private_key_file: Option<String>,
+    /// Path to OpenSSH known_hosts file. If omitted, host key is accepted without verification.
+    #[serde(default)]
+    pub ssh_known_hosts_file: Option<String>,
     /// Override cache-provided retry interval (seconds).
     #[serde(default)]
     pub retry_interval: Option<u64>,
@@ -382,6 +403,32 @@ pub struct RpkiCacheConfig {
     /// Override cache-provided expire interval (seconds).
     #[serde(default)]
     pub expire_interval: Option<u64>,
+}
+
+impl RpkiCacheConfig {
+    /// Convert transport config fields to runtime RtrTransport.
+    /// Returns None with an error message if SSH fields are missing.
+    pub fn to_rtr_transport(&self) -> Result<crate::rpki::manager::RtrTransport, String> {
+        use crate::rpki::manager::{RtrTransport, SshTransport};
+        match self.transport {
+            TransportType::Tcp => Ok(RtrTransport::Tcp),
+            TransportType::Ssh => {
+                let username = self
+                    .ssh_username
+                    .as_ref()
+                    .ok_or("SSH transport requires ssh-username")?;
+                let private_key_file = self
+                    .ssh_private_key_file
+                    .as_ref()
+                    .ok_or("SSH transport requires ssh-private-key-file")?;
+                Ok(RtrTransport::Ssh(SshTransport {
+                    username: username.clone(),
+                    private_key_file: private_key_file.clone(),
+                    known_hosts_file: self.ssh_known_hosts_file.clone(),
+                }))
+            }
+        }
+    }
 }
 
 /// Container for all defined sets used in policy matching (YAML representation)
@@ -1137,5 +1184,57 @@ llgr:
         assert_eq!(afi_safis.len(), 2);
         assert_eq!(afi_safis[0], AfiSafi::new(Afi::Ipv4, Safi::Unicast));
         assert_eq!(afi_safis[1], AfiSafi::new(Afi::Ipv6, Safi::Unicast));
+    }
+
+    #[test]
+    fn test_rpki_cache_config_tcp_default() {
+        let yaml = r#"
+address: "127.0.0.1:8282"
+preference: 1
+"#;
+        let cfg: RpkiCacheConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.address, "127.0.0.1:8282");
+        assert_eq!(cfg.preference, 1);
+        assert_eq!(cfg.transport, TransportType::Tcp);
+        assert!(cfg.ssh_username.is_none());
+        assert!(cfg.ssh_private_key_file.is_none());
+    }
+
+    #[test]
+    fn test_rpki_cache_config_ssh() {
+        let yaml = r#"
+address: "10.0.0.2:22"
+preference: 5
+transport: ssh
+ssh-username: rpki
+ssh-private-key-file: /etc/bgp/rpki_ssh.key
+ssh-known-hosts-file: /etc/bgp/known_hosts
+"#;
+        let cfg: RpkiCacheConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.address, "10.0.0.2:22");
+        assert_eq!(cfg.preference, 5);
+        assert_eq!(cfg.transport, TransportType::Ssh);
+        assert_eq!(cfg.ssh_username.as_deref(), Some("rpki"));
+        assert_eq!(
+            cfg.ssh_private_key_file.as_deref(),
+            Some("/etc/bgp/rpki_ssh.key")
+        );
+        assert_eq!(
+            cfg.ssh_known_hosts_file.as_deref(),
+            Some("/etc/bgp/known_hosts")
+        );
+    }
+
+    #[test]
+    fn test_rpki_cache_config_ssh_no_known_hosts() {
+        let yaml = r#"
+address: "10.0.0.2:22"
+transport: ssh
+ssh-username: rpki
+ssh-private-key-file: /etc/bgp/rpki_ssh.key
+"#;
+        let cfg: RpkiCacheConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.transport, TransportType::Ssh);
+        assert!(cfg.ssh_known_hosts_file.is_none());
     }
 }

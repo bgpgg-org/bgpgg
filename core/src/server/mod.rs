@@ -688,9 +688,18 @@ impl BgpServer {
                 continue;
             };
 
+            let transport = match rpki_cfg.to_rtr_transport() {
+                Ok(transport) => transport,
+                Err(err) => {
+                    error!(%addr, %err, "invalid RPKI cache transport config");
+                    continue;
+                }
+            };
+
             let cache_config = RtrCacheConfig {
                 address: addr,
                 preference: rpki_cfg.preference,
+                transport,
                 retry_interval: rpki_cfg.retry_interval,
                 refresh_interval: rpki_cfg.refresh_interval,
                 expire_interval: rpki_cfg.expire_interval,

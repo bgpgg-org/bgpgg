@@ -125,7 +125,7 @@ mod tests {
         for (addr, expected_family, expected_s_addr) in cases {
             let sig = tcp_md5sig(*addr, key);
             assert_eq!(sig.keylen, key.len() as u16);
-            assert_eq!(&sig.key[..key.len()], key.as_ref());
+            assert_eq!(&sig.key[..key.len()], key.as_slice());
             unsafe {
                 let sa = addr_of!(sig.peer_addr) as *const libc::sockaddr_in;
                 assert_eq!((*sa).sin_family, *expected_family);

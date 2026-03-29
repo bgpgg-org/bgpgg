@@ -30,7 +30,7 @@ use bgpgg::grpc::proto::{
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
-use utils::rtr::FakeCache;
+use utils::rtr::FakeTcpCache;
 
 #[tokio::test]
 async fn test_export_policy_prefix_match() {
@@ -410,7 +410,7 @@ async fn test_export_policy_ext_community_match() {
 /// - Accept Valid and NotFound routes
 #[tokio::test]
 async fn test_import_policy_rpki_validation() {
-    let mut cache = FakeCache::listen().await;
+    let mut cache = FakeTcpCache::listen().await;
 
     // server2 (AS 65002) -> server1 (AS 65001, with RPKI cache)
     let server1 = start_test_server(Config {

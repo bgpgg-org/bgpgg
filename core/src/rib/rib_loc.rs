@@ -77,8 +77,9 @@ pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
 // Helper functions to avoid code duplication
 
 /// Insert or update a path in a route's path list.
-/// - If a matching path exists (same source, same remote_path_id) and attrs differ,
-///   replace it while inheriting the existing local_path_id.
+/// - If a matching path exists and attrs differ, replace it (inheriting local_path_id).
+/// - If attrs match but local metadata differs (rpki_state, stale), update in place
+///   to preserve Arc identity (ADD-PATH propagation relies on ptr_eq).
 /// - If no match, allocate a fresh local_path_id and append.
 fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
     table: &mut PrefixMap<K, Route>,
@@ -100,9 +101,15 @@ fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
             if existing.attrs != path.attrs {
                 Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
                 *existing = path;
-            } else if existing.stale {
-                // GR: identical attrs but stale -> clear the stale flag
-                Arc::make_mut(existing).stale = false;
+            } else {
+                // Attrs unchanged — update local metadata in place to preserve
+                // Arc identity (ADD-PATH relies on ptr_eq for propagation).
+                if existing.rpki_state != path.rpki_state {
+                    Arc::make_mut(existing).rpki_state = path.rpki_state;
+                }
+                if existing.stale {
+                    Arc::make_mut(existing).stale = false;
+                }
             }
         }
         None => {
@@ -777,6 +784,29 @@ mod tests {
                 paths: vec![expected_path]
             }
         );
+    }
+
+    #[test]
+    fn test_upsert_path_updates_rpki_state_in_place() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let peer_ip = test_peer_ip();
+        let prefix = create_test_prefix();
+
+        let path = create_test_path(peer_ip, test_bgp_id());
+        loc_rib.upsert_path(prefix, path);
+
+        let ptr_before = Arc::as_ptr(&loc_rib.get_all_routes()[0].paths[0]);
+
+        // Same attrs, different rpki_state — should update in place, same Arc.
+        let path_valid = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.rpki_state = RpkiValidation::Valid;
+        });
+        loc_rib.upsert_path(prefix, path_valid);
+
+        let routes = loc_rib.get_all_routes();
+        assert_eq!(routes[0].paths[0].rpki_state, RpkiValidation::Valid);
+        // Arc identity preserved — no replacement, just in-place mutation.
+        assert_eq!(ptr_before, Arc::as_ptr(&routes[0].paths[0]));
     }
 
     #[test]

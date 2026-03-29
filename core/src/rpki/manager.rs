@@ -25,12 +25,29 @@ use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+/// SSH transport configuration for RTR cache connections.
+#[derive(Clone, Debug)]
+pub struct SshTransport {
+    pub username: String,
+    pub private_key_file: String,
+    pub known_hosts_file: Option<String>,
+}
+
+/// Transport type for RTR cache connections.
+#[derive(Clone, Debug)]
+pub enum RtrTransport {
+    Tcp,
+    Ssh(SshTransport),
+}
+
 /// Configuration for a single RTR cache server.
 #[derive(Clone, Debug)]
 pub struct RtrCacheConfig {
     pub address: SocketAddr,
     /// Lower values are preferred. Only the lowest tier is active at startup.
     pub preference: u8,
+    /// Transport to use for cache connection.
+    pub transport: RtrTransport,
     /// Override cache-provided retry interval (seconds).
     pub retry_interval: Option<u64>,
     /// Override cache-provided refresh interval (seconds).
@@ -425,6 +442,7 @@ mod tests {
         RtrCacheConfig {
             address: addr(port),
             preference,
+            transport: RtrTransport::Tcp,
             retry_interval: None,
             refresh_interval: None,
             expire_interval: None,
