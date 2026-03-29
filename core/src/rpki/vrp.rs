@@ -118,7 +118,7 @@ impl VrpTable {
         }
     }
 
-    fn covering_vrps(&self, prefix: IpNetwork) -> Vec<Vrp> {
+    pub fn covering_vrps(&self, prefix: IpNetwork) -> Vec<Vrp> {
         let mut result = Vec::new();
         match prefix {
             IpNetwork::V4(net) => {

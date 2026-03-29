@@ -20,6 +20,7 @@ use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, 
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::PathAttrs;
+use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
 use crate::server::AdminState;
@@ -29,20 +30,70 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 use super::proto::{
-    self, bgp_service_server::BgpService, AddBmpServerRequest, AddBmpServerResponse,
-    AddDefinedSetRequest, AddDefinedSetResponse, AddPeerRequest, AddPeerResponse, AddPolicyRequest,
-    AddPolicyResponse, AddRouteRequest, AddRouteResponse, AddRouteStreamResponse,
-    AdminState as ProtoAdminState, BgpState as ProtoBgpState, DisablePeerRequest,
-    DisablePeerResponse, EnablePeerRequest, EnablePeerResponse, GetPeerRequest, GetPeerResponse,
-    GetServerInfoRequest, GetServerInfoResponse, ListBmpServersRequest, ListBmpServersResponse,
-    ListDefinedSetsRequest, ListDefinedSetsResponse, ListPeersRequest, ListPeersResponse,
-    ListPoliciesRequest, ListPoliciesResponse, ListRoutesRequest, ListRoutesResponse,
-    Path as ProtoPath, Peer as ProtoPeer, PeerStatistics as ProtoPeerStatistics,
-    RemoveBmpServerRequest, RemoveBmpServerResponse, RemoveDefinedSetRequest,
-    RemoveDefinedSetResponse, RemovePeerRequest, RemovePeerResponse, RemovePolicyRequest,
-    RemovePolicyResponse, RemoveRouteRequest, RemoveRouteResponse, ResetPeerRequest,
-    ResetPeerResponse, Route as ProtoRoute, SessionConfig as ProtoSessionConfig,
-    SetPeerGracefulShutdownRequest, SetPeerGracefulShutdownResponse, SetPolicyAssignmentRequest,
+    self,
+    bgp_service_server::BgpService,
+    AddBmpServerRequest,
+    AddBmpServerResponse,
+    AddDefinedSetRequest,
+    AddDefinedSetResponse,
+    AddPeerRequest,
+    AddPeerResponse,
+    AddPolicyRequest,
+    AddPolicyResponse,
+    AddRouteRequest,
+    AddRouteResponse,
+    AddRouteStreamResponse,
+    // RPKI
+    AddRpkiCacheRequest,
+    AddRpkiCacheResponse,
+    AdminState as ProtoAdminState,
+    BgpState as ProtoBgpState,
+    DisablePeerRequest,
+    DisablePeerResponse,
+    EnablePeerRequest,
+    EnablePeerResponse,
+    GetPeerRequest,
+    GetPeerResponse,
+    GetRpkiValidationRequest,
+    GetRpkiValidationResponse,
+    GetServerInfoRequest,
+    GetServerInfoResponse,
+    ListBmpServersRequest,
+    ListBmpServersResponse,
+    ListDefinedSetsRequest,
+    ListDefinedSetsResponse,
+    ListPeersRequest,
+    ListPeersResponse,
+    ListPoliciesRequest,
+    ListPoliciesResponse,
+    ListRoutesRequest,
+    ListRoutesResponse,
+    ListRpkiCachesRequest,
+    ListRpkiCachesResponse,
+    Path as ProtoPath,
+    Peer as ProtoPeer,
+    PeerStatistics as ProtoPeerStatistics,
+    RemoveBmpServerRequest,
+    RemoveBmpServerResponse,
+    RemoveDefinedSetRequest,
+    RemoveDefinedSetResponse,
+    RemovePeerRequest,
+    RemovePeerResponse,
+    RemovePolicyRequest,
+    RemovePolicyResponse,
+    RemoveRouteRequest,
+    RemoveRouteResponse,
+    RemoveRpkiCacheRequest,
+    RemoveRpkiCacheResponse,
+    ResetPeerRequest,
+    ResetPeerResponse,
+    Route as ProtoRoute,
+    RpkiCacheInfo,
+    RpkiVrp,
+    SessionConfig as ProtoSessionConfig,
+    SetPeerGracefulShutdownRequest,
+    SetPeerGracefulShutdownResponse,
+    SetPolicyAssignmentRequest,
     SetPolicyAssignmentResponse,
 };
 
@@ -1143,6 +1194,177 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         Ok(Response::new(ListBmpServersResponse { addresses }))
+    }
+
+    async fn add_rpki_cache(
+        &self,
+        request: Request<AddRpkiCacheRequest>,
+    ) -> Result<Response<AddRpkiCacheResponse>, Status> {
+        let inner = request.into_inner();
+        let addr: std::net::SocketAddr = inner
+            .address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid address: {}", e)))?;
+
+        let transport = match inner.transport.as_deref() {
+            Some("ssh") => {
+                let username = inner.ssh_username.ok_or_else(|| {
+                    Status::invalid_argument("ssh_username required for SSH transport")
+                })?;
+                let private_key_file = inner.ssh_private_key_file.ok_or_else(|| {
+                    Status::invalid_argument("ssh_private_key_file required for SSH transport")
+                })?;
+                RtrTransport::Ssh(SshTransport {
+                    username,
+                    private_key_file,
+                    known_hosts_file: inner.ssh_known_hosts_file,
+                })
+            }
+            _ => RtrTransport::Tcp,
+        };
+
+        let config = RtrCacheConfig {
+            address: addr,
+            preference: inner.preference.map(|p| p as u8).unwrap_or(0),
+            transport,
+            retry_interval: inner.retry_interval,
+            refresh_interval: inner.refresh_interval,
+            expire_interval: inner.expire_interval,
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::AddRpkiCache {
+            config,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(AddRpkiCacheResponse {
+                success: true,
+                message: format!("RPKI cache {} added", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(AddRpkiCacheResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn remove_rpki_cache(
+        &self,
+        request: Request<RemoveRpkiCacheRequest>,
+    ) -> Result<Response<RemoveRpkiCacheResponse>, Status> {
+        let addr: std::net::SocketAddr = request
+            .into_inner()
+            .address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid address: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RemoveRpkiCache { addr, response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(Response::new(RemoveRpkiCacheResponse {
+                success: true,
+                message: format!("RPKI cache {} removed", addr),
+            })),
+            Ok(Err(e)) => Ok(Response::new(RemoveRpkiCacheResponse {
+                success: false,
+                message: e,
+            })),
+            Err(_) => Err(Status::internal("request processing failed")),
+        }
+    }
+
+    async fn list_rpki_caches(
+        &self,
+        _request: Request<ListRpkiCachesRequest>,
+    ) -> Result<Response<ListRpkiCachesResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetRpkiCaches { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let (caches, total_vrp_count) = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        let proto_caches = caches
+            .into_iter()
+            .map(|cache| RpkiCacheInfo {
+                address: cache.address.to_string(),
+                preference: cache.preference as u32,
+                transport: cache.transport_name.to_string(),
+                session_active: cache.session_active,
+                vrp_count: cache.vrp_count as u64,
+            })
+            .collect();
+
+        Ok(Response::new(ListRpkiCachesResponse {
+            caches: proto_caches,
+            total_vrp_count: total_vrp_count as u64,
+        }))
+    }
+
+    async fn get_rpki_validation(
+        &self,
+        request: Request<GetRpkiValidationRequest>,
+    ) -> Result<Response<GetRpkiValidationResponse>, Status> {
+        let inner = request.into_inner();
+        let prefix: IpNetwork = inner
+            .prefix
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid prefix: {}", e)))?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetRpkiValidation {
+            prefix,
+            origin_as: inner.origin_as,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let (validation, covering) = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        let proto_validation = match validation {
+            RpkiValidation::Valid => proto::RpkiValidation::RpkiValid,
+            RpkiValidation::Invalid => proto::RpkiValidation::RpkiInvalid,
+            RpkiValidation::NotFound => proto::RpkiValidation::RpkiNotFound,
+        };
+
+        let covering_vrps = covering
+            .into_iter()
+            .map(|vrp| RpkiVrp {
+                prefix: vrp.prefix.to_string(),
+                max_length: vrp.max_length as u32,
+                origin_as: vrp.origin_as,
+            })
+            .collect();
+
+        Ok(Response::new(GetRpkiValidationResponse {
+            validation: proto_validation.into(),
+            covering_vrps,
+        }))
     }
 
     async fn add_defined_set(

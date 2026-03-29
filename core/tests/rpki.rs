@@ -290,3 +290,75 @@ async fn test_rpki_state_community_send_and_strip() {
     ])
     .await;
 }
+
+/// gRPC: GetRpkiValidation returns correct state and covering VRPs.
+#[tokio::test]
+async fn test_rpki_grpc_get_validation() {
+    let mut cache = FakeTcpCache::listen().await;
+    let server = start_test_server(Config {
+        asn: 65001,
+        listen_addr: "127.0.0.1:0".to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        rpki_caches: vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // Inject VRP: 10.0.0.0/8 max /24 AS 65002
+    cache
+        .send_vrps(&[Vrp {
+            prefix: IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 8,
+            }),
+            max_length: 24,
+            origin_as: 65002,
+        }])
+        .await;
+
+    // Wait for VRPs to be applied
+    poll_until(
+        || async {
+            let resp = server.client.list_rpki_caches().await.unwrap();
+            resp.total_vrp_count > 0
+        },
+        "VRPs not applied to server",
+    )
+    .await;
+
+    // Valid: prefix covered, origin matches
+    let resp = server
+        .client
+        .get_rpki_validation("10.0.0.0/24".to_string(), 65002)
+        .await
+        .unwrap();
+    assert_eq!(resp.validation, RpkiValidation::RpkiValid as i32);
+    assert_eq!(resp.covering_vrps.len(), 1);
+    assert_eq!(resp.covering_vrps[0].prefix, "10.0.0.0/8");
+    assert_eq!(resp.covering_vrps[0].max_length, 24);
+    assert_eq!(resp.covering_vrps[0].origin_as, 65002);
+
+    // Invalid: prefix covered, origin mismatch
+    let resp = server
+        .client
+        .get_rpki_validation("10.1.0.0/24".to_string(), 65099)
+        .await
+        .unwrap();
+    assert_eq!(resp.validation, RpkiValidation::RpkiInvalid as i32);
+    assert!(!resp.covering_vrps.is_empty());
+
+    // NotFound: no covering VRPs
+    let resp = server
+        .client
+        .get_rpki_validation("192.168.1.0/24".to_string(), 65002)
+        .await
+        .unwrap();
+    assert_eq!(resp.validation, RpkiValidation::RpkiNotFound as i32);
+    assert!(resp.covering_vrps.is_empty());
+}

@@ -39,6 +39,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bgp::msg_notification::CeaseSubcode;
+use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
+use crate::rpki::vrp::{RpkiValidation, Vrp};
 
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
@@ -149,6 +151,23 @@ pub enum MgmtOp {
         addr: String,
         enabled: bool,
         response: oneshot::Sender<Result<(), String>>,
+    },
+    // RPKI Cache Management
+    AddRpkiCache {
+        config: RtrCacheConfig,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveRpkiCache {
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    GetRpkiCaches {
+        response: oneshot::Sender<(Vec<RpkiCacheState>, usize)>,
+    },
+    GetRpkiValidation {
+        prefix: IpNetwork,
+        origin_as: u32,
+        response: oneshot::Sender<(RpkiValidation, Vec<Vrp>)>,
     },
 }
 
@@ -292,6 +311,22 @@ impl BgpServer {
                 response,
             } => {
                 self.handle_set_peer_graceful_shutdown(addr, enabled, response);
+            }
+            MgmtOp::AddRpkiCache { config, response } => {
+                self.handle_add_rpki_cache(config, response);
+            }
+            MgmtOp::RemoveRpkiCache { addr, response } => {
+                self.handle_remove_rpki_cache(addr, response);
+            }
+            MgmtOp::GetRpkiCaches { response } => {
+                self.handle_get_rpki_caches(response).await;
+            }
+            MgmtOp::GetRpkiValidation {
+                prefix,
+                origin_as,
+                response,
+            } => {
+                self.handle_get_rpki_validation(prefix, origin_as, response);
             }
         }
     }
@@ -942,6 +977,82 @@ impl BgpServer {
         }
 
         let _ = response.send(stats);
+    }
+
+    fn handle_add_rpki_cache(
+        &mut self,
+        config: RtrCacheConfig,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let rpki_tx = match &self.rpki_tx {
+            Some(tx) => tx.clone(),
+            None => self.spawn_rtr_manager(),
+        };
+        let addr = config.address;
+        if rpki_tx.send(RpkiOp::AddCache(config)).is_err() {
+            let _ = response.send(Err("RPKI manager not running".to_string()));
+            return;
+        }
+        info!(%addr, "RPKI cache added via gRPC");
+        let _ = response.send(Ok(()));
+    }
+
+    fn handle_remove_rpki_cache(
+        &mut self,
+        addr: SocketAddr,
+        response: oneshot::Sender<Result<(), String>>,
+    ) {
+        let Some(rpki_tx) = &self.rpki_tx else {
+            let _ = response.send(Err("no RPKI caches configured".to_string()));
+            return;
+        };
+        if rpki_tx.send(RpkiOp::RemoveCache(addr)).is_err() {
+            let _ = response.send(Err("RPKI manager not running".to_string()));
+            return;
+        }
+        info!(%addr, "RPKI cache removed via gRPC");
+        let _ = response.send(Ok(()));
+    }
+
+    async fn handle_get_rpki_caches(
+        &self,
+        response: oneshot::Sender<(Vec<RpkiCacheState>, usize)>,
+    ) {
+        let vrp_table_len = self.vrp_table.len();
+
+        let Some(rpki_tx) = &self.rpki_tx else {
+            let _ = response.send((vec![], vrp_table_len));
+            return;
+        };
+
+        let (state_tx, state_rx) = oneshot::channel();
+        if rpki_tx
+            .send(RpkiOp::GetState { response: state_tx })
+            .is_err()
+        {
+            let _ = response.send((vec![], vrp_table_len));
+            return;
+        }
+
+        match state_rx.await {
+            Ok(state) => {
+                let _ = response.send((state.caches, vrp_table_len));
+            }
+            Err(_) => {
+                let _ = response.send((vec![], vrp_table_len));
+            }
+        }
+    }
+
+    fn handle_get_rpki_validation(
+        &self,
+        prefix: IpNetwork,
+        origin_as: u32,
+        response: oneshot::Sender<(RpkiValidation, Vec<Vrp>)>,
+    ) {
+        let validation = self.vrp_table.validate(prefix, origin_as);
+        let covering = self.vrp_table.covering_vrps(prefix);
+        let _ = response.send((validation, covering));
     }
 
     fn handle_add_defined_set(

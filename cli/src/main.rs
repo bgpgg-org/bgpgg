@@ -37,6 +37,10 @@ enum Commands {
     /// Global RIB commands
     #[command(subcommand)]
     Global(GlobalCommands),
+
+    /// RPKI cache management commands
+    #[command(subcommand)]
+    Rpki(RpkiCommands),
 }
 
 #[derive(Subcommand, Debug)]
@@ -78,6 +82,56 @@ pub enum PeerCommands {
 
     /// List all peers
     List,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RpkiCommands {
+    /// Add an RPKI cache server
+    Add {
+        /// Cache address in host:port format (e.g., 10.0.0.2:323)
+        address: String,
+        /// Preference (lower = more preferred)
+        #[arg(long)]
+        preference: Option<u8>,
+        /// Transport type: "tcp" (default) or "ssh"
+        #[arg(long)]
+        transport: Option<String>,
+        /// SSH username (required for SSH transport)
+        #[arg(long)]
+        ssh_username: Option<String>,
+        /// SSH private key file (required for SSH transport)
+        #[arg(long)]
+        ssh_private_key_file: Option<String>,
+        /// SSH known hosts file (optional for SSH transport)
+        #[arg(long)]
+        ssh_known_hosts_file: Option<String>,
+        /// Override retry interval (seconds)
+        #[arg(long)]
+        retry_interval: Option<u64>,
+        /// Override refresh interval (seconds)
+        #[arg(long)]
+        refresh_interval: Option<u64>,
+        /// Override expire interval (seconds)
+        #[arg(long)]
+        expire_interval: Option<u64>,
+    },
+
+    /// Remove an RPKI cache server
+    Del {
+        /// Cache address in host:port format
+        address: String,
+    },
+
+    /// List all RPKI caches and their status
+    List,
+
+    /// Query RPKI validation state for a prefix
+    Validate {
+        /// Prefix in CIDR format (e.g., 10.0.0.0/24)
+        prefix: String,
+        /// Origin AS number
+        origin_as: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -145,6 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Global(global_cmd) => {
             commands::global::handle(cli.addr, global_cmd)
+                .await
+                .map_err(|e| format!("Failed to execute command: {}", e))?;
+        }
+        Commands::Rpki(rpki_cmd) => {
+            commands::rpki::handle(cli.addr, rpki_cmd)
                 .await
                 .map_err(|e| format!("Failed to execute command: {}", e))?;
         }
@@ -420,6 +479,96 @@ mod tests {
                 // Success
             }
             _ => panic!("Expected Global Summary command"),
+        }
+    }
+
+    #[test]
+    fn test_rpki_add_command() {
+        let args = vec!["bgpgg", "rpki", "add", "10.0.0.2:323"];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Rpki(RpkiCommands::Add { address, .. }) => {
+                assert_eq!(address, "10.0.0.2:323");
+            }
+            _ => panic!("Expected Rpki Add command"),
+        }
+    }
+
+    #[test]
+    fn test_rpki_add_with_options() {
+        let args = vec![
+            "bgpgg",
+            "rpki",
+            "add",
+            "10.0.0.2:22",
+            "--preference",
+            "5",
+            "--transport",
+            "ssh",
+            "--ssh-username",
+            "rpki",
+            "--ssh-private-key-file",
+            "/etc/bgp/key",
+        ];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Rpki(RpkiCommands::Add {
+                address,
+                preference,
+                transport,
+                ssh_username,
+                ssh_private_key_file,
+                ..
+            }) => {
+                assert_eq!(address, "10.0.0.2:22");
+                assert_eq!(preference, Some(5));
+                assert_eq!(transport, Some("ssh".to_string()));
+                assert_eq!(ssh_username, Some("rpki".to_string()));
+                assert_eq!(ssh_private_key_file, Some("/etc/bgp/key".to_string()));
+            }
+            _ => panic!("Expected Rpki Add command"),
+        }
+    }
+
+    #[test]
+    fn test_rpki_del_command() {
+        let args = vec!["bgpgg", "rpki", "del", "10.0.0.2:323"];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Rpki(RpkiCommands::Del { address }) => {
+                assert_eq!(address, "10.0.0.2:323");
+            }
+            _ => panic!("Expected Rpki Del command"),
+        }
+    }
+
+    #[test]
+    fn test_rpki_list_command() {
+        let args = vec!["bgpgg", "rpki", "list"];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Rpki(RpkiCommands::List) => {
+                // Success
+            }
+            _ => panic!("Expected Rpki List command"),
+        }
+    }
+
+    #[test]
+    fn test_rpki_validate_command() {
+        let args = vec!["bgpgg", "rpki", "validate", "10.0.0.0/24", "65001"];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Rpki(RpkiCommands::Validate { prefix, origin_as }) => {
+                assert_eq!(prefix, "10.0.0.0/24");
+                assert_eq!(origin_as, 65001);
+            }
+            _ => panic!("Expected Rpki Validate command"),
         }
     }
 }

@@ -40,6 +40,15 @@ pub enum RtrTransport {
     Ssh(SshTransport),
 }
 
+impl RtrTransport {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            RtrTransport::Tcp => "tcp",
+            RtrTransport::Ssh(_) => "ssh",
+        }
+    }
+}
+
 /// Configuration for a single RTR cache server.
 #[derive(Clone, Debug)]
 pub struct RtrCacheConfig {
@@ -56,10 +65,27 @@ pub struct RtrCacheConfig {
     pub expire_interval: Option<u64>,
 }
 
+/// Snapshot of a single RPKI cache for diagnostics.
+pub struct RpkiCacheState {
+    pub address: SocketAddr,
+    pub preference: u8,
+    pub transport_name: &'static str,
+    pub session_active: bool,
+    pub vrp_count: usize,
+}
+
+/// Snapshot of all RPKI manager state for diagnostics.
+pub struct RpkiManagerState {
+    pub caches: Vec<RpkiCacheState>,
+}
+
 /// Operations sent from the server to the RtrManager.
 pub enum RpkiOp {
     AddCache(RtrCacheConfig),
     RemoveCache(SocketAddr),
+    GetState {
+        response: oneshot::Sender<RpkiManagerState>,
+    },
 }
 
 /// A batch of VRP changes from a single cache sync cycle.
@@ -139,6 +165,9 @@ impl RtrManager {
                         Some(RpkiOp::RemoveCache(addr)) => {
                             self.handle_remove_cache(addr);
                         }
+                        Some(RpkiOp::GetState { response }) => {
+                            self.handle_get_state(response);
+                        }
                         None => {
                             info!("command channel closed, stopping RTR manager");
                             break;
@@ -190,6 +219,24 @@ impl RtrManager {
             info!(%addr, preference = config.preference, lowest = lowest_configured,
                   "cache configured but not spawned (higher preference tier)");
         }
+    }
+
+    fn handle_get_state(&self, response: oneshot::Sender<RpkiManagerState>) {
+        let caches = self
+            .all_configs
+            .values()
+            .map(|config| {
+                let addr = config.address;
+                RpkiCacheState {
+                    address: addr,
+                    preference: config.preference,
+                    transport_name: config.transport.to_str(),
+                    session_active: self.sessions.contains_key(&addr),
+                    vrp_count: self.per_cache_vrps.get(&addr).map_or(0, |s| s.len()),
+                }
+            })
+            .collect();
+        let _ = response.send(RpkiManagerState { caches });
     }
 
     fn handle_remove_cache(&mut self, addr: SocketAddr) {

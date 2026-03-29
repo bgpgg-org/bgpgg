@@ -19,7 +19,7 @@ pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
-    AdminState, AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig,
+    AddRpkiCacheRequest, AdminState, AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig,
     LlgrConfig as ProtoLlgrConfig, Origin, Route, SessionConfig,
 };
 use std::net::Ipv4Addr;
@@ -983,4 +983,88 @@ async fn test_add_peer_with_llgr() {
     assert_eq!(llgr.afi_safis.len(), 1);
     assert_eq!(llgr.afi_safis[0].afi, 1);
     assert_eq!(llgr.afi_safis[0].safi, 1);
+}
+
+/// gRPC: Add, list, and remove RPKI caches.
+#[tokio::test]
+async fn test_rpki_add_list_remove() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    // No caches initially
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert!(resp.caches.is_empty());
+    assert_eq!(resp.total_vrp_count, 0);
+
+    // Add a cache via gRPC
+    let msg = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:323".to_string(),
+            preference: Some(5),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(msg.contains("added"));
+
+    // List should show the cache
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert_eq!(resp.caches.len(), 1);
+    assert_eq!(resp.caches[0].address, "10.0.0.2:323");
+    assert_eq!(resp.caches[0].preference, 5);
+    assert_eq!(resp.caches[0].transport, "tcp");
+    assert!(resp.caches[0].session_active);
+
+    // Remove the cache
+    let msg = server
+        .client
+        .remove_rpki_cache("10.0.0.2:323".to_string())
+        .await
+        .unwrap();
+    assert!(msg.contains("removed"));
+
+    // List should be empty again
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert!(resp.caches.is_empty());
+}
+
+/// gRPC: AddRpkiCache with SSH transport validates required fields.
+#[tokio::test]
+async fn test_rpki_add_ssh_missing_fields() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    // SSH transport without username -> error
+    let result = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:22".to_string(),
+            transport: Some("ssh".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
+
+    // SSH transport without private key -> error
+    let result = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:22".to_string(),
+            transport: Some("ssh".to_string()),
+            ssh_username: Some("rpki".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
 }
