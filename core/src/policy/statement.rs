@@ -22,6 +22,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::rib::{Path, RouteSource};
+use crate::rpki::vrp::RpkiValidation;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -158,6 +159,16 @@ impl Statement {
                         RouteType::Ibgp => "ibgp".to_string(),
                         RouteType::Local => "local".to_string(),
                     });
+                }
+                Condition::RpkiValidation(state) => {
+                    conditions.rpki_validation = Some(
+                        match state {
+                            RpkiValidation::Valid => "valid",
+                            RpkiValidation::Invalid => "invalid",
+                            RpkiValidation::NotFound => "not-found",
+                        }
+                        .to_string(),
+                    );
                 }
             }
         }
@@ -439,6 +450,7 @@ pub enum Condition {
     ExtCommunitySet(Arc<ExtCommunitySet>, MatchOptionConfig),
     LargeCommunitySet(Arc<LargeCommunitySet>, MatchOptionConfig),
     RouteType(RouteType),
+    RpkiValidation(RpkiValidation),
 }
 
 impl Condition {
@@ -535,6 +547,7 @@ impl Condition {
                     | (RouteType::Ibgp, RouteSource::Ibgp { .. })
                     | (RouteType::Local, RouteSource::Local)
             ),
+            Condition::RpkiValidation(state) => path.rpki_state == *state,
         }
     }
 }
@@ -673,6 +686,21 @@ fn add_conditions(
     if let Some(ref community_str) = cond.community {
         let community = parse_community_value(community_str)?;
         stmt = stmt.when(Condition::Community(community));
+    }
+
+    if let Some(ref rpki_str) = cond.rpki_validation {
+        let rpki_state = match rpki_str.as_str() {
+            "valid" => RpkiValidation::Valid,
+            "invalid" => RpkiValidation::Invalid,
+            "not-found" => RpkiValidation::NotFound,
+            _ => {
+                return Err(format!(
+                    "invalid rpki-validation '{}' (must be 'valid', 'invalid', or 'not-found')",
+                    rpki_str
+                ))
+            }
+        };
+        stmt = stmt.when(Condition::RpkiValidation(rpki_state));
     }
 
     Ok(stmt)

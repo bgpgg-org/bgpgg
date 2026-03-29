@@ -17,9 +17,16 @@
 mod utils;
 pub use utils::*;
 
+use std::net::Ipv4Addr;
+
+use bgpgg::bgp::community;
+use bgpgg::config::{Config, RpkiCacheConfig};
 use bgpgg::grpc::proto::{
-    ActionsConfig, ConditionsConfig, DefinedSetConfig, Route, StatementConfig,
+    ActionsConfig, ConditionsConfig, DefinedSetConfig, Route, RpkiValidation, StatementConfig,
 };
+use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::rpki::vrp::Vrp;
+use utils::rtr::FakeCache;
 
 #[tokio::test]
 async fn test_export_policy_prefix_match() {
@@ -391,5 +398,163 @@ async fn test_export_policy_ext_community_match() {
         Duration::from_millis(500),
         "Routes with blocked extended communities should be rejected",
     )
+    .await;
+}
+
+/// Import policy matching on RPKI validation state:
+/// - Reject Invalid routes
+/// - Accept Valid and NotFound routes
+#[tokio::test]
+async fn test_import_policy_rpki_validation() {
+    let mut cache = FakeCache::listen().await;
+
+    // server2 (AS 65002) -> server1 (AS 65001, with RPKI cache)
+    let server1 = start_test_server(Config {
+        asn: 65001,
+        listen_addr: "127.0.0.1:0".to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        rpki_caches: vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+
+    let server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+
+    let [server2, server1] = chain_servers([server2, server1], PeerConfig::default()).await;
+
+    // Accept RPKI cache connection and provide VRPs
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // VRP 1: 10.0.0.0/8 max /24 AS 65002 -> 10.0.0.0/24 from AS 65002 is Valid
+    // VRP 2: 172.16.0.0/12 max /24 AS 65099 -> 172.16.0.0/24 from AS 65002 is Invalid
+    cache
+        .send_vrps(&[
+            Vrp {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix_length: 8,
+                }),
+                max_length: 24,
+                origin_as: 65002,
+            },
+            Vrp {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(172, 16, 0, 0),
+                    prefix_length: 12,
+                }),
+                max_length: 24,
+                origin_as: 65099,
+            },
+        ])
+        .await;
+
+    // Apply import policy on server1 for the peer from server2:
+    // Statement 1: rpki-validation=invalid -> reject
+    // Statement 2: rpki-validation=valid -> tag with community 65001:1, accept
+    // Statement 3: rpki-validation=not-found -> tag with community 65001:2, accept
+    let peer_addr = server2.address.to_string();
+    server1
+        .client
+        .add_policy(
+            "rpki-filter".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiInvalid.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiValid.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        add_communities: vec!["65001:1".to_string()],
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiNotFound.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        add_communities: vec!["65001:2".to_string()],
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server1
+        .client
+        .set_policy_assignment(
+            peer_addr.clone(),
+            "import".to_string(),
+            vec!["rpki-filter".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce routes from server2
+    for prefix in ["10.0.0.0/24", "172.16.0.0/24", "192.168.1.0/24"] {
+        announce_route(
+            &server2,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: server2.address.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // Expected on server1:
+    // - 10.0.0.0/24: Valid -> accepted with community 65001:1
+    // - 172.16.0.0/24: Invalid -> rejected (absent)
+    // - 192.168.1.0/24: NotFound -> accepted with community 65001:2
+    let comm_valid = community::from_asn_value(65001, 1);
+    let comm_not_found = community::from_asn_value(65001, 2);
+    poll_rib(&[(
+        &server1,
+        vec![
+            expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    rpki_validation: RpkiValidation::RpkiValid as i32,
+                    communities: vec![comm_valid],
+                    ..PathParams::from_peer(&server2)
+                },
+            ),
+            expected_route(
+                "192.168.1.0/24",
+                PathParams {
+                    rpki_validation: RpkiValidation::RpkiNotFound as i32,
+                    communities: vec![comm_not_found],
+                    ..PathParams::from_peer(&server2)
+                },
+            ),
+        ],
+    )])
     .await;
 }

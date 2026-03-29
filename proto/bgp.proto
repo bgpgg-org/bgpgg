@@ -563,6 +563,7 @@ message ConditionsConfig {
     optional string prefix = 6;  // Direct prefix match
     optional string neighbor = 7;  // Direct neighbor match
     optional MatchSetRef match_ext_community_set = 8;
+    optional RpkiValidation rpki_validation = 9;
 }
 
 message MatchSetRef {

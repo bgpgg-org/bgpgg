@@ -21,7 +21,7 @@ use super::proto::{
     ActionsConfig as ProtoActionsConfig, AsPathSetData, CommunitySetData,
     ConditionsConfig as ProtoConditionsConfig, DefinedSetConfig as ProtoDefinedSetConfig,
     DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo, PrefixMatch, PrefixSetData,
-    StatementInfo,
+    RpkiValidation as ProtoRpkiValidation, StatementInfo,
 };
 use crate::config::{
     ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
@@ -123,6 +123,14 @@ pub(super) fn proto_to_statement_config(
             has_asn: None,
             route_type: None,
             community: None,
+            rpki_validation: c.rpki_validation.and_then(|v| {
+                match ProtoRpkiValidation::try_from(v) {
+                    Ok(ProtoRpkiValidation::RpkiValid) => Some("valid".to_string()),
+                    Ok(ProtoRpkiValidation::RpkiInvalid) => Some("invalid".to_string()),
+                    Ok(ProtoRpkiValidation::RpkiNotFound) => Some("not-found".to_string()),
+                    Err(_) => None,
+                }
+            }),
         }
     });
 
@@ -290,6 +298,14 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 }),
                 prefix: s.conditions.prefix.clone(),
                 neighbor: s.conditions.neighbor.clone(),
+                rpki_validation: s.conditions.rpki_validation.as_deref().map(|v| {
+                    match v {
+                        "valid" => ProtoRpkiValidation::RpkiValid,
+                        "invalid" => ProtoRpkiValidation::RpkiInvalid,
+                        _ => ProtoRpkiValidation::RpkiNotFound,
+                    }
+                    .into()
+                }),
             });
 
             let (add_communities, remove_communities) = if let Some(comm) = s.actions.community {

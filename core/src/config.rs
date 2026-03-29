@@ -533,6 +533,8 @@ pub struct ConditionsConfig {
     pub route_type: Option<String>, // "ebgp", "ibgp", "local"
     #[serde(default)]
     pub community: Option<String>, // Single community value
+    #[serde(default)]
+    pub rpki_validation: Option<String>, // "valid", "invalid", "not-found"
 }
 
 /// Reference to a defined set with match option

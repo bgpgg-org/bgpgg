@@ -646,33 +646,43 @@ Validation on export (RFC 8893): not yet implemented. `apply_import` only
 runs on import. Export-time validation to be added when AS_PATH modification
 is implemented (no effective origin AS differs from stored origin AS today).
 
-### Phase 6: Policy Integration
+### Phase 6: Policy Integration (done)
 
-Add policy match condition for rpki_state:
-```
-match rpki-validation { valid, invalid, not-found }
+`Condition::RpkiValidation` in `core/src/policy/statement.rs` matches on
+`path.rpki_state`. Config uses `Option<String>` ("valid", "invalid",
+"not-found") parsed in `add_conditions()`, same pattern as `route_type`.
+
+YAML config:
+```yaml
+conditions:
+  rpki-validation: "invalid"
+actions:
+  reject: true
 ```
 
-Add policy set action:
-```
-set local-preference 200  (when valid)
-set local-preference 50   (when not-found)
-reject                    (when invalid)
-```
+Proto: `optional RpkiValidation rpki_validation = 9` on `ConditionsConfig`
+message, using existing proto enum. Conversion in `proto_policy.rs`.
+
+No set actions needed -- existing actions (reject, set local-pref,
+set community, etc.) combine with the new match condition.
 
 This is user-configured, not built-in behavior (RFC 8481). Absent
 explicit operator configuration, policy MUST NOT be applied based on
 validation state (RFC 8481 Section 5).
 
-Must be available in import, export, and redistribution policies
-(RFC 8893 Section 3).
+Available in import and export policies. Redistribution policies
+(RFC 8893 Section 3) not applicable -- bgpgg does not support
+redistribution today.
 
-NOTE on redistribution (RFC 8481 Section 4): "redistribution" means
-importing routes from non-BGP sources (static routes, connected
-interfaces, IGP) into BGP. When such routes lack an AS_PATH, the
-router's own ASN must be used as origin AS for validation. bgpgg
-does not support redistribution today -- this requirement applies
-when/if it's added. Normal iBGP propagation is not redistribution.
+NOTE: `SetLocalPref` with `force: false` (the only mode exposed via
+gRPC proto) cannot override the default local-pref 100 set by
+`apply_import()`. To boost local-pref for Valid routes via policy,
+either use YAML config with `force: true`, or use community tagging
+as a workaround. Consider adding `force` to the proto in Phase 9.
+
+Test: `core/tests/policy.rs::test_import_policy_rpki_validation` --
+explicit match on all three states (Invalid->reject, Valid->tag
+community 65001:1, NotFound->tag community 65001:2).
 
 ### Phase 7: iBGP Validation State Propagation (RFC 8097)
 
@@ -800,9 +810,10 @@ Test cases (table-driven where possible):
    CacheSession does full re-sync (Reset Query) and VRPs are correct
    after re-sync.
 
-7. **Import policy on rpki_state.** Configure import policy that rejects
-   Invalid routes. Inject VRPs that make a route Invalid. Announce route.
-   Verify route is rejected by policy.
+7. **Import policy on rpki_state (done in Phase 6).** Three-statement
+   policy: reject Invalid, tag Valid with community 65001:1, tag NotFound
+   with 65001:2. Verifies all three match conditions and absence of
+   rejected route. Test: `core/tests/policy.rs::test_import_policy_rpki_validation`.
 
 8. **iBGP validation state community (RFC 8097).** Two servers, iBGP
    peered. Configure send_rpki_community on exporting peer. Verify
