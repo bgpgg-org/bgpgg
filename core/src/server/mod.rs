@@ -39,6 +39,7 @@ use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::LocRib;
 use crate::rib::AdjRibOut;
 use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
+use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
@@ -477,6 +478,8 @@ pub struct BgpServer {
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
     /// Channel to send operations to the RtrManager (RPKI).
     pub(crate) rpki_tx: Option<mpsc::UnboundedSender<RpkiOp>>,
+    /// RPKI VRP table for origin validation (RFC 6811).
+    pub(crate) vrp_table: VrpTable,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
 }
@@ -510,6 +513,7 @@ impl BgpServer {
             op_rx,
             bmp_tasks: HashMap::new(),
             rpki_tx: None,
+            vrp_table: VrpTable::new(),
             listener_fd: None,
         })
     }

@@ -593,16 +593,14 @@ async fn test_list_routes_impl(use_stream: bool) {
     // Export policy prepends server2's ASN: [] -> [65002]
     // eBGP: no LOCAL_PREF
     let expected_adj_in: Vec<Route> = (0..5)
-        .map(|i| Route {
-            prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server2.asn])],
-                next_hop: server2.address.to_string(),
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: None, // eBGP - no LOCAL_PREF
-                ..Default::default()
-            })],
+        .map(|i| {
+            expected_route(
+                &format!("10.{}.0.0/24", i),
+                PathParams {
+                    local_pref: None, // eBGP - no LOCAL_PREF
+                    ..PathParams::from_peer(&server2)
+                },
+            )
         })
         .collect();
 
@@ -630,16 +628,15 @@ async fn test_list_routes_impl(use_stream: bool) {
     // Export policy prepends server1's ASN: [] -> [65001]
     // eBGP: no LOCAL_PREF, NEXT_HOP rewritten to local session address
     let expected_adj_out: Vec<Route> = (10..15)
-        .map(|i| Route {
-            prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server1.asn])],
-                next_hop: server1.address.to_string(),
-                peer_address: "127.0.0.1".to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: None, // eBGP - no LOCAL_PREF
-                ..Default::default()
-            })],
+        .map(|i| {
+            expected_route(
+                &format!("10.{}.0.0/24", i),
+                PathParams {
+                    peer_address: "127.0.0.1".to_string(),
+                    local_pref: None, // eBGP - no LOCAL_PREF
+                    ..PathParams::from_peer(&server1)
+                },
+            )
         })
         .collect();
 

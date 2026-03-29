@@ -607,6 +607,7 @@ mod tests {
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
     use crate::rib::{Path, PathAttrs, RouteSource};
+    use crate::rpki::vrp::RpkiValidation;
     use std::net::Ipv4Addr;
 
     fn test_path() -> Path {
@@ -614,6 +615,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {

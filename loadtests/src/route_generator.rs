@@ -15,6 +15,7 @@
 use bgpgg::bgp::msg_update::{AsPathSegment, AsPathSegmentType, NextHopAddr, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rib::{Path, PathAttrs, RouteSource};
+use bgpgg::rpki::vrp::RpkiValidation;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -141,6 +142,7 @@ impl PeerRoute {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: self.origin,
                 as_path: as_path_segments,

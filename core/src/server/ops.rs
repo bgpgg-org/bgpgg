@@ -22,11 +22,12 @@ use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::MaxPrefixAction;
 use crate::log::{debug, info, warn};
+use crate::net::IpNetwork;
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, Withdrawal};
-use crate::policy::PolicyResult;
+use crate::policy::{Policy, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{Path, PrefixPath};
-use crate::rpki::vrp::Vrp;
+use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -198,11 +199,7 @@ impl BgpServer {
                 self.handle_get_bmp_statistics(response);
             }
             ServerOp::VrpUpdate { added, removed } => {
-                info!(
-                    added = added.len(),
-                    removed = removed.len(),
-                    "received VRP update from RTR manager"
-                );
+                self.handle_vrp_update(added, removed).await;
             }
         }
     }
@@ -830,23 +827,12 @@ impl BgpServer {
             .map(|c| (c.asn, c.bgp_id))
             .unwrap_or((None, None));
 
+        let vrp_table = &self.vrp_table;
         let delta = self.loc_rib.apply_peer_update(
             peer_ip,
             withdrawn.clone(),
             announced.clone(),
-            |prefix, path| {
-                if path.attrs.local_pref.is_none() {
-                    path.attrs.local_pref = Some(100);
-                }
-                for policy in &import_policies {
-                    match policy.evaluate(prefix, path) {
-                        PolicyResult::Accept => return true,
-                        PolicyResult::Reject => return false,
-                        PolicyResult::Continue => continue,
-                    }
-                }
-                false
-            },
+            |prefix, path| apply_import(vrp_table, local_asn, &import_policies, prefix, path),
         );
 
         info!(%peer_ip, "UPDATE processing complete");
@@ -857,6 +843,79 @@ impl BgpServer {
         if let (Some(asn), Some(bgp_id)) = (bmp_peer_asn, bmp_peer_bgp_id) {
             self.send_bmp_route_monitoring(peer_ip, asn, bgp_id, &withdrawn, &announced);
         }
+    }
+
+    /// Handle VRP table update from RtrManager. Apply diff to VrpTable, find
+    /// affected routes via rib trie, re-evaluate from adj-rib-in using the
+    /// same apply_peer_update path as normal route handling.
+    async fn handle_vrp_update(&mut self, added: Vec<Vrp>, removed: Vec<Vrp>) {
+        info!(
+            added = added.len(),
+            removed = removed.len(),
+            "applying VRP update"
+        );
+
+        self.vrp_table.add(&added);
+        self.vrp_table.remove(&removed);
+
+        let affected = self.loc_rib.affected_prefixes(&added, &removed);
+        if affected.is_empty() {
+            return;
+        }
+
+        info!(
+            affected_prefixes = affected.len(),
+            "re-evaluating routes after VRP change"
+        );
+
+        let delta = self.reevaluate_routes(self.affected_routes(&affected));
+        if delta.has_changes() {
+            self.propagate_routes(delta, None).await;
+        }
+    }
+
+    /// Re-run import policy on routes already in adj-rib-in (e.g. after VRP change).
+    fn reevaluate_routes(&mut self, routes: Vec<(IpAddr, Vec<PrefixPath>)>) -> RouteDelta {
+        let local_asn = self.config.asn;
+        let mut delta = RouteDelta::new();
+        for (peer_ip, peer_routes) in routes {
+            let policies = match self.peers.get(&peer_ip) {
+                Some(peer) => peer.policy_in().to_vec(),
+                None => continue,
+            };
+            let vrp_table = &self.vrp_table;
+            let peer_delta =
+                self.loc_rib
+                    .apply_peer_update(peer_ip, vec![], peer_routes, |prefix, path| {
+                        apply_import(vrp_table, local_asn, &policies, prefix, path)
+                    });
+            delta.extend(peer_delta);
+        }
+        delta
+    }
+
+    /// Collect adj-rib-in routes for the given prefixes from all peers.
+    /// Returns (peer_ip, routes) pairs. Collected upfront so loc_rib can be
+    /// mutated separately (borrow splitting).
+    fn affected_routes(&self, prefixes: &HashSet<IpNetwork>) -> Vec<(IpAddr, Vec<PrefixPath>)> {
+        let mut result = Vec::new();
+        for (&peer_ip, peer_info) in &self.peers {
+            let mut routes = Vec::new();
+            for &prefix in prefixes {
+                if let Some(route) = peer_info.adj_rib_in.get_route(&prefix) {
+                    for path in &route.paths {
+                        routes.push(PrefixPath {
+                            prefix,
+                            path: Arc::clone(path),
+                        });
+                    }
+                }
+            }
+            if !routes.is_empty() {
+                result.push((peer_ip, routes));
+            }
+        }
+        result
     }
 }
 
@@ -922,4 +981,28 @@ fn has_route_reflector_loop(path: &Path, local_bgp_id: Ipv4Addr, cluster_id: Ipv
         return true;
     }
     path.cluster_list().contains(&cluster_id)
+}
+
+/// Shared import policy evaluation: stamp RPKI validation state, set default
+/// LOCAL_PREF, then run import policies.
+fn apply_import(
+    vrp_table: &VrpTable,
+    local_asn: u32,
+    policies: &[Arc<Policy>],
+    prefix: &IpNetwork,
+    path: &mut Path,
+) -> bool {
+    let origin = path.origin_as().unwrap_or(local_asn);
+    path.rpki_state = vrp_table.validate(*prefix, origin);
+    if path.attrs.local_pref.is_none() {
+        path.attrs.local_pref = Some(100);
+    }
+    for policy in policies {
+        match policy.evaluate(prefix, path) {
+            PolicyResult::Accept => return true,
+            PolicyResult::Reject => return false,
+            PolicyResult::Continue => continue,
+        }
+    }
+    false
 }

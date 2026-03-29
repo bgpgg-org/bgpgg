@@ -200,6 +200,30 @@ pub struct PathParams {
     /// RFC 7911: path ID received from peer
     pub remote_path_id: Option<u32>,
     pub aggregator: Option<Aggregator>,
+    /// RFC 6811: RPKI origin validation state
+    pub rpki_validation: i32,
+}
+
+impl PathParams {
+    /// Build PathParams with defaults derived from a TestServer peer:
+    /// next_hop, peer_address, as_path (single AS_SEQUENCE), local_pref 100.
+    pub fn from_peer(peer: &TestServer) -> Self {
+        PathParams {
+            next_hop: peer.address.to_string(),
+            peer_address: peer.address.to_string(),
+            as_path: vec![as_sequence(vec![peer.asn])],
+            local_pref: Some(100),
+            ..Default::default()
+        }
+    }
+}
+
+/// Build a single-path Route for test assertions.
+pub fn expected_route(prefix: &str, params: PathParams) -> Route {
+    Route {
+        prefix: prefix.to_string(),
+        paths: vec![build_path(params)],
+    }
 }
 
 /// Helper to build a Path from PathParams (new way - preferred for new tests)
@@ -221,6 +245,7 @@ pub fn build_path(params: PathParams) -> Path {
         local_path_id: params.local_path_id,
         remote_path_id: params.remote_path_id,
         aggregator: params.aggregator,
+        rpki_validation: params.rpki_validation,
     }
 }
 

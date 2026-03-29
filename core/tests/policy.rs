@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::grpc::proto::{
-    ActionsConfig, ConditionsConfig, DefinedSetConfig, Origin, Route, StatementConfig,
+    ActionsConfig, ConditionsConfig, DefinedSetConfig, Route, StatementConfig,
 };
 
 #[tokio::test]
@@ -82,16 +82,14 @@ async fn test_export_policy_prefix_match() {
         let expected: Vec<Route> = tc
             .expected
             .iter()
-            .map(|prefix| Route {
-                prefix: prefix.to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002])],
-                    next_hop: server2.address.to_string(),
-                    peer_address: peer_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
+            .map(|prefix| {
+                expected_route(
+                    prefix,
+                    PathParams {
+                        peer_address: peer_addr.clone(),
+                        ..PathParams::from_peer(&server2)
+                    },
+                )
             })
             .collect();
 
@@ -218,33 +216,25 @@ async fn test_export_policy_large_community_match() {
     let peer_addr = &peers[0].address;
 
     let expected = vec![
-        Route {
-            prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        expected_route(
+            "10.2.0.0/24",
+            PathParams {
                 large_communities: vec![proto::LargeCommunity {
                     global_admin: 65536,
                     local_data_1: 999,
                     local_data_2: 999,
                 }],
-                ..Default::default()
-            })],
-        },
-        Route {
-            prefix: "10.3.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
                 peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        },
+                ..PathParams::from_peer(&server2)
+            },
+        ),
+        expected_route(
+            "10.3.0.0/24",
+            PathParams {
+                peer_address: peer_addr.clone(),
+                ..PathParams::from_peer(&server2)
+            },
+        ),
     ];
 
     poll_until_stable(
@@ -367,14 +357,9 @@ async fn test_export_policy_ext_community_match() {
     let peer_addr = &peers[0].address;
 
     let expected = vec![
-        Route {
-            prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        expected_route(
+            "10.2.0.0/24",
+            PathParams {
                 extended_communities: vec![proto::ExtendedCommunity {
                     community: Some(proto::extended_community::Community::TwoOctetAs(
                         proto::extended_community::TwoOctetAsSpecific {
@@ -385,20 +370,17 @@ async fn test_export_policy_ext_community_match() {
                         },
                     )),
                 }],
-                ..Default::default()
-            })],
-        },
-        Route {
-            prefix: "10.3.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
                 peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        },
+                ..PathParams::from_peer(&server2)
+            },
+        ),
+        expected_route(
+            "10.3.0.0/24",
+            PathParams {
+                peer_address: peer_addr.clone(),
+                ..PathParams::from_peer(&server2)
+            },
+        ),
     ];
 
     poll_until_stable(

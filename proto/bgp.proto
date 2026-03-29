@@ -269,6 +269,13 @@ enum Origin {
     INCOMPLETE = 2;
 }
 
+// RFC 6811: RPKI origin validation state
+enum RpkiValidation {
+    RPKI_NOT_FOUND = 0;
+    RPKI_VALID = 1;
+    RPKI_INVALID = 2;
+}
+
 // AS_PATH segment type
 enum AsPathSegmentType {
     AS_SET = 0;
@@ -324,6 +331,8 @@ message Path {
     optional uint32 local_path_id = 14;       // Locally assigned path ID (absent = not in loc-rib)
     optional uint32 remote_path_id = 15;      // Path ID received from peer (absent = no ADD-PATH)
     optional Aggregator aggregator = 16;
+    // RFC 6811: RPKI origin validation state
+    RpkiValidation rpki_validation = 17;
 }
 
 message Aggregator {

@@ -201,17 +201,17 @@ async fn test_rs_no_add_path_no_path_hiding() {
     // Client3 receives Client2's path via route iteration.
     poll_route_exists(
         &client3,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 next_hop: client2.address.to_string(),
                 peer_address: rs.address.to_string(),
                 as_path: vec![as_sequence(vec![65002])],
                 origin: Some(Origin::Incomplete),
                 local_pref: Some(100),
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -409,16 +409,16 @@ async fn test_rs_attribute_transparency() {
 
         poll_route_exists(
             &client2,
-            Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     next_hop: client1.address.to_string(), // RS must not modify next hop
                     peer_address: rs.address.to_string(),
                     local_pref: Some(100),
                     origin: Some(Origin::Igp),
                     ..case.expected
-                })],
-            },
+                },
+            ),
         )
         .await;
     }
@@ -487,9 +487,9 @@ async fn test_rs_unknown_attr_transparency() {
 
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001])],
                 next_hop: "127.0.0.5".to_string(),
                 peer_address: rs.address.to_string(),
@@ -510,8 +510,8 @@ async fn test_rs_unknown_attr_transparency() {
                     },
                 ],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -607,17 +607,17 @@ async fn test_rs_well_known_communities_block_propagation() {
 
         poll_route_exists(
             &client2,
-            Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            expected_route(
+                "10.1.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65001])],
                     next_hop: "127.0.0.5".to_string(),
                     peer_address: rs.address.to_string(),
                     local_pref: Some(100),
                     origin: Some(Origin::Igp),
                     ..Default::default()
-                })],
-            },
+                },
+            ),
         )
         .await;
 

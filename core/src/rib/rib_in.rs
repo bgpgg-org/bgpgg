@@ -37,6 +37,13 @@ impl AdjRibIn {
         }
     }
 
+    pub fn get_route(&self, prefix: &IpNetwork) -> Option<&Route> {
+        match prefix {
+            IpNetwork::V4(net) => self.ipv4_unicast.get(net),
+            IpNetwork::V6(net) => self.ipv6_unicast.get(net),
+        }
+    }
+
     pub fn get_all_routes(&self) -> Vec<Route> {
         let mut routes = Vec::new();
         routes.extend(self.ipv4_unicast.values().cloned());

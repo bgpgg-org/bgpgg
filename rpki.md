@@ -618,42 +618,33 @@ Changes:
 - AS_TRANS skip in first-AS check (OLD speaker)
 - Server package restructured: `server/{mod,ops,ops_mgmt,helpers}.rs`
 
-### Phase 5: Server Integration
+### Phase 5: Server Integration (done)
 
-Wire up the channel pattern:
-- Server creates `rpki_tx` channel, passes to RtrManager on spawn
-- Add `ServerOp::VrpUpdate` variant
-- Server handler: apply VRP diff to VRP trie, find affected routes via rib
-  trie, re-validate, re-run best path, propagate
+`BgpServer` owns `VrpTable` instance. Shared `apply_import()` helper stamps
+`rpki_state` on Path and runs import policies -- used by both
+`handle_peer_update` (new routes) and `handle_vrp_update` (re-evaluation).
 
-Validation on route receive (RFC 6811):
-- In `apply_peer_update()` (server_ops.rs), BEFORE import policy: validate
-  route against VrpTable, set path.rpki_state. Then import policy runs and
-  can match on rpki_state (e.g., set LOCAL_PREF based on validation state).
-- This runs on every incoming route
-- Origin AS derivation (RFC 6811 Section 2):
-  - Final segment is AS_SEQUENCE: rightmost AS in that segment
-  - AS_PATH is empty: origin AS = local AS (the BGP speaker's own ASN)
-  - Final segment is AS_CONFED_SEQUENCE or AS_CONFED_SET: origin =
-    "NONE" (RFC 6811 Section 2: "any other type" -> cannot match any
-    VRP, state = NotFound)
-  - Final segment is AS_SET: origin = "NONE" (cannot match any VRP,
-    state = NotFound)
-- Validation state MUST NOT be used to exclude routes from adj-rib-in
-  or from the decision process unless explicitly configured by policy
-  (RFC 6811 Section 2). Validation happens after adj-rib-in insertion.
-- Default rpki_state: when no RPKI caches are configured (VrpTable is
-  empty), all routes get rpki_state = NotFound (RFC 6811 Section 2:
-  "If validation is not performed on a Route, the implementation
-  SHOULD initialize the validation state of such a route to
-  'NotFound'").
+VRP re-evaluation reuses `apply_peer_update` -- no separate re-evaluation
+method. `affected_prefixes()` on LocRib finds route prefixes covered by
+changed VRPs, `affected_routes()` collects adj-rib-in paths,
+`reevaluate_routes()` feeds them back through `apply_peer_update`.
 
-Validation on export (RFC 8893):
-- In export policy evaluation, re-validate using the effective origin AS
-- Effective origin AS = origin after private AS removal, confederation
-  handling, and any other local AS_PATH modifications
-- The validate() function takes an explicit origin_as argument, not
-  extract-from-path, so the same function works for both import and export
+`rpki_state` lives on Path (not PathAttrs). `upsert_path` compares attrs
+only, so rpki_state-only changes preserve Arc identity -> no propagation.
+If policy changes attrs based on rpki_state (e.g. LOCAL_PREF), attrs differ
+-> Arc replaced -> propagation.
+
+`Path::origin_as()` extracts origin from AS_PATH per RFC 6811 Section 2.
+
+Proto `RpkiValidation` enum + `rpki_validation` field on proto Path message
+already wired in gRPC service (pulled forward from Phase 9).
+
+FakeCache test helper at `core/tests/utils/rtr.rs`. Phase 10 test case 1
+(basic validation: Valid/Invalid/NotFound) implemented in Phase 5.
+
+Validation on export (RFC 8893): not yet implemented. `apply_import` only
+runs on import. Export-time validation to be added when AS_PATH modification
+is implemented (no effective origin AS differs from stored origin AS today).
 
 ### Phase 6: Policy Integration
 
@@ -744,17 +735,16 @@ Low priority -- TCP is what's used in practice.
 - Config file `[[rpki_caches]]` section
 - GetRpkiState for diagnostics (cache status, VRP count, last sync time)
 - GetRpkiValidation for per-prefix validation state lookup
-- Extend existing GetRoutes/ListRoutes: proto Path message gains
-  `rpki_state` field so callers can see validation state on each route.
-  This satisfies RFC 8893 SHOULD: "An implementation SHOULD be able to
+- Proto Path message `rpki_validation` field: done in Phase 5.
+  Satisfies RFC 8893 SHOULD: "An implementation SHOULD be able to
   list announcements that were not sent to a peer, e.g., because they
   were marked Invalid."
 
 ### Phase 10: Integration Tests (`core/tests/rpki.rs`)
 
-**FakeCache** (`core/tests/utils/common.rs`) -- test helper that speaks
+**FakeCache** (`core/tests/utils/rtr.rs`) -- test helper that speaks
 RTR protocol, same pattern as FakePeer. Listens on a TCP port, server's
-CacheSession connects to it.
+CacheSession connects to it. Basic implementation done in Phase 5.
 
 ```rust
 struct FakeCache {
@@ -765,12 +755,16 @@ struct FakeCache {
 }
 ```
 
-Methods:
+Implemented methods:
 - `listen() -> Self` -- bind to random port
 - `accept()` -- accept CacheSession connection
-- `read_reset_query()` / `read_serial_query()` -- read PDU from client
+- `read_message()` -- read any RTR PDU from client
+- `read_reset_query()` -- read and assert Reset Query
 - `send_vrps(vrps: &[Vrp])` -- send Cache Response + prefix PDUs + End
   of Data as one batch
+
+Methods to add for remaining test cases:
+- `read_serial_query()` -- read Serial Query from client
 - `send_cache_reset()` -- force client to do full re-sync
 - `send_error(code)` -- simulate cache error (No Data Available, etc.)
 - `send_notify()` -- Serial Notify to trigger immediate client query
@@ -778,9 +772,10 @@ Methods:
 
 Test cases (table-driven where possible):
 
-1. **Basic validation state.** Start server + FakeCache. Inject VRPs via
-   FakeCache. Announce routes from a peer. Verify rpki_state on received
-   routes (Valid/Invalid/NotFound) via poll_rib or gRPC.
+1. **Basic validation state (done in Phase 5).** Start server + FakeCache.
+   Inject VRPs via FakeCache. Announce routes from peers. Verify rpki_state
+   on received routes (Valid/Invalid/NotFound) via poll_rib with
+   rpki_validation field.
 
 2. **VRP update re-evaluation.** Announce routes, verify NotFound. Then
    inject covering VRPs via FakeCache. Verify routes transition to
@@ -798,9 +793,8 @@ Test cases (table-driven where possible):
 5. **Multi-cache merge.** Two FakeCaches same preference. Each provides
    different VRPs. Verify both VRP sets merged for validation. Kill one
    cache, verify its VRPs removed but other cache's VRPs still work.
-   Verify via `poll_rib()` -- extend proto Path message with rpki_state
-   field, check it in existing routes_match() comparison (ListRoutes
-   gRPC already returns Path objects).
+   Verify via `poll_rib()` -- proto Path already has `rpki_validation`
+   field (done in Phase 5), checked in routes_match() comparison.
 
 6. **Cache reset.** FakeCache sends Cache Reset mid-session. Verify
    CacheSession does full re-sync (Reset Query) and VRPs are correct

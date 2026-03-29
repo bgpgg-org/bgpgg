@@ -360,7 +360,7 @@ pub struct BmpConfig {
 }
 
 /// Configuration for an RPKI cache server (RTR, RFC 8210).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RpkiCacheConfig {
     /// Address in "host:port" format (e.g. "127.0.0.1:8282").

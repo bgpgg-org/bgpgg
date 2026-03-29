@@ -30,6 +30,7 @@ use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::rib_loc::{LocRib, RouteDelta};
 use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
+use crate::rpki::vrp::RpkiValidation;
 
 #[cfg(test)]
 use crate::policy::Policy;
@@ -533,6 +534,7 @@ fn compute_export_path(
         remote_path_id: exported.remote_path_id,
         attrs: build_export_attrs(&exported, ctx, prefix)?,
         stale: false,
+        rpki_state: RpkiValidation::NotFound,
     })
 }
 
@@ -782,6 +784,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path,
@@ -1321,6 +1324,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
@@ -1532,6 +1536,7 @@ mod tests {
                 local_path_id: None,
                 remote_path_id: None,
                 stale: false,
+                rpki_state: RpkiValidation::NotFound,
                 attrs: PathAttrs {
                     origin: Origin::IGP,
                     as_path: test_case.as_path,
@@ -1747,6 +1752,7 @@ mod tests {
                 local_path_id: None,
                 remote_path_id: None,
                 stale: false,
+                rpki_state: RpkiValidation::NotFound,
                 attrs: PathAttrs {
                     origin: Origin::IGP,
                     as_path: vec![],
@@ -1993,6 +1999,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],

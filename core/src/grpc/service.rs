@@ -20,6 +20,7 @@ use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, 
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::PathAttrs;
+use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
 use crate::server::AdminState;
 use std::net::IpAddr;
@@ -154,6 +155,12 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 asn: agg.asn,
                 ip_address: agg.ip_addr.to_string(),
             }),
+            rpki_validation: match path.rpki_state {
+                RpkiValidation::NotFound => proto::RpkiValidation::RpkiNotFound,
+                RpkiValidation::Valid => proto::RpkiValidation::RpkiValid,
+                RpkiValidation::Invalid => proto::RpkiValidation::RpkiInvalid,
+            }
+            .into(),
         })
         .collect();
 

@@ -19,6 +19,7 @@ use crate::peer::Withdrawal;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::stale::{handle_stale_routes, mark_stale_in_table, StaleStrategy};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
+use crate::rpki::vrp::RpkiValidation;
 use crate::table::{Prefix, PrefixMap};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -325,6 +326,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 source: RouteSource::Local,
                 local_pref: path_attrs.local_pref.or(Some(100)),
@@ -588,8 +590,22 @@ impl<A: PathIdAllocator> LocRib<A> {
         result
     }
 
+    /// Find all route prefixes in the RIB affected by VRP additions and removals.
+    pub fn affected_prefixes(
+        &self,
+        added: &[crate::rpki::vrp::Vrp],
+        removed: &[crate::rpki::vrp::Vrp],
+    ) -> HashSet<IpNetwork> {
+        let mut affected = HashSet::new();
+        for vrp in added.iter().chain(removed) {
+            for prefix in self.subtree_prefixes(&vrp.prefix) {
+                affected.insert(prefix);
+            }
+        }
+        affected
+    }
+
     /// Find all prefixes in the RIB that are subnets of (or equal to) the given prefix.
-    /// Used for RPKI re-evaluation when a VRP changes.
     pub fn subtree_prefixes(&self, prefix: &IpNetwork) -> Vec<IpNetwork> {
         match prefix {
             IpNetwork::V4(v4) => self

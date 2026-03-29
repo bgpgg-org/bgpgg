@@ -21,6 +21,7 @@ use crate::bgp::msg_update::{
 use crate::bgp::msg_update_types::{AsPath, LargeCommunity, AS_TRANS};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::rib::types::RouteSource;
+use crate::rpki::vrp::RpkiValidation;
 use std::cmp::Ordering;
 use std::net::IpAddr;
 
@@ -59,6 +60,8 @@ pub struct Path {
     pub attrs: PathAttrs,
     /// RFC 4724: Marked stale during Graceful Restart, cleared on replacement
     pub stale: bool,
+    /// RFC 6811: RPKI origin validation state (local metadata, never serialized)
+    pub rpki_state: RpkiValidation,
 }
 
 impl Path {
@@ -158,6 +161,7 @@ impl Path {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin,
                 as_path,
@@ -264,6 +268,17 @@ impl Path {
         }
         // Empty AS_PATH or no AS_SEQUENCE (locally originated or aggregated routes)
         None
+    }
+
+    /// Extract origin AS from AS_PATH (RFC 6811 Section 2).
+    /// Returns None for empty AS_PATH (caller should use local AS).
+    /// Returns Some(0) for AS_SET/confederation final segment (cannot match any VRP).
+    pub fn origin_as(&self) -> Option<u32> {
+        let last = self.as_path().last()?;
+        match last.segment_type {
+            AsPathSegmentType::AsSequence => last.asn_list.last().copied(),
+            _ => Some(0),
+        }
     }
 }
 
@@ -399,6 +414,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
@@ -671,6 +687,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
@@ -876,6 +893,87 @@ mod tests {
             bgp_id: test_bgp_id(2),
         };
         assert!(!path3.matches_remote(&path4));
+    }
+
+    #[test]
+    fn test_origin_as() {
+        let tests = [
+            (
+                "normal AS_SEQUENCE with two ASNs",
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65002],
+                }],
+                Some(65002),
+            ),
+            (
+                "single AS in AS_SEQUENCE",
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(65001),
+            ),
+            ("empty AS_PATH", vec![], None),
+            (
+                "AS_SET as final segment",
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsSet,
+                    segment_len: 2,
+                    asn_list: vec![65001, 65002],
+                }],
+                Some(0),
+            ),
+            (
+                "AS_CONFED_SEQUENCE as final segment",
+                vec![AsPathSegment {
+                    segment_type: AsPathSegmentType::AsConfedSequence,
+                    segment_len: 1,
+                    asn_list: vec![65001],
+                }],
+                Some(0),
+            ),
+            (
+                "AS_SEQUENCE then AS_SET - last segment is AS_SET",
+                vec![
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 1,
+                        asn_list: vec![65001],
+                    },
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSet,
+                        segment_len: 1,
+                        asn_list: vec![65002],
+                    },
+                ],
+                Some(0),
+            ),
+            (
+                "AS_SET then AS_SEQUENCE - last segment is AS_SEQUENCE",
+                vec![
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSet,
+                        segment_len: 1,
+                        asn_list: vec![65001],
+                    },
+                    AsPathSegment {
+                        segment_type: AsPathSegmentType::AsSequence,
+                        segment_len: 2,
+                        asn_list: vec![65002, 65003],
+                    },
+                ],
+                Some(65003),
+            ),
+        ];
+
+        for (name, as_path, expected) in tests {
+            let mut path = make_base_path();
+            path.attrs.as_path = as_path;
+            assert_eq!(path.origin_as(), expected, "test case: {}", name);
+        }
     }
 
     #[test]

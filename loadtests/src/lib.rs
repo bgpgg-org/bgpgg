@@ -29,6 +29,7 @@ use bgpgg::bgp::msg_update::{NextHopAddr, UpdateMessage};
 use bgpgg::bgp::msg_update_types::{AsPathSegment, AsPathSegmentType, Origin};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rib::{Path, PathAttrs, RouteSource};
+use bgpgg::rpki::vrp::RpkiValidation;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::AsyncWriteExt;
@@ -162,6 +163,7 @@ pub fn create_update_message(
         local_path_id: None,
         remote_path_id: None,
         stale: false,
+        rpki_state: RpkiValidation::NotFound,
         attrs: PathAttrs {
             origin,
             as_path: as_path_segments,
@@ -296,6 +298,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
         local_path_id: None,
         remote_path_id: None,
         stale: false,
+        rpki_state: RpkiValidation::NotFound,
         attrs: PathAttrs {
             origin,
             as_path,

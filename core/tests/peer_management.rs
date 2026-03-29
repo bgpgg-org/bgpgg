@@ -19,7 +19,7 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AdminState, BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{AdminState, BgpState, Origin, SessionConfig};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -32,8 +32,6 @@ async fn test_remove_peer() {
     .await;
 
     // Server2 announces a route to Server1
-    let server2_addr = server2.address.to_string();
-    let peer_addr = server2_addr.clone();
     announce_and_verify_route(
         &server2,
         &[&server1],
@@ -42,18 +40,12 @@ async fn test_remove_peer() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65002])],
-            next_hop: server2_addr.clone(),
-            peer_address: server2_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server2),
     )
     .await;
 
     // Remove peer via API call instead of killing the server
+    let peer_addr = server2.address.to_string();
     server1
         .client
         .remove_peer(peer_addr.clone())
@@ -87,8 +79,6 @@ async fn test_remove_peer_withdraw_routes() {
     )
     .await;
 
-    let server2_addr = server2.address.to_string();
-    let peer_addr = server2_addr.clone();
     announce_and_verify_route(
         &server2,
         &[&server1],
@@ -97,21 +87,14 @@ async fn test_remove_peer_withdraw_routes() {
             next_hop: "192.168.2.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65002])],
-            next_hop: server2_addr.clone(),
-            peer_address: server2_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server2),
     )
     .await;
 
     // Remove Server2's peer from Server1 via API call
     server1
         .client
-        .remove_peer(peer_addr.clone())
+        .remove_peer(server2.address.to_string())
         .await
         .expect("Failed to remove peer");
 
@@ -132,7 +115,6 @@ async fn test_remove_peer_four_node_mesh() {
     .await;
 
     // Server4 announces a route to all peers
-    let server4_addr = server4.address.to_string();
     announce_and_verify_route(
         &server4,
         &[&server1, &server2, &server3],
@@ -141,14 +123,7 @@ async fn test_remove_peer_four_node_mesh() {
             next_hop: "192.168.4.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65004])],
-            next_hop: server4_addr.clone(),
-            peer_address: server4_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server4),
     )
     .await;
 
@@ -168,45 +143,31 @@ async fn test_remove_peer_four_node_mesh() {
         &[
             (
                 &server1,
-                vec![Route {
-                    prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(PathParams {
+                vec![expected_route(
+                    "10.4.0.0/24",
+                    PathParams {
                         as_path: vec![as_sequence(vec![65002, 65004])],
                         next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
                         peer_address: server2.address.to_string(),
                         origin: Some(Origin::Igp),
                         local_pref: Some(100),
                         ..Default::default()
-                    })], // Via server2 (127.0.0.2 < 127.0.0.3)
-                }],
+                    },
+                )], // Via server2 (127.0.0.2 < 127.0.0.3)
             ),
             (
                 &server2,
-                vec![Route {
-                    prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(PathParams {
-                        as_path: vec![as_sequence(vec![65004])],
-                        next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                        peer_address: server4.address.to_string(),
-                        origin: Some(Origin::Igp),
-                        local_pref: Some(100),
-                        ..Default::default()
-                    })],
-                }],
+                vec![expected_route(
+                    "10.4.0.0/24",
+                    PathParams::from_peer(&server4),
+                )],
             ),
             (
                 &server3,
-                vec![Route {
-                    prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(PathParams {
-                        as_path: vec![as_sequence(vec![65004])],
-                        next_hop: server4.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                        peer_address: server4.address.to_string(),
-                        origin: Some(Origin::Igp),
-                        local_pref: Some(100),
-                        ..Default::default()
-                    })],
-                }],
+                vec![expected_route(
+                    "10.4.0.0/24",
+                    PathParams::from_peer(&server4),
+                )],
             ),
         ],
         Duration::from_secs(20),
