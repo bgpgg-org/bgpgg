@@ -16,7 +16,7 @@ use super::fsm::FsmEvent;
 use super::{BgpOpenParams, PeerCapabilities};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
+use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{
     AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
@@ -25,7 +25,7 @@ use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
 use crate::config::LlgrConfig;
 use crate::log::{debug, info, warn};
-use crate::server::ServerOp;
+use crate::server::ops::ServerOp;
 use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -501,42 +501,18 @@ impl Peer {
         }
 
         // Process UPDATE message content
-        match message {
-            BgpMessage::Update(update_msg) => {
-                // RFC 4724: Check for End-of-RIB marker
-                if update_msg.is_eor() {
-                    self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                        .await;
-                    return Ok(None);
-                }
+        let BgpMessage::Update(update_msg) = message else {
+            return Ok(None);
+        };
 
-                match self.handle_update(update_msg) {
-                    Ok(delta) => Ok(Some(delta)),
-                    Err(BgpError::Cease(CeaseSubcode::MaxPrefixesReached)) => {
-                        // RFC 4271 8.1.2: check allow_automatic_stop
-                        if self.config.allow_automatic_stop {
-                            self.process_event(&FsmEvent::AutomaticStop(
-                                CeaseSubcode::MaxPrefixesReached,
-                            ))
-                            .await?;
-                            Ok(None)
-                        } else {
-                            warn!(peer_ip = %self.addr,
-                                  "max prefix exceeded but allow_automatic_stop=false, continuing");
-                            Ok(None)
-                        }
-                    }
-                    Err(bgp_error) => {
-                        // RFC 4271 Event 28: UpdateMsgErr
-                        let notif = NotificationMessage::new(bgp_error, vec![]);
-                        self.process_event(&FsmEvent::BgpUpdateMsgErr(notif))
-                            .await?;
-                        Ok(None)
-                    }
-                }
-            }
-            _ => Ok(None),
+        // RFC 4724: Check for End-of-RIB marker
+        if update_msg.is_eor() {
+            self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
+                .await;
+            return Ok(None);
         }
+
+        Ok(Some(self.handle_update(update_msg)))
     }
 
     /// Handle received ROUTE_REFRESH message
@@ -621,6 +597,7 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::msg_notification::CeaseSubcode;
     use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, LlgrEntry, OptionalParam};
     use crate::bgp::msg_update::{
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,

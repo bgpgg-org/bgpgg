@@ -584,7 +584,7 @@ TCP keep-alives on the socket after connecting:
 > transport session."
 Use `setsockopt(SO_KEEPALIVE)` with OS defaults.
 
-### Phase 4: Move adj-rib-in to server
+### Phase 4: Move adj-rib-in to server (done)
 
 Prerequisite for RPKI re-evaluation (see design decision above).
 `AdjRibIn` already exists at `core/src/rib/rib_in.rs` (per-AFI
@@ -597,6 +597,26 @@ Prerequisite for RPKI re-evaluation (see design decision above).
 - Move max-prefix enforcement to server
 - Move BMP adj-rib-in count to read from PeerInfo
 - Tests: verify adj-rib-in contents match what peer sent (pre-policy)
+
+### Phase 4.1: Move UPDATE validation to server (done)
+
+Clean responsibility split: peer task handles wire protocol only
+(parse, build Path, extract NLRI), server handles all routing
+decisions (validation, adj-rib-in, policy, loc-rib, propagation).
+
+Functional behavior: loc-rib contents and wire protocol behavior
+are identical. adj-rib-in now stores pre-validation routes per
+RFC 4271 3.2 ("unprocessed routing information"), so gRPC adj-rib-in
+queries may return routes that fail validation (e.g. AS-looped).
+
+Changes:
+- Peer `incoming.rs` stripped to deserialization only
+- Validation in `server/ops.rs`: AFI/SAFI, first-AS, AS loop,
+  RR loop, nexthop-self, eBGP attr scrubbing, GRACEFUL_SHUTDOWN
+- `disabled_afi_safi` moved from Peer to PeerInfo
+- `ClearPeerAfiSafi` ServerOp removed (inline in server)
+- AS_TRANS skip in first-AS check (OLD speaker)
+- Server package restructured: `server/{mod,ops,ops_mgmt,helpers}.rs`
 
 ### Phase 5: Server Integration
 

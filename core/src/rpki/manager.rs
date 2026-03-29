@@ -19,7 +19,7 @@ use crate::log::{info, warn};
 use crate::rpki::rtr::Serial;
 use crate::rpki::session::CacheSession;
 use crate::rpki::vrp::Vrp;
-use crate::server::ServerOp;
+use crate::server::ops::ServerOp;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};

@@ -28,7 +28,7 @@ use crate::config::{
     DefinedSetConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
     NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
 };
-use crate::server::PolicyInfoResponse;
+use crate::server::ops_mgmt::PolicyInfoResponse;
 
 pub(super) fn proto_to_defined_set_config(
     proto: &ProtoDefinedSetConfig,

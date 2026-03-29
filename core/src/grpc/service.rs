@@ -20,7 +20,8 @@ use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, 
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::PathAttrs;
-use crate::server::{AdminState, MgmtOp};
+use crate::server::ops_mgmt::MgmtOp;
+use crate::server::AdminState;
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;

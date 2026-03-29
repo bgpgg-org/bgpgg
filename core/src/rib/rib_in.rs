@@ -48,7 +48,6 @@ impl AdjRibIn {
         self.ipv4_unicast.len() + self.ipv6_unicast.len()
     }
 
-    #[cfg(test)]
     pub fn clear(&mut self) {
         self.ipv4_unicast.clear();
         self.ipv6_unicast.clear();
@@ -143,6 +142,32 @@ impl AdjRibIn {
             }
             _ => 0,
         }
+    }
+
+    /// Drain all routes for a specific AFI/SAFI, returning them as (prefix, path_id) withdrawals.
+    pub fn drain_afi_safi(&mut self, afi_safi: AfiSafi) -> Vec<(IpNetwork, Option<u32>)> {
+        let table: Box<dyn Iterator<Item = (IpNetwork, Route)>> =
+            match (afi_safi.afi, afi_safi.safi) {
+                (Afi::Ipv4, Safi::Unicast) => Box::new(
+                    self.ipv4_unicast
+                        .drain()
+                        .map(|(k, v)| (IpNetwork::V4(k), v)),
+                ),
+                (Afi::Ipv6, Safi::Unicast) => Box::new(
+                    self.ipv6_unicast
+                        .drain()
+                        .map(|(k, v)| (IpNetwork::V6(k), v)),
+                ),
+                _ => return vec![],
+            };
+
+        let mut withdrawals = Vec::new();
+        for (prefix, route) in table {
+            for path in &route.paths {
+                withdrawals.push((prefix, path.remote_path_id));
+            }
+        }
+        withdrawals
     }
 }
 
