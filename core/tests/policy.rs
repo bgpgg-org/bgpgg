@@ -20,12 +20,16 @@ pub use utils::*;
 use std::net::Ipv4Addr;
 
 use bgpgg::bgp::community;
+use bgpgg::bgp::ext_community::from_rpki_state_community;
 use bgpgg::config::{Config, RpkiCacheConfig};
 use bgpgg::grpc::proto::{
-    ActionsConfig, ConditionsConfig, DefinedSetConfig, Route, RpkiValidation, StatementConfig,
+    defined_set_config,
+    extended_community::{Community, Opaque},
+    ActionsConfig, ConditionsConfig, DefinedSetConfig, ExtendedCommunity, ExtendedCommunitySetData,
+    MatchSetRef, Route, RpkiValidation, StatementConfig,
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
-use bgpgg::rpki::vrp::Vrp;
+use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
 use utils::rtr::FakeCache;
 
 #[tokio::test]
@@ -555,6 +559,132 @@ async fn test_import_policy_rpki_validation() {
                 },
             ),
         ],
+    )])
+    .await;
+}
+
+fn rpki_state_ext_community(state: RpkiState) -> ExtendedCommunity {
+    let ec = from_rpki_state_community(state.to_u8());
+    let bytes = ec.to_be_bytes();
+    ExtendedCommunity {
+        community: Some(Community::Opaque(Opaque {
+            is_transitive: false,
+            value: bytes[2..].to_vec(),
+        })),
+    }
+}
+
+/// RFC 8097: SetRpkiState policy action sets rpki_state from matched RPKI state community.
+/// Topology: server1 (AS 65001) -> server2 (AS 65001, iBGP with import policy)
+/// server1 sends route with RPKI state community, server2 import policy matches and sets rpki_state.
+#[tokio::test]
+async fn test_rpki_state_community_set_policy() {
+    let server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let server2 = start_test_server(Config::new(
+        65001,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+    let [server1, server2] = chain_servers([server1, server2], PeerConfig::default()).await;
+
+    // Define ext community set for RPKI state valid
+    let rpki_valid_ec = from_rpki_state_community(0);
+    server2
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "ext-community".to_string(),
+                name: "rpki-valid".to_string(),
+                config: Some(defined_set_config::Config::ExtCommunitySet(
+                    ExtendedCommunitySetData {
+                        ext_communities: vec![format!("0x{:016x}", rpki_valid_ec)],
+                    },
+                )),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Import policy: match RPKI state valid community -> set rpki_state to valid
+    server2
+        .client
+        .add_policy(
+            "rpki-import".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_ext_community_set: Some(MatchSetRef {
+                            set_name: "rpki-valid".to_string(),
+                            match_option: String::new(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        set_rpki_state: Some(RpkiValidation::RpkiValid.into()),
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let peer_addr = server1.address.to_string();
+    server2
+        .client
+        .set_policy_assignment(
+            peer_addr,
+            "import".to_string(),
+            vec!["rpki-import".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce route from server1 with RPKI state valid community
+    announce_route(
+        &server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: server1.address.to_string(),
+            extended_communities: vec![rpki_valid_ec],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // server2 should have rpki_state=valid from policy
+    poll_rib(&[(
+        &server2,
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
+                as_path: vec![],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                local_pref: Some(100),
+                rpki_validation: RpkiValidation::RpkiValid as i32,
+                extended_communities: vec![rpki_state_ext_community(RpkiState::Valid)],
+                ..Default::default()
+            },
+        )],
     )])
     .await;
 }

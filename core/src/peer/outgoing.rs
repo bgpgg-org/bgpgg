@@ -15,7 +15,9 @@
 //! Route propagation logic for BGP UPDATE messages
 
 use crate::bgp::community;
-use crate::bgp::ext_community::is_transitive;
+use crate::bgp::ext_community::{
+    from_rpki_state_community, is_rpki_state_community, is_transitive,
+};
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
 use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
 use crate::bgp::msg_update_types::{
@@ -67,6 +69,8 @@ pub struct PeerExportContext<'a> {
     pub graceful_shutdown: bool,
     /// Negotiated capabilities for this peer
     pub capabilities: &'a PeerCapabilities,
+    /// RFC 8097: attach RPKI state extended community on export
+    pub send_rpki_community: bool,
 }
 
 impl<'a> PeerExportContext<'a> {
@@ -274,7 +278,6 @@ pub fn build_export_med(path: &Path, ctx: &PeerExportContext) -> Option<u32> {
 /// RFC 7947: Route servers preserve ALL communities (both transitive and non-transitive)
 pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -> Vec<u64> {
     // RFC 7947: Route servers preserve ALL communities
-    // (both transitive and non-transitive)
     if ctx.rs_client {
         return path.extended_communities().clone();
     }
@@ -287,8 +290,15 @@ pub fn build_export_extended_communities(path: &Path, ctx: &PeerExportContext) -
             .copied()
             .collect()
     } else {
-        // iBGP: propagate all extended communities
-        path.extended_communities().clone()
+        let mut communities = path.extended_communities().clone();
+
+        // RFC 8097: attach RPKI state extended community
+        if ctx.send_rpki_community {
+            communities.retain(|ec| !is_rpki_state_community(*ec));
+            communities.push(from_rpki_state_community(path.rpki_state.to_u8()));
+        }
+
+        communities
     }
 }
 
@@ -817,6 +827,7 @@ mod tests {
         peer_asn: u32,
         rs_client: bool,
         next_hop_self: bool,
+        send_rpki_community: bool,
     ) -> PeerExportContext<'static> {
         let (tx, _rx) = mpsc::unbounded_channel();
         // Leak the channel to get 'static lifetime for test
@@ -854,6 +865,7 @@ mod tests {
             next_hop_self,
             graceful_shutdown: false,
             capabilities,
+            send_rpki_community,
         }
     }
 
@@ -991,6 +1003,7 @@ mod tests {
                 test_case.peer_asn,
                 test_case.rs_client,
                 false,
+                false,
             );
             let result = build_export_as_path(&path, &ctx);
 
@@ -1097,7 +1110,7 @@ mod tests {
         );
 
         // Export to eBGP peer should prepend local ASN and preserve AS_SET
-        let ctx = make_peer_export_ctx(65000, 65100, false, false);
+        let ctx = make_peer_export_ctx(65000, 65100, false, false, false);
         let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1130,7 +1143,7 @@ mod tests {
         );
 
         // Export to eBGP should create new AS_SEQUENCE segment for local ASN
-        let ctx = make_peer_export_ctx(65000, 65100, false, false);
+        let ctx = make_peer_export_ctx(65000, 65100, false, false, false);
         let result = build_export_as_path(&path_starting_with_as_set, &ctx);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1165,7 +1178,7 @@ mod tests {
         );
 
         // Export to iBGP peer should preserve AS_PATH unchanged
-        let ctx = make_peer_export_ctx(65000, 65000, false, false);
+        let ctx = make_peer_export_ctx(65000, 65000, false, false, false);
         let result = build_export_as_path(&path_with_as_set, &ctx);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].segment_type, AsPathSegmentType::AsSequence);
@@ -1304,6 +1317,7 @@ mod tests {
                 test_case.peer_asn,
                 test_case.rs_client,
                 test_case.next_hop_self,
+                false,
             );
             let result = build_export_next_hop(&path, &ctx, &prefix);
 
@@ -1344,11 +1358,11 @@ mod tests {
         };
 
         // iBGP: include LOCAL_PREF
-        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false, false);
+        let ctx_ibgp = make_peer_export_ctx(65001, 65001, false, false, false);
         assert_eq!(build_export_local_pref(&path, &ctx_ibgp), Some(200));
 
         // eBGP: MUST NOT include LOCAL_PREF
-        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false, false);
+        let ctx_ebgp = make_peer_export_ctx(65001, 65002, false, false, false);
         assert_eq!(build_export_local_pref(&path, &ctx_ebgp), None);
     }
 
@@ -1560,6 +1574,7 @@ mod tests {
                 test_case.peer_asn,
                 test_case.rs_client,
                 false,
+                false,
             );
             let result = build_export_med(&path, &ctx);
             assert_eq!(
@@ -1639,6 +1654,7 @@ mod tests {
             next_hop_self: false,
             graceful_shutdown: false,
             capabilities: &PeerCapabilities::default(),
+            send_rpki_community: false,
         };
         let filtered = compute_routes_for_peer(&routes, &ctx);
         send_batched_announcements(
@@ -1714,12 +1730,17 @@ mod tests {
     fn test_build_export_extended_communities() {
         let transitive = 0x0002FDE800000064u64; // Transitive extended community
         let non_transitive = 0x4002FDE800000064u64; // Non-transitive extended community
+        let rpki_valid = from_rpki_state_community(RpkiValidation::VALID);
+        let rpki_not_found = from_rpki_state_community(RpkiValidation::NOT_FOUND);
 
         struct TestCase {
             name: &'static str,
             local_asn: u32,
             peer_asn: u32,
             rs_client: bool,
+            send_rpki_community: bool,
+            rpki_state: RpkiValidation,
+            input_communities: Vec<u64>,
             expected: Vec<u64>,
         }
 
@@ -1729,6 +1750,9 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: false,
+                send_rpki_community: false,
+                rpki_state: RpkiValidation::NotFound,
+                input_communities: vec![transitive, non_transitive],
                 expected: vec![transitive],
             },
             TestCase {
@@ -1736,6 +1760,9 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65000,
                 rs_client: false,
+                send_rpki_community: false,
+                rpki_state: RpkiValidation::NotFound,
+                input_communities: vec![transitive, non_transitive],
                 expected: vec![transitive, non_transitive],
             },
             TestCase {
@@ -1743,7 +1770,40 @@ mod tests {
                 local_asn: 65000,
                 peer_asn: 65001,
                 rs_client: true,
+                send_rpki_community: false,
+                rpki_state: RpkiValidation::NotFound,
+                input_communities: vec![transitive, non_transitive],
                 expected: vec![transitive, non_transitive],
+            },
+            TestCase {
+                name: "iBGP send_rpki_community attaches RPKI state",
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                send_rpki_community: true,
+                rpki_state: RpkiValidation::Valid,
+                input_communities: vec![transitive],
+                expected: vec![transitive, rpki_valid],
+            },
+            TestCase {
+                name: "iBGP send_rpki_community replaces existing RPKI state",
+                local_asn: 65000,
+                peer_asn: 65000,
+                rs_client: false,
+                send_rpki_community: true,
+                rpki_state: RpkiValidation::NotFound,
+                input_communities: vec![transitive, rpki_valid],
+                expected: vec![transitive, rpki_not_found],
+            },
+            TestCase {
+                name: "eBGP send_rpki_community does not attach (non-transitive)",
+                local_asn: 65000,
+                peer_asn: 65001,
+                rs_client: false,
+                send_rpki_community: true,
+                rpki_state: RpkiValidation::Valid,
+                input_communities: vec![transitive],
+                expected: vec![transitive],
             },
         ];
 
@@ -1752,7 +1812,7 @@ mod tests {
                 local_path_id: None,
                 remote_path_id: None,
                 stale: false,
-                rpki_state: RpkiValidation::NotFound,
+                rpki_state: test_case.rpki_state,
                 attrs: PathAttrs {
                     origin: Origin::IGP,
                     as_path: vec![],
@@ -1763,7 +1823,7 @@ mod tests {
                     atomic_aggregate: false,
                     aggregator: None,
                     communities: vec![],
-                    extended_communities: vec![transitive, non_transitive],
+                    extended_communities: test_case.input_communities,
                     large_communities: vec![],
                     unknown_attrs: vec![],
                     originator_id: None,
@@ -1776,6 +1836,7 @@ mod tests {
                 test_case.peer_asn,
                 test_case.rs_client,
                 false,
+                test_case.send_rpki_community,
             );
             let result = build_export_extended_communities(&path, &ctx);
             assert_eq!(
@@ -1853,6 +1914,7 @@ mod tests {
                 test_case.peer_asn,
                 test_case.rs_client,
                 false,
+                false,
             );
             let result = build_export_unknown_attrs(&path, &ctx);
             assert_eq!(
@@ -1906,6 +1968,7 @@ mod tests {
             next_hop_self: false,
             graceful_shutdown: false,
             capabilities: &PeerCapabilities::default(),
+            send_rpki_community: false,
         };
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(peer_bgp_id));
@@ -1976,11 +2039,11 @@ mod tests {
         )];
         let rs_ctx = PeerExportContext {
             export_policies: &policies,
-            ..make_peer_export_ctx(65000, 65003, true, false)
+            ..make_peer_export_ctx(65000, 65003, true, false, false)
         };
         let non_rs_ctx = PeerExportContext {
             export_policies: &policies,
-            ..make_peer_export_ctx(65000, 65003, false, false)
+            ..make_peer_export_ctx(65000, 65003, false, false, false)
         };
 
         // RS client iterates to path2 (passes policy)
@@ -2063,7 +2126,7 @@ mod tests {
 
         for test_case in test_cases {
             let path = make_path(test_case.input_communities);
-            let mut ctx = make_peer_export_ctx(65001, 65002, false, false);
+            let mut ctx = make_peer_export_ctx(65001, 65002, false, false, false);
             ctx.graceful_shutdown = test_case.graceful_shutdown;
             let result = build_export_communities(&path, &ctx);
             assert_eq!(
@@ -2076,11 +2139,11 @@ mod tests {
 
     #[test]
     fn test_is_ebgp_is_ibgp() {
-        let ebgp_ctx = make_peer_export_ctx(65001, 65002, false, false);
+        let ebgp_ctx = make_peer_export_ctx(65001, 65002, false, false, false);
         assert!(ebgp_ctx.is_ebgp());
         assert!(!ebgp_ctx.is_ibgp());
 
-        let ibgp_ctx = make_peer_export_ctx(65001, 65001, false, false);
+        let ibgp_ctx = make_peer_export_ctx(65001, 65001, false, false, false);
         assert!(!ibgp_ctx.is_ebgp());
         assert!(ibgp_ctx.is_ibgp());
     }

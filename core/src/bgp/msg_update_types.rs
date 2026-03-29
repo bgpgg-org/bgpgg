@@ -91,7 +91,7 @@ pub use super::ext_community::{
 };
 pub use super::ext_community::{
     SUBTYPE_ROUTE_ORIGIN, SUBTYPE_ROUTE_TARGET, TYPE_EVPN, TYPE_FOUR_OCTET_AS, TYPE_IPV4_ADDRESS,
-    TYPE_OPAQUE, TYPE_TWO_OCTET_AS,
+    TYPE_TRANSITIVE_OPAQUE, TYPE_TWO_OCTET_AS,
 };
 
 // Re-export large community

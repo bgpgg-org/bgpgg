@@ -137,7 +137,7 @@ pub(super) fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u
                     ec.value.len()
                 ));
             }
-            let mut typ = TYPE_OPAQUE;
+            let mut typ = TYPE_TRANSITIVE_OPAQUE;
             if !ec.is_transitive {
                 typ |= TYPE_NON_TRANSITIVE_BIT;
             }
@@ -239,7 +239,7 @@ pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
             )
         }
 
-        TYPE_OPAQUE => {
+        TYPE_TRANSITIVE_OPAQUE => {
             // Check for Color extended community (subtype 0x0B)
             if subtype == SUBTYPE_COLOR {
                 // [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_opaque_roundtrip() {
         // Create opaque extended community: [type][subtype][6 bytes value]
-        let mut typ = TYPE_OPAQUE;
+        let mut typ = TYPE_TRANSITIVE_OPAQUE;
         typ |= TYPE_NON_TRANSITIVE_BIT; // non-transitive
         let val: u64 = ((typ as u64) << 56) | 0xAABBCCDDEE00;
 

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::rpki::vrp::RpkiValidation;
 use std::fmt;
 use std::net::Ipv4Addr;
 
@@ -23,7 +24,8 @@ use std::net::Ipv4Addr;
 pub const TYPE_TWO_OCTET_AS: u8 = 0x00;
 pub const TYPE_IPV4_ADDRESS: u8 = 0x01;
 pub const TYPE_FOUR_OCTET_AS: u8 = 0x02;
-pub const TYPE_OPAQUE: u8 = 0x03;
+pub const TYPE_TRANSITIVE_OPAQUE: u8 = 0x03;
+pub const TYPE_NON_TRANSITIVE_OPAQUE: u8 = 0x43;
 pub const TYPE_EVPN: u8 = 0x06;
 
 // Subtype constants for Route Target / Route Origin
@@ -34,6 +36,7 @@ pub const SUBTYPE_LINK_BANDWIDTH: u8 = 0x04;
 // Subtype constants for Opaque extended communities
 pub const SUBTYPE_COLOR: u8 = 0x0B;
 pub const SUBTYPE_ENCAPSULATION: u8 = 0x0C;
+pub const SUBTYPE_ORIGIN_VALIDATION: u8 = 0x00;
 
 // Subtype constants for EVPN extended communities
 pub const SUBTYPE_ROUTER_MAC: u8 = 0x03;
@@ -75,6 +78,26 @@ pub const fn is_transitive(extcomm: u64) -> bool {
     (typ & TYPE_NON_TRANSITIVE_BIT) == 0
 }
 
+/// Check if an extended community is an RFC 8097 Origin Validation State community
+pub const fn is_rpki_state_community(extcomm: u64) -> bool {
+    ext_type(extcomm) == TYPE_NON_TRANSITIVE_OPAQUE
+        && ext_subtype(extcomm) == SUBTYPE_ORIGIN_VALIDATION
+}
+
+/// Extract the validation state byte from an RPKI state extended community (last byte)
+pub const fn rpki_state_community_value(extcomm: u64) -> u8 {
+    (extcomm & 0xFF) as u8
+}
+
+/// Create an RFC 8097 Origin Validation State extended community
+/// Type 0x43 (non-transitive opaque), subtype 0x00, 5 bytes reserved, 1 byte state
+/// State values: 0 = Valid, 1 = NotFound, 2 = Invalid
+pub const fn from_rpki_state_community(state: u8) -> u64 {
+    ((TYPE_NON_TRANSITIVE_OPAQUE as u64) << byte_shift(0))
+        | ((SUBTYPE_ORIGIN_VALIDATION as u64) << byte_shift(1))
+        | (state as u64)
+}
+
 /// Create an extended community from two-octet AS format
 /// Type 0x00: [Type][Subtype][AS (2 bytes)][Local (4 bytes)]
 pub const fn from_two_octet_as(subtype: u8, asn: u16, local: u32) -> u64 {
@@ -105,7 +128,7 @@ pub const fn from_four_octet_as(subtype: u8, asn: u32, local: u16) -> u64 {
 /// Create a Color extended community (RFC 9012)
 /// Type 0x03: [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
 pub const fn from_color(color: u32) -> u64 {
-    ((TYPE_OPAQUE as u64) << byte_shift(0))
+    ((TYPE_TRANSITIVE_OPAQUE as u64) << byte_shift(0))
         | ((SUBTYPE_COLOR as u64) << byte_shift(1))
         | (color as u64)
 }
@@ -113,7 +136,7 @@ pub const fn from_color(color: u32) -> u64 {
 /// Create an Encapsulation extended community (RFC 9012)
 /// Type 0x03: [Type][Subtype][Reserved (2 bytes)][Tunnel Type (2 bytes)]
 pub const fn from_encapsulation(tunnel_type: u16) -> u64 {
-    ((TYPE_OPAQUE as u64) << byte_shift(0))
+    ((TYPE_TRANSITIVE_OPAQUE as u64) << byte_shift(0))
         | ((SUBTYPE_ENCAPSULATION as u64) << byte_shift(1))
         | (tunnel_type as u64)
 }
@@ -179,6 +202,7 @@ impl fmt::Display for ParseExtCommunityError {
 /// - "color:100" (Color community, RFC 9012)
 /// - "encapsulation:8" (Encapsulation community, RFC 9012)
 /// - "router-mac:aa:bb:cc:dd:ee:ff" (Router's MAC community, RFC 9012)
+/// - "rpki:valid" / "rpki:not-found" / "rpki:invalid" (RFC 8097 Origin Validation State)
 /// - "0x0002FDE800000064" (raw hex, 16 hex digits)
 pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> {
     // Handle raw hex format
@@ -188,6 +212,17 @@ pub fn parse_extended_community(s: &str) -> Result<u64, ParseExtCommunityError> 
 
     // Parse colon-separated format
     let parts: Vec<&str> = s.split(':').collect();
+
+    // Handle rpki:STATE format (RFC 8097)
+    if parts.len() == 2 && parts[0] == "rpki" {
+        let state = match parts[1] {
+            "valid" => RpkiValidation::VALID,
+            "not-found" => RpkiValidation::NOT_FOUND,
+            "invalid" => RpkiValidation::INVALID,
+            _ => return Err(ParseExtCommunityError::InvalidFormat),
+        };
+        return Ok(from_rpki_state_community(state));
+    }
 
     // Handle color:VALUE format (2 parts)
     if parts.len() == 2 && parts[0] == "color" {
@@ -279,8 +314,8 @@ pub fn format_extended_community(extcomm: u64) -> String {
     let subtype = ext_subtype(extcomm);
     let value_bytes = ext_value(extcomm);
 
-    // Handle Opaque extended communities separately
-    if typ == TYPE_OPAQUE {
+    // Handle transtiive opaque extended communities
+    if typ == TYPE_TRANSITIVE_OPAQUE {
         match subtype {
             SUBTYPE_COLOR => {
                 // [Type][Subtype][Reserved (2 bytes)][Color (4 bytes)]
@@ -299,6 +334,24 @@ pub fn format_extended_community(extcomm: u64) -> String {
             }
             _ => {
                 // Unknown opaque subtype, return raw hex
+                return format!("0x{:016x}", extcomm);
+            }
+        }
+    }
+
+    // Handle Non-transitive opaque extended communities (RFC 8097)
+    if typ == TYPE_NON_TRANSITIVE_OPAQUE {
+        match subtype {
+            SUBTYPE_ORIGIN_VALIDATION => {
+                let state = value_bytes[5];
+                return match state {
+                    RpkiValidation::VALID => "rpki:valid".to_string(),
+                    RpkiValidation::NOT_FOUND => "rpki:not-found".to_string(),
+                    RpkiValidation::INVALID => "rpki:invalid".to_string(),
+                    _ => format!("0x{:016x}", extcomm),
+                };
+            }
+            _ => {
                 return format!("0x{:016x}", extcomm);
             }
         }
@@ -579,7 +632,7 @@ mod tests {
     #[test]
     fn test_from_color() {
         let extcomm = from_color(100);
-        assert_eq!(ext_type(extcomm), TYPE_OPAQUE);
+        assert_eq!(ext_type(extcomm), TYPE_TRANSITIVE_OPAQUE);
         assert_eq!(ext_subtype(extcomm), SUBTYPE_COLOR);
         // Color should be in last 4 bytes
         let value = ext_value(extcomm);
@@ -602,7 +655,7 @@ mod tests {
     #[test]
     fn test_from_encapsulation() {
         let extcomm = from_encapsulation(8); // VXLAN
-        assert_eq!(ext_type(extcomm), TYPE_OPAQUE);
+        assert_eq!(ext_type(extcomm), TYPE_TRANSITIVE_OPAQUE);
         assert_eq!(ext_subtype(extcomm), SUBTYPE_ENCAPSULATION);
         // Tunnel type should be in last 2 bytes
         let value = ext_value(extcomm);
@@ -693,5 +746,58 @@ mod tests {
             let formatted = format_extended_community(extcomm);
             assert_eq!(original, formatted);
         }
+    }
+
+    #[test]
+    fn test_from_rpki_state_community() {
+        let valid = from_rpki_state_community(0);
+        assert_eq!(
+            ext_type(valid),
+            TYPE_TRANSITIVE_OPAQUE | TYPE_NON_TRANSITIVE_BIT
+        );
+        assert_eq!(ext_subtype(valid), SUBTYPE_ORIGIN_VALIDATION);
+        assert_eq!(rpki_state_community_value(valid), 0);
+        assert!(!is_transitive(valid));
+
+        let not_found = from_rpki_state_community(1);
+        assert_eq!(rpki_state_community_value(not_found), 1);
+
+        let invalid = from_rpki_state_community(2);
+        assert_eq!(rpki_state_community_value(invalid), 2);
+    }
+
+    #[test]
+    fn test_is_rpki_state_community() {
+        assert!(is_rpki_state_community(from_rpki_state_community(0)));
+        assert!(is_rpki_state_community(from_rpki_state_community(1)));
+        assert!(is_rpki_state_community(from_rpki_state_community(2)));
+        assert!(!is_rpki_state_community(from_two_octet_as(
+            SUBTYPE_ROUTE_TARGET,
+            65000,
+            100
+        )));
+        assert!(!is_rpki_state_community(from_color(100)));
+        assert!(!is_rpki_state_community(from_link_bandwidth(
+            65000, 1000000.0
+        )));
+    }
+
+    #[test]
+    fn test_rpki_state_community_roundtrip() {
+        let test_cases = vec!["rpki:valid", "rpki:not-found", "rpki:invalid"];
+
+        for original in test_cases {
+            let extcomm = parse_extended_community(original).unwrap();
+            let formatted = format_extended_community(extcomm);
+            assert_eq!(original, formatted);
+        }
+    }
+
+    #[test]
+    fn test_parse_rpki_state_community_invalid() {
+        assert_eq!(
+            parse_extended_community("rpki:unknown"),
+            Err(ParseExtCommunityError::InvalidFormat)
+        );
     }
 }

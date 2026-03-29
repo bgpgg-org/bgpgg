@@ -15,6 +15,7 @@
 use crate::bgp::msg_open_types::LlgrEntry;
 use crate::bgp::multiprotocol::{default_afi_safis, AfiSafi};
 use crate::net::bind_addr_from_ip;
+use crate::rpki::vrp::RpkiValidation;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -234,6 +235,9 @@ pub struct PeerConfig {
     /// RFC 9494: Long-Lived Graceful Restart configuration
     #[serde(default)]
     pub llgr: Option<LlgrConfig>,
+    /// RFC 8097: Attach RPKI Origin Validation State extended community on export
+    #[serde(default)]
+    pub send_rpki_community: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -347,6 +351,7 @@ impl Default for PeerConfig {
             graceful_shutdown: false,
             ttl_min: None,
             llgr: None,
+            send_rpki_community: false,
         }
     }
 }
@@ -534,7 +539,7 @@ pub struct ConditionsConfig {
     #[serde(default)]
     pub community: Option<String>, // Single community value
     #[serde(default)]
-    pub rpki_validation: Option<String>, // "valid", "invalid", "not-found"
+    pub rpki_validation: Option<RpkiValidationConfig>,
 }
 
 /// Reference to a defined set with match option
@@ -562,6 +567,35 @@ pub enum MatchOptionConfig {
     Invert,
 }
 
+/// RFC 6811: RPKI validation state for policy config
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RpkiValidationConfig {
+    Valid,
+    Invalid,
+    NotFound,
+}
+
+impl From<RpkiValidationConfig> for RpkiValidation {
+    fn from(config: RpkiValidationConfig) -> Self {
+        match config {
+            RpkiValidationConfig::Valid => RpkiValidation::Valid,
+            RpkiValidationConfig::Invalid => RpkiValidation::Invalid,
+            RpkiValidationConfig::NotFound => RpkiValidation::NotFound,
+        }
+    }
+}
+
+impl From<RpkiValidation> for RpkiValidationConfig {
+    fn from(state: RpkiValidation) -> Self {
+        match state {
+            RpkiValidation::Valid => RpkiValidationConfig::Valid,
+            RpkiValidation::Invalid => RpkiValidationConfig::Invalid,
+            RpkiValidation::NotFound => RpkiValidationConfig::NotFound,
+        }
+    }
+}
+
 /// Actions to apply when conditions match
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -580,6 +614,8 @@ pub struct ActionsConfig {
     pub ext_community: Option<ExtCommunityActionConfig>,
     #[serde(default)]
     pub large_community: Option<LargeCommunityActionConfig>,
+    #[serde(default)]
+    pub set_rpki_state: Option<RpkiValidationConfig>,
 }
 
 /// Local preference action

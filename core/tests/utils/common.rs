@@ -148,6 +148,7 @@ pub struct PeerConfig {
     pub min_route_advertisement_interval_secs: Option<u64>,
     pub add_path_send: Option<bool>,
     pub add_path_receive: Option<bool>,
+    pub send_rpki_community: Option<bool>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -1132,6 +1133,7 @@ pub async fn chain_servers<const N: usize>(
             .into()
         }),
         add_path_receive: config.add_path_receive,
+        send_rpki_community: config.send_rpki_community,
         ..Default::default()
     };
 
@@ -1348,6 +1350,7 @@ pub async fn mesh_servers<const N: usize>(
             .into()
         }),
         add_path_receive: config.add_path_receive,
+        send_rpki_community: config.send_rpki_community,
         ..Default::default()
     };
 
@@ -1426,6 +1429,7 @@ pub async fn hub_spoke_servers<const N: usize>(
             .into()
         }),
         add_path_receive: config.add_path_receive,
+        send_rpki_community: config.send_rpki_community,
         ..Default::default()
     };
 

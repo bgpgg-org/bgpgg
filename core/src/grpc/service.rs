@@ -329,6 +329,9 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
         graceful_shutdown: cfg.graceful_shutdown.unwrap_or(defaults.graceful_shutdown),
         ttl_min: cfg.ttl_min.map(|v| v as u8).or(defaults.ttl_min),
         llgr: proto_to_llgr_config(cfg.llgr)?,
+        send_rpki_community: cfg
+            .send_rpki_community
+            .unwrap_or(defaults.send_rpki_community),
     })
 }
 
@@ -420,6 +423,7 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
         graceful_shutdown: Some(config.graceful_shutdown),
         ttl_min: config.ttl_min.map(|v| v as u32),
         llgr,
+        send_rpki_community: Some(config.send_rpki_community),
     }
 }
 

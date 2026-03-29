@@ -105,6 +105,7 @@ impl BgpServer {
                 next_hop_self: entry.config.next_hop_self,
                 graceful_shutdown: entry.config.graceful_shutdown,
                 capabilities: &capabilities,
+                send_rpki_community: entry.config.send_rpki_community,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);
@@ -174,6 +175,7 @@ impl BgpServer {
             next_hop_self: peer_info.config.next_hop_self,
             graceful_shutdown: peer_info.config.graceful_shutdown,
             capabilities: &capabilities,
+            send_rpki_community: peer_info.config.send_rpki_community,
         };
 
         let all_prefixes = self.loc_rib.prefixes_for_afi(afi);

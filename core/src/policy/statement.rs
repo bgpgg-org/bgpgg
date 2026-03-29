@@ -161,14 +161,7 @@ impl Statement {
                     });
                 }
                 Condition::RpkiValidation(state) => {
-                    conditions.rpki_validation = Some(
-                        match state {
-                            RpkiValidation::Valid => "valid",
-                            RpkiValidation::Invalid => "invalid",
-                            RpkiValidation::NotFound => "not-found",
-                        }
-                        .to_string(),
-                    );
+                    conditions.rpki_validation = Some((*state).into());
                 }
             }
         }
@@ -298,6 +291,9 @@ impl Statement {
                         }
                     }
                 }
+                Action::SetRpkiState(state) => {
+                    actions.set_rpki_state = Some((*state).into());
+                }
             }
         }
 
@@ -351,6 +347,7 @@ pub enum Action {
     SetCommunity(CommunityOp),
     SetExtCommunity(ExtCommunityOp),
     SetLargeCommunity(LargeCommunityOp),
+    SetRpkiState(RpkiValidation),
 }
 
 impl Action {
@@ -426,6 +423,10 @@ impl Action {
                         path.attrs.large_communities = new_large_communities.clone();
                     }
                 }
+                true
+            }
+            Action::SetRpkiState(state) => {
+                path.rpki_state = *state;
                 true
             }
         }
@@ -688,19 +689,8 @@ fn add_conditions(
         stmt = stmt.when(Condition::Community(community));
     }
 
-    if let Some(ref rpki_str) = cond.rpki_validation {
-        let rpki_state = match rpki_str.as_str() {
-            "valid" => RpkiValidation::Valid,
-            "invalid" => RpkiValidation::Invalid,
-            "not-found" => RpkiValidation::NotFound,
-            _ => {
-                return Err(format!(
-                    "invalid rpki-validation '{}' (must be 'valid', 'invalid', or 'not-found')",
-                    rpki_str
-                ))
-            }
-        };
-        stmt = stmt.when(Condition::RpkiValidation(rpki_state));
+    if let Some(rpki_config) = cond.rpki_validation {
+        stmt = stmt.when(Condition::RpkiValidation(rpki_config.into()));
     }
 
     Ok(stmt)
@@ -808,6 +798,10 @@ fn add_actions(mut stmt: Statement, actions: &ActionsConfig) -> Result<Statement
             }
         };
         stmt = stmt.then(action);
+    }
+
+    if let Some(rpki_config) = actions.set_rpki_state {
+        stmt = stmt.then(Action::SetRpkiState(rpki_config.into()));
     }
 
     // Accept/Reject (should be last)

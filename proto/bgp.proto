@@ -102,6 +102,7 @@ message SessionConfig {
     optional bool graceful_shutdown = 19;  // RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
+    optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
 }
 
 // Add peer request/response
@@ -578,6 +579,7 @@ message ActionsConfig {
     optional uint32 med = 4;
     repeated string add_communities = 5;
     repeated string remove_communities = 6;
+    optional RpkiValidation set_rpki_state = 7;
 }
 
 message RemovePolicyRequest {

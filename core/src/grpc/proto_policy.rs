@@ -26,7 +26,7 @@ use super::proto::{
 use crate::config::{
     ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
     DefinedSetConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
-    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
+    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, RpkiValidationConfig, StatementConfig,
 };
 use crate::server::ops_mgmt::PolicyInfoResponse;
 
@@ -125,9 +125,9 @@ pub(super) fn proto_to_statement_config(
             community: None,
             rpki_validation: c.rpki_validation.and_then(|v| {
                 match ProtoRpkiValidation::try_from(v) {
-                    Ok(ProtoRpkiValidation::RpkiValid) => Some("valid".to_string()),
-                    Ok(ProtoRpkiValidation::RpkiInvalid) => Some("invalid".to_string()),
-                    Ok(ProtoRpkiValidation::RpkiNotFound) => Some("not-found".to_string()),
+                    Ok(ProtoRpkiValidation::RpkiValid) => Some(RpkiValidationConfig::Valid),
+                    Ok(ProtoRpkiValidation::RpkiInvalid) => Some(RpkiValidationConfig::Invalid),
+                    Ok(ProtoRpkiValidation::RpkiNotFound) => Some(RpkiValidationConfig::NotFound),
                     Err(_) => None,
                 }
             }),
@@ -155,6 +155,14 @@ pub(super) fn proto_to_statement_config(
         },
         ext_community: None,   // TODO: Add proto support for extended communities
         large_community: None, // TODO: Add proto support for large communities
+        set_rpki_state: a
+            .set_rpki_state
+            .and_then(|v| match ProtoRpkiValidation::try_from(v) {
+                Ok(ProtoRpkiValidation::RpkiValid) => Some(RpkiValidationConfig::Valid),
+                Ok(ProtoRpkiValidation::RpkiInvalid) => Some(RpkiValidationConfig::Invalid),
+                Ok(ProtoRpkiValidation::RpkiNotFound) => Some(RpkiValidationConfig::NotFound),
+                Err(_) => None,
+            }),
         accept: a.accept,
         reject: a.reject,
     });
@@ -298,11 +306,11 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 }),
                 prefix: s.conditions.prefix.clone(),
                 neighbor: s.conditions.neighbor.clone(),
-                rpki_validation: s.conditions.rpki_validation.as_deref().map(|v| {
+                rpki_validation: s.conditions.rpki_validation.map(|v| {
                     match v {
-                        "valid" => ProtoRpkiValidation::RpkiValid,
-                        "invalid" => ProtoRpkiValidation::RpkiInvalid,
-                        _ => ProtoRpkiValidation::RpkiNotFound,
+                        RpkiValidationConfig::Valid => ProtoRpkiValidation::RpkiValid,
+                        RpkiValidationConfig::Invalid => ProtoRpkiValidation::RpkiInvalid,
+                        RpkiValidationConfig::NotFound => ProtoRpkiValidation::RpkiNotFound,
                     }
                     .into()
                 }),
@@ -331,6 +339,14 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 }),
                 add_communities,
                 remove_communities,
+                set_rpki_state: s.actions.set_rpki_state.map(|r| {
+                    match r {
+                        RpkiValidationConfig::Valid => ProtoRpkiValidation::RpkiValid,
+                        RpkiValidationConfig::Invalid => ProtoRpkiValidation::RpkiInvalid,
+                        RpkiValidationConfig::NotFound => ProtoRpkiValidation::RpkiNotFound,
+                    }
+                    .into()
+                }),
             });
 
             StatementInfo {

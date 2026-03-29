@@ -104,7 +104,7 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
             )
         }
 
-        TYPE_OPAQUE => {
+        TYPE_TRANSITIVE_OPAQUE => {
             proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
                 is_transitive,
                 value: value_bytes.to_vec(),

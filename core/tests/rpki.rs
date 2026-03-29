@@ -15,12 +15,27 @@
 mod utils;
 pub use utils::*;
 
+use bgpgg::bgp::ext_community::from_rpki_state_community;
 use bgpgg::config::{Config, RpkiCacheConfig};
-use bgpgg::grpc::proto::RpkiValidation;
+use bgpgg::grpc::proto::{
+    extended_community::{Community, Opaque},
+    ExtendedCommunity, RpkiValidation, SessionConfig,
+};
 use bgpgg::net::{IpNetwork, Ipv4Net};
-use bgpgg::rpki::vrp::Vrp;
+use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
 use std::net::Ipv4Addr;
 use utils::rtr::FakeCache;
+
+fn rpki_state_ext_community(state: RpkiState) -> ExtendedCommunity {
+    let ec = from_rpki_state_community(state.to_u8());
+    let bytes = ec.to_be_bytes();
+    ExtendedCommunity {
+        community: Some(Community::Opaque(Opaque {
+            is_transitive: false,
+            value: bytes[2..].to_vec(),
+        })),
+    }
+}
 
 /// Phase 10 test case 1: Basic validation state.
 /// Inject VRPs via FakeCache, announce routes from peers with different origin ASes,
@@ -124,5 +139,110 @@ async fn test_rpki_basic_validation_state() {
             ),
         ],
     )])
+    .await;
+}
+
+/// RFC 8097: RPKI state extended community send and eBGP stripping.
+/// Topology: validator (65001, RPKI) -> receiver (65001, iBGP)
+///                                   -> downstream (65003, eBGP)
+/// Verifies: receiver gets the RPKI state community, downstream does not (stripped at eBGP).
+#[tokio::test]
+async fn test_rpki_state_community_send_and_strip() {
+    let mut cache = FakeCache::listen().await;
+
+    let validator = start_test_server(Config {
+        asn: 65001,
+        listen_addr: "127.0.0.1:0".to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        rpki_caches: vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+    let receiver = start_test_server(Config::new(
+        65001,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+    let downstream = start_test_server(Config::new(
+        65003,
+        "127.0.0.3:0",
+        Ipv4Addr::new(3, 3, 3, 3),
+        90,
+    ))
+    .await;
+
+    // validator <-> receiver (iBGP): send_rpki_community on this link
+    peer_servers_with_config(
+        &validator,
+        &receiver,
+        SessionConfig {
+            send_rpki_community: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // validator <-> downstream (eBGP): default config
+    peer_servers(&validator, &downstream).await;
+
+    // Accept RPKI cache and provide VRPs
+    cache.accept().await;
+    cache.read_reset_query().await;
+    cache
+        .send_vrps(&[Vrp {
+            prefix: IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 8,
+            }),
+            max_length: 24,
+            origin_as: 65001,
+        }])
+        .await;
+
+    // Validator announces its own route: 10.0.0.0/24 (Valid per VRP, origin AS matches)
+    announce_route(
+        &validator,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: validator.address.to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    poll_rib(&[
+        (
+            &receiver,
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    next_hop: validator.address.to_string(),
+                    peer_address: validator.address.to_string(),
+                    local_pref: Some(100),
+                    extended_communities: vec![rpki_state_ext_community(RpkiState::NotFound)],
+                    ..Default::default()
+                },
+            )],
+        ),
+        (
+            &downstream,
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    as_path: vec![as_sequence(vec![65001])],
+                    next_hop: validator.address.to_string(),
+                    peer_address: validator.address.to_string(),
+                    local_pref: Some(100),
+                    extended_communities: vec![],
+                    ..Default::default()
+                },
+            )],
+        ),
+    ])
     .await;
 }

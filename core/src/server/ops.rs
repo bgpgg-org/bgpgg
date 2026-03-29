@@ -14,6 +14,7 @@
 
 use super::{AdminState, BgpServer, BmpOp, BmpPeerStats, ConnectionType, PeerInfo};
 use crate::bgp::community;
+use crate::bgp::ext_community::is_rpki_state_community;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::StaleFilter;
@@ -733,6 +734,10 @@ impl BgpServer {
                 // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive
                 path.attrs.originator_id = None;
                 path.attrs.cluster_list.clear();
+                // RFC 8097: strip RPKI state extended community from eBGP peers
+                path.attrs
+                    .extended_communities
+                    .retain(|ec| !is_rpki_state_community(*ec));
                 // RFC 8326: GRACEFUL_SHUTDOWN community -> LOCAL_PREF = 0
                 if path
                     .attrs

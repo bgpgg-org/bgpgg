@@ -41,6 +41,21 @@ pub enum RpkiValidation {
     NotFound,
 }
 
+impl RpkiValidation {
+    /// RFC 8097 wire values for origin validation state extended community
+    pub const VALID: u8 = 0;
+    pub const NOT_FOUND: u8 = 1;
+    pub const INVALID: u8 = 2;
+
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            RpkiValidation::Valid => Self::VALID,
+            RpkiValidation::NotFound => Self::NOT_FOUND,
+            RpkiValidation::Invalid => Self::INVALID,
+        }
+    }
+}
+
 /// Table of VRPs indexed by prefix for efficient covering-prefix lookups.
 pub struct VrpTable {
     ipv4: PrefixTrie<Ipv4Net, Vec<Vrp>>,
@@ -492,5 +507,12 @@ mod tests {
             table.validate(v4(10, 0, 0, 0, 8), 65001),
             RpkiValidation::NotFound
         );
+    }
+
+    #[test]
+    fn test_rpki_validation_to_u8() {
+        assert_eq!(RpkiValidation::Valid.to_u8(), 0);
+        assert_eq!(RpkiValidation::NotFound.to_u8(), 1);
+        assert_eq!(RpkiValidation::Invalid.to_u8(), 2);
     }
 }

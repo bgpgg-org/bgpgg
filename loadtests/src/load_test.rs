@@ -67,6 +67,7 @@ async fn create_reject_all_policy(client: &mut BgpClient) {
                     med: None,
                     add_communities: vec![],
                     remove_communities: vec![],
+                    set_rpki_state: None,
                 }),
             }],
         })

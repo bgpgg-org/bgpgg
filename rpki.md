@@ -10,7 +10,7 @@ Module: `core/src/rpki/`
 | 8210 | RPKI-to-Router Protocol v1 | Must implement | Wire protocol for cache communication |
 | 8481 | Clarifications to Origin Validation | Must implement | Updates 6811: validate ALL prefixes, never apply default policy |
 | 8893 | RPKI Origin Validation for BGP Export | Must implement | Updates 6811: validate at export too, using effective origin AS |
-| 8097 | Origin Validation State Extended Community | Should implement | Non-transitive ext community to carry validation state over iBGP |
+| 8097 | Origin Validation State Extended Community | Done | Non-transitive ext community to carry validation state over iBGP |
 | 6810 | RPKI-to-Router Protocol v0 | Skip | Superseded by 8210 |
 | 9319 | Use of maxLength in RPKI | Skip | Guidance for ROA creators, not routers |
 | 8210bis | RPKI-to-Router Protocol v2 (draft) | Skip | Still a draft, adds ASPA -- revisit when published |
@@ -684,7 +684,7 @@ Test: `core/tests/policy.rs::test_import_policy_rpki_validation` --
 explicit match on all three states (Invalid->reject, Valid->tag
 community 65001:1, NotFound->tag community 65001:2).
 
-### Phase 7: iBGP Validation State Propagation (RFC 8097)
+### Phase 7: Origin Validation State Extended Community (RFC 8097) -- COMPLETE
 
 When validation state influences best path selection via a non-propagated
 attribute (e.g., LOCAL_PREF), iBGP peers may not have the same validation
@@ -706,32 +706,87 @@ RFC 8097 defines a non-transitive opaque extended community:
 - Sub-type: 0x00
 - 5 bytes reserved (MUST be 0 on send, ignored on receive)
 - 1 byte validation state: 0 = Valid, 1 = NotFound, 2 = Invalid
+- String format: `rpki:valid`, `rpki:not-found`, `rpki:invalid`
 
-**Export behavior:**
-- On export to iBGP peer (when `send_rpki_community` is true): attach
-  the extended community with current rpki_state.
-- SHOULD NOT send more than one instance (RFC 8097).
-- SHOULD NOT send to eBGP peers by default. `send_rpki_community`
-  defaults to false; operator can enable per-peer if warranted.
+#### Send side
 
-**Import behavior:**
-- On import from iBGP peer: if community present, derive rpki_state
-  from it (override local validation -- the validating router already
-  checked). No config needed -- the community is non-transitive.
-- If multiple instances received: MUST use only the one with the
-  numerically greatest validation state value (RFC 8097). Discard
-  the rest.
-- If value > 2: MUST discard the erroneous community and log the
-  error (attribute discard per RFC 7606). Do not set rpki_state
-  from it; fall through to local validation.
-- MUST drop the community if received from an eBGP peer by default
-  (RFC 8097). No receive-side config override -- the community is
-  non-transitive and should never cross eBGP boundaries.
+Per-peer `send_rpki_community: bool` (default false). When true,
+`compute_export_path()` attaches the RPKI state extended community based on
+the path's current `rpki_state`.
 
-Per-peer config:
-```rust
-pub send_rpki_community: bool,  // export: attach validation state ext community (default false)
+- Remove any existing RPKI state communities first, then attach new one.
+  The path may already carry an RPKI state community from a previous hop
+  (e.g., upstream iBGP peer). RFC 8097 says SHOULD NOT send more
+  than one instance, and receivers use the greatest (most pessimistic)
+  value when multiple are present -- so we strip and replace with
+  our own fresh validation result.
+- Default false; typically enabled on iBGP peers. Operator can enable
+  on eBGP peers if warranted but SHOULD NOT by default (RFC 8097).
+
+#### Receive side (policy-based)
+
+No special receive flag. The operator uses existing policy to match the
+RPKI state extended community and set rpki_state via a new `SetRpkiState`
+action. This keeps the receive side explicit and composable with other
+policy logic.
+
+Example import policy:
+```yaml
+- name: rpki-from-rr
+  statements:
+    - conditions:
+        match_ext_community_set: "rpki-valid"   # rpki:valid
+      actions:
+        set_rpki_state: valid
+        result: accept
+    - conditions:
+        match_ext_community_set: "rpki-invalid"  # rpki:invalid
+      actions:
+        set_rpki_state: invalid
+        result: reject
 ```
+
+This means routers that validate locally ignore the community (no
+policy to consume it), while routers that rely on an upstream
+validator opt in explicitly via import policy.
+
+#### eBGP stripping
+
+Non-transitive extended communities (type high bit 0x40) MUST be
+stripped at eBGP boundaries. On export: `build_export_attrs()` strips
+non-transitive ext communities for eBGP peers. On import from eBGP:
+strip RPKI state communities before policy evaluation.
+
+#### Implementation
+
+1. `ext_community.rs`: Add `SUBTYPE_ORIGIN_VALIDATION: u8 = 0x00`,
+   `from_rpki_state_community(state: u8) -> u64`, `is_rpki_state_community(extcomm)`,
+   `rpki_state_community_value(extcomm) -> Option<u8>`. Parse/format `rpki:valid`,
+   `rpki:not-found`, `rpki:invalid`.
+
+2. `PeerConfig`: Add `send_rpki_community: bool`.
+
+3. `PeerExportContext`: Carry `send_rpki_community`.
+
+4. `compute_export_path()`: After export policy, if `send_rpki_community`,
+   strip existing RPKI state communities and attach new one from rpki_state.
+
+5. `Action::SetRpkiState(RpkiValidation)`: New policy action that sets
+   `path.rpki_state`. Wire through gRPC/config parsing.
+
+6. `build_export_attrs()`: Strip non-transitive ext communities for
+   eBGP peers. Strip RPKI state on eBGP import in `apply_import()` or earlier.
+
+#### Tests
+
+1. **Send**: Two iBGP peers, `send_rpki_community: true` on exporter.
+   Verify RPKI state ext community appears with correct validation state.
+2. **Receive via policy**: Import policy matches `rpki:valid`, action
+   sets rpki_state. Verify path gets correct state.
+3. **eBGP strip**: RPKI state community from eBGP peer is stripped.
+4. **Dedup**: Path with existing RPKI state community -- only one sent.
+5. **ovs parse/format roundtrip**: `rpki:valid`, `rpki:not-found`,
+   `rpki:invalid` all roundtrip through parse/format.
 
 ### Phase 8: SSH Transport (deferred)
 
@@ -815,9 +870,17 @@ Test cases (table-driven where possible):
    with 65001:2. Verifies all three match conditions and absence of
    rejected route. Test: `core/tests/policy.rs::test_import_policy_rpki_validation`.
 
-8. **iBGP validation state community (RFC 8097).** Two servers, iBGP
-   peered. Configure send_rpki_community on exporting peer. Verify
-   receiving peer gets the extended community and uses it for rpki_state.
+8. **RPKI state extended community send (RFC 8097).** Two servers, iBGP peered.
+   Configure send_rpki_community on exporting peer. Verify receiving
+   peer gets the `rpki:valid` / `rpki:invalid` / `rpki:not-found` ext
+   community.
+
+9. **RPKI state receive via policy.** Import policy matches RPKI state ext community
+   and sets rpki_state via SetRpkiState action. Verify path gets the
+   correct rpki_state on the receiving router.
+
+10. **eBGP RPKI state stripping.** eBGP peer sends RPKI state community. Verify it
+    is stripped before policy evaluation.
 
 ### Performance: Dual HashMap + PrefixTrie
 
