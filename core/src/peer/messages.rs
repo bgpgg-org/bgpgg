@@ -28,7 +28,7 @@ use crate::log::{debug, info, warn};
 use crate::server::ops::ServerOp;
 use std::collections::HashSet;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 
 use crate::config::{AddPathSend, PeerConfig};
@@ -375,7 +375,6 @@ impl Peer {
     pub(super) async fn handle_received_message(
         &mut self,
         message: BgpMessage,
-        peer_ip: IpAddr,
     ) -> Result<(), io::Error> {
         match &message {
             BgpMessage::Notification(_) => {
@@ -392,12 +391,12 @@ impl Peer {
                     self.fsm.timers.reset_hold_timer();
                 }
 
+                // Accumulate into pending buffers; the established loop
+                // flushes periodically so multiple UPDATEs coalesce into
+                // a single ServerOp::PeerUpdate.
                 if let Some((announced, withdrawn)) = delta {
-                    let _ = self.server_tx.send(ServerOp::PeerUpdate {
-                        peer_ip,
-                        withdrawn,
-                        announced,
-                    });
+                    self.pending_announced.extend(announced);
+                    self.pending_withdrawn.extend(withdrawn);
                 }
                 Ok(())
             }

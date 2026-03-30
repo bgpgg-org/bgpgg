@@ -24,6 +24,10 @@ use std::mem;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
+/// Flush pending route buffer immediately when it reaches this size,
+/// rather than waiting for the periodic flush timer.
+const ROUTE_FLUSH_WATERMARK: usize = 1000;
+
 impl Peer {
     /// Handle Established state transitions.
     pub(super) async fn handle_established_transitions(
@@ -107,8 +111,12 @@ impl Peer {
 
         // Timer interval for hold/keepalive checks
         let mut timer_interval = tokio::time::interval(Duration::from_millis(500));
+        // Flush interval for coalescing route updates to the server
+        let mut flush_interval = tokio::time::interval(Duration::from_millis(10));
+        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            let has_pending_routes = self.pending_route_count() > 0;
             let conn = match self.conn.as_mut() {
                 Some(c) => c,
                 None => {
@@ -137,10 +145,15 @@ impl Peer {
                             let format = self.capabilities.receive_format(self.session_type);
                             match Self::parse_bgp_message(&bytes, format) {
                                 Ok(message) => {
-                                    if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                    if let Err(e) = self.handle_received_message(message).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");
                                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                         return false;
+                                    }
+
+                                    // Don't wait for the flush timer under heavy load
+                                    if self.pending_route_count() >= ROUTE_FLUSH_WATERMARK {
+                                        self.flush_pending_routes();
                                     }
                                 }
                                 Err(e) => {
@@ -320,6 +333,11 @@ impl Peer {
                             return false;
                         }
                     }
+                }
+
+                // Flush coalesced route updates to server
+                _ = flush_interval.tick(), if has_pending_routes => {
+                    self.flush_pending_routes();
                 }
 
                 // MRAI timer - send pending updates when timer expires

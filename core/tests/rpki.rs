@@ -21,10 +21,10 @@ use bgpgg::grpc::proto::{
     extended_community::{Community, Opaque},
     ExtendedCommunity, Route, RpkiValidation, SessionConfig,
 };
-use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use bgpgg::rpki::rtr::ErrorCode;
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::rtr::{FakeCache, FakeSshCache, FakeTcpCache};
 
@@ -39,12 +39,35 @@ fn vrp4(a: u8, b: u8, c: u8, d: u8, prefix_length: u8, max_length: u8, origin_as
     }
 }
 
-/// Build an expected route with rpki_validation state from a given peer.
-fn rpki_route(prefix: &str, state: RpkiValidation, peer: &TestServer) -> Route {
+fn vrp6(addr: Ipv6Addr, prefix_length: u8, max_length: u8, origin_as: u32) -> Vrp {
+    Vrp {
+        prefix: IpNetwork::V6(Ipv6Net {
+            address: addr,
+            prefix_length,
+        }),
+        max_length,
+        origin_as,
+    }
+}
+
+/// Build an expected IPv4 route with rpki_validation state from a given peer.
+fn rpki_v4_route(prefix: &str, state: RpkiValidation, peer: &TestServer) -> Route {
     expected_route(
         prefix,
         PathParams {
             rpki_validation: state as i32,
+            ..PathParams::from_peer(peer)
+        },
+    )
+}
+
+/// Build an expected IPv6 route with rpki_validation state from a given peer.
+fn rpki_v6_route(prefix: &str, state: RpkiValidation, next_hop: &str, peer: &TestServer) -> Route {
+    expected_route(
+        prefix,
+        PathParams {
+            rpki_validation: state as i32,
+            next_hop: next_hop.to_string(),
             ..PathParams::from_peer(peer)
         },
     )
@@ -90,7 +113,7 @@ async fn announce_and_verify_rpki(
         },
     )
     .await;
-    poll_rib(&[(on, vec![rpki_route(prefix, state, from)])]).await;
+    poll_rib(&[(on, vec![rpki_v4_route(prefix, state, from)])]).await;
 }
 
 fn rpki_state_ext_community(state: RpkiState) -> ExtendedCommunity {
@@ -139,9 +162,9 @@ async fn verify_basic_validation<S: AsyncRead + AsyncWrite + Unpin>(
     poll_rib(&[(
         server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, server2),
-            rpki_route("192.168.1.0/24", RpkiValidation::RpkiNotFound, server2),
-            rpki_route("10.1.0.0/24", RpkiValidation::RpkiInvalid, server3),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiValid, server2),
+            rpki_v4_route("192.168.1.0/24", RpkiValidation::RpkiNotFound, server2),
+            rpki_v4_route("10.1.0.0/24", RpkiValidation::RpkiInvalid, server3),
         ],
     )])
     .await;
@@ -404,8 +427,10 @@ async fn test_rpki_vrp_update_reevaluation() {
     cache.read_reset_query().await;
     cache.send_vrps(&[]).await;
 
-    // Announce routes before any VRPs exist -> all NotFound
-    for prefix in ["10.0.0.0/24", "10.1.0.0/24"] {
+    // Announce routes before any VRPs exist -> all NotFound.
+    // Includes 10.0.0.0/8 (exact VRP prefix) to verify subtree inclusivity
+    // in the re-evaluation path.
+    for prefix in ["10.0.0.0/8", "10.0.0.0/24", "10.1.0.0/24"] {
         announce_route(
             &server2,
             RouteParams {
@@ -420,13 +445,14 @@ async fn test_rpki_vrp_update_reevaluation() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
-            rpki_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.0.0.0/8", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
         ],
     )])
     .await;
 
-    // Inject VRP: 10.0.0.0/8 max /24 AS 65002 -> both routes become Valid
+    // Inject VRP: 10.0.0.0/8 max /24 AS 65002 -> all three routes become Valid
     let vrp = vrp4(10, 0, 0, 0, 8, 24, 65002);
     cache.send_notify().await;
     cache.read_serial_query().await;
@@ -435,8 +461,9 @@ async fn test_rpki_vrp_update_reevaluation() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
-            rpki_route("10.1.0.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/8", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.1.0.0/24", RpkiValidation::RpkiValid, &server2),
         ],
     )])
     .await;
@@ -449,8 +476,9 @@ async fn test_rpki_vrp_update_reevaluation() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
-            rpki_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.0.0.0/8", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("10.1.0.0/24", RpkiValidation::RpkiNotFound, &server2),
         ],
     )])
     .await;
@@ -505,8 +533,8 @@ async fn test_rpki_multi_cache_merge() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
-            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
         ],
     )])
     .await;
@@ -521,8 +549,8 @@ async fn test_rpki_multi_cache_merge() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
-            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
         ],
     )])
     .await;
@@ -573,8 +601,8 @@ async fn test_rpki_cache_reset() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
-            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
         ],
     )])
     .await;
@@ -624,7 +652,7 @@ async fn test_rpki_cache_failover() {
     poll_rib_with_timeout(
         &[(
             &server1,
-            vec![rpki_route(
+            vec![rpki_v4_route(
                 "10.0.0.0/24",
                 RpkiValidation::RpkiValid,
                 &server2,
@@ -642,7 +670,7 @@ async fn test_rpki_cache_failover() {
     // Routes stay valid, preferred reactivated, fallback killed
     poll_rib(&[(
         &server1,
-        vec![rpki_route(
+        vec![rpki_v4_route(
             "10.0.0.0/24",
             RpkiValidation::RpkiValid,
             &server2,
@@ -701,7 +729,7 @@ async fn test_rpki_no_data_available() {
 
     poll_rib(&[(
         &server1,
-        vec![rpki_route(
+        vec![rpki_v4_route(
             "10.0.0.0/24",
             RpkiValidation::RpkiValid,
             &server2,
@@ -762,8 +790,70 @@ async fn test_rpki_session_id_mismatch() {
     poll_rib(&[(
         &server1,
         vec![
-            rpki_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
-            rpki_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+            rpki_v4_route("10.0.0.0/24", RpkiValidation::RpkiNotFound, &server2),
+            rpki_v4_route("192.168.1.0/24", RpkiValidation::RpkiValid, &server2),
+        ],
+    )])
+    .await;
+}
+
+/// IPv6 VRP validation: Valid, Invalid, NotFound with IPv6 prefixes and max_length.
+#[tokio::test]
+async fn test_rpki_ipv6_validation() {
+    let mut cache = FakeTcpCache::listen().await;
+    let (server1, server2) = setup_rpki_peer(
+        vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        65002,
+    )
+    .await;
+
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // VRP: 2001:db8::/32 max /48 AS 65002
+    let addr = "2001:db8::".parse::<Ipv6Addr>().unwrap();
+    cache.send_vrps(&[vrp6(addr, 32, 48, 65002)]).await;
+
+    // 2001:db8:1::/48 from AS 65002 -> Valid (covered, origin matches)
+    // 2001:db8:ff:1::/64 from AS 65002 -> Invalid (prefix len exceeds max_length)
+    // 2001:a00::/24 from AS 65002 -> NotFound (no covering VRP)
+    let next_hop_v6 = "2001:db8::2".to_string();
+    for prefix in ["2001:db8:1::/48", "2001:db8:ff:1::/64", "2001:a00::/24"] {
+        announce_route(
+            &server2,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: next_hop_v6.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    poll_rib(&[(
+        &server1,
+        vec![
+            rpki_v6_route(
+                "2001:a00::/24",
+                RpkiValidation::RpkiNotFound,
+                &next_hop_v6,
+                &server2,
+            ),
+            rpki_v6_route(
+                "2001:db8:1::/48",
+                RpkiValidation::RpkiValid,
+                &next_hop_v6,
+                &server2,
+            ),
+            rpki_v6_route(
+                "2001:db8:ff:1::/64",
+                RpkiValidation::RpkiInvalid,
+                &next_hop_v6,
+                &server2,
+            ),
         ],
     )])
     .await;

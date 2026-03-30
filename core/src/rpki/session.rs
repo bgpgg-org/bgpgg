@@ -396,27 +396,25 @@ impl CacheSession {
         match msg {
             Message::SerialNotify(notify) => self.handle_msg_serial_notify(notify, writer).await,
             Message::CacheResponse(resp) => self.handle_msg_cache_response(resp, writer).await,
-            Message::Ipv4Prefix(prefix) => {
-                self.handle_msg_prefix(
-                    writer,
-                    prefix.is_announcement(),
-                    prefix.prefix_length,
-                    prefix.max_length,
-                    prefix.asn,
-                    IpAddr::V4(prefix.prefix),
-                )
-                .await
+            Message::Ipv4Prefix(pfx) => {
+                let vrp =
+                    make_ip_network(IpAddr::V4(pfx.prefix), pfx.prefix_length).map(|prefix| Vrp {
+                        prefix,
+                        max_length: pfx.max_length,
+                        origin_as: pfx.asn,
+                    });
+                self.handle_msg_prefix(writer, pfx.is_announcement(), vrp)
+                    .await
             }
-            Message::Ipv6Prefix(prefix) => {
-                self.handle_msg_prefix(
-                    writer,
-                    prefix.is_announcement(),
-                    prefix.prefix_length,
-                    prefix.max_length,
-                    prefix.asn,
-                    IpAddr::V6(prefix.prefix),
-                )
-                .await
+            Message::Ipv6Prefix(pfx) => {
+                let vrp =
+                    make_ip_network(IpAddr::V6(pfx.prefix), pfx.prefix_length).map(|prefix| Vrp {
+                        prefix,
+                        max_length: pfx.max_length,
+                        origin_as: pfx.asn,
+                    });
+                self.handle_msg_prefix(writer, pfx.is_announcement(), vrp)
+                    .await
             }
             Message::EndOfData(eod) => self.handle_msg_end_of_data(eod, writer).await,
             Message::CacheReset(_) => self.handle_msg_cache_reset(writer).await,
@@ -493,15 +491,11 @@ impl CacheSession {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn handle_msg_prefix<W: AsyncWriteExt + Unpin>(
         &mut self,
         writer: &mut W,
         is_announcement: bool,
-        prefix_length: u8,
-        max_length: u8,
-        asn: u32,
-        ip_addr: IpAddr,
+        vrp: Option<Vrp>,
     ) -> Option<SessionResult> {
         let addr = self.config.address;
         if !self.syncing {
@@ -515,18 +509,12 @@ impl CacheSession {
                 .await;
         }
 
-        let prefix = match make_ip_network(ip_addr, prefix_length) {
-            Some(net) => net,
+        let vrp = match vrp {
+            Some(vrp) => vrp,
             None => {
-                warn!(%addr, %ip_addr, prefix_length, "invalid prefix");
+                warn!(%addr, "invalid prefix in PDU");
                 return None;
             }
-        };
-
-        let vrp = Vrp {
-            prefix,
-            max_length,
-            origin_as: asn,
         };
 
         if is_announcement {

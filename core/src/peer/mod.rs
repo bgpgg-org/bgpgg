@@ -415,6 +415,10 @@ pub struct Peer {
     capabilities: PeerCapabilities,
     /// Graceful Restart runtime state (RFC 4724)
     gr_state: Option<GracefulRestartState>,
+    /// Accumulated route announcements awaiting flush to server
+    pending_announced: Vec<PrefixPath>,
+    /// Accumulated route withdrawals awaiting flush to server
+    pending_withdrawn: Vec<Withdrawal>,
 }
 
 impl Peer {
@@ -458,7 +462,23 @@ impl Peer {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
+    }
+
+    fn pending_route_count(&self) -> usize {
+        self.pending_announced.len() + self.pending_withdrawn.len()
+    }
+
+    /// Flush accumulated route announcements/withdrawals to the server
+    /// as a single coalesced PeerUpdate.
+    fn flush_pending_routes(&mut self) {
+        let _ = self.server_tx.send(ServerOp::PeerUpdate {
+            peer_ip: self.addr,
+            announced: std::mem::take(&mut self.pending_announced),
+            withdrawn: std::mem::take(&mut self.pending_withdrawn),
+        });
     }
 
     /// Main peer task - handles the full lifecycle of a BGP peer.
@@ -892,6 +912,8 @@ pub mod test_helpers {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
     }
 }

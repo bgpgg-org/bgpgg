@@ -112,11 +112,11 @@ pub enum CacheEvent {
 }
 
 /// Handle to a running CacheSession task.
-#[allow(dead_code)]
 struct CacheSessionHandle {
     config: RtrCacheConfig,
     shutdown_tx: oneshot::Sender<()>,
-    join_handle: JoinHandle<()>,
+    /// Held to prevent the spawned task from being detached.
+    _join_handle: JoinHandle<()>,
 }
 
 /// Manages RTR cache sessions and delivers merged VRP diffs to the server.
@@ -423,7 +423,7 @@ impl RtrManager {
             CacheSessionHandle {
                 config,
                 shutdown_tx,
-                join_handle,
+                _join_handle: join_handle,
             },
         );
         info!(%addr, "spawned cache session");

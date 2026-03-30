@@ -54,7 +54,7 @@ impl Peer {
 
                             match BgpMessage::from_bytes(message_type, body, format) {
                                 Ok(message) => {
-                                    if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                    if let Err(e) = self.handle_received_message(message).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");
                                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                         return false;
@@ -435,6 +435,8 @@ pub(super) mod tests {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
     }
 

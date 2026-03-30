@@ -106,7 +106,6 @@ pub struct PrefixTrie<K: Prefix, V> {
     len: usize,
 }
 
-#[allow(dead_code)]
 impl<K: Prefix, V> PrefixTrie<K, V> {
     pub fn new() -> Self {
         PrefixTrie {
@@ -126,6 +125,7 @@ impl<K: Prefix, V> PrefixTrie<K, V> {
     }
 
     /// Exact prefix lookup.
+    #[cfg(test)]
     pub fn get(&self, key: &K) -> Option<&V> {
         let idx = self.find_exact(key)?;
         self.node(idx).value.as_ref()
@@ -231,6 +231,7 @@ impl<K: Prefix, V> PrefixTrie<K, V> {
     }
 
     /// Iterate all entries via DFS.
+    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         match self.root {
             Some(root) => self.collect_all(root).into_iter(),
