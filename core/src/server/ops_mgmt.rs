@@ -16,6 +16,7 @@ use super::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionType, GetPeerResponse,
     GetPeersResponse, PeerInfo, PolicyDirection, ResetType,
 };
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::{DefinedSetConfig, PeerConfig};
 use crate::log::{error, info};
@@ -644,6 +645,7 @@ impl BgpServer {
                 let _ = peer_tx.send(PeerOp::SendRouteRefresh {
                     afi: afi_safi.afi,
                     safi: afi_safi.safi,
+                    subtype: RouteRefreshSubtype::Normal,
                 });
             }
         }

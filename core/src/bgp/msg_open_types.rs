@@ -141,6 +141,7 @@ pub(crate) enum BgpCapabiltyCode {
     GracefulRestart = 64,
     FourOctetAsn = 65,
     AddPath = 69,
+    EnhancedRouteRefresh = 70,
     Llgr = 71,
     Unknown,
 }
@@ -153,6 +154,7 @@ impl From<u8> for BgpCapabiltyCode {
             64 => BgpCapabiltyCode::GracefulRestart,
             65 => BgpCapabiltyCode::FourOctetAsn,
             69 => BgpCapabiltyCode::AddPath,
+            70 => BgpCapabiltyCode::EnhancedRouteRefresh,
             71 => BgpCapabiltyCode::Llgr,
             _ => BgpCapabiltyCode::Unknown,
         }
@@ -167,6 +169,7 @@ impl BgpCapabiltyCode {
             BgpCapabiltyCode::GracefulRestart => 64,
             BgpCapabiltyCode::FourOctetAsn => 65,
             BgpCapabiltyCode::AddPath => 69,
+            BgpCapabiltyCode::EnhancedRouteRefresh => 70,
             BgpCapabiltyCode::Llgr => 71,
             BgpCapabiltyCode::Unknown => 0,
         }
@@ -241,6 +244,15 @@ impl Capability {
     pub(crate) fn new_route_refresh() -> Self {
         Capability {
             code: BgpCapabiltyCode::RouteRefresh,
+            len: 0,
+            val: vec![],
+        }
+    }
+
+    /// Create an Enhanced Route Refresh capability (RFC 7313, capability code 70)
+    pub(crate) fn new_enhanced_route_refresh() -> Self {
+        Capability {
+            code: BgpCapabiltyCode::EnhancedRouteRefresh,
             len: 0,
             val: vec![],
         }

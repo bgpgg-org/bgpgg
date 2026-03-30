@@ -170,28 +170,29 @@ impl BgpMessage {
     }
 
     pub fn from_bytes(
-        message_type_val: u8,
-        bytes: Vec<u8>,
+        msg_type: u8,
+        body: Vec<u8>,
+        full_msg: &[u8],
         format: MessageFormat,
     ) -> Result<Self, ParserError> {
-        let message_type = MessageType::try_from(message_type_val)?;
+        let message_type = MessageType::try_from(msg_type)?;
 
         match message_type {
             MessageType::Open => {
-                let message = OpenMessage::from_bytes(bytes)?;
+                let message = OpenMessage::from_bytes(body)?;
                 Ok(BgpMessage::Open(message))
             }
             MessageType::Update => {
-                let message = UpdateMessage::from_bytes(bytes, format)?;
+                let message = UpdateMessage::from_bytes(body, format)?;
                 Ok(BgpMessage::Update(message))
             }
             MessageType::Keepalive => Ok(BgpMessage::Keepalive(KeepaliveMessage {})),
             MessageType::Notification => {
-                let message = NotificationMessage::from_bytes(bytes);
+                let message = NotificationMessage::from_bytes(body);
                 Ok(BgpMessage::Notification(message))
             }
             MessageType::RouteRefresh => {
-                let message = RouteRefreshMessage::from_bytes(bytes)?;
+                let message = RouteRefreshMessage::from_bytes(body, full_msg)?;
                 Ok(BgpMessage::RouteRefresh(message))
             }
         }
@@ -246,10 +247,10 @@ pub async fn read_bgp_message<R: AsyncReadExt + Unpin>(
     stream: R,
     format: MessageFormat,
 ) -> Result<BgpMessage, ParserError> {
-    let bytes = read_bgp_message_bytes(stream).await?;
-    let message_type = bytes[18];
-    let body = bytes[BGP_HEADER_SIZE_BYTES..].to_vec();
-    BgpMessage::from_bytes(message_type, body, format)
+    let full_msg = read_bgp_message_bytes(stream).await?;
+    let message_type = full_msg[18];
+    let body = full_msg[BGP_HEADER_SIZE_BYTES..].to_vec();
+    BgpMessage::from_bytes(message_type, body, &full_msg, format)
 }
 
 fn validate_marker(header: &[u8]) -> Result<(), ParserError> {
@@ -289,14 +290,6 @@ fn validate_length(message_length: u16, message_type: u8) -> Result<(), ParserEr
 
     // NOTIFICATION minimum length is 21 (19 header + 2 for error code/subcode)
     if message_type == MessageType::Notification.as_u8() && message_length < 21 {
-        return Err(ParserError::BgpError {
-            error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
-            data: message_length.to_be_bytes().to_vec(),
-        });
-    }
-
-    // ROUTEREFRESH: exactly 23 bytes (19 header + 4 body)
-    if message_type == MessageType::RouteRefresh.as_u8() && message_length != 23 {
         return Err(ParserError::BgpError {
             error: BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             data: message_length.to_be_bytes().to_vec(),

@@ -52,7 +52,7 @@ impl Peer {
                             let message_type = bytes[18]; // Type is in header byte 18
                             let body = bytes[19..].to_vec(); // Body starts after header
 
-                            match BgpMessage::from_bytes(message_type, body, format) {
+                            match BgpMessage::from_bytes(message_type, body, &bytes, format) {
                                 Ok(message) => {
                                     if let Err(e) = self.handle_received_message(message).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");

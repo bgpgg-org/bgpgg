@@ -232,6 +232,12 @@ impl ConnectionState {
             .is_some_and(|caps| caps.supports_four_octet_asn())
     }
 
+    pub fn has_enhanced_route_refresh(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.enhanced_route_refresh)
+    }
+
     pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
         self.capabilities
             .as_ref()
@@ -980,5 +986,25 @@ mod tests {
         let mut server = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
+    }
+
+    #[test]
+    fn test_has_enhanced_route_refresh() {
+        // No capabilities -> false
+        let conn = ConnectionState::new(None);
+        assert!(!conn.has_enhanced_route_refresh());
+
+        // Capabilities without enhanced RR -> false
+        let mut conn = ConnectionState::new(None);
+        conn.capabilities = Some(PeerCapabilities::default());
+        assert!(!conn.has_enhanced_route_refresh());
+
+        // Capabilities with enhanced RR -> true
+        let mut conn = ConnectionState::new(None);
+        conn.capabilities = Some(PeerCapabilities {
+            enhanced_route_refresh: true,
+            ..PeerCapabilities::default()
+        });
+        assert!(conn.has_enhanced_route_refresh());
     }
 }

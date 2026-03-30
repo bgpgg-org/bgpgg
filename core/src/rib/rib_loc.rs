@@ -501,7 +501,7 @@ impl<A: PathIdAllocator> LocRib<A> {
 
         if count > 0 {
             info!(peer_ip = %peer_ip, afi_safi = %afi_safi, count = count,
-                  "marked paths as stale for Graceful Restart");
+                  "marked paths as stale");
         }
         count
     }

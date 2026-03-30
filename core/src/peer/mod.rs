@@ -16,6 +16,7 @@ use crate::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat, PRE_OPEN_
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability, LlgrCapability};
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
@@ -62,6 +63,8 @@ pub struct PeerCapabilities {
     pub multiprotocol: HashSet<AfiSafi>,
     /// Route Refresh capability (RFC 2918)
     pub route_refresh: bool,
+    /// Enhanced Route Refresh capability (RFC 7313)
+    pub enhanced_route_refresh: bool,
     /// Four-Octet ASN capability (RFC 6793)
     /// Contains the peer's 4-byte ASN if advertised
     pub four_octet_asn: Option<u32>,
@@ -264,8 +267,9 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 pub enum PeerOp {
     SendUpdate(Vec<u8>),
     SendRouteRefresh {
-        afi: crate::bgp::multiprotocol::Afi,
-        safi: crate::bgp::multiprotocol::Safi,
+        afi: Afi,
+        safi: Safi,
+        subtype: RouteRefreshSubtype,
     },
     GetStatistics(oneshot::Sender<PeerStatistics>),
     GetNegotiatedCapabilities(oneshot::Sender<PeerCapabilities>),
@@ -777,7 +781,7 @@ impl Peer {
     fn parse_bgp_message(bytes: &[u8], format: MessageFormat) -> Result<BgpMessage, ParserError> {
         let message_type = bytes[18];
         let body = bytes[19..].to_vec();
-        BgpMessage::from_bytes(message_type, body, format)
+        BgpMessage::from_bytes(message_type, body, bytes, format)
     }
 
     /// Convert BGP parse error to FSM event for error handling.

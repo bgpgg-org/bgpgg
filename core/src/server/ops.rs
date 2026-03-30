@@ -18,6 +18,7 @@ use crate::bgp::ext_community::is_rpki_state_community;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::StaleFilter;
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::NextHopAddr;
 use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
@@ -79,6 +80,18 @@ pub enum ServerOp {
     SetAdminState { peer_ip: IpAddr, state: AdminState },
     /// Route Refresh request from peer
     RouteRefresh {
+        peer_ip: IpAddr,
+        afi: Afi,
+        safi: Safi,
+    },
+    /// RFC 7313: Beginning of Route Refresh from peer
+    RouteRefreshBoRR {
+        peer_ip: IpAddr,
+        afi: Afi,
+        safi: Safi,
+    },
+    /// RFC 7313: End of Route Refresh from peer
+    RouteRefreshEoRR {
         peer_ip: IpAddr,
         afi: Afi,
         safi: Safi,
@@ -172,6 +185,12 @@ impl BgpServer {
             }
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
+            }
+            ServerOp::RouteRefreshBoRR { peer_ip, afi, safi } => {
+                self.handle_route_refresh_borr(peer_ip, afi, safi).await;
+            }
+            ServerOp::RouteRefreshEoRR { peer_ip, afi, safi } => {
+                self.handle_route_refresh_eorr(peer_ip, afi, safi).await;
             }
             ServerOp::GracefulRestartTimerExpired {
                 peer_ip,
@@ -661,7 +680,61 @@ impl BgpServer {
 
     async fn handle_route_refresh(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
+
+        let enhanced = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.established_conn())
+            .is_some_and(|c| c.has_enhanced_route_refresh());
+
+        if enhanced {
+            self.send_enhanced_route_refresh(peer_ip, afi, safi);
+        } else {
+            self.resend_routes_to_peer(peer_ip, afi, safi);
+        }
+    }
+
+    /// RFC 7313: Wrap route resend with BoRR/EoRR demarcation.
+    fn send_enhanced_route_refresh(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let peer_tx = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.established_conn())
+            .and_then(|c| c.peer_tx.clone());
+
+        let Some(peer_tx) = peer_tx else { return };
+
+        let _ = peer_tx.send(PeerOp::SendRouteRefresh {
+            afi,
+            safi,
+            subtype: RouteRefreshSubtype::BoRR,
+        });
         self.resend_routes_to_peer(peer_ip, afi, safi);
+        let _ = peer_tx.send(PeerOp::SendRouteRefresh {
+            afi,
+            safi,
+            subtype: RouteRefreshSubtype::EoRR,
+        });
+    }
+
+    /// RFC 7313: Mark all routes from peer as stale for the given AFI/SAFI.
+    async fn handle_route_refresh_borr(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+        info!(%peer_ip, ?afi, ?safi, count, "BoRR: marked routes stale (RFC 7313)");
+    }
+
+    /// RFC 7313: Sweep remaining stale routes from peer for the given AFI/SAFI.
+    async fn handle_route_refresh_eorr(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+        let removed = delta.changed.len();
+        if removed > 0 {
+            info!(%peer_ip, ?afi, ?safi, removed, "EoRR: purged stale routes (RFC 7313)");
+        } else {
+            info!(%peer_ip, ?afi, ?safi, "EoRR: no stale routes to purge (RFC 7313)");
+        }
+        self.propagate_routes(delta, Some(peer_ip)).await;
     }
 
     /// Process a peer UPDATE on the server: store in adj-rib-in, validate,

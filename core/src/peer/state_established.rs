@@ -212,7 +212,7 @@ impl Peer {
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
                         }
-                        PeerOp::SendRouteRefresh { afi, safi } => {
+                        PeerOp::SendRouteRefresh { afi, safi, subtype } => {
                             // RFC 2918: Only send if capability was negotiated
                             if !self.capabilities.route_refresh {
                                 warn!(peer_ip = %peer_ip,
@@ -230,7 +230,11 @@ impl Peer {
                                 continue;
                             }
 
-                            let refresh_msg = RouteRefreshMessage::new(afi, safi);
+                            let refresh_msg = RouteRefreshMessage {
+                                afi,
+                                safi,
+                                subtype,
+                            };
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
                                     error!(peer_ip = %peer_ip,
@@ -243,6 +247,7 @@ impl Peer {
                                     info!(peer_ip = %peer_ip,
                                           afi = ?afi,
                                           safi = ?safi,
+                                          subtype = ?subtype,
                                           "sent ROUTE_REFRESH");
                                 }
                             }

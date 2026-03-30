@@ -95,6 +95,22 @@ impl From<u8> for UpdateMessageError {
     }
 }
 
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum RouteRefreshMessageError {
+    InvalidMessageLength = 1,
+    Unknown(u8),
+}
+
+impl From<u8> for RouteRefreshMessageError {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => RouteRefreshMessageError::InvalidMessageLength,
+            val => RouteRefreshMessageError::Unknown(val),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BgpError {
     MessageHeaderError(MessageHeaderError),
@@ -103,6 +119,7 @@ pub enum BgpError {
     HoldTimerExpired,
     FiniteStateMachineError,
     Cease(CeaseSubcode),
+    RouteRefreshMessageError(RouteRefreshMessageError),
     Unknown,
 }
 
@@ -145,6 +162,7 @@ enum ErrorCode {
     HoldTimerExpired = 4,
     FiniteStateMachineError = 5,
     Cease = 6,
+    RouteRefreshMessageError = 7,
     Unknown,
 }
 
@@ -157,6 +175,7 @@ impl From<u8> for ErrorCode {
             4 => ErrorCode::HoldTimerExpired,
             5 => ErrorCode::FiniteStateMachineError,
             6 => ErrorCode::Cease,
+            7 => ErrorCode::RouteRefreshMessageError,
             _ => ErrorCode::Unknown,
         }
     }
@@ -166,6 +185,9 @@ impl BgpError {
     fn new(err_code: u8, err_sub_code: u8) -> BgpError {
         match ErrorCode::from(err_code) {
             ErrorCode::Cease => BgpError::Cease(CeaseSubcode::from(err_sub_code)),
+            ErrorCode::RouteRefreshMessageError => {
+                BgpError::RouteRefreshMessageError(RouteRefreshMessageError::from(err_sub_code))
+            }
             ErrorCode::MessageHeaderError => {
                 let err = MessageHeaderError::from(err_sub_code);
                 if matches!(err, MessageHeaderError::Unknown(_)) {
@@ -216,6 +238,7 @@ impl BgpError {
             BgpError::HoldTimerExpired => 4,
             BgpError::FiniteStateMachineError => 5,
             BgpError::Cease(_) => 6,
+            BgpError::RouteRefreshMessageError(_) => 7,
             BgpError::Unknown => 0,
         }
     }
@@ -260,6 +283,10 @@ impl BgpError {
                 CeaseSubcode::ConnectionCollisionResolution => 7,
                 CeaseSubcode::OutOfResources => 8,
                 CeaseSubcode::Unknown(val) => *val,
+            },
+            BgpError::RouteRefreshMessageError(subcode) => match subcode {
+                RouteRefreshMessageError::InvalidMessageLength => 1,
+                RouteRefreshMessageError::Unknown(val) => *val,
             },
             _ => 0,
         }
@@ -412,6 +439,14 @@ mod tests {
     test_bgp_error_new!(
         bgp_error_new_cease_out_of_resources, 6, 8,
         expected BgpError::Cease(CeaseSubcode::OutOfResources)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_route_refresh_invalid_length, 7, 1,
+        expected BgpError::RouteRefreshMessageError(RouteRefreshMessageError::InvalidMessageLength)
+    );
+    test_bgp_error_new!(
+        bgp_error_new_route_refresh_unknown_subcode, 7, 99,
+        expected BgpError::RouteRefreshMessageError(RouteRefreshMessageError::Unknown(99))
     );
     test_bgp_error_new!(
         bgp_error_new_unknown, 99, 0,
