@@ -60,10 +60,6 @@ impl Peer {
                         Some(PeerOp::GetStatistics(response)) => {
                             let _ = response.send(self.statistics.clone());
                         }
-                        Some(PeerOp::GetAdjRibIn(response)) => {
-                            let routes = self.rib_in.get_all_routes();
-                            let _ = response.send(routes);
-                        }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                             // RFC 4271 8.2.2: In Idle state, refuse incoming connections
                             debug!(peer_ip = %self.addr, "connection refused in Idle state");
@@ -112,10 +108,6 @@ impl Peer {
                         Some(PeerOp::Shutdown(_)) => return true,
                         Some(PeerOp::GetStatistics(response)) => {
                             let _ = response.send(self.statistics.clone());
-                        }
-                        Some(PeerOp::GetAdjRibIn(response)) => {
-                            let routes = self.rib_in.get_all_routes();
-                            let _ = response.send(routes);
                         }
                         Some(PeerOp::TcpConnectionAccepted { tcp_tx, tcp_rx }) => {
                             // RFC 4271 8.2.2: In Idle state, refuse incoming connections

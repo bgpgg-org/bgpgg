@@ -1,4 +1,4 @@
-// Copyright 2025 bgpgg Authors
+// Copyright 2026 bgpgg Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod global;
-pub mod peer;
-pub mod rpki;
+pub mod manager;
+pub mod rtr;
+pub mod session;
+pub mod vrp;

@@ -24,6 +24,12 @@ service BgpService {
     rpc RemoveBmpServer(RemoveBmpServerRequest) returns (RemoveBmpServerResponse);
     rpc ListBmpServers(ListBmpServersRequest) returns (ListBmpServersResponse);
 
+    // RPKI cache management
+    rpc AddRpkiCache(AddRpkiCacheRequest) returns (AddRpkiCacheResponse);
+    rpc RemoveRpkiCache(RemoveRpkiCacheRequest) returns (RemoveRpkiCacheResponse);
+    rpc ListRpkiCaches(ListRpkiCachesRequest) returns (ListRpkiCachesResponse);
+    rpc GetRpkiValidation(GetRpkiValidationRequest) returns (GetRpkiValidationResponse);
+
     // Policy management
     rpc AddDefinedSet(AddDefinedSetRequest) returns (AddDefinedSetResponse);
     rpc RemoveDefinedSet(RemoveDefinedSetRequest) returns (RemoveDefinedSetResponse);
@@ -102,6 +108,7 @@ message SessionConfig {
     optional bool graceful_shutdown = 19;  // RFC 8326: tag exported routes with GRACEFUL_SHUTDOWN community
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
+    optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
 }
 
 // Add peer request/response
@@ -269,6 +276,13 @@ enum Origin {
     INCOMPLETE = 2;
 }
 
+// RFC 6811: RPKI origin validation state
+enum RpkiValidation {
+    RPKI_NOT_FOUND = 0;
+    RPKI_VALID = 1;
+    RPKI_INVALID = 2;
+}
+
 // AS_PATH segment type
 enum AsPathSegmentType {
     AS_SET = 0;
@@ -324,6 +338,8 @@ message Path {
     optional uint32 local_path_id = 14;       // Locally assigned path ID (absent = not in loc-rib)
     optional uint32 remote_path_id = 15;      // Path ID received from peer (absent = no ADD-PATH)
     optional Aggregator aggregator = 16;
+    // RFC 6811: RPKI origin validation state
+    RpkiValidation rpki_validation = 17;
 }
 
 message Aggregator {
@@ -436,6 +452,67 @@ message ListBmpServersRequest {}
 
 message ListBmpServersResponse {
     repeated string addresses = 1;
+}
+
+// ============================================================================
+// RPKI Cache Management
+// ============================================================================
+
+message AddRpkiCacheRequest {
+    string address = 1;                       // "host:port"
+    optional uint32 preference = 2;           // default 0
+    optional string transport = 3;            // "tcp" (default) or "ssh"
+    optional string ssh_username = 4;         // required when transport="ssh"
+    optional string ssh_private_key_file = 5; // required when transport="ssh"
+    optional string ssh_known_hosts_file = 6; // optional for ssh
+    optional uint64 retry_interval = 7;
+    optional uint64 refresh_interval = 8;
+    optional uint64 expire_interval = 9;
+}
+
+message AddRpkiCacheResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message RemoveRpkiCacheRequest {
+    string address = 1;
+}
+
+message RemoveRpkiCacheResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ListRpkiCachesRequest {}
+
+message ListRpkiCachesResponse {
+    repeated RpkiCacheInfo caches = 1;
+    uint64 total_vrp_count = 2;
+}
+
+message RpkiCacheInfo {
+    string address = 1;
+    uint32 preference = 2;
+    string transport = 3;
+    bool session_active = 4;
+    uint64 vrp_count = 5;
+}
+
+message GetRpkiValidationRequest {
+    string prefix = 1;
+    uint32 origin_as = 2;
+}
+
+message GetRpkiValidationResponse {
+    RpkiValidation validation = 1;
+    repeated RpkiVrp covering_vrps = 2;
+}
+
+message RpkiVrp {
+    string prefix = 1;
+    uint32 max_length = 2;
+    uint32 origin_as = 3;
 }
 
 // ============================================================================
@@ -554,6 +631,7 @@ message ConditionsConfig {
     optional string prefix = 6;  // Direct prefix match
     optional string neighbor = 7;  // Direct neighbor match
     optional MatchSetRef match_ext_community_set = 8;
+    optional RpkiValidation rpki_validation = 9;
 }
 
 message MatchSetRef {
@@ -568,6 +646,7 @@ message ActionsConfig {
     optional uint32 med = 4;
     repeated string add_communities = 5;
     repeated string remove_communities = 6;
+    optional RpkiValidation set_rpki_state = 7;
 }
 
 message RemovePolicyRequest {

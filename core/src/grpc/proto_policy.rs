@@ -21,14 +21,14 @@ use super::proto::{
     ActionsConfig as ProtoActionsConfig, AsPathSetData, CommunitySetData,
     ConditionsConfig as ProtoConditionsConfig, DefinedSetConfig as ProtoDefinedSetConfig,
     DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo, PrefixMatch, PrefixSetData,
-    StatementInfo,
+    RpkiValidation as ProtoRpkiValidation, StatementInfo,
 };
 use crate::config::{
     ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
     DefinedSetConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
-    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, StatementConfig,
+    NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, RpkiValidationConfig, StatementConfig,
 };
-use crate::server::PolicyInfoResponse;
+use crate::server::ops_mgmt::PolicyInfoResponse;
 
 pub(super) fn proto_to_defined_set_config(
     proto: &ProtoDefinedSetConfig,
@@ -123,6 +123,14 @@ pub(super) fn proto_to_statement_config(
             has_asn: None,
             route_type: None,
             community: None,
+            rpki_validation: c.rpki_validation.and_then(|v| {
+                match ProtoRpkiValidation::try_from(v) {
+                    Ok(ProtoRpkiValidation::RpkiValid) => Some(RpkiValidationConfig::Valid),
+                    Ok(ProtoRpkiValidation::RpkiInvalid) => Some(RpkiValidationConfig::Invalid),
+                    Ok(ProtoRpkiValidation::RpkiNotFound) => Some(RpkiValidationConfig::NotFound),
+                    Err(_) => None,
+                }
+            }),
         }
     });
 
@@ -147,6 +155,14 @@ pub(super) fn proto_to_statement_config(
         },
         ext_community: None,   // TODO: Add proto support for extended communities
         large_community: None, // TODO: Add proto support for large communities
+        set_rpki_state: a
+            .set_rpki_state
+            .and_then(|v| match ProtoRpkiValidation::try_from(v) {
+                Ok(ProtoRpkiValidation::RpkiValid) => Some(RpkiValidationConfig::Valid),
+                Ok(ProtoRpkiValidation::RpkiInvalid) => Some(RpkiValidationConfig::Invalid),
+                Ok(ProtoRpkiValidation::RpkiNotFound) => Some(RpkiValidationConfig::NotFound),
+                Err(_) => None,
+            }),
         accept: a.accept,
         reject: a.reject,
     });
@@ -290,6 +306,14 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 }),
                 prefix: s.conditions.prefix.clone(),
                 neighbor: s.conditions.neighbor.clone(),
+                rpki_validation: s.conditions.rpki_validation.map(|v| {
+                    match v {
+                        RpkiValidationConfig::Valid => ProtoRpkiValidation::RpkiValid,
+                        RpkiValidationConfig::Invalid => ProtoRpkiValidation::RpkiInvalid,
+                        RpkiValidationConfig::NotFound => ProtoRpkiValidation::RpkiNotFound,
+                    }
+                    .into()
+                }),
             });
 
             let (add_communities, remove_communities) = if let Some(comm) = s.actions.community {
@@ -315,6 +339,14 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                 }),
                 add_communities,
                 remove_communities,
+                set_rpki_state: s.actions.set_rpki_state.map(|r| {
+                    match r {
+                        RpkiValidationConfig::Valid => ProtoRpkiValidation::RpkiValid,
+                        RpkiValidationConfig::Invalid => ProtoRpkiValidation::RpkiInvalid,
+                        RpkiValidationConfig::NotFound => ProtoRpkiValidation::RpkiNotFound,
+                    }
+                    .into()
+                }),
             });
 
             StatementInfo {

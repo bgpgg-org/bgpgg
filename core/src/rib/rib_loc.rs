@@ -19,6 +19,8 @@ use crate::peer::Withdrawal;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::stale::{handle_stale_routes, mark_stale_in_table, StaleStrategy};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
+use crate::rpki::vrp::RpkiValidation;
+use crate::table::{Prefix, PrefixMap};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::IpAddr;
@@ -64,9 +66,9 @@ use std::net::Ipv4Addr;
 /// Contains the best paths selected after applying import policies
 /// and the BGP best path selection algorithm.
 pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
-    // Per-AFI/SAFI tables
-    ipv4_unicast: HashMap<Ipv4Net, Route>, // AFI=1, SAFI=1
-    ipv6_unicast: HashMap<Ipv6Net, Route>, // AFI=2, SAFI=1
+    // Per-AFI/SAFI tables (HashMap + trie for subtree/covering queries)
+    ipv4_unicast: PrefixMap<Ipv4Net, Route>,
+    ipv6_unicast: PrefixMap<Ipv6Net, Route>,
 
     /// ADD-PATH local path ID allocator (RFC 7911)
     path_ids: A,
@@ -75,29 +77,39 @@ pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
 // Helper functions to avoid code duplication
 
 /// Insert or update a path in a route's path list.
-/// - If a matching path exists (same source, same remote_path_id) and attrs differ,
-///   replace it while inheriting the existing local_path_id.
+/// - If a matching path exists and attrs differ, replace it (inheriting local_path_id).
+/// - If attrs match but local metadata differs (rpki_state, stale), update in place
+///   to preserve Arc identity (ADD-PATH propagation relies on ptr_eq).
 /// - If no match, allocate a fresh local_path_id and append.
-fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
-    table: &mut HashMap<K, Route>,
+fn upsert_path<K: Eq + Hash + Prefix, A: PathIdAllocator>(
+    table: &mut PrefixMap<K, Route>,
     key: K,
     prefix: IpNetwork,
     mut path: Arc<Path>,
     path_ids: &mut A,
 ) {
-    let route = table.entry(key).or_insert_with(|| Route {
-        prefix,
-        paths: vec![],
-    });
+    let route = table.get_or_insert(
+        key,
+        Route {
+            prefix,
+            paths: vec![],
+        },
+    );
 
     match route.paths.iter_mut().find(|p| p.matches_remote(&path)) {
         Some(existing) => {
             if existing.attrs != path.attrs {
                 Arc::make_mut(&mut path).local_path_id = existing.local_path_id;
                 *existing = path;
-            } else if existing.stale {
-                // GR: identical attrs but stale -> clear the stale flag
-                Arc::make_mut(existing).stale = false;
+            } else {
+                // Attrs unchanged — update local metadata in place to preserve
+                // Arc identity (ADD-PATH relies on ptr_eq for propagation).
+                if existing.rpki_state != path.rpki_state {
+                    Arc::make_mut(existing).rpki_state = path.rpki_state;
+                }
+                if existing.stale {
+                    Arc::make_mut(existing).stale = false;
+                }
             }
         }
         None => {
@@ -110,8 +122,8 @@ fn upsert_path<K: Eq + Hash, A: PathIdAllocator>(
 }
 
 /// Remove paths matching a predicate and return their freed local_path_ids.
-fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
-    table: &mut HashMap<K, Route>,
+fn remove_paths<K: Eq + Hash + Prefix, F: Fn(&Path) -> bool>(
+    table: &mut PrefixMap<K, Route>,
     key: &K,
     should_remove: F,
 ) -> Vec<u32> {
@@ -134,7 +146,10 @@ fn remove_paths<K: Eq + Hash, F: Fn(&Path) -> bool>(
 }
 
 /// Remove all paths from a peer and return their local_path_ids for freeing.
-fn remove_all_peer_paths<K: Eq + Hash>(table: &mut HashMap<K, Route>, peer_ip: IpAddr) -> Vec<u32> {
+fn remove_all_peer_paths<K: Eq + Hash + Prefix>(
+    table: &mut PrefixMap<K, Route>,
+    peer_ip: IpAddr,
+) -> Vec<u32> {
     let mut freed_path_ids = Vec::new();
     for route in table.values_mut() {
         freed_path_ids.extend(
@@ -173,13 +188,13 @@ impl<A: PathIdAllocator> LocRib<A> {
     fn get_prefixes_from_peer(&self, peer_ip: IpAddr) -> Vec<IpNetwork> {
         let mut prefixes = Vec::new();
 
-        for (prefix, route) in &self.ipv4_unicast {
+        for (prefix, route) in self.ipv4_unicast.iter() {
             if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V4(*prefix));
             }
         }
 
-        for (prefix, route) in &self.ipv6_unicast {
+        for (prefix, route) in self.ipv6_unicast.iter() {
             if route.paths.iter().any(|p| p.is_from_peer(peer_ip)) {
                 prefixes.push(IpNetwork::V6(*prefix));
             }
@@ -295,8 +310,8 @@ impl Default for LocRib {
 impl LocRib {
     pub fn new() -> Self {
         LocRib {
-            ipv4_unicast: HashMap::new(),
-            ipv6_unicast: HashMap::new(),
+            ipv4_unicast: PrefixMap::new(),
+            ipv6_unicast: PrefixMap::new(),
             path_ids: BitmapPathIdAllocator::new(),
         }
     }
@@ -305,8 +320,8 @@ impl LocRib {
 impl<A: PathIdAllocator> LocRib<A> {
     pub fn with_path_ids(path_ids: A) -> Self {
         LocRib {
-            ipv4_unicast: HashMap::new(),
-            ipv6_unicast: HashMap::new(),
+            ipv4_unicast: PrefixMap::new(),
+            ipv6_unicast: PrefixMap::new(),
             path_ids,
         }
     }
@@ -318,6 +333,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 source: RouteSource::Local,
                 local_pref: path_attrs.local_pref.or(Some(100)),
@@ -580,6 +596,39 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
         result
     }
+
+    /// Find all route prefixes in the RIB affected by VRP additions and removals.
+    pub fn affected_prefixes(
+        &self,
+        added: &[crate::rpki::vrp::Vrp],
+        removed: &[crate::rpki::vrp::Vrp],
+    ) -> HashSet<IpNetwork> {
+        let mut affected = HashSet::new();
+        for vrp in added.iter().chain(removed) {
+            for prefix in self.subtree_prefixes(&vrp.prefix) {
+                affected.insert(prefix);
+            }
+        }
+        affected
+    }
+
+    /// Find all prefixes in the RIB that are subnets of (or equal to) the given prefix.
+    pub fn subtree_prefixes(&self, prefix: &IpNetwork) -> Vec<IpNetwork> {
+        match prefix {
+            IpNetwork::V4(v4) => self
+                .ipv4_unicast
+                .subtree(v4)
+                .into_iter()
+                .map(|k| IpNetwork::V4(*k))
+                .collect(),
+            IpNetwork::V6(v6) => self
+                .ipv6_unicast
+                .subtree(v6)
+                .into_iter()
+                .map(|k| IpNetwork::V6(*k))
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -735,6 +784,29 @@ mod tests {
                 paths: vec![expected_path]
             }
         );
+    }
+
+    #[test]
+    fn test_upsert_path_updates_rpki_state_in_place() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let peer_ip = test_peer_ip();
+        let prefix = create_test_prefix();
+
+        let path = create_test_path(peer_ip, test_bgp_id());
+        loc_rib.upsert_path(prefix, path);
+
+        let ptr_before = Arc::as_ptr(&loc_rib.get_all_routes()[0].paths[0]);
+
+        // Same attrs, different rpki_state — should update in place, same Arc.
+        let path_valid = create_test_path_with(peer_ip, test_bgp_id(), |p| {
+            p.rpki_state = RpkiValidation::Valid;
+        });
+        loc_rib.upsert_path(prefix, path_valid);
+
+        let routes = loc_rib.get_all_routes();
+        assert_eq!(routes[0].paths[0].rpki_state, RpkiValidation::Valid);
+        // Arc identity preserved — no replacement, just in-place mutation.
+        assert_eq!(ptr_before, Arc::as_ptr(&routes[0].paths[0]));
     }
 
     #[test]

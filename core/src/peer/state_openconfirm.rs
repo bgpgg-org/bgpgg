@@ -14,7 +14,7 @@
 
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
-use crate::server::ServerOp;
+use crate::server::ops::ServerOp;
 use crate::types::PeerDownReason;
 use std::time::Instant;
 

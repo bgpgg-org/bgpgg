@@ -22,9 +22,9 @@ use crate::bgp::utils::ParserError;
 use crate::config::{LlgrConfig, PeerConfig};
 use crate::log::{debug, error, info};
 use crate::net::IpNetwork;
-use crate::rib::rib_in::AdjRibIn;
-use crate::rib::{PrefixPath, Route};
-use crate::server::{ConnectionType, ServerOp};
+use crate::rib::PrefixPath;
+use crate::server::ops::ServerOp;
+use crate::server::ConnectionType;
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -268,7 +268,6 @@ pub enum PeerOp {
         safi: crate::bgp::multiprotocol::Safi,
     },
     GetStatistics(oneshot::Sender<PeerStatistics>),
-    GetAdjRibIn(oneshot::Sender<Vec<Route>>),
     GetNegotiatedCapabilities(oneshot::Sender<PeerCapabilities>),
     /// Graceful shutdown - sends CEASE NOTIFICATION with given subcode and closes connection
     Shutdown(CeaseSubcode),
@@ -383,7 +382,6 @@ pub struct Peer {
     pub asn: Option<u32>,
     /// Peer's BGP Router ID from OPEN message
     pub bgp_id: Option<std::net::Ipv4Addr>,
-    pub rib_in: AdjRibIn,
     pub session_type: Option<SessionType>,
     pub statistics: PeerStatistics,
     pub config: PeerConfig,
@@ -415,10 +413,12 @@ pub struct Peer {
     received_open: Option<OpenMessage>,
     /// Peer capabilities
     capabilities: PeerCapabilities,
-    /// AFI/SAFI pairs disabled due to errors (RFC 4760 Section 7)
-    disabled_afi_safi: HashSet<crate::bgp::multiprotocol::AfiSafi>,
     /// Graceful Restart runtime state (RFC 4724)
     gr_state: Option<GracefulRestartState>,
+    /// Accumulated route announcements awaiting flush to server
+    pending_announced: Vec<PrefixPath>,
+    /// Accumulated route withdrawals awaiting flush to server
+    pending_withdrawn: Vec<Withdrawal>,
 }
 
 impl Peer {
@@ -442,7 +442,6 @@ impl Peer {
             conn: None,
             asn: None,
             bgp_id: None,
-            rib_in: AdjRibIn::new(),
             session_type: None,
             statistics: PeerStatistics::default(),
             mrai_interval: Duration::from_secs(
@@ -462,9 +461,24 @@ impl Peer {
             sent_open: None,
             received_open: None,
             capabilities: PeerCapabilities::default(),
-            disabled_afi_safi: HashSet::new(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
+    }
+
+    fn pending_route_count(&self) -> usize {
+        self.pending_announced.len() + self.pending_withdrawn.len()
+    }
+
+    /// Flush accumulated route announcements/withdrawals to the server
+    /// as a single coalesced PeerUpdate.
+    fn flush_pending_routes(&mut self) {
+        let _ = self.server_tx.send(ServerOp::PeerUpdate {
+            peer_ip: self.addr,
+            announced: std::mem::take(&mut self.pending_announced),
+            withdrawn: std::mem::take(&mut self.pending_withdrawn),
+        });
     }
 
     /// Main peer task - handles the full lifecycle of a BGP peer.
@@ -880,7 +894,6 @@ pub mod test_helpers {
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
             bgp_id: Some(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-            rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
@@ -898,8 +911,9 @@ pub mod test_helpers {
             sent_open: None,
             received_open: None,
             capabilities: PeerCapabilities::default(),
-            disabled_afi_safi: HashSet::new(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
     }
 }

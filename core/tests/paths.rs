@@ -41,7 +41,7 @@ use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     extended_community::{Community, TwoOctetAsSpecific},
-    AsPathSegment, BgpState, ExtendedCommunity, Origin, Route, SessionConfig, UnknownAttribute,
+    AsPathSegment, BgpState, ExtendedCommunity, Origin, SessionConfig, UnknownAttribute,
 };
 use std::net::Ipv4Addr;
 
@@ -79,16 +79,18 @@ async fn test_origin_preservation() {
         |as_path: Vec<AsPathSegment>, next_hop: &str, peer_address: String| {
             test_routes
                 .iter()
-                .map(|(prefix, _, origin)| Route {
-                    prefix: prefix.to_string(),
-                    paths: vec![build_path(PathParams {
-                        as_path: as_path.clone(),
-                        next_hop: next_hop.to_string(),
-                        peer_address: peer_address.clone(),
-                        origin: Some(*origin),
-                        local_pref: Some(100),
-                        ..Default::default()
-                    })],
+                .map(|(prefix, _, origin)| {
+                    expected_route(
+                        prefix,
+                        PathParams {
+                            as_path: as_path.clone(),
+                            next_hop: next_hop.to_string(),
+                            peer_address: peer_address.clone(),
+                            origin: Some(*origin),
+                            local_pref: Some(100),
+                            ..Default::default()
+                        },
+                    )
                 })
                 .collect()
         };
@@ -147,45 +149,36 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     poll_rib(&[
         (
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])], // eBGP: S1 created AS_SEQUENCE with its AS
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to S1's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    ..PathParams::from_peer(server1) // eBGP: S1 created AS_SEQUENCE with its AS
+                },
+            )],
         ),
         (
             server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65001])], // iBGP: S2 did NOT modify AS_PATH
                     next_hop: server1.address.to_string(),   // iBGP: NEXT_HOP preserved from S2
                     peer_address: server2.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
         (
             server4,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65002, 65001])], // eBGP: S3 prepended its AS
-                    next_hop: server3.address.to_string(), // eBGP: NEXT_HOP rewritten to S3's local address
-                    peer_address: server3.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+                    ..PathParams::from_peer(server3) // eBGP: NEXT_HOP rewritten to S3's local address
+                },
+            )],
         ),
     ])
     .await;
@@ -220,31 +213,26 @@ async fn test_originating_speaker_as_path() {
     poll_rib(&[
         (
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![],                     // iBGP: originating speaker sends empty AS_PATH
                     next_hop: "192.168.1.1".to_string(), // iBGP: NEXT_HOP preserved (explicit value, not 0.0.0.0)
                     peer_address: server1.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
         (
             server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])], // eBGP: S2 prepended AS65001
-                    next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to S2's local address
-                    peer_address: server2.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    ..PathParams::from_peer(server2) // eBGP: S2 prepended AS65001, NEXT_HOP rewritten
+                },
+            )],
         ),
     ])
     .await;
@@ -282,21 +270,17 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // eBGP: NEXT_HOP rewritten to S1's router ID
     poll_rib(&[(
         server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![
                     as_sequence(vec![65001]),   // Prepended by S1 (eBGP)
                     as_set(vec![65003, 65004]), // Original AS_SET
                     as_sequence(vec![65005]),   // Original AS_SEQUENCE
                 ],
-                next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to S1's local address
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(server1) // eBGP: NEXT_HOP rewritten to S1's local address
+            },
+        )],
     )])
     .await;
 }
@@ -335,17 +319,17 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     // (the interface address used for the peering session)
     poll_rib(&[(
         server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![], // iBGP: empty AS_PATH for locally-originated route
                 next_hop: server1.address.to_string(), // NEXT_HOP should be set to S1's local address
                 peer_address: server1.address.to_string(),
                 origin: Some(Origin::Igp),
                 local_pref: Some(100),
                 ..Default::default()
-            })],
-        }],
+            },
+        )],
     )])
     .await;
 }
@@ -382,31 +366,26 @@ async fn test_next_hop_rewrite_to_ebgp() {
     poll_rib(&[
         (
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![],                       // iBGP: empty AS_PATH
                     next_hop: "192.168.1.100".to_string(), // iBGP: NEXT_HOP preserved
                     peer_address: server1.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
         (
             server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])], // eBGP: AS prepended
-                    next_hop: server2.address.to_string(), // eBGP: NEXT_HOP rewritten to S2's local address
-                    peer_address: server2.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    ..PathParams::from_peer(server2) // eBGP: AS prepended, NEXT_HOP rewritten
+                },
+            )],
         ),
     ])
     .await;
@@ -445,31 +424,26 @@ async fn test_local_pref_send_to_ibgp() {
     poll_rib(&[
         (
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65000])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100), // LOCAL_PREF set by DefaultLocalPref policy
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    ..PathParams::from_peer(server1) // LOCAL_PREF set by DefaultLocalPref policy
+                },
+            )],
         ),
         (
             server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65000])], // iBGP preserves AS_PATH
                     next_hop: server1.address.to_string(),   // iBGP preserves NEXT_HOP
                     peer_address: server2.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100), // LOCAL_PREF preserved from S2's UPDATE (proves it was included)
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
     ])
     .await;
@@ -509,17 +483,17 @@ async fn test_local_pref_not_sent_to_ebgp() {
     // Verify S2 first (iBGP): receives route with LOCAL_PREF=200 (preserved from S1)
     poll_rib(&[(
         server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![],                     // iBGP: empty AS_PATH
                 next_hop: "192.168.1.1".to_string(), // iBGP: NEXT_HOP preserved
                 peer_address: server1.address.to_string(),
                 origin: Some(Origin::Igp),
                 local_pref: Some(200), // LOCAL_PREF=200 preserved via iBGP
                 ..Default::default()
-            })],
-        }],
+            },
+        )],
     )])
     .await;
 
@@ -527,17 +501,12 @@ async fn test_local_pref_not_sent_to_ebgp() {
     //                   This proves LOCAL_PREF was NOT sent in UPDATE from S2 to S3
     poll_rib(&[(
         server3,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])], // eBGP: AS prepended
-                next_hop: server2.address.to_string(),   // eBGP: NEXT_HOP rewritten
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100), // LOCAL_PREF=100 (set by policy, NOT 200 from S2!)
-                ..Default::default()
-            })],
-        }],
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
+                ..PathParams::from_peer(server2) // eBGP: AS prepended, NEXT_HOP rewritten, LOCAL_PREF=100
+            },
+        )],
     )])
     .await;
 }
@@ -576,24 +545,19 @@ async fn test_med_propagation_over_ibgp() {
     poll_rib(&[
         (
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65000])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100), // LOCAL_PREF set by DefaultLocalPref policy
-                    med: Some(50),         // MED=50 received from S1
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    med: Some(50), // MED=50 received from S1
+                    ..PathParams::from_peer(server1)
+                },
+            )],
         ),
         (
             server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65000])], // iBGP preserves AS_PATH
                     next_hop: server1.address.to_string(),   // iBGP preserves NEXT_HOP
                     peer_address: server2.address.to_string(),
@@ -601,8 +565,8 @@ async fn test_med_propagation_over_ibgp() {
                     local_pref: Some(100), // LOCAL_PREF preserved from S2
                     med: Some(50),         // MED=50 propagated over iBGP (proves propagation)
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
     ])
     .await;
@@ -639,18 +603,13 @@ async fn test_med_not_propagated_to_other_as() {
     // Verify S2 first (eBGP): receives route with MED=50
     poll_rib(&[(
         server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65000])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100), // LOCAL_PREF set by policy
-                med: Some(50),         // MED=50 received from S1
-                ..Default::default()
-            })],
-        }],
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
+                med: Some(50), // MED=50 received from S1
+                ..PathParams::from_peer(server1)
+            },
+        )],
     )])
     .await;
 
@@ -658,17 +617,13 @@ async fn test_med_not_propagated_to_other_as() {
     // This proves MED was NOT propagated to other neighboring AS (AS65002)
     poll_rib(&[(
         server3,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001, 65000])], // eBGP: S2 prepended AS65001
-                next_hop: server2.address.to_string(),          // eBGP: NEXT_HOP rewritten
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100), // LOCAL_PREF set by policy
-                ..Default::default() // MED=None (NOT 50 from S1 - proves MED not propagated to other AS)
-            })],
-        }],
+                ..PathParams::from_peer(server2)                // eBGP: NEXT_HOP rewritten, MED=None
+            },
+        )],
     )])
     .await;
 }
@@ -713,27 +668,22 @@ async fn test_med_not_propagated_via_ibgp_to_other_as() {
     // S2 (eBGP from S1): MED=50
     poll_rib(&[(
         &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65000])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 med: Some(50),
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(&server1)
+            },
+        )],
     )])
     .await;
 
     // S3 (iBGP from S2): MED=50 (iBGP preserves)
     poll_rib(&[(
         &server3,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65000])],
                 next_hop: server1.address.to_string(),
                 peer_address: server2.address.to_string(),
@@ -741,8 +691,8 @@ async fn test_med_not_propagated_via_ibgp_to_other_as() {
                 local_pref: Some(100),
                 med: Some(50), // Preserved via iBGP
                 ..Default::default()
-            })],
-        }],
+            },
+        )],
     )])
     .await;
 
@@ -750,18 +700,14 @@ async fn test_med_not_propagated_via_ibgp_to_other_as() {
     // BUG: Currently sends MED=50 because source changed to Ibgp at S3
     poll_rib(&[(
         &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001, 65000])],
-                next_hop: server3.address.to_string(),
-                peer_address: server3.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
                 // MED must be None - route originated from AS65000
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(&server3)
+            },
+        )],
     )])
     .await;
 }
@@ -797,18 +743,13 @@ async fn test_atomic_aggregate_propagation() {
     // Verify S2 (eBGP): receives route with ATOMIC_AGGREGATE=true
     poll_rib(&[(
         server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])], // eBGP: S1 prepended its AS
-                next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to S1's local address
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100), // LOCAL_PREF set by DefaultLocalPref policy
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 atomic_aggregate: true, // ATOMIC_AGGREGATE=true (received from S1)
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(server1)
+            },
+        )],
     )])
     .await;
 
@@ -816,9 +757,9 @@ async fn test_atomic_aggregate_propagation() {
     // This proves ATOMIC_AGGREGATE was propagated over iBGP
     poll_rib(&[(
         server3,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001])], // iBGP: AS_PATH preserved
                 next_hop: server1.address.to_string(),   // iBGP: NEXT_HOP preserved
                 peer_address: server2.address.to_string(),
@@ -826,8 +767,8 @@ async fn test_atomic_aggregate_propagation() {
                 local_pref: Some(100),  // LOCAL_PREF preserved from S2
                 atomic_aggregate: true, // ATOMIC_AGGREGATE=true (propagated from S1 -> S2 -> S3)
                 ..Default::default()
-            })],
-        }],
+            },
+        )],
     )])
     .await;
 }
@@ -899,18 +840,13 @@ async fn test_unknown_optional_attribute_handling(
 
     poll_rib(&[(
         server3,
-        vec![Route {
-            prefix: "192.168.1.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        vec![expected_route(
+            "192.168.1.0/24",
+            PathParams {
                 unknown_attributes: expected_unknown_attrs,
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(server2)
+            },
+        )],
     )])
     .await;
 }
@@ -1026,18 +962,14 @@ async fn test_med_comparison_restricted_to_same_as() {
     //              MED NOT compared across ASes (S2 beat S3 despite higher MED)
     poll_rib(&[(
         &server4,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001])],
-                next_hop: server2.address.to_string(),
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
                 med: Some(50),
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(&server2)
+            },
+        )],
     )])
     .await;
 }
@@ -1065,18 +997,13 @@ async fn test_normal_community_propagation() {
 
     poll_rib(&[(
         &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 communities,
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(&server1)
+            },
+        )],
     )])
     .await;
 }
@@ -1139,17 +1066,10 @@ async fn test_well_known_communities() {
 
             routes_match(
                 &routes,
-                &[Route {
-                    prefix: "10.4.0.0/24".to_string(),
-                    paths: vec![build_path(PathParams {
-                        as_path: vec![as_sequence(vec![65001])],
-                        next_hop: server1.address.to_string(),
-                        peer_address: server1.address.to_string(),
-                        origin: Some(Origin::Igp),
-                        local_pref: Some(100),
-                        ..Default::default()
-                    })],
-                }],
+                &[expected_route(
+                    "10.4.0.0/24",
+                    PathParams::from_peer(&server1),
+                )],
                 ExpectPathId::Present,
             ) && server1
                 .client
@@ -1237,17 +1157,17 @@ async fn test_extended_communities_filtering() {
 
         poll_rib(&[(
             server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: expected_as_path,
                     next_hop: expected_next_hop,
                     peer_address: server1.address.to_string(),
                     local_pref: Some(100),
                     extended_communities: expected_communities,
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         )])
         .await;
 
@@ -1300,18 +1220,13 @@ async fn test_large_community_propagation() {
 
     poll_rib(&[(
         &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 large_communities: expected_large_comms,
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(&server1)
+            },
+        )],
     )])
     .await;
 }
@@ -1373,17 +1288,13 @@ async fn test_mixed_asn_propagation() {
     // Verify route reaches s3 with correct AS path and next_hop rewritten to s2
     poll_rib(&[(
         s3,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                origin: Some(Origin::Igp),
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65001, 4200000001])],
-                next_hop: s2.address.to_string(),
-                peer_address: s2.address.to_string(),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+                ..PathParams::from_peer(s2)
+            },
+        )],
     )])
     .await;
 }

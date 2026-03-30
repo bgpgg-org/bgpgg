@@ -813,6 +813,7 @@ mod tests {
     };
     use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
     use crate::rib::{PathAttrs, RouteSource};
+    use crate::rpki::vrp::RpkiValidation;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     /// Test helper to create a base Path with sensible defaults
@@ -821,6 +822,7 @@ mod tests {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],

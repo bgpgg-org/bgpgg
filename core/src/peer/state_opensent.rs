@@ -15,7 +15,8 @@
 use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
-use crate::server::{AdminState, ServerOp};
+use crate::server::ops::ServerOp;
+use crate::server::AdminState;
 use crate::types::PeerDownReason;
 
 impl Peer {

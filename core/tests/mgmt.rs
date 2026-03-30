@@ -19,7 +19,7 @@ pub use utils::*;
 
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
-    AdminState, AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig,
+    AddRpkiCacheRequest, AdminState, AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig,
     LlgrConfig as ProtoLlgrConfig, Origin, Route, SessionConfig,
 };
 use std::net::Ipv4Addr;
@@ -593,16 +593,14 @@ async fn test_list_routes_impl(use_stream: bool) {
     // Export policy prepends server2's ASN: [] -> [65002]
     // eBGP: no LOCAL_PREF
     let expected_adj_in: Vec<Route> = (0..5)
-        .map(|i| Route {
-            prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server2.asn])],
-                next_hop: server2.address.to_string(),
-                peer_address: server2.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: None, // eBGP - no LOCAL_PREF
-                ..Default::default()
-            })],
+        .map(|i| {
+            expected_route(
+                &format!("10.{}.0.0/24", i),
+                PathParams {
+                    local_pref: None, // eBGP - no LOCAL_PREF
+                    ..PathParams::from_peer(&server2)
+                },
+            )
         })
         .collect();
 
@@ -630,16 +628,15 @@ async fn test_list_routes_impl(use_stream: bool) {
     // Export policy prepends server1's ASN: [] -> [65001]
     // eBGP: no LOCAL_PREF, NEXT_HOP rewritten to local session address
     let expected_adj_out: Vec<Route> = (10..15)
-        .map(|i| Route {
-            prefix: format!("10.{}.0.0/24", i),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![server1.asn])],
-                next_hop: server1.address.to_string(),
-                peer_address: "127.0.0.1".to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: None, // eBGP - no LOCAL_PREF
-                ..Default::default()
-            })],
+        .map(|i| {
+            expected_route(
+                &format!("10.{}.0.0/24", i),
+                PathParams {
+                    peer_address: "127.0.0.1".to_string(),
+                    local_pref: None, // eBGP - no LOCAL_PREF
+                    ..PathParams::from_peer(&server1)
+                },
+            )
         })
         .collect();
 
@@ -986,4 +983,88 @@ async fn test_add_peer_with_llgr() {
     assert_eq!(llgr.afi_safis.len(), 1);
     assert_eq!(llgr.afi_safis[0].afi, 1);
     assert_eq!(llgr.afi_safis[0].safi, 1);
+}
+
+/// gRPC: Add, list, and remove RPKI caches.
+#[tokio::test]
+async fn test_rpki_add_list_remove() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    // No caches initially
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert!(resp.caches.is_empty());
+    assert_eq!(resp.total_vrp_count, 0);
+
+    // Add a cache via gRPC
+    let msg = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:323".to_string(),
+            preference: Some(5),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(msg.contains("added"));
+
+    // List should show the cache
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert_eq!(resp.caches.len(), 1);
+    assert_eq!(resp.caches[0].address, "10.0.0.2:323");
+    assert_eq!(resp.caches[0].preference, 5);
+    assert_eq!(resp.caches[0].transport, "tcp");
+    assert!(resp.caches[0].session_active);
+
+    // Remove the cache
+    let msg = server
+        .client
+        .remove_rpki_cache("10.0.0.2:323".to_string())
+        .await
+        .unwrap();
+    assert!(msg.contains("removed"));
+
+    // List should be empty again
+    let resp = server.client.list_rpki_caches().await.unwrap();
+    assert!(resp.caches.is_empty());
+}
+
+/// gRPC: AddRpkiCache with SSH transport validates required fields.
+#[tokio::test]
+async fn test_rpki_add_ssh_missing_fields() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    // SSH transport without username -> error
+    let result = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:22".to_string(),
+            transport: Some("ssh".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
+
+    // SSH transport without private key -> error
+    let result = server
+        .client
+        .add_rpki_cache(AddRpkiCacheRequest {
+            address: "10.0.0.2:22".to_string(),
+            transport: Some("ssh".to_string()),
+            ssh_username: Some("rpki".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
 }

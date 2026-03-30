@@ -22,6 +22,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::rib::{Path, RouteSource};
+use crate::rpki::vrp::RpkiValidation;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -159,6 +160,9 @@ impl Statement {
                         RouteType::Local => "local".to_string(),
                     });
                 }
+                Condition::RpkiValidation(state) => {
+                    conditions.rpki_validation = Some((*state).into());
+                }
             }
         }
 
@@ -287,6 +291,9 @@ impl Statement {
                         }
                     }
                 }
+                Action::SetRpkiState(state) => {
+                    actions.set_rpki_state = Some((*state).into());
+                }
             }
         }
 
@@ -340,6 +347,7 @@ pub enum Action {
     SetCommunity(CommunityOp),
     SetExtCommunity(ExtCommunityOp),
     SetLargeCommunity(LargeCommunityOp),
+    SetRpkiState(RpkiValidation),
 }
 
 impl Action {
@@ -417,6 +425,10 @@ impl Action {
                 }
                 true
             }
+            Action::SetRpkiState(state) => {
+                path.rpki_state = *state;
+                true
+            }
         }
     }
 }
@@ -439,6 +451,7 @@ pub enum Condition {
     ExtCommunitySet(Arc<ExtCommunitySet>, MatchOptionConfig),
     LargeCommunitySet(Arc<LargeCommunitySet>, MatchOptionConfig),
     RouteType(RouteType),
+    RpkiValidation(RpkiValidation),
 }
 
 impl Condition {
@@ -535,6 +548,7 @@ impl Condition {
                     | (RouteType::Ibgp, RouteSource::Ibgp { .. })
                     | (RouteType::Local, RouteSource::Local)
             ),
+            Condition::RpkiValidation(state) => path.rpki_state == *state,
         }
     }
 }
@@ -675,6 +689,10 @@ fn add_conditions(
         stmt = stmt.when(Condition::Community(community));
     }
 
+    if let Some(rpki_config) = cond.rpki_validation {
+        stmt = stmt.when(Condition::RpkiValidation(rpki_config.into()));
+    }
+
     Ok(stmt)
 }
 
@@ -780,6 +798,10 @@ fn add_actions(mut stmt: Statement, actions: &ActionsConfig) -> Result<Statement
             }
         };
         stmt = stmt.then(action);
+    }
+
+    if let Some(rpki_config) = actions.set_rpki_state {
+        stmt = stmt.then(Action::SetRpkiState(rpki_config.into()));
     }
 
     // Accept/Reject (should be last)

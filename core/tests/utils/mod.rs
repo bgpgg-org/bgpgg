@@ -14,5 +14,6 @@
 
 pub mod bmp;
 pub mod common;
+pub mod rtr;
 
 pub use common::*;

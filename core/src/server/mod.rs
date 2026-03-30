@@ -1,4 +1,4 @@
-// Copyright 2025 bgpgg Authors
+// Copyright 2026 bgpgg Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::msg::{Message, MessageFormat, PRE_OPEN_FORMAT};
+pub(crate) mod ops;
+pub(crate) mod ops_mgmt;
+pub(crate) mod propagate;
+
+use crate::bgp::msg::{AddPathMask, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_update::UpdateMessage;
-use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::bgp::multiprotocol::AfiSafi;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
 use crate::config::{get_peer_llgr, Config, PeerConfig};
@@ -27,17 +31,18 @@ use crate::net::apply_gtsm;
 use crate::net::apply_tcp_md5;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::set_ttl_max;
-use crate::net::IpNetwork;
 use crate::net::{bind_addr_from_ip, peer_ip};
-use crate::peer::outgoing::{
-    propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
-};
 use crate::peer::BgpState;
-use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics, Withdrawal};
-use crate::policy::{DefinedSetType, Policy, PolicyContext};
+use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
+use crate::policy::{Policy, PolicyContext};
+use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::LocRib;
-use crate::rib::{AdjRibOut, PathAttrs, PrefixPath, Route, RouteDelta};
+use crate::rib::AdjRibOut;
+use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
+use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
+use ops::ServerOp;
+use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -136,192 +141,7 @@ pub enum PolicyDirection {
     Export,
 }
 
-// Management operations that can be sent to the BGP server
-pub enum MgmtOp {
-    AddPeer {
-        addr: String,
-        config: PeerConfig,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemovePeer {
-        addr: String,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    DisablePeer {
-        addr: String,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    EnablePeer {
-        addr: String,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    ResetPeer {
-        addr: String,
-        reset_type: ResetType,
-        afi: Option<Afi>,
-        safi: Option<Safi>,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    AddRoute {
-        prefix: IpNetwork,
-        attrs: PathAttrs,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemoveRoute {
-        prefix: IpNetwork,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    GetPeers {
-        response: oneshot::Sender<Vec<GetPeersResponse>>,
-    },
-    GetPeer {
-        addr: String,
-        response: oneshot::Sender<Option<GetPeerResponse>>,
-    },
-    GetRoutes {
-        rib_type: Option<i32>,
-        peer_address: Option<String>,
-        response: oneshot::Sender<Result<Vec<Route>, String>>,
-    },
-    GetRoutesStream {
-        rib_type: Option<i32>,
-        peer_address: Option<String>,
-        tx: mpsc::UnboundedSender<Route>,
-    },
-    GetPeersStream {
-        tx: mpsc::UnboundedSender<GetPeersResponse>,
-    },
-    GetServerInfo {
-        response: oneshot::Sender<(IpAddr, u16, u64)>,
-    },
-    AddBmpServer {
-        addr: SocketAddr,
-        statistics_timeout: Option<u64>,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemoveBmpServer {
-        addr: SocketAddr,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    GetBmpServers {
-        response: oneshot::Sender<Vec<String>>,
-    },
-    // Policy Management
-    AddDefinedSet {
-        set: DefinedSetConfig,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemoveDefinedSet {
-        set_type: DefinedSetType,
-        name: String,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    ListDefinedSets {
-        set_type: Option<DefinedSetType>,
-        name: Option<String>,
-        response: oneshot::Sender<Vec<DefinedSetConfig>>,
-    },
-    AddPolicy {
-        name: String,
-        statements: Vec<crate::config::StatementConfig>,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    RemovePolicy {
-        name: String,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    ListPolicies {
-        name: Option<String>,
-        response: oneshot::Sender<Vec<PolicyInfoResponse>>,
-    },
-    SetPolicyAssignment {
-        peer_addr: IpAddr,
-        direction: PolicyDirection,
-        policy_names: Vec<String>,
-        default_action: Option<crate::policy::PolicyResult>,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    SetPeerGracefulShutdown {
-        addr: String,
-        enabled: bool,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-}
-
-// Helper types for policy management operations
-pub use crate::config::DefinedSetConfig;
-
-#[derive(Debug, Clone)]
-pub struct PolicyInfoResponse {
-    pub name: String,
-    pub statements: Vec<crate::config::StatementConfig>,
-}
-
-// Server operations sent from peer tasks to the main server loop
-pub enum ServerOp {
-    PeerStateChanged {
-        peer_ip: IpAddr,
-        state: BgpState,
-        conn_type: ConnectionType,
-    },
-    PeerHandshakeComplete {
-        peer_ip: IpAddr,
-        asn: u32,
-        conn_type: ConnectionType,
-    },
-    /// Sent when peer receives OPEN message, for collision detection (RFC 4271 Section 6.8)
-    OpenReceived {
-        peer_ip: IpAddr,
-        bgp_id: u32,
-        conn_type: ConnectionType,
-    },
-    /// Connection info sent when peer establishes
-    PeerConnectionInfo {
-        peer_ip: IpAddr,
-        local_address: IpAddr,
-        local_port: u16,
-        remote_port: u16,
-        sent_open: OpenMessage,
-        received_open: OpenMessage,
-        negotiated_capabilities: PeerCapabilities,
-        conn_type: ConnectionType,
-    },
-    PeerUpdate {
-        peer_ip: IpAddr,
-        withdrawn: Vec<Withdrawal>,
-        announced: Vec<PrefixPath>,
-    },
-    PeerDisconnected {
-        peer_ip: IpAddr,
-        reason: PeerDownReason,
-        gr_afi_safis: Vec<AfiSafi>,
-        conn_type: ConnectionType,
-    },
-    /// Set peer's admin state (e.g., when max prefix limit exceeded)
-    SetAdminState { peer_ip: IpAddr, state: AdminState },
-    /// Route Refresh request from peer
-    RouteRefresh {
-        peer_ip: IpAddr,
-        afi: Afi,
-        safi: Safi,
-    },
-    /// Graceful Restart timer expired for a peer (RFC 4724)
-    GracefulRestartTimerExpired {
-        peer_ip: IpAddr,
-        /// RFC 9494: LLGR-capable AFI/SAFIs and their stale times from peer capability
-        llgr_afi_safis: Vec<(AfiSafi, u32)>,
-    },
-    /// RFC 9494: Long-Lived Graceful Restart stale timer expired for a peer's AFI/SAFI
-    LlgrTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
-    /// Graceful Restart completed for a peer (all EORs received)
-    GracefulRestartComplete { peer_ip: IpAddr, afi_safi: AfiSafi },
-    /// Server signals peer that loc-rib has been sent
-    LocalRibSent { peer_ip: IpAddr, afi_safi: AfiSafi },
-    /// Query BMP statistics for all established peers
-    GetBmpStatistics {
-        response: oneshot::Sender<Vec<BmpPeerStats>>,
-    },
-}
+// Re-exported from ops_mgmt where the handler lives
 
 // BMP operations sent from server to BMP sender task
 pub enum BmpOp {
@@ -471,8 +291,12 @@ pub struct PeerInfo {
     pub outgoing: Option<ConnectionState>,
     /// Incoming connection slot (peer initiated)
     pub incoming: Option<ConnectionState>,
+    /// Per-peer adj-rib-in: routes received from this peer before import policy.
+    pub adj_rib_in: AdjRibIn,
     /// Per-peer adj-rib-out: tracks routes actually exported to this peer.
     pub adj_rib_out: AdjRibOut,
+    /// AFI/SAFIs disabled due to non-negotiated UPDATE (RFC 4760 Section 7)
+    pub disabled_afi_safi: HashSet<AfiSafi>,
     /// RFC 9494: Running LLGR stale timers per AFI/SAFI
     pub llgr_timers: LlgrTimers,
 }
@@ -538,7 +362,9 @@ impl PeerInfo {
             config,
             outgoing,
             incoming,
+            adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
+            disabled_afi_safi: HashSet::new(),
             llgr_timers: LlgrTimers::new(),
         }
     }
@@ -546,6 +372,14 @@ impl PeerInfo {
     /// Get the established connection (only one can be Established)
     pub fn established_conn(&self) -> Option<&ConnectionState> {
         [self.outgoing.as_ref(), self.incoming.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|c| c.state == BgpState::Established)
+    }
+
+    /// Get mutable reference to the established connection
+    pub fn established_conn_mut(&mut self) -> Option<&mut ConnectionState> {
+        [self.outgoing.as_mut(), self.incoming.as_mut()]
             .into_iter()
             .flatten()
             .find(|c| c.state == BgpState::Established)
@@ -614,6 +448,19 @@ impl PeerInfo {
     pub fn policy_out(&self) -> &[Arc<Policy>] {
         &self.export_policies
     }
+
+    pub fn supports_4byte_asn(&self) -> bool {
+        self.established_conn()
+            .and_then(|c| c.capabilities.as_ref())
+            .map(|caps| caps.supports_four_octet_asn())
+            .unwrap_or(true)
+    }
+
+    pub fn add_path_receive_mask(&self) -> AddPathMask {
+        self.established_conn()
+            .map(|conn| conn.receive_format().add_path)
+            .unwrap_or(AddPathMask::NONE)
+    }
 }
 
 pub struct BgpServer {
@@ -629,6 +476,10 @@ pub struct BgpServer {
     pub(crate) op_tx: mpsc::UnboundedSender<ServerOp>,
     op_rx: mpsc::UnboundedReceiver<ServerOp>,
     pub(crate) bmp_tasks: HashMap<SocketAddr, BmpTaskInfo>,
+    /// Channel to send operations to the RtrManager (RPKI).
+    pub(crate) rpki_tx: Option<mpsc::UnboundedSender<RpkiOp>>,
+    /// RPKI VRP table for origin validation (RFC 6811).
+    pub(crate) vrp_table: VrpTable,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
 }
@@ -661,6 +512,8 @@ impl BgpServer {
             op_tx,
             op_rx,
             bmp_tasks: HashMap::new(),
+            rpki_tx: None,
+            vrp_table: VrpTable::new(),
             listener_fd: None,
         })
     }
@@ -743,6 +596,7 @@ impl BgpServer {
         let bind_addr = bind_addr_from_ip(self.local_addr);
         self.init_configured_peers(bind_addr);
         self.init_configured_bmp_servers();
+        self.init_configured_rpki_caches();
 
         loop {
             tokio::select! {
@@ -819,6 +673,52 @@ impl BgpServer {
 
             info!(%addr, "configured BMP server");
         }
+    }
+
+    fn init_configured_rpki_caches(&mut self) {
+        if self.config.rpki_caches.is_empty() {
+            return;
+        }
+
+        let rpki_tx = self.spawn_rtr_manager();
+
+        for rpki_cfg in &self.config.rpki_caches.clone() {
+            let Ok(addr) = rpki_cfg.address.parse::<SocketAddr>() else {
+                error!(addr = %rpki_cfg.address, "invalid RPKI cache address in config");
+                continue;
+            };
+
+            let transport = match rpki_cfg.to_rtr_transport() {
+                Ok(transport) => transport,
+                Err(err) => {
+                    error!(%addr, %err, "invalid RPKI cache transport config");
+                    continue;
+                }
+            };
+
+            let cache_config = RtrCacheConfig {
+                address: addr,
+                preference: rpki_cfg.preference,
+                transport,
+                retry_interval: rpki_cfg.retry_interval,
+                refresh_interval: rpki_cfg.refresh_interval,
+                expire_interval: rpki_cfg.expire_interval,
+            };
+            let _ = rpki_tx.send(RpkiOp::AddCache(cache_config));
+            info!(%addr, "configured RPKI cache");
+        }
+    }
+
+    fn spawn_rtr_manager(&mut self) -> mpsc::UnboundedSender<RpkiOp> {
+        let (rpki_tx, rpki_rx) = mpsc::unbounded_channel();
+        let manager = RtrManager::new(rpki_rx, self.op_tx.clone());
+
+        tokio::spawn(async move {
+            manager.run().await;
+        });
+
+        self.rpki_tx = Some(rpki_tx.clone());
+        rpki_tx
     }
 
     /// Spawn a new Peer task in Idle state
@@ -1051,88 +951,6 @@ impl BgpServer {
         });
 
         task_tx
-    }
-
-    /// Broadcast a BMP operation to all active BMP tasks
-    pub(crate) fn broadcast_bmp(&self, op: BmpOp) {
-        let op = Arc::new(op);
-        for task_info in self.bmp_tasks.values() {
-            let _ = task_info.task_tx.send(Arc::clone(&op));
-        }
-    }
-
-    /// Propagate route changes to all established peers (except the originating peer)
-    /// If originating_peer is None, propagates to all peers (used for locally originated routes)
-    ///
-    /// Loops per-AFI/SAFI so ADD-PATH is checked per address family, not globally.
-    ///
-    /// RFC 4456 Route Reflector filtering is handled by compute_export_path based on:
-    /// - path.source.is_rr_client(): whether source peer was an RR client
-    /// - rr_client: whether peer is an RR client
-    pub(crate) async fn propagate_routes(
-        &mut self,
-        delta: RouteDelta,
-        originating_peer: Option<IpAddr>,
-    ) {
-        if !delta.has_changes() {
-            return;
-        }
-
-        let local_asn = self.config.asn;
-        let cluster_id = self.config.cluster_id();
-        let local_addr = self.local_addr;
-        let loc_rib = &self.loc_rib;
-
-        for (peer_addr, entry) in self.peers.iter_mut() {
-            let Some(conn) = entry.established_conn() else {
-                continue;
-            };
-
-            if !should_propagate_to_peer(*peer_addr, conn.state, originating_peer) {
-                continue;
-            }
-
-            let Some(peer_tx) = conn.peer_tx.clone() else {
-                continue;
-            };
-            let Some(capabilities) = conn.capabilities.clone() else {
-                continue;
-            };
-
-            let peer_asn = conn.asn.unwrap_or(local_asn);
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(local_addr);
-            let send_format = conn.send_format();
-            let negotiated_afi_safis = conn.negotiated_afi_safis();
-
-            let export_policies = entry.policy_out().to_vec();
-            if export_policies.is_empty() {
-                error!(peer_ip = %peer_addr, "export policies not set for established peer");
-                continue;
-            }
-
-            let ctx = PeerExportContext {
-                peer_addr: *peer_addr,
-                peer_tx: &peer_tx,
-                local_asn,
-                peer_asn,
-                local_next_hop,
-                export_policies: &export_policies,
-                rr_client: entry.config.rr_client,
-                rs_client: entry.config.rs_client,
-                cluster_id,
-                send_format,
-                negotiated_afi_safis: &negotiated_afi_safis,
-                next_hop_self: entry.config.next_hop_self,
-                graceful_shutdown: entry.config.graceful_shutdown,
-                capabilities: &capabilities,
-            };
-
-            propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);
-        }
     }
 }
 

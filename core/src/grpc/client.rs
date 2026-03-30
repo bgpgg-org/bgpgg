@@ -13,14 +13,47 @@
 // limitations under the License.
 
 use super::proto::{
-    self, bgp_service_client::BgpServiceClient, AddBmpServerRequest, AddDefinedSetRequest,
-    AddPeerRequest, AddPolicyRequest, AddRouteRequest, AsPathSegment, DefinedSetConfig,
-    DefinedSetInfo, DisablePeerRequest, EnablePeerRequest, GetPeerRequest, GetServerInfoRequest,
-    ListBmpServersRequest, ListDefinedSetsRequest, ListPeersRequest, ListPoliciesRequest,
-    ListRoutesRequest, Origin, Peer, PeerStatistics, PolicyInfo, RemoveBmpServerRequest,
-    RemoveDefinedSetRequest, RemovePeerRequest, RemovePolicyRequest, RemoveRouteRequest,
-    ResetPeerRequest, Route, SessionConfig, SetPeerGracefulShutdownRequest,
-    SetPolicyAssignmentRequest, StatementConfig,
+    self,
+    bgp_service_client::BgpServiceClient,
+    AddBmpServerRequest,
+    AddDefinedSetRequest,
+    AddPeerRequest,
+    AddPolicyRequest,
+    AddRouteRequest,
+    // RPKI
+    AddRpkiCacheRequest,
+    AsPathSegment,
+    DefinedSetConfig,
+    DefinedSetInfo,
+    DisablePeerRequest,
+    EnablePeerRequest,
+    GetPeerRequest,
+    GetRpkiValidationRequest,
+    GetRpkiValidationResponse,
+    GetServerInfoRequest,
+    ListBmpServersRequest,
+    ListDefinedSetsRequest,
+    ListPeersRequest,
+    ListPoliciesRequest,
+    ListRoutesRequest,
+    ListRpkiCachesRequest,
+    ListRpkiCachesResponse,
+    Origin,
+    Peer,
+    PeerStatistics,
+    PolicyInfo,
+    RemoveBmpServerRequest,
+    RemoveDefinedSetRequest,
+    RemovePeerRequest,
+    RemovePolicyRequest,
+    RemoveRouteRequest,
+    RemoveRpkiCacheRequest,
+    ResetPeerRequest,
+    Route,
+    SessionConfig,
+    SetPeerGracefulShutdownRequest,
+    SetPolicyAssignmentRequest,
+    StatementConfig,
 };
 use std::net::Ipv4Addr;
 use tonic::transport::Channel;
@@ -104,7 +137,7 @@ fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
             )
         }
 
-        TYPE_OPAQUE => {
+        TYPE_TRANSITIVE_OPAQUE => {
             proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
                 is_transitive,
                 value: value_bytes.to_vec(),
@@ -741,6 +774,67 @@ impl BgpClient {
         } else {
             Err(tonic::Status::unknown(resp.message))
         }
+    }
+
+    /// Add an RPKI cache server
+    pub async fn add_rpki_cache(
+        &self,
+        request: AddRpkiCacheRequest,
+    ) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .add_rpki_cache(request)
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// Remove an RPKI cache server
+    pub async fn remove_rpki_cache(&self, address: String) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .remove_rpki_cache(RemoveRpkiCacheRequest { address })
+            .await?
+            .into_inner();
+
+        if resp.success {
+            Ok(resp.message)
+        } else {
+            Err(tonic::Status::unknown(resp.message))
+        }
+    }
+
+    /// List all configured RPKI caches
+    pub async fn list_rpki_caches(&self) -> Result<ListRpkiCachesResponse, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .list_rpki_caches(ListRpkiCachesRequest {})
+            .await?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Query RPKI validation state for a prefix + origin AS
+    pub async fn get_rpki_validation(
+        &self,
+        prefix: String,
+        origin_as: u32,
+    ) -> Result<GetRpkiValidationResponse, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .get_rpki_validation(GetRpkiValidationRequest { prefix, origin_as })
+            .await?
+            .into_inner();
+        Ok(resp)
     }
 
     /// RFC 8326: enable or disable graceful shutdown tagging for a peer

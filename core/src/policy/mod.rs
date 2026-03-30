@@ -167,6 +167,7 @@ pub(crate) mod test_helpers {
     use crate::bgp::msg_update::{NextHopAddr, Origin};
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::{Path, PathAttrs, RouteSource};
+    use crate::rpki::vrp::RpkiValidation;
     use std::net::Ipv4Addr;
 
     pub fn create_path(source: RouteSource) -> Path {
@@ -174,6 +175,7 @@ pub(crate) mod test_helpers {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],

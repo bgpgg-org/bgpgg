@@ -67,6 +67,7 @@ async fn create_reject_all_policy(client: &mut BgpClient) {
                     med: None,
                     add_communities: vec![],
                     remove_communities: vec![],
+                    set_rpki_state: None,
                 }),
             }],
         })
@@ -424,6 +425,7 @@ impl BgpggProcess {
             connect_retry_secs: 30,
             peers: vec![],
             bmp_servers: vec![],
+            rpki_caches: vec![],
             defined_sets: Default::default(),
             policy_definitions: vec![],
             sys_name: None,

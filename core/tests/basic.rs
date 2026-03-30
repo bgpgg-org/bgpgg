@@ -24,7 +24,6 @@ async fn test_announce_withdraw() {
     let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     // Server2 announces a route to Server1
-    let server2_addr = server2.address.to_string();
     announce_and_verify_route(
         &server2,
         &[&server1],
@@ -33,14 +32,7 @@ async fn test_announce_withdraw() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65002])],
-            next_hop: server2_addr.clone(),
-            peer_address: server2_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server2),
     )
     .await;
 
@@ -63,7 +55,6 @@ async fn test_announce_withdraw_mesh() {
     let (server1, server2, server3) = setup_three_meshed_servers(PeerConfig::default()).await;
 
     // Server1 announces a route to both server2 and server3
-    let server1_addr = server1.address.to_string();
     announce_and_verify_route(
         &server1,
         &[&server2, &server3],
@@ -72,14 +63,7 @@ async fn test_announce_withdraw_mesh() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65001])],
-            next_hop: server1_addr.clone(),
-            peer_address: server1_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server1),
     )
     .await;
 
@@ -142,17 +126,10 @@ async fn test_announce_withdraw_four_node_mesh() {
     .await;
 
     // Expected route for convergence check
-    let expected_route = vec![Route {
-        prefix: "10.1.0.0/24".to_string(),
-        paths: vec![build_path(PathParams {
-            as_path: vec![as_sequence(vec![65001])],
-            next_hop: server1.address.to_string(),
-            peer_address: server1.address.to_string(),
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        })],
-    }];
+    let expected_route = vec![expected_route(
+        "10.1.0.0/24",
+        PathParams::from_peer(&server1),
+    )];
     let recv_1 = ExpectedStats {
         min_update_received: Some(1),
         ..Default::default()
@@ -310,17 +287,17 @@ async fn test_ibgp_split_horizon() {
     poll_rib(&[
         (
             &server2,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.1.0.0/24",
+                PathParams {
                     as_path: vec![], // Empty AS_PATH for locally originated route in iBGP
                     next_hop: "192.168.1.1".to_string(), // iBGP: NEXT_HOP preserved
                     peer_address: server1.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
         (&server3, vec![]), // Server3 should have no routes due to split horizon
     ])
@@ -377,7 +354,6 @@ async fn test_as_loop_prevention() {
     .await;
 
     // Server1_A announces a route to server2
-    let server1_a_addr = server1_a.address.to_string();
     announce_and_verify_route(
         &server1_a,
         &[&server2],
@@ -386,14 +362,7 @@ async fn test_as_loop_prevention() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65001])],
-            next_hop: server1_a_addr.clone(),
-            peer_address: server1_a_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server1_a),
     )
     .await;
 
@@ -467,38 +436,20 @@ async fn test_ipv6_route_exchange() {
     )
     .await;
 
-    // Get the actual peer address
-    let peers = server1.client.get_peers().await.unwrap();
-    let peer_addr = &peers[0].address;
-
     // Poll for both IPv4 and IPv6 routes to appear in Server1's RIB
     // eBGP: IPv4 next hop rewritten to sender's address
     // Cross-family (IPv6 route over IPv4 session): IPv6 next hop preserved
     poll_rib(&[(
         &server1,
         vec![
-            Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002])],
-                    next_hop: server2.address.to_string(),
-                    peer_address: peer_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            },
-            Route {
-                prefix: "2001:db8::/32".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002])],
+            expected_route("10.0.0.0/24", PathParams::from_peer(&server2)),
+            expected_route(
+                "2001:db8::/32",
+                PathParams {
                     next_hop: "2001:db8::1".to_string(), // IPv6 next hop preserved
-                    peer_address: peer_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            },
+                    ..PathParams::from_peer(&server2)
+                },
+            ),
         ],
     )])
     .await;
@@ -543,7 +494,6 @@ async fn test_ipv6_nexthop_rewrite() {
     let [server1, server2] = chain_servers([server1, server2], PeerConfig::default()).await;
 
     // Server2 announces IPv6 route with explicit next-hop
-    let server2_addr = server2.address.to_string();
     announce_and_verify_route(
         &server2,
         &[&server1],
@@ -552,14 +502,7 @@ async fn test_ipv6_nexthop_rewrite() {
             next_hop: "2001:db8::1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65002])],
-            next_hop: server2_addr.clone(),
-            peer_address: server2_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server2),
     )
     .await;
 
@@ -856,17 +799,17 @@ async fn test_next_hop_self() {
 
         poll_rib(&[(
             &server_c,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65001])],
                     next_hop: expected_next_hop,
                     peer_address: server_b.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         )])
         .await;
     }

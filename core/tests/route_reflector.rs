@@ -18,7 +18,7 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
-use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{BgpState, Origin, SessionConfig};
 use std::net::Ipv4Addr;
 
 /// RFC 4456 Section 8: ORIGINATOR_ID loop detection.
@@ -62,9 +62,9 @@ async fn test_rr_originator_id_loop_detection() {
     // Wait for the clean route to propagate (proves RR processed updates from Client)
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.1.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.1.0.0/24",
+            PathParams {
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: rr.address.to_string(),
                 origin: Some(Origin::Igp),
@@ -72,8 +72,8 @@ async fn test_rr_originator_id_loop_detection() {
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["2.2.2.2".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 
@@ -119,9 +119,9 @@ async fn test_rr_ebgp_route_reflected_to_clients() {
 
     // Both client and non-client should receive route WITHOUT RR attributes
     // (route came from eBGP, not iBGP - no reflection attributes needed)
-    let expected_route = Route {
-        prefix: "10.0.0.0/24".to_string(),
-        paths: vec![build_path(PathParams {
+    let route = expected_route(
+        "10.0.0.0/24",
+        PathParams {
             as_path: vec![as_sequence(vec![65002])],
             next_hop: ebgp_peer.address.to_string(),
             peer_address: rr.address.to_string(),
@@ -130,14 +130,10 @@ async fn test_rr_ebgp_route_reflected_to_clients() {
             originator_id: None,
             cluster_list: vec![],
             ..Default::default()
-        })],
-    };
+        },
+    );
 
-    poll_rib(&[
-        (&client, vec![expected_route.clone()]),
-        (&nc, vec![expected_route]),
-    ])
-    .await;
+    poll_rib(&[(&client, vec![route.clone()]), (&nc, vec![route])]).await;
 }
 
 /// RR locally originated routes are sent to clients without RR attributes.
@@ -169,9 +165,9 @@ async fn test_rr_locally_originated_route() {
 
     // Both clients should receive route WITHOUT ORIGINATOR_ID/CLUSTER_LIST
     // (route is locally originated by the RR, not reflected from an iBGP peer)
-    let expected_route = Route {
-        prefix: "10.0.0.0/24".to_string(),
-        paths: vec![build_path(PathParams {
+    let route = expected_route(
+        "10.0.0.0/24",
+        PathParams {
             next_hop: "192.168.2.1".to_string(),
             peer_address: rr.address.to_string(),
             origin: Some(Origin::Igp),
@@ -179,14 +175,10 @@ async fn test_rr_locally_originated_route() {
             originator_id: None,
             cluster_list: vec![],
             ..Default::default()
-        })],
-    };
+        },
+    );
 
-    poll_rib(&[
-        (&client1, vec![expected_route.clone()]),
-        (&client2, vec![expected_route]),
-    ])
-    .await;
+    poll_rib(&[(&client1, vec![route.clone()]), (&client2, vec![route])]).await;
 }
 
 /// Test that Route Reflector reflects routes between iBGP clients.
@@ -216,9 +208,9 @@ async fn test_route_reflector_basic() {
     // its cluster_id to CLUSTER_LIST when reflecting to clients
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![],
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: rr.address.to_string(),
@@ -227,8 +219,8 @@ async fn test_route_reflector_basic() {
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["2.2.2.2".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -264,9 +256,9 @@ async fn test_route_reflector_mixed_topology() {
     )
     .await;
 
-    let client_route = vec![Route {
-        prefix: "10.1.0.0/24".to_string(),
-        paths: vec![build_path(PathParams {
+    let client_route = vec![expected_route(
+        "10.1.0.0/24",
+        PathParams {
             as_path: vec![],
             next_hop: "192.168.1.1".to_string(),
             peer_address: rr.address.to_string(),
@@ -275,8 +267,8 @@ async fn test_route_reflector_mixed_topology() {
             originator_id: Some("1.1.1.1".to_string()),
             cluster_list: vec!["2.2.2.2".to_string()],
             ..Default::default()
-        })],
-    }];
+        },
+    )];
 
     poll_rib(&[(&nc1, client_route.clone()), (&nc2, client_route.clone())]).await;
 
@@ -294,9 +286,9 @@ async fn test_route_reflector_mixed_topology() {
     // Client should receive nc1's route via RR
     poll_route_exists(
         &c1,
-        Route {
-            prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.2.0.0/24",
+            PathParams {
                 as_path: vec![],
                 next_hop: "192.168.3.1".to_string(),
                 peer_address: rr.address.to_string(),
@@ -305,8 +297,8 @@ async fn test_route_reflector_mixed_topology() {
                 originator_id: Some("3.3.3.3".to_string()),
                 cluster_list: vec!["2.2.2.2".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 
@@ -368,15 +360,15 @@ async fn test_rr_cluster_loop_detection() {
     // Route should exist on RR1 (accepted from its client)
     poll_route_exists(
         &rr1,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: client1.address.to_string(),
                 local_pref: Some(100),
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 
@@ -422,18 +414,14 @@ async fn test_rr_ebgp_attribute_stripping() {
     // eBGP peer should receive route WITHOUT ORIGINATOR_ID/CLUSTER_LIST
     poll_route_exists(
         &ebgp_peer,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: rr.address.to_string(),
-                peer_address: rr.address.to_string(),
-                local_pref: Some(100),
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 originator_id: None,
                 cluster_list: vec![],
-                ..Default::default()
-            })],
-        },
+                ..PathParams::from_peer(&rr)
+            },
+        ),
     )
     .await;
 }
@@ -468,17 +456,17 @@ async fn test_rr_custom_cluster_id() {
     // CLUSTER_LIST should contain 9.9.9.9 (custom cluster_id), not 2.2.2.2 (router_id)
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: rr.address.to_string(),
                 local_pref: Some(100),
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["9.9.9.9".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -516,17 +504,17 @@ async fn test_rr_multi_hop_cluster_list() {
     // CLUSTER_LIST=[3.3.3.3, 2.2.2.2] (each RR prepended its own)
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: rr2.address.to_string(),
                 local_pref: Some(100),
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["3.3.3.3".to_string(), "2.2.2.2".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -555,17 +543,17 @@ async fn test_rr_withdrawal_reflection() {
 
     poll_route_exists(
         &client2,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 next_hop: "192.168.1.1".to_string(),
                 peer_address: rr.address.to_string(),
                 local_pref: Some(100),
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["2.2.2.2".to_string()],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 
@@ -638,9 +626,9 @@ async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
     // Client should receive route WITHOUT the bogus RR attributes
     poll_route_exists(
         &client,
-        Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
                 as_path: vec![as_sequence(vec![65002])],
                 next_hop: "127.0.0.3".to_string(),
                 peer_address: rr.address.to_string(),
@@ -649,8 +637,8 @@ async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
                 originator_id: None,
                 cluster_list: vec![],
                 ..Default::default()
-            })],
-        },
+            },
+        ),
     )
     .await;
 }
@@ -738,23 +726,23 @@ async fn test_rr_next_hop_self() {
     poll_rib(&[
         (
             &client_nhs,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     next_hop: rr.address.to_string(), // rewritten to RR's address
                     ..path_base.clone()
-                })],
-            }],
+                },
+            )],
         ),
         (
             &client,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     next_hop: ebgp_peer.address.to_string(), // original eBGP NH preserved
                     ..path_base.clone()
-                })],
-            }],
+                },
+            )],
         ),
     ])
     .await;

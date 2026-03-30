@@ -1,4 +1,4 @@
-// Copyright 2025 bgpgg Authors
+// Copyright 2026 bgpgg Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod global;
-pub mod peer;
-pub mod rpki;
+//! Prefix data structures for IP routing tables.
+//!
+//! - `PrefixTrie`: Arena-allocated Patricia trie for subtree/covering queries.
+//! - `PrefixMap`: HashMap + PrefixTrie kept in sync for hot-path lookups
+//!   and prefix queries.
+
+mod prefix_map;
+mod trie;
+
+pub use prefix_map::PrefixMap;
+pub use trie::Prefix;
+pub(crate) use trie::PrefixTrie;

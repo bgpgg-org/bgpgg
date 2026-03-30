@@ -17,9 +17,20 @@
 mod utils;
 pub use utils::*;
 
+use std::net::Ipv4Addr;
+
+use bgpgg::bgp::community;
+use bgpgg::bgp::ext_community::from_rpki_state_community;
+use bgpgg::config::{Config, RpkiCacheConfig};
 use bgpgg::grpc::proto::{
-    ActionsConfig, ConditionsConfig, DefinedSetConfig, Origin, Route, StatementConfig,
+    defined_set_config,
+    extended_community::{Community, Opaque},
+    ActionsConfig, ConditionsConfig, DefinedSetConfig, ExtendedCommunity, ExtendedCommunitySetData,
+    MatchSetRef, Route, RpkiValidation, StatementConfig,
 };
+use bgpgg::net::{IpNetwork, Ipv4Net};
+use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
+use utils::rtr::FakeTcpCache;
 
 #[tokio::test]
 async fn test_export_policy_prefix_match() {
@@ -82,16 +93,14 @@ async fn test_export_policy_prefix_match() {
         let expected: Vec<Route> = tc
             .expected
             .iter()
-            .map(|prefix| Route {
-                prefix: prefix.to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65002])],
-                    next_hop: server2.address.to_string(),
-                    peer_address: peer_addr.clone(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
+            .map(|prefix| {
+                expected_route(
+                    prefix,
+                    PathParams {
+                        peer_address: peer_addr.clone(),
+                        ..PathParams::from_peer(&server2)
+                    },
+                )
             })
             .collect();
 
@@ -218,33 +227,25 @@ async fn test_export_policy_large_community_match() {
     let peer_addr = &peers[0].address;
 
     let expected = vec![
-        Route {
-            prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        expected_route(
+            "10.2.0.0/24",
+            PathParams {
                 large_communities: vec![proto::LargeCommunity {
                     global_admin: 65536,
                     local_data_1: 999,
                     local_data_2: 999,
                 }],
-                ..Default::default()
-            })],
-        },
-        Route {
-            prefix: "10.3.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
                 peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        },
+                ..PathParams::from_peer(&server2)
+            },
+        ),
+        expected_route(
+            "10.3.0.0/24",
+            PathParams {
+                peer_address: peer_addr.clone(),
+                ..PathParams::from_peer(&server2)
+            },
+        ),
     ];
 
     poll_until_stable(
@@ -367,14 +368,9 @@ async fn test_export_policy_ext_community_match() {
     let peer_addr = &peers[0].address;
 
     let expected = vec![
-        Route {
-            prefix: "10.2.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
-                peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
+        expected_route(
+            "10.2.0.0/24",
+            PathParams {
                 extended_communities: vec![proto::ExtendedCommunity {
                     community: Some(proto::extended_community::Community::TwoOctetAs(
                         proto::extended_community::TwoOctetAsSpecific {
@@ -385,20 +381,17 @@ async fn test_export_policy_ext_community_match() {
                         },
                     )),
                 }],
-                ..Default::default()
-            })],
-        },
-        Route {
-            prefix: "10.3.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65002])],
-                next_hop: server2.address.to_string(),
                 peer_address: peer_addr.clone(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        },
+                ..PathParams::from_peer(&server2)
+            },
+        ),
+        expected_route(
+            "10.3.0.0/24",
+            PathParams {
+                peer_address: peer_addr.clone(),
+                ..PathParams::from_peer(&server2)
+            },
+        ),
     ];
 
     poll_until_stable(
@@ -409,5 +402,289 @@ async fn test_export_policy_ext_community_match() {
         Duration::from_millis(500),
         "Routes with blocked extended communities should be rejected",
     )
+    .await;
+}
+
+/// Import policy matching on RPKI validation state:
+/// - Reject Invalid routes
+/// - Accept Valid and NotFound routes
+#[tokio::test]
+async fn test_import_policy_rpki_validation() {
+    let mut cache = FakeTcpCache::listen().await;
+
+    // server2 (AS 65002) -> server1 (AS 65001, with RPKI cache)
+    let server1 = start_test_server(Config {
+        asn: 65001,
+        listen_addr: "127.0.0.1:0".to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        rpki_caches: vec![RpkiCacheConfig {
+            address: cache.address(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+
+    let server2 = start_test_server(Config::new(
+        65002,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+
+    let [server2, server1] = chain_servers([server2, server1], PeerConfig::default()).await;
+
+    // Accept RPKI cache connection and provide VRPs
+    cache.accept().await;
+    cache.read_reset_query().await;
+
+    // VRP 1: 10.0.0.0/8 max /24 AS 65002 -> 10.0.0.0/24 from AS 65002 is Valid
+    // VRP 2: 172.16.0.0/12 max /24 AS 65099 -> 172.16.0.0/24 from AS 65002 is Invalid
+    cache
+        .send_vrps(&[
+            Vrp {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix_length: 8,
+                }),
+                max_length: 24,
+                origin_as: 65002,
+            },
+            Vrp {
+                prefix: IpNetwork::V4(Ipv4Net {
+                    address: Ipv4Addr::new(172, 16, 0, 0),
+                    prefix_length: 12,
+                }),
+                max_length: 24,
+                origin_as: 65099,
+            },
+        ])
+        .await;
+
+    // Apply import policy on server1 for the peer from server2:
+    // Statement 1: rpki-validation=invalid -> reject
+    // Statement 2: rpki-validation=valid -> tag with community 65001:1, accept
+    // Statement 3: rpki-validation=not-found -> tag with community 65001:2, accept
+    let peer_addr = server2.address.to_string();
+    server1
+        .client
+        .add_policy(
+            "rpki-filter".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiInvalid.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiValid.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        add_communities: vec!["65001:1".to_string()],
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        rpki_validation: Some(RpkiValidation::RpkiNotFound.into()),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        add_communities: vec!["65001:2".to_string()],
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server1
+        .client
+        .set_policy_assignment(
+            peer_addr.clone(),
+            "import".to_string(),
+            vec!["rpki-filter".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce routes from server2
+    for prefix in ["10.0.0.0/24", "172.16.0.0/24", "192.168.1.0/24"] {
+        announce_route(
+            &server2,
+            RouteParams {
+                prefix: prefix.to_string(),
+                next_hop: server2.address.to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    // Expected on server1:
+    // - 10.0.0.0/24: Valid -> accepted with community 65001:1
+    // - 172.16.0.0/24: Invalid -> rejected (absent)
+    // - 192.168.1.0/24: NotFound -> accepted with community 65001:2
+    let comm_valid = community::from_asn_value(65001, 1);
+    let comm_not_found = community::from_asn_value(65001, 2);
+    poll_rib(&[(
+        &server1,
+        vec![
+            expected_route(
+                "10.0.0.0/24",
+                PathParams {
+                    rpki_validation: RpkiValidation::RpkiValid as i32,
+                    communities: vec![comm_valid],
+                    ..PathParams::from_peer(&server2)
+                },
+            ),
+            expected_route(
+                "192.168.1.0/24",
+                PathParams {
+                    rpki_validation: RpkiValidation::RpkiNotFound as i32,
+                    communities: vec![comm_not_found],
+                    ..PathParams::from_peer(&server2)
+                },
+            ),
+        ],
+    )])
+    .await;
+}
+
+fn rpki_state_ext_community(state: RpkiState) -> ExtendedCommunity {
+    let ec = from_rpki_state_community(state.to_u8());
+    let bytes = ec.to_be_bytes();
+    ExtendedCommunity {
+        community: Some(Community::Opaque(Opaque {
+            is_transitive: false,
+            value: bytes[2..].to_vec(),
+        })),
+    }
+}
+
+/// RFC 8097: SetRpkiState policy action sets rpki_state from matched RPKI state community.
+/// Topology: server1 (AS 65001) -> server2 (AS 65001, iBGP with import policy)
+/// server1 sends route with RPKI state community, server2 import policy matches and sets rpki_state.
+#[tokio::test]
+async fn test_rpki_state_community_set_policy() {
+    let server1 = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let server2 = start_test_server(Config::new(
+        65001,
+        "127.0.0.2:0",
+        Ipv4Addr::new(2, 2, 2, 2),
+        90,
+    ))
+    .await;
+    let [server1, server2] = chain_servers([server1, server2], PeerConfig::default()).await;
+
+    // Define ext community set for RPKI state valid
+    let rpki_valid_ec = from_rpki_state_community(0);
+    server2
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "ext-community".to_string(),
+                name: "rpki-valid".to_string(),
+                config: Some(defined_set_config::Config::ExtCommunitySet(
+                    ExtendedCommunitySetData {
+                        ext_communities: vec![format!("0x{:016x}", rpki_valid_ec)],
+                    },
+                )),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Import policy: match RPKI state valid community -> set rpki_state to valid
+    server2
+        .client
+        .add_policy(
+            "rpki-import".to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_ext_community_set: Some(MatchSetRef {
+                            set_name: "rpki-valid".to_string(),
+                            match_option: String::new(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        set_rpki_state: Some(RpkiValidation::RpkiValid.into()),
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let peer_addr = server1.address.to_string();
+    server2
+        .client
+        .set_policy_assignment(
+            peer_addr,
+            "import".to_string(),
+            vec!["rpki-import".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Announce route from server1 with RPKI state valid community
+    announce_route(
+        &server1,
+        RouteParams {
+            prefix: "10.0.0.0/24".to_string(),
+            next_hop: server1.address.to_string(),
+            extended_communities: vec![rpki_valid_ec],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // server2 should have rpki_state=valid from policy
+    poll_rib(&[(
+        &server2,
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams {
+                as_path: vec![],
+                next_hop: server1.address.to_string(),
+                peer_address: server1.address.to_string(),
+                local_pref: Some(100),
+                rpki_validation: RpkiValidation::RpkiValid as i32,
+                extended_communities: vec![rpki_state_ext_community(RpkiState::Valid)],
+                ..Default::default()
+            },
+        )],
+    )])
     .await;
 }

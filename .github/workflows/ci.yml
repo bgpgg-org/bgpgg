@@ -47,6 +47,7 @@ jobs:
       with:
         usesh: true
         copyback: false
+        mem: 8192
         prepare: |
           ./script/setup-freebsd.sh
         run: |

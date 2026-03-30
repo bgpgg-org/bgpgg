@@ -18,7 +18,8 @@ use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::log::{debug, error, info};
-use crate::server::{AdminState, ServerOp};
+use crate::server::ops::ServerOp;
+use crate::server::AdminState;
 use crate::types::PeerDownReason;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -53,7 +54,7 @@ impl Peer {
 
                             match BgpMessage::from_bytes(message_type, body, format) {
                                 Ok(message) => {
-                                    if let Err(e) = self.handle_received_message(message, peer_ip).await {
+                                    if let Err(e) = self.handle_received_message(message).await {
                                         error!(peer_ip = %peer_ip, error = %e, "error processing message");
                                         self.disconnect(true, PeerDownReason::RemoteNoNotification);
                                         return false;
@@ -112,10 +113,6 @@ impl Peer {
                         }
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
-                        }
-                        PeerOp::GetAdjRibIn(response) => {
-                            let routes = self.rib_in.get_all_routes();
-                            let _ = response.send(routes);
                         }
                         PeerOp::HardReset => {
                             info!(peer_ip = %peer_ip, "hard reset requested");
@@ -375,9 +372,7 @@ pub(super) mod tests {
     use crate::config::PeerConfig;
     use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, LocalConfig, PeerStatistics, SessionType};
-    use crate::rib::rib_in::AdjRibIn;
     use crate::server::ConnectionType;
-    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -422,7 +417,6 @@ pub(super) mod tests {
             conn: Some(TcpConnection::new(tcp_tx, tcp_rx)),
             asn: Some(65001),
             bgp_id: Some(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-            rib_in: AdjRibIn::new(),
             session_type: Some(SessionType::Ebgp),
             statistics: PeerStatistics::default(),
             config: PeerConfig::default(),
@@ -440,8 +434,9 @@ pub(super) mod tests {
             sent_open: None,
             received_open: None,
             capabilities: PeerCapabilities::default(),
-            disabled_afi_safi: HashSet::new(),
             gr_state: None,
+            pending_announced: Vec::new(),
+            pending_withdrawn: Vec::new(),
         }
     }
 

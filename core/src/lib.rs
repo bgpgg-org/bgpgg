@@ -21,8 +21,9 @@ pub mod net;
 pub mod peer;
 pub mod policy;
 pub mod rib;
+pub mod rpki;
 pub mod server;
-pub mod server_ops;
+pub mod table;
 pub mod types;
 
 #[cfg(test)]
@@ -31,6 +32,7 @@ pub(crate) mod test_helpers {
     use crate::net::{IpNetwork, Ipv4Net};
     use crate::rib::path_id::PathIdAllocator;
     use crate::rib::{Path, PathAttrs, RouteSource};
+    use crate::rpki::vrp::RpkiValidation;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -69,6 +71,7 @@ pub(crate) mod test_helpers {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
@@ -101,6 +104,7 @@ pub(crate) mod test_helpers {
             local_path_id: None,
             remote_path_id: None,
             stale: false,
+            rpki_state: RpkiValidation::NotFound,
             attrs: PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {

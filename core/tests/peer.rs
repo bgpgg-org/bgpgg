@@ -21,8 +21,7 @@ use bgpgg::bgp::community;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
-    AdminState, Afi, BgpState, GracefulRestartConfig, Origin, Peer, ResetType, Route, Safi,
-    SessionConfig,
+    AdminState, Afi, BgpState, GracefulRestartConfig, Origin, Peer, ResetType, Safi, SessionConfig,
 };
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
@@ -81,7 +80,6 @@ async fn test_peer_down() {
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
     // Server2 announces a route to Server1
-    let server2_addr = server2.address.to_string();
     announce_and_verify_route(
         &server2,
         &[&server1],
@@ -90,14 +88,7 @@ async fn test_peer_down() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65002])],
-            next_hop: server2_addr.clone(),
-            peer_address: server2_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server2),
     )
     .await;
 
@@ -130,7 +121,6 @@ async fn test_peer_down_four_node_mesh() {
     .await;
 
     // Server1 announces a route to all peers
-    let server1_addr = server1.address.to_string();
     announce_and_verify_route(
         &server1,
         &[&server2, &server3, &server4],
@@ -139,14 +129,7 @@ async fn test_peer_down_four_node_mesh() {
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
         },
-        PathParams {
-            as_path: vec![as_sequence(vec![65001])],
-            next_hop: server1_addr.clone(),
-            peer_address: server1_addr,
-            origin: Some(Origin::Igp),
-            local_pref: Some(100),
-            ..Default::default()
-        },
+        PathParams::from_peer(&server1),
     )
     .await;
 
@@ -194,31 +177,17 @@ async fn test_peer_down_four_node_mesh() {
     poll_rib(&[
         (
             &server2,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.1.0.0/24",
+                PathParams::from_peer(&server1),
+            )],
         ),
         (
             &server3,
-            vec![Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(), // eBGP: NEXT_HOP rewritten to sender's local address
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.1.0.0/24",
+                PathParams::from_peer(&server1),
+            )],
         ),
     ])
     .await;
@@ -808,16 +777,8 @@ async fn test_mrai_rate_limiting() {
         poll_rib(&[(
             &server2,
             (0..num_routes)
-                .map(|i| Route {
-                    prefix: format!("10.{}.0.0/24", i),
-                    paths: vec![build_path(PathParams {
-                        as_path: vec![as_sequence(vec![65001])],
-                        next_hop: server1.address.to_string(),
-                        peer_address: server1.address.to_string(),
-                        origin: Some(Origin::Igp),
-                        local_pref: Some(100),
-                        ..Default::default()
-                    })],
+                .map(|i| {
+                    expected_route(&format!("10.{}.0.0/24", i), PathParams::from_peer(&server1))
                 })
                 .collect(),
         )])
@@ -992,17 +953,10 @@ async fn test_reset_peer_soft() {
         // Wait for route to propagate
         poll_rib(&[(
             &server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams::from_peer(&server1),
+            )],
         )])
         .await;
 
@@ -1090,17 +1044,10 @@ async fn test_hard_reset_established() {
     // Wait for route to propagate
     poll_rib(&[(
         &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams::from_peer(&server1),
+        )],
     )])
     .await;
 
@@ -1122,17 +1069,10 @@ async fn test_hard_reset_established() {
     // Verify route is automatically re-advertised after reconnection
     poll_rib(&[(
         &server2,
-        vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
-            paths: vec![build_path(PathParams {
-                as_path: vec![as_sequence(vec![65001])],
-                next_hop: server1.address.to_string(),
-                peer_address: server1.address.to_string(),
-                origin: Some(Origin::Igp),
-                local_pref: Some(100),
-                ..Default::default()
-            })],
-        }],
+        vec![expected_route(
+            "10.0.0.0/24",
+            PathParams::from_peer(&server1),
+        )],
     )])
     .await;
 }
@@ -2028,9 +1968,9 @@ async fn test_graceful_session_shutdown_receiver() {
     poll_rib(&[(
         &server,
         vec![
-            Route {
-                prefix: "10.1.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            expected_route(
+                "10.1.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65002])],
                     next_hop: next_hop_str.clone(),
                     peer_address: peer.address.clone(),
@@ -2038,19 +1978,19 @@ async fn test_graceful_session_shutdown_receiver() {
                     local_pref: Some(0),
                     communities: vec![community::GRACEFUL_SHUTDOWN],
                     ..Default::default()
-                })],
-            },
-            Route {
-                prefix: "10.2.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+                },
+            ),
+            expected_route(
+                "10.2.0.0/24",
+                PathParams {
                     as_path: vec![as_sequence(vec![65002])],
                     next_hop: next_hop_str,
                     peer_address: peer.address.clone(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            },
+                },
+            ),
         ],
     )])
     .await;
@@ -2088,45 +2028,34 @@ async fn test_graceful_session_shutdown_initiator() {
     poll_rib(&[
         (
             &server2,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     local_pref: Some(0),
                     communities: vec![community::GRACEFUL_SHUTDOWN],
-                    ..Default::default()
-                })],
-            }],
+                    ..PathParams::from_peer(&server1)
+                },
+            )],
         ),
         (
             &server3,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
-                    as_path: vec![as_sequence(vec![65001])],
-                    next_hop: server1.address.to_string(),
-                    peer_address: server1.address.to_string(),
-                    origin: Some(Origin::Igp),
-                    local_pref: Some(100),
-                    ..Default::default()
-                })],
-            }],
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams::from_peer(&server1),
+            )],
         ),
         (
             &server4,
-            vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
-                paths: vec![build_path(PathParams {
+            vec![expected_route(
+                "10.0.0.0/24",
+                PathParams {
                     next_hop: "192.168.1.1".to_string(),
                     peer_address: server1.address.to_string(),
                     origin: Some(Origin::Igp),
                     local_pref: Some(100),
                     ..Default::default()
-                })],
-            }],
+                },
+            )],
         ),
     ])
     .await;
@@ -2148,17 +2077,15 @@ async fn test_dynamic_graceful_shutdown_toggle() {
     )
     .await;
 
-    let route_at = |communities: Vec<u32>, local_pref: u32| Route {
-        prefix: "10.0.0.0/24".to_string(),
-        paths: vec![build_path(PathParams {
-            as_path: vec![as_sequence(vec![65001])],
-            next_hop: server1.address.to_string(),
-            peer_address: server1.address.to_string(),
-            origin: Some(Origin::Igp),
-            local_pref: Some(local_pref),
-            communities,
-            ..Default::default()
-        })],
+    let route_at = |communities: Vec<u32>, local_pref: u32| {
+        expected_route(
+            "10.0.0.0/24",
+            PathParams {
+                local_pref: Some(local_pref),
+                communities,
+                ..PathParams::from_peer(&server1)
+            },
+        )
     };
 
     poll_rib(&[(&server2, vec![route_at(vec![], 100)])]).await;
