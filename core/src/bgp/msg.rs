@@ -68,6 +68,8 @@ pub struct MessageFormat {
     pub add_path: AddPathMask,
     /// Whether this is an eBGP session (RFC 7606 error handling, attribute stripping)
     pub is_ebgp: bool,
+    /// Whether Enhanced Route Refresh (RFC 7313) was negotiated
+    pub enhanced_rr: bool,
 }
 
 /// Format for parsing OPEN messages, before capabilities are negotiated.
@@ -76,6 +78,7 @@ pub const PRE_OPEN_FORMAT: MessageFormat = MessageFormat {
     use_4byte_asn: false,
     add_path: AddPathMask::NONE,
     is_ebgp: false,
+    enhanced_rr: false,
 };
 
 // BGP header marker (16 bytes of 0xFF)
@@ -192,7 +195,7 @@ impl BgpMessage {
                 Ok(BgpMessage::Notification(message))
             }
             MessageType::RouteRefresh => {
-                let message = RouteRefreshMessage::from_bytes(body, full_msg)?;
+                let message = RouteRefreshMessage::from_bytes(body, full_msg, format.enhanced_rr)?;
                 Ok(BgpMessage::RouteRefresh(message))
             }
         }

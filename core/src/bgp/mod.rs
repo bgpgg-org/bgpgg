@@ -53,6 +53,7 @@ pub(crate) const DEFAULT_FORMAT: msg::MessageFormat = msg::MessageFormat {
     use_4byte_asn: true,
     add_path: msg::AddPathMask::NONE,
     is_ebgp: false,
+    enhanced_rr: false,
 };
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub(crate) const ADDPATH_FORMAT: msg::MessageFormat = msg::MessageFormat {
     use_4byte_asn: true,
     add_path: msg::AddPathMask::ALL,
     is_ebgp: false,
+    enhanced_rr: false,
 };
 
 #[cfg(test)]

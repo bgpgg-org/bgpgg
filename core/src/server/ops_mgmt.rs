@@ -1613,6 +1613,7 @@ fn send_initial_bmp_state_to_task(
                 use_4byte_asn: peer_info.supports_4byte_asn(),
                 add_path: peer_info.add_path_receive_mask(),
                 is_ebgp: false,
+                enhanced_rr: false,
             };
 
             // Convert routes to UpdateMessages, batching by shared path attributes

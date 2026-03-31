@@ -860,6 +860,7 @@ mod tests {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: local_asn != peer_asn,
+                enhanced_rr: false,
             },
             negotiated_afi_safis: negotiated,
             next_hop_self,
@@ -1649,6 +1650,7 @@ mod tests {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,
@@ -1664,6 +1666,7 @@ mod tests {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
         );
 
@@ -1963,6 +1966,7 @@ mod tests {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
             negotiated_afi_safis: &negotiated,
             next_hop_self: false,

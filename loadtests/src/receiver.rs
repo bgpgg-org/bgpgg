@@ -59,6 +59,7 @@ pub async fn run_receiver(
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
         )
         .await

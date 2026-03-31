@@ -134,6 +134,7 @@ impl PeerCapabilities {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
             is_ebgp: session_type == Some(SessionType::Ebgp),
+            enhanced_rr: self.enhanced_route_refresh,
         }
     }
 
@@ -152,6 +153,7 @@ impl PeerCapabilities {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
             is_ebgp: session_type == Some(SessionType::Ebgp),
+            enhanced_rr: self.enhanced_route_refresh,
         }
     }
 

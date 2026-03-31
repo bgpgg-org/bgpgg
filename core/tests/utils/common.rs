@@ -1809,6 +1809,7 @@ impl FakePeer {
             use_4byte_asn: self.supports_4byte_asn,
             add_path: self.add_path,
             is_ebgp: false,
+            enhanced_rr: false,
         }
     }
 

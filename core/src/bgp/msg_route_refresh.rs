@@ -84,17 +84,23 @@ impl RouteRefreshMessage {
         }
     }
 
-    pub fn from_bytes(body: Vec<u8>, full_msg: &[u8]) -> Result<Self, ParserError> {
+    /// Parse a ROUTE-REFRESH message body.
+    pub fn from_bytes(
+        body: Vec<u8>,
+        full_msg: &[u8],
+        enhanced_rr: bool,
+    ) -> Result<Self, ParserError> {
         if body.len() != 4 {
             let subtype = body.get(2).copied().map(RouteRefreshSubtype::from);
-            let is_enhanced = matches!(
+            let is_borr_or_eorr = matches!(
                 subtype,
                 Some(RouteRefreshSubtype::BoRR | RouteRefreshSubtype::EoRR)
             );
 
             // RFC 7313 Section 5: BoRR/EoRR with wrong length -> error code 7, subcode 1.
-            // Data must contain the complete ROUTE-REFRESH message.
-            if is_enhanced {
+            // Data field must contain the complete ROUTE-REFRESH message.
+            // Only applies when Enhanced Route Refresh was received from peer.
+            if is_borr_or_eorr && enhanced_rr {
                 return Err(ParserError::BgpError {
                     error: BgpError::RouteRefreshMessageError(
                         RouteRefreshMessageError::InvalidMessageLength,
@@ -211,7 +217,7 @@ mod tests {
 
         for (body, expected_afi, expected_safi, expected_subtype) in cases {
             let full_msg = build_rr_msg(&body);
-            let msg = RouteRefreshMessage::from_bytes(body, &full_msg).unwrap();
+            let msg = RouteRefreshMessage::from_bytes(body, &full_msg, false).unwrap();
             assert_eq!(msg.afi, expected_afi);
             assert_eq!(msg.safi, expected_safi);
             assert_eq!(msg.subtype, expected_subtype);
@@ -229,7 +235,7 @@ mod tests {
         for msg in cases {
             let body = msg.to_bytes();
             let full_msg = build_rr_msg(&body);
-            let parsed = RouteRefreshMessage::from_bytes(body, &full_msg).unwrap();
+            let parsed = RouteRefreshMessage::from_bytes(body, &full_msg, false).unwrap();
             assert_eq!(parsed, msg);
         }
     }
@@ -245,35 +251,63 @@ mod tests {
 
     #[test]
     fn test_route_refresh_invalid_length_error_codes() {
+        // RFC 7313 Section 5: error code 7 only when enhanced RR is negotiated
         let cases = vec![
-            // Normal subtype with wrong length -> error code 1 (MessageHeader)
+            // (body, enhanced_rr, expected_error)
+            // Normal subtype -> always error code 1
             (
                 vec![0x00, 0x01, 0x00],
+                true,
                 BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             ),
-            // BoRR with wrong length -> error code 7 (RouteRefreshMessage)
+            (
+                vec![0x00, 0x01, 0x00],
+                false,
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            ),
+            // BoRR with enhanced_rr=true -> error code 7
             (
                 vec![0x00, 0x01, 0x01],
+                true,
                 BgpError::RouteRefreshMessageError(RouteRefreshMessageError::InvalidMessageLength),
             ),
-            // EoRR with wrong length -> error code 7 (RouteRefreshMessage)
+            // BoRR with enhanced_rr=false -> falls back to error code 1
+            (
+                vec![0x00, 0x01, 0x01],
+                false,
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            ),
+            // EoRR with enhanced_rr=true -> error code 7
             (
                 vec![0x00, 0x01, 0x02],
+                true,
                 BgpError::RouteRefreshMessageError(RouteRefreshMessageError::InvalidMessageLength),
             ),
-            // Unknown subtype with wrong length -> error code 1 (MessageHeader)
+            // EoRR with enhanced_rr=false -> falls back to error code 1
+            (
+                vec![0x00, 0x01, 0x02],
+                false,
+                BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
+            ),
+            // Unknown subtype -> always error code 1
             (
                 vec![0x00, 0x01, 0x63],
+                true,
                 BgpError::MessageHeaderError(MessageHeaderError::BadMessageLength),
             ),
         ];
 
-        for (body, expected_error) in cases {
+        for (body, enhanced_rr, expected_error) in cases {
             let full_msg = build_rr_msg(&body);
-            let err = RouteRefreshMessage::from_bytes(body.clone(), &full_msg).unwrap_err();
+            let err =
+                RouteRefreshMessage::from_bytes(body.clone(), &full_msg, enhanced_rr).unwrap_err();
             match err {
                 ParserError::BgpError { error, data } => {
-                    assert_eq!(error, expected_error, "body: {:?}", body);
+                    assert_eq!(
+                        error, expected_error,
+                        "body: {:?}, enhanced_rr: {}",
+                        body, enhanced_rr
+                    );
                     if matches!(error, BgpError::RouteRefreshMessageError(_)) {
                         assert_eq!(data, full_msg, "data must be the complete message");
                     }
