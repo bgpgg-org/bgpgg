@@ -264,6 +264,39 @@ async fn test_sender_wraps_with_borr_eorr() {
     );
 }
 
+/// RFC 7313: Stale TTL timer sweeps stale routes when EoRR is not received.
+#[tokio::test]
+async fn test_enhanced_rr_stale_ttl_expiry() {
+    let mut config = test_config(65001, 1);
+    config.enhanced_rr_stale_ttl = Some(1);
+    config.peers.push(bgpgg::config::PeerConfig {
+        address: "127.0.0.2".to_string(),
+        passive_mode: true,
+        ..Default::default()
+    });
+    let server = start_test_server(config).await;
+    let mut fake = FakePeer::connect_and_handshake_enhanced_rr(
+        Some("127.0.0.2"),
+        &server,
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+    )
+    .await;
+    poll_peer_established(&server, "127.0.0.2").await;
+
+    fake_announce_prefix(&server, &mut fake, &[24, 10, 0, 1], "10.0.1.0/24").await;
+
+    // Send BoRR but do NOT send EoRR -> timer should sweep after 1s
+    fake.send_raw(&build_raw_route_refresh(1, 1, 1)).await;
+
+    poll_until_with_timeout(
+        || async { !has_route(&server, "10.0.1.0/24").await },
+        "Stale TTL (1s) did not sweep route within 3s",
+        Duration::from_secs(3),
+    )
+    .await;
+}
+
 /// RFC 7313: EoRR sweeps all stale routes when none are re-advertised.
 #[tokio::test]
 async fn test_eorr_sweeps_all_routes() {

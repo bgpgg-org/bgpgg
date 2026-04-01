@@ -104,7 +104,7 @@ impl PeerCapabilities {
             .map(|ap| {
                 ap.entries
                     .iter()
-                    .any(|(as_, mode)| as_ == afi_safi && mode.can_send())
+                    .any(|(entry_afi_safi, mode)| entry_afi_safi == afi_safi && mode.can_send())
             })
             .unwrap_or(false)
     }
@@ -164,7 +164,7 @@ impl PeerCapabilities {
             .map(|ap| {
                 ap.entries
                     .iter()
-                    .any(|(as_, mode)| as_ == afi_safi && mode.can_receive())
+                    .any(|(entry_afi_safi, mode)| entry_afi_safi == afi_safi && mode.can_receive())
             })
             .unwrap_or(false)
     }
@@ -705,7 +705,7 @@ impl Peer {
             let all_eors_received = gr_state
                 .afi_safis
                 .iter()
-                .all(|as_| gr_state.eor_received.contains(as_));
+                .all(|afi_safi| gr_state.eor_received.contains(afi_safi));
 
             if all_eors_received {
                 info!(peer_ip = %self.addr, "all EORs received - Graceful Restart complete");

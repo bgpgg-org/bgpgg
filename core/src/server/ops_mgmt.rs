@@ -447,11 +447,10 @@ impl BgpServer {
             }
         }
 
-        // Cancel any running LLGR timers before removing the peer
+        // Cancel any running timers before removing the peer
         if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-            for afi_safi in peer_info.llgr_timers.afi_safis() {
-                peer_info.llgr_timers.cancel(&afi_safi);
-            }
+            peer_info.llgr_timers.cancel_all();
+            peer_info.rr_stale_timers.cancel_all();
         }
 
         // Now remove the peer from the map

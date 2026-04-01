@@ -260,6 +260,10 @@ fn default_enforce_first_as() -> bool {
     true
 }
 
+fn default_enhanced_rr_stale_ttl() -> Option<u64> {
+    Some(360)
+}
+
 fn default_port() -> u16 {
     179
 }
@@ -753,6 +757,9 @@ pub struct Config {
     /// RFC 9494: Server-level LLGR configuration. Peers inherit this unless overridden.
     #[serde(default)]
     pub llgr: Option<LlgrConfig>,
+    /// RFC 7313: Max seconds to retain stale routes after BoRR. None = no limit.
+    #[serde(default = "default_enhanced_rr_stale_ttl")]
+    pub enhanced_rr_stale_ttl: Option<u64>,
 }
 
 fn default_listen_addr() -> String {
@@ -795,6 +802,7 @@ impl Config {
             policy_definitions: Vec::new(),
             cluster_id: None,
             llgr: None,
+            enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
         }
     }
 
@@ -858,6 +866,7 @@ impl Default for Config {
             policy_definitions: Vec::new(),
             cluster_id: None,
             llgr: None,
+            enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
         }
     }
 }

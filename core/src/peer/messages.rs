@@ -516,9 +516,9 @@ impl Peer {
         };
 
         // RFC 4724: Check for End-of-RIB marker
-        if update_msg.is_eor() {
-            self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                .await;
+        if let Some(afi_safi) = update_msg.eor_afi_safi() {
+            info!(peer_ip = %self.addr, %afi_safi, "received End-of-RIB marker");
+            self.handle_eor_received(afi_safi).await;
             return Ok(None);
         }
 
@@ -554,7 +554,7 @@ impl Peer {
             }
             RouteRefreshSubtype::BoRR => {
                 if !self.capabilities.enhanced_route_refresh {
-                    debug!(peer_ip = %self.addr, "BoRR received but enhanced route refresh not negotiated");
+                    warn!(peer_ip = %self.addr, "BoRR received but enhanced route refresh not negotiated");
                     return;
                 }
                 // RFC 7313 Section 4: If GR is negotiated, ignore BoRR before EoR
@@ -575,7 +575,7 @@ impl Peer {
             }
             RouteRefreshSubtype::EoRR => {
                 if !self.capabilities.enhanced_route_refresh {
-                    debug!(peer_ip = %self.addr, "EoRR received but enhanced route refresh not negotiated");
+                    warn!(peer_ip = %self.addr, "EoRR received but enhanced route refresh not negotiated");
                     return;
                 }
                 let _ = self.server_tx.send(ServerOp::RouteRefreshEoRR {

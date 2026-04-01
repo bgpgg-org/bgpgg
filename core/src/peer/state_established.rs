@@ -312,7 +312,7 @@ impl Peer {
                                 let all_complete = gr_state
                                     .afi_safis
                                     .iter()
-                                    .all(|as_| gr_state.loc_rib_received.get(as_).copied().unwrap_or(false));
+                                    .all(|afi_safi| gr_state.loc_rib_received.get(afi_safi).copied().unwrap_or(false));
 
                                 if all_complete {
                                     // Send EOR markers for all negotiated AFI/SAFIs

@@ -104,6 +104,8 @@ pub enum ServerOp {
     },
     /// RFC 9494: Long-Lived Graceful Restart stale timer expired for a peer's AFI/SAFI
     LlgrTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
+    /// RFC 7313: Enhanced route refresh stale TTL expired for a peer's AFI/SAFI
+    EnhancedRrStaleTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Graceful Restart completed for a peer (all EORs received)
     GracefulRestartComplete { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Server signals peer that loc-rib has been sent
@@ -205,6 +207,10 @@ impl BgpServer {
             ServerOp::LlgrTimerExpired { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "LLGR stale timer expired");
                 self.clear_stale_afi_safi(peer_ip, afi_safi).await;
+            }
+            ServerOp::EnhancedRrStaleTimerExpired { peer_ip, afi_safi } => {
+                self.handle_enhanced_rr_stale_expired(peer_ip, afi_safi)
+                    .await;
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
                 if let Some(peer) = self.peers.get(&peer_ip) {
@@ -431,6 +437,7 @@ impl BgpServer {
             conn.bgp_id = None;
         }
         peer.adj_rib_out.clear();
+        peer.rr_stale_timers.cancel_all();
         // For non-GR disconnect, clear adj-rib-in and disabled AFI/SAFIs;
         // GR keeps adj-rib-in (routes are stale but retained)
         if gr_afi_safis.is_empty() {
@@ -569,9 +576,12 @@ impl BgpServer {
 
         if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
             for (afi_safi, llst) in llgr_map {
-                peer_info
-                    .llgr_timers
-                    .run(afi_safi, llst, peer_ip, self.op_tx.clone());
+                peer_info.llgr_timers.run(
+                    afi_safi,
+                    llst as u64,
+                    ServerOp::LlgrTimerExpired { peer_ip, afi_safi },
+                    self.op_tx.clone(),
+                );
             }
         }
         self.propagate_routes(delta, Some(peer_ip)).await;
@@ -611,7 +621,7 @@ impl BgpServer {
         let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             return RouteDelta::new();
         };
-        let stale = peer_info.llgr_timers.afi_safis();
+        let stale = peer_info.llgr_timers.keys();
         let to_clear = match &capabilities.llgr {
             Some(cap) => cap.filter_stale(stale),
             None => stale,
@@ -722,11 +732,25 @@ impl BgpServer {
         let afi_safi = AfiSafi::new(afi, safi);
         let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
         info!(%peer_ip, ?afi, ?safi, count, "BoRR: marked routes stale (RFC 7313)");
+
+        if let Some(ttl) = self.config.enhanced_rr_stale_ttl {
+            if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+                peer_info.rr_stale_timers.run(
+                    afi_safi,
+                    ttl,
+                    ServerOp::EnhancedRrStaleTimerExpired { peer_ip, afi_safi },
+                    self.op_tx.clone(),
+                );
+            }
+        }
     }
 
     /// RFC 7313: Sweep remaining stale routes from peer for the given AFI/SAFI.
     async fn handle_route_refresh_eorr(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            peer_info.rr_stale_timers.cancel(&afi_safi);
+        }
         let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
         let removed = delta.changed.len();
         if removed > 0 {
@@ -734,6 +758,13 @@ impl BgpServer {
         } else {
             info!(%peer_ip, ?afi, ?safi, "EoRR: no stale routes to purge (RFC 7313)");
         }
+        self.propagate_routes(delta, Some(peer_ip)).await;
+    }
+
+    /// RFC 7313: Stale TTL expired without receiving EoRR. Sweep remaining stale routes.
+    async fn handle_enhanced_rr_stale_expired(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) {
+        info!(%peer_ip, %afi_safi, "enhanced RR stale TTL expired (RFC 7313)");
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
         self.propagate_routes(delta, Some(peer_ip)).await;
     }
 
