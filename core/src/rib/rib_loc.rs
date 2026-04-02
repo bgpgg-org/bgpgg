@@ -15,7 +15,7 @@
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{debug, info};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
-use crate::peer::Withdrawal;
+use crate::peer::PendingRoute;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::stale::{handle_stale_routes, mark_stale_in_table, StaleStrategy};
 use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
@@ -244,54 +244,56 @@ impl<A: PathIdAllocator> LocRib<A> {
         self.ipv4_unicast.values().chain(self.ipv6_unicast.values())
     }
 
-    /// Update Loc-RIB from delta changes (withdrawn and announced routes)
-    /// Applies import policy (via closure) before adding routes
+    /// Update Loc-RIB from ordered pending routes.
+    /// Routes are processed in order to preserve causality across coalesced updates.
     pub fn apply_peer_update<F>(
         &mut self,
         peer_ip: IpAddr,
-        withdrawn: Vec<Withdrawal>,
-        announced: Vec<PrefixPath>,
+        pending_routes: &[PendingRoute],
         import_policy: F,
     ) -> RouteDelta
     where
         F: Fn(&IpNetwork, &mut Path) -> bool,
     {
-        // Collect affected prefixes and snapshot old best BEFORE mutations
-        let mut affected_set: HashSet<IpNetwork> = HashSet::new();
-        affected_set.extend(withdrawn.iter().map(|(prefix, _)| *prefix));
-        affected_set.extend(announced.iter().map(|prefix_path| prefix_path.prefix));
-        let affected: Vec<IpNetwork> = affected_set.into_iter().collect();
+        let affected: Vec<IpNetwork> = pending_routes
+            .iter()
+            .map(|route| route.prefix())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         let old_best: HashMap<IpNetwork, Arc<Path>> = affected
             .iter()
-            .filter_map(|p| self.get_best_path(p).map(|best| (*p, Arc::clone(best))))
+            .filter_map(|prefix| {
+                self.get_best_path(prefix)
+                    .map(|best| (*prefix, Arc::clone(best)))
+            })
             .collect();
 
-        // Process withdrawals
-        for (prefix, remote_path_id) in withdrawn {
-            info!(prefix = ?prefix, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
-            self.remove_peer_path(prefix, peer_ip, remote_path_id);
-        }
-
-        // Process announcements - apply import policy and add to Loc-RIB
-        for PrefixPath {
-            prefix,
-            path: path_arc,
-        } in announced
-        {
-            // Clone inner Path for policy mutation
-            let mut path = (*path_arc).clone();
-            if import_policy(&prefix, &mut path) {
-                info!(prefix = ?prefix, peer_ip = %peer_ip, "adding route to Loc-RIB");
-                self.upsert_path(prefix, Arc::new(path));
-            } else {
-                debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
-                self.remove_peer_path(prefix, peer_ip, path_arc.remote_path_id);
+        for pending_route in pending_routes {
+            match pending_route {
+                PendingRoute::Withdraw((prefix, remote_path_id)) => {
+                    info!(prefix = ?prefix, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
+                    self.remove_peer_path(*prefix, peer_ip, *remote_path_id);
+                }
+                PendingRoute::Announce(PrefixPath {
+                    prefix,
+                    path: path_arc,
+                }) => {
+                    let mut path = (**path_arc).clone();
+                    if import_policy(prefix, &mut path) {
+                        info!(prefix = ?prefix, peer_ip = %peer_ip, "adding route to Loc-RIB");
+                        self.upsert_path(*prefix, Arc::new(path));
+                    } else {
+                        debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
+                        self.remove_peer_path(*prefix, peer_ip, path_arc.remote_path_id);
+                    }
+                }
             }
         }
 
         let best_changed = affected
             .iter()
-            .filter(|p| self.best_path_changed(p, old_best.get(p)))
+            .filter(|prefix| self.best_path_changed(prefix, old_best.get(prefix)))
             .cloned()
             .collect();
         RouteDelta {
@@ -1226,11 +1228,10 @@ mod tests {
 
         let delta = loc_rib.apply_peer_update(
             peer2,
-            vec![],
-            vec![PrefixPath {
+            &[PendingRoute::Announce(PrefixPath {
                 prefix,
                 path: worse_path,
-            }],
+            })],
             |_, _| true,
         );
 
@@ -1269,11 +1270,10 @@ mod tests {
         });
         loc_rib.apply_peer_update(
             peer_ip,
-            vec![],
-            vec![PrefixPath {
+            &[PendingRoute::Announce(PrefixPath {
                 prefix,
                 path: refreshed_path,
-            }],
+            })],
             |_, _| true,
         );
 
@@ -1324,11 +1324,10 @@ mod tests {
         });
         loc_rib.apply_peer_update(
             peer_ip,
-            vec![],
-            vec![PrefixPath {
+            &[PendingRoute::Announce(PrefixPath {
                 prefix,
                 path: refreshed,
-            }],
+            })],
             |_, _| true,
         );
 
@@ -1394,11 +1393,10 @@ mod tests {
 
         let delta1 = loc_rib.apply_peer_update(
             peer_high,
-            vec![],
-            vec![PrefixPath {
+            &[PendingRoute::Announce(PrefixPath {
                 prefix,
                 path: path_high,
-            }],
+            })],
             |_prefix, _path| true,
         );
         assert!(
@@ -1413,11 +1411,10 @@ mod tests {
 
         let delta2 = loc_rib.apply_peer_update(
             peer_low,
-            vec![],
-            vec![PrefixPath {
+            &[PendingRoute::Announce(PrefixPath {
                 prefix,
                 path: path_low,
-            }],
+            })],
             |_prefix, _path| true,
         );
         assert!(
@@ -1462,6 +1459,30 @@ mod tests {
 
         // NO_LLGR route removed
         assert!(loc_rib.get_best_path(&prefix_no_llgr).is_none());
+    }
+
+    #[test]
+    fn test_announce_then_withdraw_same_path() {
+        let mut loc_rib = LocRib::new();
+        let peer_ip = test_peer_ip();
+        let prefix = create_test_prefix();
+        let path = create_test_path(peer_ip, test_bgp_id());
+        let remote_path_id = path.remote_path_id;
+
+        let routes = vec![
+            PendingRoute::Announce(PrefixPath {
+                prefix,
+                path: path.clone(),
+            }),
+            PendingRoute::Withdraw((prefix, remote_path_id)),
+        ];
+
+        loc_rib.apply_peer_update(peer_ip, &routes, |_, _| true);
+
+        assert!(
+            loc_rib.get_best_path(&prefix).is_none(),
+            "path should be gone: withdraw after announce must win"
+        );
     }
 
     #[test]

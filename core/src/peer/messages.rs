@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::fsm::FsmEvent;
-use super::{BgpOpenParams, PeerCapabilities};
+use super::{BgpOpenParams, PeerCapabilities, PendingRoute};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
@@ -401,12 +401,14 @@ impl Peer {
                     self.fsm.timers.reset_hold_timer();
                 }
 
-                // Accumulate into pending buffers; the established loop
+                // Accumulate into ordered event list; the established loop
                 // flushes periodically so multiple UPDATEs coalesce into
-                // a single ServerOp::PeerUpdate.
+                // a single ServerOp::PeerUpdate preserving temporal order.
                 if let Some((announced, withdrawn)) = delta {
-                    self.pending_announced.extend(announced);
-                    self.pending_withdrawn.extend(withdrawn);
+                    self.pending_routes
+                        .extend(withdrawn.into_iter().map(PendingRoute::Withdraw));
+                    self.pending_routes
+                        .extend(announced.into_iter().map(PendingRoute::Announce));
                 }
                 Ok(())
             }
@@ -578,6 +580,9 @@ impl Peer {
                     warn!(peer_ip = %self.addr, "EoRR received but enhanced route refresh not negotiated");
                     return;
                 }
+                // Flush pending routes so the server processes them
+                // before the stale sweep triggered by EoRR.
+                self.flush_pending_routes();
                 let _ = self.server_tx.send(ServerOp::RouteRefreshEoRR {
                     peer_ip: self.addr,
                     afi,

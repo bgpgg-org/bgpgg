@@ -771,6 +771,7 @@ pub fn propagate_routes_to_peer(
 
 #[cfg(test)]
 mod tests {
+    use super::super::PendingRoute;
     use super::*;
     use crate::bgp::msg::AddPathMask;
     use crate::bgp::msg_update::{attr_flags, Origin, PathAttrFlag, PathAttrValue};
@@ -779,7 +780,7 @@ mod tests {
     use crate::policy::statement::{Action, Condition};
     use crate::policy::Statement;
     use crate::rib::rib_loc::LocRib;
-    use crate::rib::{PathAttrs, RouteSource};
+    use crate::rib::{PathAttrs, PrefixPath, RouteSource};
 
     fn test_ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
@@ -2020,14 +2021,12 @@ mod tests {
         let mut loc_rib = LocRib::new();
         loc_rib.apply_peer_update(
             test_ip(2),
-            vec![],
-            vec![PrefixPath::new(prefix, path1)],
+            &[PendingRoute::Announce(PrefixPath::new(prefix, path1))],
             |_, _| true,
         );
         loc_rib.apply_peer_update(
             test_ip(3),
-            vec![],
-            vec![PrefixPath::new(prefix, path2)],
+            &[PendingRoute::Announce(PrefixPath::new(prefix, path2))],
             |_, _| true,
         );
         assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);

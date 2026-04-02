@@ -435,8 +435,7 @@ pub(super) mod tests {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
-            pending_announced: Vec::new(),
-            pending_withdrawn: Vec::new(),
+            pending_routes: Vec::new(),
         }
     }
 

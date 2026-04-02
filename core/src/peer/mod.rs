@@ -204,6 +204,35 @@ pub struct LocalConfig {
 /// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
 pub type Withdrawal = (IpNetwork, Option<u32>);
 
+/// A pending route announcement or withdrawal awaiting flush to server.
+#[derive(Debug, Clone)]
+pub enum PendingRoute {
+    Announce(PrefixPath),
+    Withdraw(Withdrawal),
+}
+
+impl PendingRoute {
+    pub fn prefix(&self) -> IpNetwork {
+        match self {
+            PendingRoute::Announce(prefix_path) => prefix_path.prefix,
+            PendingRoute::Withdraw((prefix, _)) => *prefix,
+        }
+    }
+
+    /// Split a slice into separate announced and withdrawn lists.
+    pub fn split(routes: &[PendingRoute]) -> (Vec<PrefixPath>, Vec<Withdrawal>) {
+        let mut announced = Vec::new();
+        let mut withdrawn = Vec::new();
+        for route in routes {
+            match route {
+                PendingRoute::Announce(prefix_path) => announced.push(prefix_path.clone()),
+                PendingRoute::Withdraw(withdrawal) => withdrawn.push(*withdrawal),
+            }
+        }
+        (announced, withdrawn)
+    }
+}
+
 /// (announced routes, withdrawn routes)
 pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<Withdrawal>);
 
@@ -421,10 +450,8 @@ pub struct Peer {
     capabilities: PeerCapabilities,
     /// Graceful Restart runtime state (RFC 4724)
     gr_state: Option<GracefulRestartState>,
-    /// Accumulated route announcements awaiting flush to server
-    pending_announced: Vec<PrefixPath>,
-    /// Accumulated route withdrawals awaiting flush to server
-    pending_withdrawn: Vec<Withdrawal>,
+    /// Accumulated route events awaiting flush to server, in temporal order.
+    pending_routes: Vec<PendingRoute>,
 }
 
 impl Peer {
@@ -468,22 +495,19 @@ impl Peer {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
-            pending_announced: Vec::new(),
-            pending_withdrawn: Vec::new(),
+            pending_routes: Vec::new(),
         }
     }
 
     fn pending_route_count(&self) -> usize {
-        self.pending_announced.len() + self.pending_withdrawn.len()
+        self.pending_routes.len()
     }
 
-    /// Flush accumulated route announcements/withdrawals to the server
-    /// as a single coalesced PeerUpdate.
+    /// Flush accumulated route events to the server in temporal order.
     fn flush_pending_routes(&mut self) {
         let _ = self.server_tx.send(ServerOp::PeerUpdate {
             peer_ip: self.addr,
-            announced: std::mem::take(&mut self.pending_announced),
-            withdrawn: std::mem::take(&mut self.pending_withdrawn),
+            routes: std::mem::take(&mut self.pending_routes),
         });
     }
 
@@ -922,8 +946,7 @@ pub mod test_helpers {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
-            pending_announced: Vec::new(),
-            pending_withdrawn: Vec::new(),
+            pending_routes: Vec::new(),
         }
     }
 }
