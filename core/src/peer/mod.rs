@@ -714,6 +714,10 @@ impl Peer {
                 }
             }
 
+            // Flush any pending route updates so the server processes them
+            // before the stale sweep triggered by GracefulRestartComplete.
+            self.flush_pending_routes();
+
             // Notify server to remove stale routes for this AFI/SAFI
             let _ = self.server_tx.send(ServerOp::GracefulRestartComplete {
                 peer_ip: self.addr,
