@@ -787,6 +787,15 @@ pub async fn poll_rib_with_timeout(expectations: &[(&TestServer, Vec<Route>)], t
 }
 
 /// Polls until a specific route exists in a server's RIB, then asserts path attributes
+/// Check if a prefix exists in a server's RIB.
+pub async fn has_route(server: &TestServer, prefix: &str) -> bool {
+    server
+        .client
+        .get_routes()
+        .await
+        .is_ok_and(|routes| routes.iter().any(|r| r.prefix == prefix))
+}
+
 pub async fn poll_route_exists(server: &TestServer, expected: Route) {
     poll_until(
         || async {
@@ -1800,6 +1809,7 @@ impl FakePeer {
             use_4byte_asn: self.supports_4byte_asn,
             add_path: self.add_path,
             is_ebgp: false,
+            enhanced_rr: false,
         }
     }
 
@@ -2022,6 +2032,29 @@ impl FakePeer {
         self.send_raw(&open).await;
     }
 
+    /// Send an OPEN message with Route Refresh + Enhanced Route Refresh capabilities (RFC 7313)
+    pub async fn send_open_with_enhanced_rr(
+        &mut self,
+        asn: u32,
+        router_id: Ipv4Addr,
+        hold_time: u16,
+    ) {
+        let mp_cap = build_multiprotocol_capability_ipv4_unicast();
+        let rr_cap = vec![2, 0]; // Route Refresh capability (code 2, length 0)
+        let err_cap = build_enhanced_route_refresh_capability();
+        let asn_cap = build_capability_4byte_asn(asn);
+        let open = build_raw_open(
+            if asn > 65535 { AS_TRANS } else { asn as u16 },
+            hold_time,
+            u32::from(router_id),
+            RawOpenOptions {
+                capabilities: Some(vec![mp_cap, rr_cap, err_cap, asn_cap]),
+                ..Default::default()
+            },
+        );
+        self.send_raw(&open).await;
+    }
+
     /// Read and discard an OPEN message
     pub async fn read_open(&mut self) -> OpenMessage {
         let msg = read_bgp_message(self.stream.as_mut().unwrap(), PRE_OPEN_FORMAT)
@@ -2087,6 +2120,27 @@ impl FakePeer {
         match result {
             Ok(update) => update,
             Err(_) => panic!("Timeout waiting for UPDATE message"),
+        }
+    }
+
+    /// Read the next non-KEEPALIVE BGP message from the stream.
+    pub async fn read_message(&mut self) -> BgpMessage {
+        let format = self.message_format();
+        let result = timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = read_bgp_message(self.stream.as_mut().unwrap(), format)
+                    .await
+                    .expect("Failed to read message");
+                match msg {
+                    BgpMessage::Keepalive(_) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(msg) => msg,
+            Err(_) => panic!("Timeout waiting for BGP message"),
         }
     }
 
@@ -2175,6 +2229,23 @@ impl FakePeer {
         peer
     }
 
+    /// Connect and complete Enhanced Route Refresh handshake for IPv4 Unicast.
+    pub async fn connect_and_handshake_enhanced_rr(
+        local_ip: Option<&str>,
+        server: &TestServer,
+        asn: u32,
+        router_id: Ipv4Addr,
+    ) -> Self {
+        let mut peer = Self::connect(local_ip, server).await;
+        peer.read_open().await;
+        peer.send_open_with_enhanced_rr(asn, router_id, 90).await;
+        peer.asn = asn;
+        peer.supports_4byte_asn = true;
+        peer.send_keepalive().await;
+        peer.read_keepalive().await;
+        peer
+    }
+
     /// Initiate new connection to server from same IP as this peer.
     /// Returns raw TcpStream (no OPEN sent).
     pub async fn connect_to(&self, server: &TestServer) -> TcpStream {
@@ -2211,6 +2282,41 @@ pub fn build_raw_message(
     msg[17] = (len & 0xff) as u8;
 
     msg
+}
+
+/// Send a raw UPDATE via FakePeer announcing a prefix and wait for it in the RIB.
+pub async fn fake_announce_prefix(
+    server: &TestServer,
+    fake: &mut FakePeer,
+    prefix_nlri: &[u8],
+    prefix_str: &str,
+) {
+    let next_hop: Ipv4Addr = fake.address.parse().unwrap();
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_empty(),
+            &attr_next_hop(next_hop),
+            &attr_local_pref(100),
+        ],
+        prefix_nlri,
+        None,
+    );
+    fake.send_raw(&update).await;
+
+    let prefix_owned = prefix_str.to_string();
+    poll_until(
+        || async {
+            server
+                .client
+                .get_routes()
+                .await
+                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == prefix_owned))
+        },
+        &format!("Timeout waiting for route {prefix_str}"),
+    )
+    .await;
 }
 
 // Build a raw update message.
@@ -2679,6 +2785,23 @@ pub async fn apply_export_neighbor_reject_policy(
         )
         .await
         .unwrap();
+}
+
+/// Build Enhanced Route Refresh capability (RFC 7313, code 70, zero-length)
+pub fn build_enhanced_route_refresh_capability() -> Vec<u8> {
+    vec![70, 0] // Capability code 70, Length 0
+}
+
+/// Build a raw ROUTE-REFRESH message with the given AFI, subtype, and SAFI
+pub fn build_raw_route_refresh(afi: u16, subtype: u8, safi: u8) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(23);
+    msg.extend_from_slice(&[0xff; 16]); // Marker
+    msg.extend_from_slice(&23u16.to_be_bytes()); // Length
+    msg.push(5); // Type: ROUTE_REFRESH
+    msg.extend_from_slice(&afi.to_be_bytes()); // AFI
+    msg.push(subtype); // Subtype
+    msg.push(safi); // SAFI
+    msg
 }
 
 /// Write a key to a temporary file for TCP MD5 authentication tests

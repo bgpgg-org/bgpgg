@@ -206,6 +206,7 @@ impl BgpServer {
             use_4byte_asn,
             add_path,
             is_ebgp: false,
+            enhanced_rr: false,
         };
 
         // Send withdrawals if any

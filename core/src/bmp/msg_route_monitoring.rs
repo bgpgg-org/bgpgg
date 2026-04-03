@@ -106,6 +106,7 @@ mod tests {
                 use_4byte_asn: true,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
         );
 

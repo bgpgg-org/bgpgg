@@ -631,27 +631,33 @@ impl UpdateMessage {
     }
 
     /// Check if this UPDATE is an End-of-RIB marker (RFC 4724)
-    /// - IPv4 Unicast: empty UPDATE (no withdrawn, no path attributes, no NLRI)
-    /// - Other AFI/SAFI: Only MP_UNREACH_NLRI with empty withdrawn routes
     pub fn is_eor(&self) -> bool {
-        // Must have no traditional withdrawn routes or NLRI
+        self.eor_afi_safi().is_some()
+    }
+
+    /// Extract the AFI/SAFI from an End-of-RIB marker (RFC 4724).
+    /// - IPv4 Unicast: empty UPDATE (no withdrawn, no path attributes, no NLRI)
+    /// - Other AFI/SAFI: only MP_UNREACH_NLRI with empty withdrawn routes
+    pub fn eor_afi_safi(&self) -> Option<AfiSafi> {
         if !self.withdrawn_routes.is_empty() || !self.nlri_list.is_empty() {
-            return false;
+            return None;
         }
 
-        // Case 1: IPv4 Unicast EOR - completely empty
+        // IPv4 Unicast EoR: completely empty UPDATE
         if self.path_attributes.is_empty() {
-            return true;
+            return Some(AfiSafi::new(Afi::Ipv4, Safi::Unicast));
         }
 
-        // Case 2: Other AFI/SAFI EOR - single MP_UNREACH_NLRI with empty withdrawn routes
+        // Other AFI/SAFI EoR: single MP_UNREACH_NLRI with empty withdrawn routes
         if self.path_attributes.len() == 1 {
             if let PathAttrValue::MpUnreachNlri(ref mp_unreach) = self.path_attributes[0].value {
-                return mp_unreach.withdrawn_routes.is_empty();
+                if mp_unreach.withdrawn_routes.is_empty() {
+                    return Some(AfiSafi::new(mp_unreach.afi, mp_unreach.safi));
+                }
             }
         }
 
-        false
+        None
     }
 
     /// Create an End-of-RIB marker (RFC 4724)
@@ -2070,12 +2076,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_eor() {
+    fn test_eor_afi_safi() {
         let format = DEFAULT_FORMAT;
 
         let cases = vec![
             (
-                "empty UPDATE",
+                "empty UPDATE -> IPv4 Unicast EoR",
                 UpdateMessage {
                     withdrawn_routes_len: 0,
                     withdrawn_routes: vec![],
@@ -2084,10 +2090,10 @@ mod tests {
                     nlri_list: vec![],
                     format,
                 },
-                true,
+                Some(AfiSafi::new(Afi::Ipv4, Safi::Unicast)),
             ),
             (
-                "MP_UNREACH_NLRI with empty withdrawn",
+                "MP_UNREACH_NLRI with empty withdrawn -> IPv6 Unicast EoR",
                 UpdateMessage {
                     withdrawn_routes_len: 0,
                     withdrawn_routes: vec![],
@@ -2103,10 +2109,10 @@ mod tests {
                     nlri_list: vec![],
                     format,
                 },
-                true,
+                Some(AfiSafi::new(Afi::Ipv6, Safi::Unicast)),
             ),
             (
-                "has NLRI",
+                "has NLRI -> not EoR",
                 UpdateMessage {
                     withdrawn_routes_len: 0,
                     withdrawn_routes: vec![],
@@ -2115,12 +2121,13 @@ mod tests {
                     nlri_list: vec![nlri_v4(10, 0, 0, 0, 8, None)],
                     format,
                 },
-                false,
+                None,
             ),
         ];
 
         for (desc, msg, expected) in cases {
-            assert_eq!(msg.is_eor(), expected, "{}", desc);
+            assert_eq!(msg.eor_afi_safi(), expected, "{}", desc);
+            assert_eq!(msg.is_eor(), expected.is_some(), "{}", desc);
         }
     }
 

@@ -16,7 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::{Peer, PeerError, PeerOp};
 use crate::bgp::msg::Message;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
-use crate::bgp::msg_route_refresh::RouteRefreshMessage;
+use crate::bgp::msg_route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::log::{debug, error, info, warn};
 use crate::types::PeerDownReason;
@@ -212,7 +212,7 @@ impl Peer {
                         PeerOp::GetStatistics(response) => {
                             let _ = response.send(self.statistics.clone());
                         }
-                        PeerOp::SendRouteRefresh { afi, safi } => {
+                        PeerOp::SendRouteRefresh { afi, safi, subtype } => {
                             // RFC 2918: Only send if capability was negotiated
                             if !self.capabilities.route_refresh {
                                 warn!(peer_ip = %peer_ip,
@@ -230,7 +230,23 @@ impl Peer {
                                 continue;
                             }
 
-                            let refresh_msg = RouteRefreshMessage::new(afi, safi);
+                            // RFC 7313 Section 4: MUST NOT send BoRR before EoR
+                            // when Graceful Restart is negotiated.
+                            if matches!(subtype, RouteRefreshSubtype::BoRR | RouteRefreshSubtype::EoRR) {
+                                let eor_sent = self.gr_state.as_ref()
+                                    .is_none_or(|gs| gs.eor_sent.contains(&afi_safi));
+                                if !eor_sent {
+                                    warn!(peer_ip = %peer_ip, ?afi, ?safi, ?subtype,
+                                          "suppressing BoRR/EoRR: EoR not yet sent (RFC 7313)");
+                                    continue;
+                                }
+                            }
+
+                            let refresh_msg = RouteRefreshMessage {
+                                afi,
+                                safi,
+                                subtype,
+                            };
                             if let Some(conn) = &mut self.conn {
                                 if let Err(e) = conn.tx.write_all(&refresh_msg.serialize()).await {
                                     error!(peer_ip = %peer_ip,
@@ -243,6 +259,7 @@ impl Peer {
                                     info!(peer_ip = %peer_ip,
                                           afi = ?afi,
                                           safi = ?safi,
+                                          subtype = ?subtype,
                                           "sent ROUTE_REFRESH");
                                 }
                             }
@@ -295,7 +312,7 @@ impl Peer {
                                 let all_complete = gr_state
                                     .afi_safis
                                     .iter()
-                                    .all(|as_| gr_state.loc_rib_received.get(as_).copied().unwrap_or(false));
+                                    .all(|afi_safi| gr_state.loc_rib_received.get(afi_safi).copied().unwrap_or(false));
 
                                 if all_complete {
                                     // Send EOR markers for all negotiated AFI/SAFIs

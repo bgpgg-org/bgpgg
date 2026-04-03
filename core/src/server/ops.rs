@@ -18,13 +18,14 @@ use crate::bgp::ext_community::is_rpki_state_community;
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::StaleFilter;
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::NextHopAddr;
 use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::MaxPrefixAction;
 use crate::log::{debug, info, warn};
 use crate::net::IpNetwork;
-use crate::peer::{BgpState, PeerCapabilities, PeerOp, Withdrawal};
+use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
 use crate::policy::{Policy, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{Path, PrefixPath};
@@ -66,8 +67,7 @@ pub enum ServerOp {
     },
     PeerUpdate {
         peer_ip: IpAddr,
-        withdrawn: Vec<Withdrawal>,
-        announced: Vec<PrefixPath>,
+        routes: Vec<PendingRoute>,
     },
     PeerDisconnected {
         peer_ip: IpAddr,
@@ -83,6 +83,18 @@ pub enum ServerOp {
         afi: Afi,
         safi: Safi,
     },
+    /// RFC 7313: Beginning of Route Refresh from peer
+    RouteRefreshBoRR {
+        peer_ip: IpAddr,
+        afi: Afi,
+        safi: Safi,
+    },
+    /// RFC 7313: End of Route Refresh from peer
+    RouteRefreshEoRR {
+        peer_ip: IpAddr,
+        afi: Afi,
+        safi: Safi,
+    },
     /// Graceful Restart timer expired for a peer (RFC 4724)
     GracefulRestartTimerExpired {
         peer_ip: IpAddr,
@@ -91,6 +103,8 @@ pub enum ServerOp {
     },
     /// RFC 9494: Long-Lived Graceful Restart stale timer expired for a peer's AFI/SAFI
     LlgrTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
+    /// RFC 7313: Enhanced route refresh stale TTL expired for a peer's AFI/SAFI
+    EnhancedRrStaleTimerExpired { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Graceful Restart completed for a peer (all EORs received)
     GracefulRestartComplete { peer_ip: IpAddr, afi_safi: AfiSafi },
     /// Server signals peer that loc-rib has been sent
@@ -121,12 +135,8 @@ impl BgpServer {
             } => {
                 self.handle_peer_handshake_complete(peer_ip, asn, conn_type);
             }
-            ServerOp::PeerUpdate {
-                peer_ip,
-                withdrawn,
-                announced,
-            } => {
-                self.handle_peer_update(peer_ip, withdrawn, announced).await;
+            ServerOp::PeerUpdate { peer_ip, routes } => {
+                self.handle_peer_update(peer_ip, routes).await;
             }
             ServerOp::OpenReceived {
                 peer_ip,
@@ -173,6 +183,12 @@ impl BgpServer {
             ServerOp::RouteRefresh { peer_ip, afi, safi } => {
                 self.handle_route_refresh(peer_ip, afi, safi).await;
             }
+            ServerOp::RouteRefreshBoRR { peer_ip, afi, safi } => {
+                self.handle_route_refresh_borr(peer_ip, afi, safi).await;
+            }
+            ServerOp::RouteRefreshEoRR { peer_ip, afi, safi } => {
+                self.handle_route_refresh_eorr(peer_ip, afi, safi).await;
+            }
             ServerOp::GracefulRestartTimerExpired {
                 peer_ip,
                 llgr_afi_safis,
@@ -186,6 +202,10 @@ impl BgpServer {
             ServerOp::LlgrTimerExpired { peer_ip, afi_safi } => {
                 info!(%peer_ip, %afi_safi, "LLGR stale timer expired");
                 self.clear_stale_afi_safi(peer_ip, afi_safi).await;
+            }
+            ServerOp::EnhancedRrStaleTimerExpired { peer_ip, afi_safi } => {
+                self.handle_enhanced_rr_stale_expired(peer_ip, afi_safi)
+                    .await;
             }
             ServerOp::LocalRibSent { peer_ip, afi_safi } => {
                 if let Some(peer) = self.peers.get(&peer_ip) {
@@ -412,6 +432,7 @@ impl BgpServer {
             conn.bgp_id = None;
         }
         peer.adj_rib_out.clear();
+        peer.rr_stale_timers.cancel_all();
         // For non-GR disconnect, clear adj-rib-in and disabled AFI/SAFIs;
         // GR keeps adj-rib-in (routes are stale but retained)
         if gr_afi_safis.is_empty() {
@@ -550,9 +571,12 @@ impl BgpServer {
 
         if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
             for (afi_safi, llst) in llgr_map {
-                peer_info
-                    .llgr_timers
-                    .run(afi_safi, llst, peer_ip, self.op_tx.clone());
+                peer_info.llgr_timers.run(
+                    afi_safi,
+                    llst as u64,
+                    ServerOp::LlgrTimerExpired { peer_ip, afi_safi },
+                    self.op_tx.clone(),
+                );
             }
         }
         self.propagate_routes(delta, Some(peer_ip)).await;
@@ -592,7 +616,7 @@ impl BgpServer {
         let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             return RouteDelta::new();
         };
-        let stale = peer_info.llgr_timers.afi_safis();
+        let stale = peer_info.llgr_timers.keys();
         let to_clear = match &capabilities.llgr {
             Some(cap) => cap.filter_stale(stale),
             None => stale,
@@ -661,17 +685,87 @@ impl BgpServer {
 
     async fn handle_route_refresh(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer_ip, ?afi, ?safi, "processing ROUTE_REFRESH");
+
+        let enhanced = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.established_conn())
+            .is_some_and(|c| c.has_enhanced_route_refresh());
+
+        if enhanced {
+            self.send_enhanced_route_refresh(peer_ip, afi, safi);
+        } else {
+            self.resend_routes_to_peer(peer_ip, afi, safi);
+        }
+    }
+
+    /// RFC 7313: Wrap route resend with BoRR/EoRR demarcation.
+    fn send_enhanced_route_refresh(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let peer_tx = self
+            .peers
+            .get(&peer_ip)
+            .and_then(|p| p.established_conn())
+            .and_then(|c| c.peer_tx.clone());
+
+        let Some(peer_tx) = peer_tx else { return };
+
+        let _ = peer_tx.send(PeerOp::SendRouteRefresh {
+            afi,
+            safi,
+            subtype: RouteRefreshSubtype::BoRR,
+        });
         self.resend_routes_to_peer(peer_ip, afi, safi);
+        let _ = peer_tx.send(PeerOp::SendRouteRefresh {
+            afi,
+            safi,
+            subtype: RouteRefreshSubtype::EoRR,
+        });
+    }
+
+    /// RFC 7313: Mark all routes from peer as stale for the given AFI/SAFI.
+    async fn handle_route_refresh_borr(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let count = self.loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
+        info!(%peer_ip, ?afi, ?safi, count, "BoRR: marked routes stale (RFC 7313)");
+
+        if let Some(ttl) = self.config.enhanced_rr_stale_ttl {
+            if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+                peer_info.rr_stale_timers.run(
+                    afi_safi,
+                    ttl,
+                    ServerOp::EnhancedRrStaleTimerExpired { peer_ip, afi_safi },
+                    self.op_tx.clone(),
+                );
+            }
+        }
+    }
+
+    /// RFC 7313: Sweep remaining stale routes from peer for the given AFI/SAFI.
+    async fn handle_route_refresh_eorr(&mut self, peer_ip: IpAddr, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            peer_info.rr_stale_timers.cancel(&afi_safi);
+        }
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+        let removed = delta.changed.len();
+        if removed > 0 {
+            info!(%peer_ip, ?afi, ?safi, removed, "EoRR: purged stale routes (RFC 7313)");
+        } else {
+            info!(%peer_ip, ?afi, ?safi, "EoRR: no stale routes to purge (RFC 7313)");
+        }
+        self.propagate_routes(delta, Some(peer_ip)).await;
+    }
+
+    /// RFC 7313: Stale TTL expired without receiving EoRR. Sweep remaining stale routes.
+    async fn handle_enhanced_rr_stale_expired(&mut self, peer_ip: IpAddr, afi_safi: AfiSafi) {
+        info!(%peer_ip, %afi_safi, "enhanced RR stale TTL expired (RFC 7313)");
+        let delta = self.loc_rib.remove_peer_routes_stale(peer_ip, &[afi_safi]);
+        self.propagate_routes(delta, Some(peer_ip)).await;
     }
 
     /// Process a peer UPDATE on the server: store in adj-rib-in, validate,
     /// apply import policy, update loc-rib, propagate, and send BMP.
-    async fn handle_peer_update(
-        &mut self,
-        peer_ip: IpAddr,
-        mut withdrawn: Vec<Withdrawal>,
-        mut announced: Vec<PrefixPath>,
-    ) {
+    async fn handle_peer_update(&mut self, peer_ip: IpAddr, mut routes: Vec<PendingRoute>) {
         let Some(peer) = self.peers.get_mut(&peer_ip) else {
             return;
         };
@@ -701,104 +795,41 @@ impl BgpServer {
         let local_bgp_id = self.config.router_id;
         let cluster_id = self.config.cluster_id();
 
-        // 1. Store ALL routes in adj-rib-in first (RFC 4271 3.2: "unprocessed")
+        // Extract announced/withdrawn for adj-rib-in and validation checks
+        let (announced, withdrawn) = PendingRoute::split(&routes);
+
+        // Store ALL routes in adj-rib-in first (RFC 4271 3.2: "unprocessed")
         for (prefix, path_id) in &withdrawn {
             peer.adj_rib_in.remove_route(*prefix, *path_id);
         }
-        for pp in &announced {
-            peer.adj_rib_in.add_route(pp.prefix, Arc::clone(&pp.path));
+        for prefix_path in &announced {
+            peer.adj_rib_in
+                .add_route(prefix_path.prefix, Arc::clone(&prefix_path.path));
         }
 
-        // 2. AFI/SAFI validation (RFC 4760 Section 7)
+        // AFI/SAFI validation (RFC 4760 Section 7)
         if !announced.is_empty() && !validate_afi_safi(peer, &announced, &negotiated_afi_safis) {
             return;
         }
 
-        // 3. First-AS check (RFC 4271 6.3, RFC 7606 treat-as-withdraw)
-        if is_ebgp && enforce_first_as && !announced.is_empty() {
-            if let Some(path) = announced.first().map(|pp| &pp.path) {
-                if !check_first_as(path, peer_asn, peer_ip) {
-                    // Treat-as-withdraw: move all announced to withdrawn
-                    for pp in &announced {
-                        withdrawn.push((pp.prefix, pp.path.remote_path_id));
-                    }
-                    announced.clear();
-                }
+        // Treat-as-withdraw: if any check fails, all announcements
+        // in the batch are rejected (BGP UPDATE shares attrs across all NLRI)
+        if let Some(first_path) = announced.first().map(|prefix_path| &*prefix_path.path) {
+            if (is_ebgp && enforce_first_as && !check_first_as(first_path, peer_asn, peer_ip))
+                || is_next_hop_local(first_path, local_address)
+                || has_as_path_loop(first_path, local_asn)
+                || (!is_ebgp && has_route_reflector_loop(first_path, local_bgp_id, cluster_id))
+            {
+                reject_announcements(&mut routes);
             }
         }
 
-        // 4. eBGP attribute scrubbing
+        // eBGP attribute scrubbing (applied directly to routes)
         if is_ebgp {
-            for pp in &mut announced {
-                let path = Arc::make_mut(&mut pp.path);
-                // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are non-transitive
-                path.attrs.originator_id = None;
-                path.attrs.cluster_list.clear();
-                // RFC 8097: strip RPKI state extended community from eBGP peers
-                path.attrs
-                    .extended_communities
-                    .retain(|ec| !is_rpki_state_community(*ec));
-                // RFC 8326: GRACEFUL_SHUTDOWN community -> LOCAL_PREF = 0
-                if path
-                    .attrs
-                    .communities
-                    .contains(&community::GRACEFUL_SHUTDOWN)
-                {
-                    path.attrs.local_pref = Some(0);
-                }
-            }
+            scrub_ebgp_pending_routes(&mut routes);
         }
 
-        // 5. NEXT_HOP self-check (RFC 4271 5.1.3a)
-        if let Some(local_ip) = local_address {
-            if !announced.is_empty() {
-                let is_local =
-                    announced
-                        .first()
-                        .is_some_and(|pp| match (&pp.path.attrs.next_hop, local_ip) {
-                            (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
-                            (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
-                            _ => false,
-                        });
-                if is_local {
-                    warn!(peer = %peer_ip, "rejecting UPDATE: NEXT_HOP is local address");
-                    announced.clear();
-                }
-            }
-        }
-
-        // 6. AS_PATH loop detection (RFC 4271 9.1.2)
-        if !announced.is_empty() {
-            let has_loop = announced.first().is_some_and(|pp| {
-                pp.path
-                    .as_path()
-                    .iter()
-                    .any(|seg| seg.asn_list.contains(&local_asn))
-            });
-            if has_loop {
-                warn!(local_asn, peer = %peer_ip, "rejecting UPDATE: AS_PATH contains local ASN (loop)");
-                for pp in &announced {
-                    withdrawn.push((pp.prefix, pp.path.remote_path_id));
-                }
-                announced.clear();
-            }
-        }
-
-        // 7. RR loop detection (RFC 4456 Section 8, iBGP only)
-        if !is_ebgp && !announced.is_empty() {
-            let has_rr_loop = announced
-                .first()
-                .is_some_and(|pp| has_route_reflector_loop(&pp.path, local_bgp_id, cluster_id));
-            if has_rr_loop {
-                warn!(peer = %peer_ip, "rejecting UPDATE: route reflector loop detected");
-                for pp in &announced {
-                    withdrawn.push((pp.prefix, pp.path.remote_path_id));
-                }
-                announced.clear();
-            }
-        }
-
-        // 8. Max-prefix check
+        // Max-prefix check
         if let Some(setting) = peer.config.max_prefix {
             let current = peer.adj_rib_in.prefix_count();
             if current > setting.limit as usize {
@@ -816,13 +847,13 @@ impl BgpServer {
                     MaxPrefixAction::Discard => {
                         warn!(%peer_ip, limit = setting.limit, current,
                               "max prefix limit reached, discarding new prefixes");
-                        announced.clear();
+                        reject_announcements(&mut routes);
                     }
                 }
             }
         }
 
-        // 9. Import policy + loc-rib update
+        // Import policy + loc-rib update (routes processed in arrival order)
         let Some(peer) = self.peers.get_mut(&peer_ip) else {
             return;
         };
@@ -833,20 +864,20 @@ impl BgpServer {
             .unwrap_or((None, None));
 
         let vrp_table = &self.vrp_table;
-        let delta = self.loc_rib.apply_peer_update(
-            peer_ip,
-            withdrawn.clone(),
-            announced.clone(),
-            |prefix, path| apply_import(vrp_table, local_asn, &import_policies, prefix, path),
-        );
+        let delta = self
+            .loc_rib
+            .apply_peer_update(peer_ip, &routes, |prefix, path| {
+                apply_import(vrp_table, local_asn, &import_policies, prefix, path)
+            });
 
         info!(%peer_ip, "UPDATE processing complete");
 
         self.propagate_routes(delta, Some(peer_ip)).await;
 
-        // BMP route monitoring
+        // BMP route monitoring (uses validated routes, not pre-validation snapshot)
         if let (Some(asn), Some(bgp_id)) = (bmp_peer_asn, bmp_peer_bgp_id) {
-            self.send_bmp_route_monitoring(peer_ip, asn, bgp_id, &withdrawn, &announced);
+            let (bmp_announced, bmp_withdrawn) = PendingRoute::split(&routes);
+            self.send_bmp_route_monitoring(peer_ip, asn, bgp_id, &bmp_withdrawn, &bmp_announced);
         }
     }
 
@@ -889,11 +920,15 @@ impl BgpServer {
                 None => continue,
             };
             let vrp_table = &self.vrp_table;
-            let peer_delta =
-                self.loc_rib
-                    .apply_peer_update(peer_ip, vec![], peer_routes, |prefix, path| {
-                        apply_import(vrp_table, local_asn, &policies, prefix, path)
-                    });
+            let routes: Vec<PendingRoute> = peer_routes
+                .into_iter()
+                .map(PendingRoute::Announce)
+                .collect();
+            let peer_delta = self
+                .loc_rib
+                .apply_peer_update(peer_ip, &routes, |prefix, path| {
+                    apply_import(vrp_table, local_asn, &policies, prefix, path)
+                });
             delta.extend(peer_delta);
         }
         delta
@@ -978,6 +1013,55 @@ fn check_first_as(path: &Path, peer_asn: u32, peer_ip: IpAddr) -> bool {
         return false;
     }
     true
+}
+
+/// Convert all Announce entries to Withdraw in-place (treat-as-withdraw).
+fn reject_announcements(routes: &mut [PendingRoute]) {
+    for route in routes.iter_mut() {
+        if let PendingRoute::Announce(prefix_path) = route {
+            *route = PendingRoute::Withdraw((prefix_path.prefix, prefix_path.path.remote_path_id));
+        }
+    }
+}
+
+/// RFC 4456/8097/8326: Scrub non-transitive attrs and apply GRACEFUL_SHUTDOWN.
+fn scrub_ebgp_pending_routes(routes: &mut [PendingRoute]) {
+    for route in routes {
+        if let PendingRoute::Announce(prefix_path) = route {
+            let path = Arc::make_mut(&mut prefix_path.path);
+            path.attrs.originator_id = None;
+            path.attrs.cluster_list.clear();
+            path.attrs
+                .extended_communities
+                .retain(|ec| !is_rpki_state_community(*ec));
+            if path
+                .attrs
+                .communities
+                .contains(&community::GRACEFUL_SHUTDOWN)
+            {
+                path.attrs.local_pref = Some(0);
+            }
+        }
+    }
+}
+
+/// RFC 4271 5.1.3a: NEXT_HOP must not be local address.
+fn is_next_hop_local(path: &Path, local_address: Option<IpAddr>) -> bool {
+    let Some(local_ip) = local_address else {
+        return false;
+    };
+    match (&path.attrs.next_hop, local_ip) {
+        (NextHopAddr::Ipv4(nh), IpAddr::V4(local)) => nh == &local,
+        (NextHopAddr::Ipv6(nh), IpAddr::V6(local)) => nh == &local,
+        _ => false,
+    }
+}
+
+/// RFC 4271 9.1.2: AS_PATH must not contain local ASN.
+fn has_as_path_loop(path: &Path, local_asn: u32) -> bool {
+    path.as_path()
+        .iter()
+        .any(|seg| seg.asn_list.contains(&local_asn))
 }
 
 /// RFC 4456 Section 8: Check for route reflector loop.

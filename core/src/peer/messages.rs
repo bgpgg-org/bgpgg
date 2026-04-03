@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::fsm::FsmEvent;
-use super::{BgpOpenParams, PeerCapabilities};
+use super::{BgpOpenParams, PeerCapabilities, PendingRoute};
 use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
@@ -21,6 +21,7 @@ use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{
     AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
 };
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
 use crate::config::LlgrConfig;
@@ -60,6 +61,11 @@ fn build_optional_params(
     // Add Route Refresh capability (RFC 2918)
     optional_params.push(OptionalParam::new_capability(
         Capability::new_route_refresh(),
+    ));
+
+    // Add Enhanced Route Refresh capability (RFC 7313)
+    optional_params.push(OptionalParam::new_capability(
+        Capability::new_enhanced_route_refresh(),
     ));
 
     // Add Graceful Restart capability (RFC 4724) if enabled
@@ -137,6 +143,9 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
                 BgpCapabiltyCode::AddPath => {
                     // RFC 7911: Parse ADD-PATH capability
                     capabilities.add_path = cap.as_add_path();
+                }
+                BgpCapabiltyCode::EnhancedRouteRefresh => {
+                    capabilities.enhanced_route_refresh = true;
                 }
                 BgpCapabiltyCode::Llgr => {
                     // RFC 9494: Parse LLGR capability
@@ -261,6 +270,7 @@ impl Peer {
         self.capabilities = PeerCapabilities {
             multiprotocol: negotiated_multiprotocol,
             route_refresh: peer_capabilities.route_refresh,
+            enhanced_route_refresh: peer_capabilities.enhanced_route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
             graceful_restart: peer_capabilities.graceful_restart,
             add_path: negotiated_add_path,
@@ -391,12 +401,14 @@ impl Peer {
                     self.fsm.timers.reset_hold_timer();
                 }
 
-                // Accumulate into pending buffers; the established loop
+                // Accumulate into ordered event list; the established loop
                 // flushes periodically so multiple UPDATEs coalesce into
-                // a single ServerOp::PeerUpdate.
+                // a single ServerOp::PeerUpdate preserving temporal order.
                 if let Some((announced, withdrawn)) = delta {
-                    self.pending_announced.extend(announced);
-                    self.pending_withdrawn.extend(withdrawn);
+                    self.pending_routes
+                        .extend(withdrawn.into_iter().map(PendingRoute::Withdraw));
+                    self.pending_routes
+                        .extend(announced.into_iter().map(PendingRoute::Announce));
                 }
                 Ok(())
             }
@@ -494,7 +506,8 @@ impl Peer {
                 return Ok(None);
             }
             BgpMessage::RouteRefresh(msg) => {
-                self.handle_route_refresh(msg.afi, msg.safi).await;
+                self.handle_route_refresh(msg.afi, msg.safi, msg.subtype)
+                    .await;
                 return Ok(None);
             }
         }
@@ -505,9 +518,9 @@ impl Peer {
         };
 
         // RFC 4724: Check for End-of-RIB marker
-        if update_msg.is_eor() {
-            self.handle_eor_received(AfiSafi::new(Afi::Ipv4, Safi::Unicast))
-                .await;
+        if let Some(afi_safi) = update_msg.eor_afi_safi() {
+            info!(peer_ip = %self.addr, %afi_safi, "received End-of-RIB marker");
+            self.handle_eor_received(afi_safi).await;
             return Ok(None);
         }
 
@@ -515,7 +528,7 @@ impl Peer {
     }
 
     /// Handle received ROUTE_REFRESH message
-    async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi) {
+    async fn handle_route_refresh(&mut self, afi: Afi, safi: Safi, subtype: RouteRefreshSubtype) {
         // RFC 2918: ROUTE_REFRESH capability must be negotiated
         if !self.capabilities.route_refresh {
             warn!(peer_ip = %self.addr,
@@ -533,12 +546,54 @@ impl Peer {
             return;
         }
 
-        // Send to server to trigger route re-advertisement
-        let _ = self.server_tx.send(ServerOp::RouteRefresh {
-            peer_ip: self.addr,
-            afi,
-            safi,
-        });
+        match subtype {
+            RouteRefreshSubtype::Normal => {
+                let _ = self.server_tx.send(ServerOp::RouteRefresh {
+                    peer_ip: self.addr,
+                    afi,
+                    safi,
+                });
+            }
+            RouteRefreshSubtype::BoRR => {
+                if !self.capabilities.enhanced_route_refresh {
+                    warn!(peer_ip = %self.addr, "BoRR received but enhanced route refresh not negotiated");
+                    return;
+                }
+                // RFC 7313 Section 4: If GR is negotiated, ignore BoRR before EoR
+                let eor_received = self
+                    .gr_state
+                    .as_ref()
+                    .is_none_or(|state| state.eor_received.contains(&requested));
+                if self.capabilities.graceful_restart.is_some() && !eor_received {
+                    warn!(peer_ip = %self.addr, ?afi, ?safi,
+                          "ignoring BoRR received before EoR (RFC 7313)");
+                    return;
+                }
+                let _ = self.server_tx.send(ServerOp::RouteRefreshBoRR {
+                    peer_ip: self.addr,
+                    afi,
+                    safi,
+                });
+            }
+            RouteRefreshSubtype::EoRR => {
+                if !self.capabilities.enhanced_route_refresh {
+                    warn!(peer_ip = %self.addr, "EoRR received but enhanced route refresh not negotiated");
+                    return;
+                }
+                // Flush pending routes so the server processes them
+                // before the stale sweep triggered by EoRR.
+                self.flush_pending_routes();
+                let _ = self.server_tx.send(ServerOp::RouteRefreshEoRR {
+                    peer_ip: self.addr,
+                    afi,
+                    safi,
+                });
+            }
+            RouteRefreshSubtype::Unknown(val) => {
+                // RFC 7313 Section 5: unknown subtypes silently ignored
+                debug!(peer_ip = %self.addr, subtype = val, "ignoring ROUTE_REFRESH with unknown subtype");
+            }
+        }
     }
 
     /// Negotiate ADD-PATH capability (RFC 7911)

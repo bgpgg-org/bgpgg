@@ -433,6 +433,7 @@ impl BgpggProcess {
             log_level: "error".to_string(),
             cluster_id: None,
             llgr: None,
+            enhanced_rr_stale_ttl: Some(360),
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();

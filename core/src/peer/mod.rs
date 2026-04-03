@@ -16,6 +16,7 @@ use crate::bgp::msg::{AddPathMask, BgpMessage, Message, MessageFormat, PRE_OPEN_
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{AddPathCapability, GracefulRestartCapability, LlgrCapability};
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
@@ -62,6 +63,8 @@ pub struct PeerCapabilities {
     pub multiprotocol: HashSet<AfiSafi>,
     /// Route Refresh capability (RFC 2918)
     pub route_refresh: bool,
+    /// Enhanced Route Refresh capability (RFC 7313)
+    pub enhanced_route_refresh: bool,
     /// Four-Octet ASN capability (RFC 6793)
     /// Contains the peer's 4-byte ASN if advertised
     pub four_octet_asn: Option<u32>,
@@ -101,7 +104,7 @@ impl PeerCapabilities {
             .map(|ap| {
                 ap.entries
                     .iter()
-                    .any(|(as_, mode)| as_ == afi_safi && mode.can_send())
+                    .any(|(entry_afi_safi, mode)| entry_afi_safi == afi_safi && mode.can_send())
             })
             .unwrap_or(false)
     }
@@ -131,6 +134,7 @@ impl PeerCapabilities {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
             is_ebgp: session_type == Some(SessionType::Ebgp),
+            enhanced_rr: self.enhanced_route_refresh,
         }
     }
 
@@ -149,6 +153,7 @@ impl PeerCapabilities {
             use_4byte_asn: self.supports_four_octet_asn(),
             add_path,
             is_ebgp: session_type == Some(SessionType::Ebgp),
+            enhanced_rr: self.enhanced_route_refresh,
         }
     }
 
@@ -159,7 +164,7 @@ impl PeerCapabilities {
             .map(|ap| {
                 ap.entries
                     .iter()
-                    .any(|(as_, mode)| as_ == afi_safi && mode.can_receive())
+                    .any(|(entry_afi_safi, mode)| entry_afi_safi == afi_safi && mode.can_receive())
             })
             .unwrap_or(false)
     }
@@ -198,6 +203,35 @@ pub struct LocalConfig {
 
 /// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
 pub type Withdrawal = (IpNetwork, Option<u32>);
+
+/// A pending route announcement or withdrawal awaiting flush to server.
+#[derive(Debug, Clone)]
+pub enum PendingRoute {
+    Announce(PrefixPath),
+    Withdraw(Withdrawal),
+}
+
+impl PendingRoute {
+    pub fn prefix(&self) -> IpNetwork {
+        match self {
+            PendingRoute::Announce(prefix_path) => prefix_path.prefix,
+            PendingRoute::Withdraw((prefix, _)) => *prefix,
+        }
+    }
+
+    /// Split a slice into separate announced and withdrawn lists.
+    pub fn split(routes: &[PendingRoute]) -> (Vec<PrefixPath>, Vec<Withdrawal>) {
+        let mut announced = Vec::new();
+        let mut withdrawn = Vec::new();
+        for route in routes {
+            match route {
+                PendingRoute::Announce(prefix_path) => announced.push(prefix_path.clone()),
+                PendingRoute::Withdraw(withdrawal) => withdrawn.push(*withdrawal),
+            }
+        }
+        (announced, withdrawn)
+    }
+}
 
 /// (announced routes, withdrawn routes)
 pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<Withdrawal>);
@@ -264,8 +298,9 @@ const MAX_IDLE_HOLD_TIME: Duration = Duration::from_secs(120);
 pub enum PeerOp {
     SendUpdate(Vec<u8>),
     SendRouteRefresh {
-        afi: crate::bgp::multiprotocol::Afi,
-        safi: crate::bgp::multiprotocol::Safi,
+        afi: Afi,
+        safi: Safi,
+        subtype: RouteRefreshSubtype,
     },
     GetStatistics(oneshot::Sender<PeerStatistics>),
     GetNegotiatedCapabilities(oneshot::Sender<PeerCapabilities>),
@@ -415,10 +450,8 @@ pub struct Peer {
     capabilities: PeerCapabilities,
     /// Graceful Restart runtime state (RFC 4724)
     gr_state: Option<GracefulRestartState>,
-    /// Accumulated route announcements awaiting flush to server
-    pending_announced: Vec<PrefixPath>,
-    /// Accumulated route withdrawals awaiting flush to server
-    pending_withdrawn: Vec<Withdrawal>,
+    /// Accumulated route events awaiting flush to server, in temporal order.
+    pending_routes: Vec<PendingRoute>,
 }
 
 impl Peer {
@@ -462,22 +495,19 @@ impl Peer {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
-            pending_announced: Vec::new(),
-            pending_withdrawn: Vec::new(),
+            pending_routes: Vec::new(),
         }
     }
 
     fn pending_route_count(&self) -> usize {
-        self.pending_announced.len() + self.pending_withdrawn.len()
+        self.pending_routes.len()
     }
 
-    /// Flush accumulated route announcements/withdrawals to the server
-    /// as a single coalesced PeerUpdate.
+    /// Flush accumulated route events to the server in temporal order.
     fn flush_pending_routes(&mut self) {
         let _ = self.server_tx.send(ServerOp::PeerUpdate {
             peer_ip: self.addr,
-            announced: std::mem::take(&mut self.pending_announced),
-            withdrawn: std::mem::take(&mut self.pending_withdrawn),
+            routes: std::mem::take(&mut self.pending_routes),
         });
     }
 
@@ -699,7 +729,7 @@ impl Peer {
             let all_eors_received = gr_state
                 .afi_safis
                 .iter()
-                .all(|as_| gr_state.eor_received.contains(as_));
+                .all(|afi_safi| gr_state.eor_received.contains(afi_safi));
 
             if all_eors_received {
                 info!(peer_ip = %self.addr, "all EORs received - Graceful Restart complete");
@@ -707,6 +737,10 @@ impl Peer {
                     timer.abort();
                 }
             }
+
+            // Flush any pending route updates so the server processes them
+            // before the stale sweep triggered by GracefulRestartComplete.
+            self.flush_pending_routes();
 
             // Notify server to remove stale routes for this AFI/SAFI
             let _ = self.server_tx.send(ServerOp::GracefulRestartComplete {
@@ -777,7 +811,7 @@ impl Peer {
     fn parse_bgp_message(bytes: &[u8], format: MessageFormat) -> Result<BgpMessage, ParserError> {
         let message_type = bytes[18];
         let body = bytes[19..].to_vec();
-        BgpMessage::from_bytes(message_type, body, format)
+        BgpMessage::from_bytes(message_type, body, bytes, format)
     }
 
     /// Convert BGP parse error to FSM event for error handling.
@@ -912,8 +946,7 @@ pub mod test_helpers {
             received_open: None,
             capabilities: PeerCapabilities::default(),
             gr_state: None,
-            pending_announced: Vec::new(),
-            pending_withdrawn: Vec::new(),
+            pending_routes: Vec::new(),
         }
     }
 }

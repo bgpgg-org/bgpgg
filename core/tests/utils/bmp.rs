@@ -324,6 +324,7 @@ impl FakeBmpServer {
                 use_4byte_asn: true,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
         )
         .unwrap();
@@ -630,6 +631,7 @@ impl FakeBmpServer {
                 use_4byte_asn: false,
                 add_path: AddPathMask::NONE,
                 is_ebgp: false,
+                enhanced_rr: false,
             },
         )
         .unwrap();

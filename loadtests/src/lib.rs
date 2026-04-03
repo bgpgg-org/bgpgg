@@ -58,6 +58,7 @@ pub async fn bgp_handshake(
             use_4byte_asn: true,
             add_path: AddPathMask::NONE,
             is_ebgp: false,
+            enhanced_rr: false,
         },
     )
     .await
@@ -96,6 +97,7 @@ pub async fn bgp_handshake(
             use_4byte_asn: true,
             add_path: AddPathMask::NONE,
             is_ebgp: false,
+            enhanced_rr: false,
         },
     )
     .await
@@ -189,6 +191,7 @@ pub fn create_update_message(
             use_4byte_asn: true,
             add_path: AddPathMask::NONE,
             is_ebgp: false,
+            enhanced_rr: false,
         },
     );
     update.serialize()

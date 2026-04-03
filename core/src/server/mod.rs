@@ -44,6 +44,7 @@ use crate::types::PeerDownReason;
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -232,6 +233,12 @@ impl ConnectionState {
             .is_some_and(|caps| caps.supports_four_octet_asn())
     }
 
+    pub fn has_enhanced_route_refresh(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.enhanced_route_refresh)
+    }
+
     pub fn add_path_send_negotiated(&self, afi_safi: &AfiSafi) -> bool {
         self.capabilities
             .as_ref()
@@ -298,47 +305,65 @@ pub struct PeerInfo {
     /// AFI/SAFIs disabled due to non-negotiated UPDATE (RFC 4760 Section 7)
     pub disabled_afi_safi: HashSet<AfiSafi>,
     /// RFC 9494: Running LLGR stale timers per AFI/SAFI
-    pub llgr_timers: LlgrTimers,
+    pub llgr_timers: ServerOpTimers<AfiSafi>,
+    /// RFC 7313: Running enhanced route refresh stale timers per AFI/SAFI
+    pub rr_stale_timers: ServerOpTimers<AfiSafi>,
 }
 
-/// Manages per-AFI/SAFI LLGR stale timers for a peer (RFC 9494).
-#[derive(Default)]
-pub struct LlgrTimers {
-    timers: HashMap<AfiSafi, JoinHandle<()>>,
+/// Keyed timer map. Each key has at most one running timer that sends a
+/// ServerOp on expiry. Used for LLGR (RFC 9494) and enhanced RR (RFC 7313).
+pub struct ServerOpTimers<K: Eq + Hash + Copy> {
+    timers: HashMap<K, JoinHandle<()>>,
 }
 
-impl LlgrTimers {
-    pub fn new() -> Self {
+impl<K: Eq + Hash + Copy> Default for ServerOpTimers<K> {
+    fn default() -> Self {
         Self {
             timers: HashMap::new(),
         }
     }
+}
 
-    /// Start a timer if not already running. Existing timers MUST NOT be updated (RFC 9494).
+impl<K: Eq + Hash + Copy> ServerOpTimers<K> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start a timer that sends `op` after `duration_secs`.
+    /// Cancels any existing timer for the same key first.
     pub fn run(
         &mut self,
-        afi_safi: AfiSafi,
-        llst: u32,
-        peer_ip: IpAddr,
+        key: K,
+        duration_secs: u64,
+        op: ServerOp,
         server_tx: mpsc::UnboundedSender<ServerOp>,
     ) {
-        self.timers.entry(afi_safi).or_insert_with(|| {
+        self.cancel(&key);
+        self.timers.insert(
+            key,
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(llst as u64)).await;
-                let _ = server_tx.send(ServerOp::LlgrTimerExpired { peer_ip, afi_safi });
-            })
-        });
+                tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+                let _ = server_tx.send(op);
+            }),
+        );
     }
 
     /// Cancel a running timer. No-op if not running.
-    pub fn cancel(&mut self, afi_safi: &AfiSafi) {
-        if let Some(handle) = self.timers.remove(afi_safi) {
+    pub fn cancel(&mut self, key: &K) {
+        if let Some(handle) = self.timers.remove(key) {
             handle.abort();
         }
     }
 
-    /// AFI/SAFIs with running timers.
-    pub fn afi_safis(&self) -> Vec<AfiSafi> {
+    /// Cancel all running timers.
+    pub fn cancel_all(&mut self) {
+        for (_, handle) in self.timers.drain() {
+            handle.abort();
+        }
+    }
+
+    /// Keys with running timers.
+    pub fn keys(&self) -> Vec<K> {
         self.timers.keys().copied().collect()
     }
 }
@@ -365,7 +390,8 @@ impl PeerInfo {
             adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
             disabled_afi_safi: HashSet::new(),
-            llgr_timers: LlgrTimers::new(),
+            llgr_timers: ServerOpTimers::new(),
+            rr_stale_timers: ServerOpTimers::new(),
         }
     }
 
@@ -980,5 +1006,25 @@ mod tests {
         let mut server = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
+    }
+
+    #[test]
+    fn test_has_enhanced_route_refresh() {
+        // No capabilities -> false
+        let conn = ConnectionState::new(None);
+        assert!(!conn.has_enhanced_route_refresh());
+
+        // Capabilities without enhanced RR -> false
+        let mut conn = ConnectionState::new(None);
+        conn.capabilities = Some(PeerCapabilities::default());
+        assert!(!conn.has_enhanced_route_refresh());
+
+        // Capabilities with enhanced RR -> true
+        let mut conn = ConnectionState::new(None);
+        conn.capabilities = Some(PeerCapabilities {
+            enhanced_route_refresh: true,
+            ..PeerCapabilities::default()
+        });
+        assert!(conn.has_enhanced_route_refresh());
     }
 }

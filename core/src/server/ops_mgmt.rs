@@ -16,6 +16,7 @@ use super::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionType, GetPeerResponse,
     GetPeersResponse, PeerInfo, PolicyDirection, ResetType,
 };
+use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::{DefinedSetConfig, PeerConfig};
 use crate::log::{error, info};
@@ -446,11 +447,10 @@ impl BgpServer {
             }
         }
 
-        // Cancel any running LLGR timers before removing the peer
+        // Cancel any running timers before removing the peer
         if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-            for afi_safi in peer_info.llgr_timers.afi_safis() {
-                peer_info.llgr_timers.cancel(&afi_safi);
-            }
+            peer_info.llgr_timers.cancel_all();
+            peer_info.rr_stale_timers.cancel_all();
         }
 
         // Now remove the peer from the map
@@ -644,6 +644,7 @@ impl BgpServer {
                 let _ = peer_tx.send(PeerOp::SendRouteRefresh {
                     afi: afi_safi.afi,
                     safi: afi_safi.safi,
+                    subtype: RouteRefreshSubtype::Normal,
                 });
             }
         }
@@ -1611,6 +1612,7 @@ fn send_initial_bmp_state_to_task(
                 use_4byte_asn: peer_info.supports_4byte_asn(),
                 add_path: peer_info.add_path_receive_mask(),
                 is_ebgp: false,
+                enhanced_rr: false,
             };
 
             // Convert routes to UpdateMessages, batching by shared path attributes
