@@ -158,6 +158,7 @@ impl PeerRoute {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }

@@ -18,6 +18,7 @@ pub use super::msg_update_types::{
     LargeCommunity, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 
+use super::bgpls_attr::LsAttr;
 use super::msg::{Message, MessageFormat, MessageType};
 use super::msg_update_codec::{
     format_bytes_hex, read_path_attributes, validate_update_message_lengths,
@@ -526,6 +527,16 @@ impl UpdateMessage {
         })
     }
 
+    /// RFC 9552: Get BGP-LS Attribute (type 29) if present
+    pub fn ls_attr(&self) -> Option<LsAttr> {
+        self.path_attributes
+            .iter()
+            .find_map(|attr| match &attr.value {
+                PathAttrValue::LsAttr(ls_attr) => Some(ls_attr.clone()),
+                _ => None,
+            })
+    }
+
     pub fn use_4byte_asn(&self) -> bool {
         self.format.use_4byte_asn
     }
@@ -847,6 +858,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }

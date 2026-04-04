@@ -252,7 +252,7 @@ in LocRib with a proper typed key — not opaque bytes.
 Why not a generic `HashMap<AfiSafi, Box<dyn RibTable>>`? GoBGP (Go map), FRR (2D array),
 and BIRD (generic rtable) all use heterogeneous table containers. This works in Go/C because
 `interface{}`/`void*` gives you dynamic dispatch cheaply. In Rust, a `RibTable` trait with a
-generic key type `K` can't be stored in one map — `RibTable<Ipv4Net>` and `RibTable<LsNlriKey>`
+generic key type `K` can't be stored in one map — `RibTable<Ipv4Net>` and `RibTable<LsObjectId>`
 are different types. You'd need type erasure (`Box<dyn Any>` keys), losing compile-time safety
 and reimplementing dynamic typing. Not worth it.
 
@@ -263,28 +263,31 @@ new family = add a field + methods. The number of families is small and known.
 pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
     ipv4_unicast: PrefixMap<Ipv4Net, Route>,
     ipv6_unicast: PrefixMap<Ipv6Net, Route>,
-    link_state: HashMap<LsNlriKey, Route>,  // NEW: typed key, not opaque bytes
+    link_state: HashMap<LsObjectId, Route>,  // NEW: typed key, not opaque bytes
     path_ids: A,
 }
 ```
 
-BGP-LS RIB key is a proper typed struct:
+BGP-LS RIB key is a proper typed struct. Uses the already-parsed typed descriptor structs
+(`LinkDescriptor`, `PrefixDescriptor`) rather than raw `Vec<LsTlv>` — these already derive
+`Hash`/`Eq` and converting back to TLVs would be pointless:
 
 ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LsNlriKey {
+struct LsObjectId {
     nlri_type: LsNlriType,
     protocol_id: LsProtocolId,
     identifier: u64,
     local_node: NodeDescriptor,
-    remote_node: Option<NodeDescriptor>,   // link only
-    link_descriptors: Vec<LsTlv>,          // link only
-    prefix_descriptors: Vec<LsTlv>,        // prefix only
+    remote_node: Option<NodeDescriptor>,      // link only
+    link_descriptor: Option<LinkDescriptor>,   // link only
+    prefix_descriptor: Option<PrefixDescriptor>, // prefix only
 }
 ```
 
-Queryable, debuggable, no opaque blobs in the RIB. Raw bytes stored separately on LsNlri
-for wire encoding on propagation.
+Lives in `bgpls_nlri.rs`. `LsNlri::key() -> Option<LsObjectId>` extracts from parsed body
+(None for unknown NLRI types). Queryable, debuggable, no opaque blobs in the RIB. Raw bytes
+stored separately on `LsNlri` for wire encoding on propagation.
 
 ### Best path selection
 
@@ -301,7 +304,7 @@ is adding a variant; the compiler flags every match that needs updating.
 ```
 enum RouteKey {
     Prefix(IpNetwork),
-    LinkState(LsNlriKey),
+    LinkState(LsObjectId),
     // future: Flowspec(...), Evpn(...)
 }
 
@@ -317,13 +320,42 @@ encode the UPDATE. This match is needed regardless — the AFI/SAFI determines w
 
 
 
+### RouteKey in types.rs
+
+```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RouteKey {
+    Prefix(IpNetwork),
+    LinkState(LsObjectId),
+}
+```
+
+### PathAttrs
+
+Add `pub ls_attr: Option<LsAttr>` to `PathAttrs` in `path.rs`. BGP-LS attribute (type 29)
+is a path attribute like any other.
+
+### AdjRibIn
+
+Add `link_state: HashMap<LsObjectId, Route>` to AdjRibIn, same pattern as ipv4/ipv6 tables.
+
+### Stale handling
+
+Add HashMap-based variants of `mark_stale_in_table` and `handle_stale_routes` in `stale.rs`
+for `HashMap<LsObjectId, Route>`. Wire into LocRib's stale methods for the
+`(Afi::LinkState, Safi::LinkState)` arm.
+
 ### Files to change
 
-- `core/src/rib/rib_loc.rs` -- add `link_state` HashMap, upsert/remove for LS routes
-- `core/src/rib/rib_loc.rs` -- RouteDelta extension
-- `core/src/rib/path.rs` -- add `ls_attr: Option<LsAttribute>` to PathAttrs (or Path)
-- `core/src/rib/rib_in.rs` -- AdjRibIn: add LS table if needed
-- `core/src/rib/types.rs` -- Route might need LsNlri field
+- `core/src/bgp/bgpls_nlri.rs` -- LsObjectId struct, LsNlri::key() conversion
+- `core/src/rib/types.rs` -- RouteKey enum
+- `core/src/rib/path.rs` -- add `ls_attr: Option<LsAttr>` to PathAttrs
+- `core/src/rib/rib_loc.rs` -- link_state table, LS helpers, RouteDelta uses RouteKey
+- `core/src/rib/stale.rs` -- HashMap-based stale functions
+- `core/src/rib/rib_in.rs` -- link_state table and methods
+- `core/src/rib/mod.rs` -- re-export RouteKey
+- `core/src/server/propagate.rs` -- match on RouteKey (skip LinkState for now, Phase 5)
+- Multiple files -- mechanical `ls_attr: None` + `RouteKey::Prefix(...)` wrapping
 
 ### Tests
 
@@ -331,7 +363,9 @@ encode the UPDATE. This match is needed regardless — the AFI/SAFI determines w
 - Best path selection between two LS paths
 - Withdraw LS route
 - Replace LS route (same NLRI, new attribute)
-- Explicit withdraw + re-announce (NLRI TLV change)
+- Remove LS routes from peer (disconnect), verify RouteDelta has RouteKey::LinkState entries
+- Different descriptors = different route entries
+- Mark LS paths stale, sweep stale LS paths
 
 ---
 
@@ -339,18 +373,44 @@ encode the UPDATE. This match is needed regardless — the AFI/SAFI determines w
 
 Wire up the codec and RIB so bgpgg can receive, store, and propagate BGP-LS routes.
 
+### Generalize route pipeline types to RouteKey
+
+Phase 4 introduced `RouteKey` (Prefix | LinkState) and `Route.key: RouteKey`. But the
+peer-to-server pipeline still assumes IP prefixes:
+
+- `PrefixPath` has `prefix: IpNetwork` -- rename to `RoutePath`, field becomes `key: RouteKey`
+- `Withdrawal` is `(IpNetwork, Option<u32>)` -- becomes `(RouteKey, Option<u32>)`
+- `PendingRoute` wraps both -- naturally carries LS routes after the above changes
+- `apply_peer_update` processes `&[PendingRoute]` -- works for LS with no separate code path
+
+This is the first step of Phase 5. Once done, the peer can parse an LS UPDATE into
+`PendingRoute::Announce(RoutePath { key: RouteKey::LinkState(nlri), path })` and the
+server processes it through the same pipeline as IP routes.
+
+Outgoing UPDATE encoding: `outgoing.rs` matches on `RouteKey` to decide wire format.
+`RouteKey::Prefix` -> legacy/MP NLRI as today. `RouteKey::LinkState` -> MP_REACH_NLRI
+with LS NLRIs + BGP-LS attribute. The match is the natural dispatch point.
+
+BMP route monitoring (`core/src/server/ops_mgmt.rs`) also uses `PrefixPath` -- currently
+skips LS routes silently. Must be updated to mirror LS UPDATEs to BMP collectors per
+RFC 7854.
+
+Files: `core/src/rib/types.rs`, `core/src/peer/mod.rs`, `core/src/peer/outgoing.rs`,
+`core/src/server/ops.rs`, `core/src/server/propagate.rs`, `core/src/server/ops_mgmt.rs`,
+and callers.
+
 ### Receiving
 
 - `core/src/peer/` -- when UPDATE contains MP_REACH_NLRI with AFI 16388:
   - Parse LS NLRIs using Phase 2 codec
   - Parse BGP-LS Attribute (type 29) using Phase 3 codec
   - Create Path with LS data
-  - Send to server via existing PeerOp channel
+  - Send to server via existing PeerOp channel (as PendingRoute with RouteKey::LinkState)
 
 - `core/src/server/` -- handle incoming LS routes:
-  - Apply import policy (if any)
-  - Insert into LocRib.link_state
-  - Compute RouteDelta with ls_best_changed / ls_changed
+  - `apply_peer_update` processes LS PendingRoutes the same as IP
+  - Import policy applied via RouteKey match
+  - Insert into LocRib.link_state (dispatched by RouteKey in upsert_path)
 
 ### Propagating
 
@@ -368,7 +428,7 @@ Wire up the codec and RIB so bgpgg can receive, store, and propagate BGP-LS rout
 
 ### Adj-RIB-Out
 
-- Rekey from `IpNetwork` to `RouteKey` so LS routes live alongside IP routes
+- AdjRibOut currently keyed by `IpNetwork` -- rekey to `RouteKey` so LS routes tracked
 - Per-peer adj_rib_out needs LS tracking for ADD-PATH support
 - Key: RouteKey + path_id
 - Same pattern as existing adj_rib_out for IP prefixes

@@ -31,7 +31,7 @@ use crate::peer::PeerCapabilities;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::rib_loc::{LocRib, RouteDelta};
-use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
+use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteKey, RouteSource};
 use crate::rpki::vrp::RpkiValidation;
 
 #[cfg(test)]
@@ -492,6 +492,7 @@ fn build_export_attrs(
         unknown_attrs: build_export_unknown_attrs(path, ctx),
         originator_id,
         cluster_list,
+        ls_attr: path.attrs.ls_attr.clone(),
     })
 }
 
@@ -642,9 +643,10 @@ fn select_paths_for_export(
     loc_rib: &LocRib,
     ctx: &PeerExportContext,
 ) -> Vec<PrefixPath> {
+    let route_key = RouteKey::Prefix(*prefix);
     if send_add_path {
         loc_rib
-            .get_all_paths(prefix)
+            .get_all_paths(&route_key)
             .iter()
             .filter_map(|path| {
                 compute_export_path(prefix, path, ctx)
@@ -653,7 +655,7 @@ fn select_paths_for_export(
             .collect()
     } else if ctx.rs_client {
         // RFC 7947 route iteration: try paths in preference order, return first that passes policy.
-        for path in loc_rib.get_all_paths(prefix) {
+        for path in loc_rib.get_all_paths(&route_key) {
             if let Some(p) = compute_export_path(prefix, &path, ctx) {
                 return vec![PrefixPath::new(*prefix, p)];
             }
@@ -661,7 +663,7 @@ fn select_paths_for_export(
         vec![]
     } else {
         loc_rib
-            .get_best_path(prefix)
+            .get_best_path(&route_key)
             .into_iter()
             .filter_map(|path| {
                 compute_export_path(prefix, path, ctx)
@@ -728,7 +730,12 @@ pub fn propagate_routes_to_peer(
             &delta.best_changed
         };
 
-        for prefix in prefixes {
+        for route_key in prefixes {
+            // Extract the IP prefix; skip non-prefix route keys (e.g. BGP-LS)
+            let prefix = match route_key {
+                RouteKey::Prefix(p) => p,
+                RouteKey::LinkState(_) => continue, // Phase 5
+            };
             // Filter prefixes by AFI (IPv4 vs IPv6)
             if !matches!(
                 (prefix, afi_safi.afi),
@@ -811,6 +818,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }
@@ -1356,6 +1364,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         };
 
@@ -1568,6 +1577,7 @@ mod tests {
                     unknown_attrs: vec![],
                     originator_id: None,
                     cluster_list: vec![],
+                    ls_attr: None,
                 },
             };
 
@@ -1832,6 +1842,7 @@ mod tests {
                     unknown_attrs: vec![],
                     originator_id: None,
                     cluster_list: vec![],
+                    ls_attr: None,
                 },
             };
 
@@ -2029,7 +2040,7 @@ mod tests {
             &[PendingRoute::Announce(PrefixPath::new(prefix, path2))],
             |_, _| true,
         );
-        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
+        assert_eq!(loc_rib.get_all_paths(&RouteKey::Prefix(prefix)).len(), 2);
 
         let policies = vec![Arc::new(
             Policy::new("test".to_string())
@@ -2081,6 +2092,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         };
 

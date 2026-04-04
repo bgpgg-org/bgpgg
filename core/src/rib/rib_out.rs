@@ -14,7 +14,7 @@
 
 use crate::bgp::multiprotocol::Afi;
 use crate::net::IpNetwork;
-use crate::rib::{Path, Route};
+use crate::rib::{Path, Route, RouteKey};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -114,7 +114,7 @@ impl AdjRibOut {
         self.routes
             .iter()
             .map(|(prefix, paths)| Route {
-                prefix: *prefix,
+                key: RouteKey::Prefix(*prefix),
                 paths: paths.values().cloned().collect(),
             })
             .collect()
@@ -155,7 +155,7 @@ mod tests {
 
         let routes = rib.get_routes();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].prefix, prefix);
+        assert_eq!(routes[0].key, RouteKey::Prefix(prefix));
         assert_eq!(routes[0].paths.len(), 1);
     }
 

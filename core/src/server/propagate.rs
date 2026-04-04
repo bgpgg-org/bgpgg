@@ -24,7 +24,7 @@ use crate::peer::outgoing::{
 };
 use crate::peer::Withdrawal;
 use crate::rib::rib_loc::RouteDelta;
-use crate::rib::PrefixPath;
+use crate::rib::{PrefixPath, RouteKey};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -178,10 +178,15 @@ impl BgpServer {
             send_rpki_community: peer_info.config.send_rpki_community,
         };
 
-        let all_prefixes = self.loc_rib.prefixes_for_afi(afi);
+        let all_keys: Vec<RouteKey> = self
+            .loc_rib
+            .get_routes_afi(afi)
+            .iter()
+            .map(|route| route.key.clone())
+            .collect();
         let delta = RouteDelta {
-            best_changed: all_prefixes.clone(),
-            changed: all_prefixes,
+            best_changed: all_keys.clone(),
+            changed: all_keys,
         };
         propagate_routes_to_peer(&ctx, &delta, &self.loc_rib, &mut peer_info.adj_rib_out);
 

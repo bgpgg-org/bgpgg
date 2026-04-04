@@ -28,7 +28,7 @@ use crate::net::IpNetwork;
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
 use crate::policy::{Policy, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
-use crate::rib::{Path, PrefixPath};
+use crate::rib::{Path, PrefixPath, RouteKey};
 use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
@@ -800,11 +800,14 @@ impl BgpServer {
 
         // Store ALL routes in adj-rib-in first (RFC 4271 3.2: "unprocessed")
         for (prefix, path_id) in &withdrawn {
-            peer.adj_rib_in.remove_route(*prefix, *path_id);
+            peer.adj_rib_in
+                .remove_route(&RouteKey::Prefix(*prefix), *path_id);
         }
         for prefix_path in &announced {
-            peer.adj_rib_in
-                .add_route(prefix_path.prefix, Arc::clone(&prefix_path.path));
+            peer.adj_rib_in.add_route(
+                RouteKey::Prefix(prefix_path.prefix),
+                Arc::clone(&prefix_path.path),
+            );
         }
 
         // AFI/SAFI validation (RFC 4760 Section 7)
@@ -942,7 +945,7 @@ impl BgpServer {
         for (&peer_ip, peer_info) in &self.peers {
             let mut routes = Vec::new();
             for &prefix in prefixes {
-                if let Some(route) = peer_info.adj_rib_in.get_route(&prefix) {
+                if let Some(route) = peer_info.adj_rib_in.get_route(&RouteKey::Prefix(prefix)) {
                     for path in &route.paths {
                         routes.push(PrefixPath {
                             prefix,

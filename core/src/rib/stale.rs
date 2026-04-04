@@ -14,9 +14,7 @@
 
 use crate::bgp::community;
 use crate::rib::path_id::PathIdAllocator;
-use crate::rib::{Path, Route, RouteDelta};
-use crate::table::{Prefix, PrefixMap};
-use std::hash::Hash;
+use crate::rib::{Path, Route};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -47,12 +45,13 @@ impl StaleStrategy {
     }
 }
 
-pub(crate) fn mark_stale_in_table<K: Eq + Hash + Prefix>(
-    table: &mut PrefixMap<K, Route>,
+/// Mark all paths from a peer as stale across the given routes.
+pub(crate) fn mark_stale<'a>(
+    routes: impl Iterator<Item = &'a mut Route>,
     peer_ip: IpAddr,
 ) -> usize {
     let mut count = 0;
-    for route in table.values_mut() {
+    for route in routes {
         for path in &mut route.paths {
             if path.is_from_peer(peer_ip) {
                 Arc::make_mut(path).stale = true;
@@ -63,75 +62,46 @@ pub(crate) fn mark_stale_in_table<K: Eq + Hash + Prefix>(
     count
 }
 
-fn peer_stale_keys<K: Eq + Hash + Copy + Prefix>(
-    table: &PrefixMap<K, Route>,
-    peer_ip: IpAddr,
-) -> Vec<K> {
-    table
-        .iter()
-        .filter(|(_, r)| r.paths.iter().any(|p| p.is_from_peer(peer_ip) && p.stale))
-        .map(|(k, _)| *k)
-        .collect()
-}
-
-fn best_path_changed(old: Option<&Arc<Path>>, new: Option<&Arc<Path>>) -> bool {
-    match (old, new) {
-        (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-        (None, None) => false,
-        _ => true,
-    }
-}
-
-pub(crate) fn handle_stale_routes<K: Eq + Hash + Copy + Prefix, A: PathIdAllocator>(
-    table: &mut PrefixMap<K, Route>,
+/// Process stale paths in a single route: apply the strategy, free removed path IDs.
+/// Returns the old best path (before modification) for delta tracking.
+pub(crate) fn apply_stale_to_route<A: PathIdAllocator>(
+    route: &mut Route,
     peer_ip: IpAddr,
     path_ids: &mut A,
     strategy: &StaleStrategy,
-) -> RouteDelta {
-    let keys = peer_stale_keys(table, peer_ip);
-    let mut delta = RouteDelta::new();
-
-    for key in keys {
-        let Some(route) = table.get_mut(&key) else {
-            continue;
-        };
-        let old_best = route.paths.first().map(Arc::clone);
-        let prefix = route.prefix;
-
-        let mut kept = Vec::with_capacity(route.paths.len());
-        for mut path in route.paths.drain(..) {
-            if path.is_from_peer(peer_ip) && path.stale && !strategy.apply(&mut path) {
-                if let Some(id) = path.local_path_id {
-                    path_ids.free(id);
-                }
-                continue;
-            }
-            kept.push(path);
-        }
-        route.paths = kept;
-        route.paths.sort_by(|a, b| b.best_path_cmp(a));
-
-        if route.paths.is_empty() {
-            table.remove(&key);
-        }
-
-        delta.changed.push(prefix);
-        if best_path_changed(
-            old_best.as_ref(),
-            table.get(&key).and_then(|r| r.paths.first()),
-        ) {
-            delta.best_changed.push(prefix);
-        }
+) -> Option<Arc<Path>> {
+    let has_stale = route
+        .paths
+        .iter()
+        .any(|p| p.is_from_peer(peer_ip) && p.stale);
+    if !has_stale {
+        return None;
     }
 
-    delta
+    let old_best = route.paths.first().map(Arc::clone);
+
+    let mut kept = Vec::with_capacity(route.paths.len());
+    for mut path in route.paths.drain(..) {
+        if path.is_from_peer(peer_ip) && path.stale && !strategy.apply(&mut path) {
+            if let Some(id) = path.local_path_id {
+                path_ids.free(id);
+            }
+            continue;
+        }
+        kept.push(path);
+    }
+    route.paths = kept;
+    route.paths.sort_by(|a, b| b.best_path_cmp(a));
+
+    old_best
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bgp::community;
-    use crate::net::{IpNetwork, Ipv4Net};
+    use crate::rib::types::RouteKey;
+    use crate::rib::Route;
     use crate::test_helpers::*;
     use std::net::Ipv4Addr;
 
@@ -151,171 +121,129 @@ mod tests {
         Ipv4Addr::new(192, 0, 2, 2)
     }
 
-    fn prefix(last: u8) -> (Ipv4Net, IpNetwork) {
-        let net = Ipv4Net {
-            address: Ipv4Addr::new(10, 0, last, 0),
+    fn make_route(paths: Vec<Arc<Path>>) -> Route {
+        use crate::net::{IpNetwork, Ipv4Net};
+        let prefix = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
             prefix_length: 24,
-        };
-        (net, IpNetwork::V4(net))
-    }
-
-    fn make_table(entries: Vec<(Ipv4Net, IpNetwork, Vec<Arc<Path>>)>) -> PrefixMap<Ipv4Net, Route> {
-        let mut table = PrefixMap::new();
-        for (key, ip_prefix, paths) in entries {
-            table.insert(
-                key,
-                Route {
-                    prefix: ip_prefix,
-                    paths,
-                },
-            );
+        });
+        Route {
+            key: RouteKey::Prefix(prefix),
+            paths,
         }
-        table
     }
 
     #[test]
     fn test_mark_stale() {
-        let (key, ip_prefix) = prefix(1);
-        let mut table = make_table(vec![(
-            key,
-            ip_prefix,
-            vec![
-                create_test_path(peer_ip(), bgp_id()),
-                create_test_path(other_peer_ip(), other_bgp_id()),
-            ],
-        )]);
+        let mut route = make_route(vec![
+            create_test_path(peer_ip(), bgp_id()),
+            create_test_path(other_peer_ip(), other_bgp_id()),
+        ]);
 
-        let count = mark_stale_in_table(&mut table, peer_ip());
+        let count = mark_stale(std::iter::once(&mut route), peer_ip());
         assert_eq!(count, 1);
-        assert!(table.get(&key).unwrap().paths[0].stale);
-        assert!(!table.get(&key).unwrap().paths[1].stale);
+        assert!(route.paths[0].stale);
+        assert!(!route.paths[1].stale);
     }
 
     #[test]
     fn test_sweep() {
-        let (key_mixed, prefix_mixed) = prefix(1);
-        let (key_only_stale, prefix_only_stale) = prefix(2);
-        let (key_not_stale, prefix_not_stale) = prefix(3);
         let mut alloc = FakeAllocator::new();
-        let mut table = make_table(vec![
-            // Stale + non-stale path -> stale removed, other peer's path kept
-            (
-                key_mixed,
-                prefix_mixed,
-                vec![
-                    create_test_path_with(peer_ip(), bgp_id(), |p| {
-                        p.stale = true;
-                        p.local_path_id = Some(42);
-                    }),
-                    create_test_path(other_peer_ip(), other_bgp_id()),
-                ],
-            ),
-            // Only stale path -> route removed entirely
-            (
-                key_only_stale,
-                prefix_only_stale,
-                vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
-                    p.stale = true;
-                    p.local_path_id = Some(43);
-                })],
-            ),
-            // Non-stale path -> untouched
-            (
-                key_not_stale,
-                prefix_not_stale,
-                vec![create_test_path(peer_ip(), bgp_id())],
-            ),
+        let mut route = make_route(vec![
+            create_test_path_with(peer_ip(), bgp_id(), |p| {
+                p.stale = true;
+                p.local_path_id = Some(42);
+            }),
+            create_test_path(other_peer_ip(), other_bgp_id()),
         ]);
 
-        let delta = handle_stale_routes(&mut table, peer_ip(), &mut alloc, &StaleStrategy::Sweep);
-
-        // Mixed: stale path removed, other peer's path kept
-        assert_eq!(table.get(&key_mixed).unwrap().paths.len(), 1);
-        assert!(table.get(&key_mixed).unwrap().paths[0].is_from_peer(other_peer_ip()));
+        let old_best =
+            apply_stale_to_route(&mut route, peer_ip(), &mut alloc, &StaleStrategy::Sweep);
+        assert!(old_best.is_some());
+        assert_eq!(route.paths.len(), 1);
+        assert!(route.paths[0].is_from_peer(other_peer_ip()));
         assert!(alloc.freed.contains(&42));
+    }
 
-        // Only stale: route removed entirely
-        assert!(!table.contains_key(&key_only_stale));
+    #[test]
+    fn test_sweep_removes_empty() {
+        let mut alloc = FakeAllocator::new();
+        let mut route = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
+            p.stale = true;
+            p.local_path_id = Some(43);
+        })]);
+
+        apply_stale_to_route(&mut route, peer_ip(), &mut alloc, &StaleStrategy::Sweep);
+        assert!(route.paths.is_empty());
         assert!(alloc.freed.contains(&43));
-
-        // Non-stale: untouched
-        assert_eq!(table.get(&key_not_stale).unwrap().paths.len(), 1);
-
-        assert!(delta.changed.contains(&prefix_mixed));
-        assert!(delta.changed.contains(&prefix_only_stale));
-        assert!(!delta.changed.contains(&prefix_not_stale));
     }
 
     #[test]
     fn test_llgr_transition() {
-        let (key_clean, prefix_clean) = prefix(1);
-        let (key_no_llgr, prefix_no_llgr) = prefix(2);
-        let (key_already_tagged, prefix_already_tagged) = prefix(3);
         let mut alloc = FakeAllocator::new();
-        let mut table = make_table(vec![
-            // Stale path -> should be tagged with LLGR_STALE
-            (
-                key_clean,
-                prefix_clean,
-                vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
-                    p.stale = true;
-                    p.local_path_id = Some(1);
-                })],
-            ),
-            // Stale path with NO_LLGR -> should be removed
-            (
-                key_no_llgr,
-                prefix_no_llgr,
-                vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
-                    p.stale = true;
-                    p.local_path_id = Some(2);
-                    p.attrs.communities.push(community::NO_LLGR);
-                })],
-            ),
-            // Already tagged with LLGR_STALE -> should not double-tag
-            (
-                key_already_tagged,
-                prefix_already_tagged,
-                vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
-                    p.stale = true;
-                    p.local_path_id = Some(3);
-                    p.attrs.communities.push(community::LLGR_STALE);
-                })],
-            ),
-        ]);
 
-        let delta = handle_stale_routes(
-            &mut table,
+        // Clean stale path -> tagged with LLGR_STALE
+        let mut route_clean = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
+            p.stale = true;
+            p.local_path_id = Some(1);
+        })]);
+        apply_stale_to_route(
+            &mut route_clean,
             peer_ip(),
             &mut alloc,
             &StaleStrategy::TransitionToLlgr,
         );
-
-        // Clean path tagged with LLGR_STALE
-        assert!(table.get(&key_clean).unwrap().paths[0]
+        assert!(route_clean.paths[0]
             .attrs
             .communities
             .contains(&community::LLGR_STALE));
 
-        // NO_LLGR path removed, id freed
-        assert!(!table.contains_key(&key_no_llgr));
+        // NO_LLGR path -> removed
+        let mut route_no_llgr = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
+            p.stale = true;
+            p.local_path_id = Some(2);
+            p.attrs.communities.push(community::NO_LLGR);
+        })]);
+        apply_stale_to_route(
+            &mut route_no_llgr,
+            peer_ip(),
+            &mut alloc,
+            &StaleStrategy::TransitionToLlgr,
+        );
+        assert!(route_no_llgr.paths.is_empty());
         assert!(alloc.freed.contains(&2));
 
-        // Already-tagged path: exactly one LLGR_STALE, not doubled
-        let communities = &table.get(&key_already_tagged).unwrap().paths[0]
-            .attrs
-            .communities;
+        // Already tagged -> not double-tagged
+        let mut route_already = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
+            p.stale = true;
+            p.local_path_id = Some(3);
+            p.attrs.communities.push(community::LLGR_STALE);
+        })]);
+        apply_stale_to_route(
+            &mut route_already,
+            peer_ip(),
+            &mut alloc,
+            &StaleStrategy::TransitionToLlgr,
+        );
         assert_eq!(
-            communities
+            route_already.paths[0]
+                .attrs
+                .communities
                 .iter()
                 .filter(|c| **c == community::LLGR_STALE)
                 .count(),
             1
         );
+    }
 
-        // All prefixes in changed
-        assert!(delta.changed.contains(&prefix_clean));
-        assert!(delta.changed.contains(&prefix_no_llgr));
-        assert!(delta.changed.contains(&prefix_already_tagged));
+    #[test]
+    fn test_no_stale_paths_returns_none() {
+        let mut alloc = FakeAllocator::new();
+        let mut route = make_route(vec![create_test_path(peer_ip(), bgp_id())]);
+
+        let old_best =
+            apply_stale_to_route(&mut route, peer_ip(), &mut alloc, &StaleStrategy::Sweep);
+        assert!(old_best.is_none());
+        assert_eq!(route.paths.len(), 1);
     }
 }

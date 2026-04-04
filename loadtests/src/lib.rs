@@ -181,6 +181,7 @@ pub fn create_update_message(
             unknown_attrs: vec![],
             originator_id: None,
             cluster_list: vec![],
+            ls_attr: None,
         },
     };
 
@@ -317,6 +318,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
             unknown_attrs: vec![],
             originator_id: None,
             cluster_list: vec![],
+            ls_attr: None,
         },
     })
 }

@@ -12,11 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::bgpls_nlri::LsNlri;
 use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+
+/// Identifies a route across all address families.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
+pub enum RouteKey {
+    Prefix(IpNetwork),
+    LinkState(LsNlri),
+}
 
 /// A single prefix with a single path, used for propagation and wire encoding.
 #[derive(Debug, Clone)]
@@ -114,11 +123,11 @@ impl RouteSource {
     }
 }
 
-/// Represents a route with one or more paths to a prefix
+/// Represents a route with one or more paths
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Route {
-    pub prefix: IpNetwork,
+    pub key: RouteKey,
     pub paths: Vec<Arc<Path>>,
 }
 

@@ -31,7 +31,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::DefinedSetType;
-use crate::rib::{PathAttrs, Route};
+use crate::rib::{PathAttrs, Route, RouteKey};
 use crate::types::PeerDownReason;
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
@@ -1615,13 +1615,20 @@ fn send_initial_bmp_state_to_task(
                 enhanced_rr: false,
             };
 
-            // Convert routes to UpdateMessages, batching by shared path attributes
+            // Convert routes to UpdateMessages, batching by shared path attributes.
+            // Phase 5: generalize PrefixPath to handle LS routes in BMP monitoring.
             let announcements: Vec<PrefixPath> = routes
                 .iter()
                 .flat_map(|route| {
-                    route.paths.iter().map(|path| PrefixPath {
-                        prefix: route.prefix,
-                        path: Arc::clone(path),
+                    route.paths.iter().filter_map(|path| {
+                        if let RouteKey::Prefix(prefix) = route.key {
+                            Some(PrefixPath {
+                                prefix,
+                                path: Arc::clone(path),
+                            })
+                        } else {
+                            None
+                        }
                     })
                 })
                 .collect();

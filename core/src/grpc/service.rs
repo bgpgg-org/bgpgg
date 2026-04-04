@@ -116,13 +116,14 @@ type RouteStream =
 
 /// Convert internal route to proto Route
 fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
-    let prefix_str = match route.prefix {
-        IpNetwork::V4(v4) => {
+    let prefix_str = match &route.key {
+        crate::rib::RouteKey::Prefix(IpNetwork::V4(v4)) => {
             format!("{}/{}", v4.address, v4.prefix_length)
         }
-        IpNetwork::V6(v6) => {
+        crate::rib::RouteKey::Prefix(IpNetwork::V6(v6)) => {
             format!("{}/{}", v6.address, v6.prefix_length)
         }
+        crate::rib::RouteKey::LinkState(_) => String::new(),
     };
 
     let proto_paths: Vec<ProtoPath> = route
@@ -871,6 +872,7 @@ impl BgpService for BgpGrpcService {
                 unknown_attrs: vec![],
                 originator_id,
                 cluster_list,
+                ls_attr: None,
             },
             response: tx,
         };
@@ -968,6 +970,7 @@ impl BgpService for BgpGrpcService {
                     unknown_attrs: vec![],
                     originator_id,
                     cluster_list,
+                    ls_attr: None,
                 },
                 response: tx,
             };
