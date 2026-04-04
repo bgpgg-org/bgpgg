@@ -176,84 +176,64 @@ enum LsNlriData {
 
 ---
 
-## Phase 3: BGP-LS Attribute (Type 29) Codec
+## Phase 3: BGP-LS Attribute (Type 29) Codec -- DONE
 
 Parse and encode the BGP-LS path attribute that carries node/link/prefix properties.
 
-### Types
+### Changes made
 
-```
-// BGP-LS Attribute -- optional transitive, type 29
-struct LsAttribute {
-    raw: Vec<u8>,              // for opaque propagation
-    tlvs: Vec<LsTlv>,         // parsed TLV envelope (type + raw value)
-}
-```
+- `core/src/bgp/bgpls.rs` (NEW) -- shared BGP-LS types: `LsTlv`, `LsTlvType` (NLRI descriptor
+  TLV types), `LsAttrTlvType` (attribute TLV types). Moved `LsTlv` and `LsTlvType` here from
+  `bgpls_nlri.rs` since they're used by both NLRI and attribute modules.
 
-### Parsing
+- `core/src/bgp/bgpls_attr.rs` (NEW) -- `LsAttrTlv` enum, `LsAttribute` struct, parsing/encoding
+  - `LsAttrTlv`: typed enum with one variant per known TLV, grouped by RFC 9552 Section 5.3
+    (Node 5.3.1, Link 5.3.2, Prefix 5.3.3), plus `Unknown(LsTlv)` catch-all
+  - Each known variant validates length at parse time (fixed-length fields checked exactly,
+    variable-length fields like SRLG/IGP Route Tag checked for non-empty multiple-of-N)
+  - `LsAttribute`: `raw: Vec<u8>` (opaque propagation) + `tlvs: Vec<LsAttrTlv>` (typed access)
+  - `build_ls_attribute()`: construct from typed TLVs, encodes to set raw field
+  - TLV ordering not validated (SHOULD not MUST per RFC 9552 for attributes)
 
-- Optional transitive attribute (flags: 0xC0)
-- Parse as sequence of TLVs (type 2 bytes, length 2 bytes, value variable)
-- TLV ordering SHOULD be ascending but unordered is NOT malformed
-- Unknown TLVs: preserve and propagate
-- No semantic validation on propagator path
+- `core/src/bgp/msg_update_types.rs`
+  - Added `attr_type_code::LINK_STATE = 29`
+  - Added `AttrType::LinkState = 29` with expected flags OPTIONAL | TRANSITIVE
+  - Added `PathAttrValue::LsAttribute(LsAttribute)` variant
 
-### Error handling
+- `core/src/bgp/msg_update_codec.rs`
+  - `parse_attr_value`: dispatches type 29 to `parse_ls_attribute()`
+  - `validate_attribute_length`: variable length (always valid)
+  - `write_path_attribute`: encodes via `write_ls_attribute()` (raw bytes)
+  - RFC 7606 error action: Attribute Discard (via `malformed_attr_action` catch-all)
 
-- Recoverable (TLV length error but overall attribute length correct): Attribute Discard
-- Unrecoverable (attribute length inconsistent): AFI/SAFI disable or session reset
-- If UPDATE exceeds 4096 bytes due to other attrs: discard BGP-LS attribute first
+- `core/src/bgp/bgpls_nlri.rs` -- imports `LsTlv` and `LsTlvType` from `bgpls.rs`
 
-### Well-known TLV types to parse (for gRPC query)
+### Design notes
 
-Node Attribute TLVs:
-- 1024: Node Flag Bits (1 byte)
-- 1025: Opaque Node Attribute (variable)
-- 1026: Node Name (variable, max 255)
-- 1027: IS-IS Area Identifier (variable)
-- 1028: IPv4 Router-ID of Local Node (4 bytes)
-- 1029: IPv6 Router-ID of Local Node (16 bytes)
+**Why one flat enum, not NodeAttrTlv / LinkAttrTlv / PrefixAttrTlv?** At attribute parse time
+we don't know the NLRI type -- the type 29 attribute is a separate path attribute from
+MP_REACH_NLRI. TLV type ranges also overlap (1028/1029 appear in both Node and Link per RFC).
+One enum with variants grouped by section is the simplest correct approach.
 
-Link Attribute TLVs:
-- 1028/1029: Local Node Router-IDs (same as above)
-- 1030: IPv4 Router-ID of Remote Node (4 bytes)
-- 1031: IPv6 Router-ID of Remote Node (16 bytes)
-- 1088: Administrative group (4 bytes)
-- 1089: Max link bandwidth (4 bytes, IEEE float)
-- 1090: Max reservable link bandwidth (4 bytes, IEEE float)
-- 1091: Unreserved bandwidth (32 bytes, 8x IEEE float)
-- 1092: TE Default Metric (4 bytes)
-- 1093: Link Protection Type (2 bytes)
-- 1094: MPLS Protocol Mask (1 byte)
-- 1095: IGP Metric (variable, 1-3 bytes)
-- 1096: Shared Risk Link Group (4*n bytes)
-- 1097: Opaque Link Attribute (variable)
-- 1098: Link Name (variable, max 255)
-
-Prefix Attribute TLVs:
-- 1152: IGP Flags (1 byte)
-- 1153: IGP Route Tag (4*n bytes)
-- 1154: IGP Extended Route Tag (8*n bytes)
-- 1155: Prefix Metric (4 bytes)
-- 1156: OSPF Forwarding Address (4 or 16 bytes)
-- 1157: Opaque Prefix Attribute (variable)
-
-Private use: 65000-65535 (first 4 bytes of value = Enterprise Code)
-
-### Files to change
-
-- `core/src/bgp/bgp_ls.rs` -- LsAttribute parsing/encoding, TLV definitions
-- `core/src/bgp/msg_update_codec.rs` -- parse attr type 29 into LsAttribute
-- `core/src/bgp/msg_update_types.rs` -- add `LS = 29` to attr_type_code constants
-- `core/src/bgp/msg_update_types.rs` -- RFC 7606 action for type 29: Attribute Discard
+**Why typed variants instead of raw `Vec<LsTlv>`?** Matches the NLRI pattern where descriptors
+are parsed into typed structs (`NodeDescriptor`, `LinkDescriptor`, etc). Known TLVs get length
+validation at parse time. gRPC query (Phase 6) can pattern-match directly.
 
 ### Tests
 
-- Parse BGP-LS attribute with known TLVs
-- Parse BGP-LS attribute with unknown TLVs (preserved)
-- Round-trip encoding
-- Attribute with no TLVs (length 0)
-- Private-use TLV with Enterprise Code
+- `test_parse_node_attr_tlvs` -- all 6 node TLV types parsed into typed variants
+- `test_parse_link_attr_tlvs` -- 10 link TLV types including IEEE float, SRLG, variable IGP metric
+- `test_parse_prefix_attr_tlvs` -- 6 prefix TLV types including dual-length OSPF fwd addr
+- `test_unknown_tlvs_preserved` -- unknown + private-use TLVs survive as `Unknown(LsTlv)`
+- `test_round_trip` -- build -> encode -> parse for node, link, prefix, mixed, empty
+- `test_empty_attribute` -- zero-length attribute valid
+- `test_malformed_tlv_truncated_header` -- 2 bytes rejects
+- `test_malformed_tlv_length_overflow` -- TLV claims more bytes than available
+- `test_malformed_trailing_bytes` -- valid TLV + incomplete header
+- `test_malformed_known_tlv_wrong_length` -- 18 cases covering every fixed/multiple-of constraint
+- `test_unordered_tlvs_accepted` -- descending order accepted per RFC
+- `test_ls_attribute_roundtrip` (codec) -- full path attribute wire format round-trip
+- `test_ls_attribute_malformed_discard` (codec) -- malformed type 29 triggers Attribute Discard
 
 ---
 

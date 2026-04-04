@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bgpls;
+pub mod bgpls_attr;
 pub mod bgpls_nlri;
 pub mod community;
 pub mod ext_community;

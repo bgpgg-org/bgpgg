@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::bgpls_attr::parse_ls_attr;
 use super::bgpls_nlri::{parse_ls_nlri_list, write_ls_nlri_list};
 use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
@@ -96,6 +97,7 @@ pub(super) fn validate_attribute_length(
         AttrType::ExtendedCommunities => attr_len > 0 && attr_len.is_multiple_of(8), // RFC 7606 Section 7.14
         AttrType::As4Path => true,       // Variable length (RFC 6793)
         AttrType::As4Aggregator => true, // Variable length - validation in parser (RFC 6793)
+        AttrType::LinkState => true,     // Variable length (RFC 9552)
         AttrType::LargeCommunities => attr_len > 0 && attr_len.is_multiple_of(12), // Non-zero multiple of 12
     };
 
@@ -866,6 +868,13 @@ fn parse_attr_value(
                 return None;
             }
         },
+        AttrType::LinkState => match parse_ls_attr(attr_data) {
+            Some(ls_attr) => PathAttrValue::LsAttr(ls_attr),
+            None => {
+                warn!("malformed BGP-LS attribute per RFC 9552 Section 8.2");
+                return None;
+            }
+        },
     };
 
     Some(value)
@@ -1225,6 +1234,7 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
             agg_bytes.extend_from_slice(&agg.ip_addr.octets());
             agg_bytes
         }
+        PathAttrValue::LsAttr(ls_attr) => ls_attr.raw.clone(),
         PathAttrValue::Unknown { data, .. } => data.clone(),
     };
 
@@ -1253,6 +1263,7 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
         PathAttrValue::As4Path(_) => AttrType::As4Path as u8,
         PathAttrValue::As4Aggregator(_) => AttrType::As4Aggregator as u8,
         PathAttrValue::LargeCommunities(_) => AttrType::LargeCommunities as u8,
+        PathAttrValue::LsAttr(_) => AttrType::LinkState as u8,
         PathAttrValue::Unknown { type_code, .. } => *type_code,
     };
     bytes.push(attr_type);
@@ -1286,6 +1297,8 @@ pub(super) fn write_path_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::bgpls::LsTlv;
+    use crate::bgp::bgpls_attr::{build_ls_attr, LinkAttrTlv, LsAttr, LsAttrTlv, NodeAttrTlv};
     use crate::bgp::bgpls_nlri::{
         build_ls_nlri, LsDescriptors, LsNlriType, LsProtocolId, NodeDescriptor,
     };
@@ -2172,6 +2185,57 @@ mod tests {
         assert_eq!(parsed.safi, Safi::LinkState);
         assert!(parsed.withdrawn_routes.is_empty());
         assert_eq!(parsed.ls_withdrawn.len(), 1);
+    }
+
+    #[test]
+    fn test_ls_attribute_roundtrip() {
+        let cases: Vec<(&str, LsAttr)> = vec![
+            (
+                "with TLVs",
+                build_ls_attr(vec![
+                    LsAttrTlv::Node(NodeAttrTlv::Name("router1".to_string())),
+                    LsAttrTlv::Link(LinkAttrTlv::IgpMetric(10)),
+                ]),
+            ),
+            ("empty", build_ls_attr(vec![])),
+            (
+                "unknown TLV preserved",
+                build_ls_attr(vec![LsAttrTlv::Unknown(LsTlv {
+                    tlv_type: 60000,
+                    value: vec![0xCA, 0xFE],
+                })]),
+            ),
+        ];
+
+        for (name, ls_attr) in cases {
+            let attr = PathAttribute::new(
+                PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                PathAttrValue::LsAttr(ls_attr.clone()),
+            );
+            let wire = write_path_attribute(&attr, true);
+            let (result, consumed) = read_path_attribute(&wire, DEFAULT_FORMAT).unwrap();
+            assert_eq!(consumed as usize, wire.len(), "{name}: all bytes consumed");
+            let parsed = result.unwrap();
+            assert_eq!(parsed.value, PathAttrValue::LsAttr(ls_attr), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_ls_attribute_malformed_discard() {
+        // Type 29 with truncated TLV inside -- should trigger Attribute Discard
+        let mut value = Vec::new();
+        value.extend_from_slice(&1026u16.to_be_bytes()); // TLV type
+        value.extend_from_slice(&100u16.to_be_bytes()); // length claims 100 bytes
+        value.extend_from_slice(&[0x01, 0x02]); // only 2 bytes available
+
+        let mut wire = Vec::new();
+        wire.push(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE); // flags
+        wire.push(AttrType::LinkState as u8); // type 29
+        wire.push(value.len() as u8); // length
+        wire.extend_from_slice(&value);
+
+        let (result, _) = read_path_attribute(&wire, DEFAULT_FORMAT).unwrap();
+        assert_eq!(result, PathAttrResult::Malformed(PathAttrError::Discard));
     }
 
     #[test]

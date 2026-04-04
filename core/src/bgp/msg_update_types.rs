@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::bgpls_attr::LsAttr;
 use super::bgpls_nlri::LsNlri;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::multiprotocol::{Afi, Safi};
@@ -144,6 +145,7 @@ pub mod attr_type_code {
     pub const EXTENDED_COMMUNITIES: u8 = 16;
     pub const AS4_PATH: u8 = 17;
     pub const AS4_AGGREGATOR: u8 = 18;
+    pub const LINK_STATE: u8 = 29;
     pub const LARGE_COMMUNITIES: u8 = 32;
 }
 
@@ -204,6 +206,7 @@ pub enum PathAttrValue {
     As4Path(AsPath),
     As4Aggregator(Aggregator),
     LargeCommunities(Vec<LargeCommunity>),
+    LsAttr(LsAttr),
     Unknown {
         type_code: u8,
         flags: u8,
@@ -248,6 +251,7 @@ impl PathAttribute {
             PathAttrValue::As4Path(_) => attr_type_code::AS4_PATH,
             PathAttrValue::As4Aggregator(_) => attr_type_code::AS4_AGGREGATOR,
             PathAttrValue::LargeCommunities(_) => attr_type_code::LARGE_COMMUNITIES,
+            PathAttrValue::LsAttr(_) => attr_type_code::LINK_STATE,
             PathAttrValue::Unknown { type_code, .. } => *type_code,
         }
     }
@@ -270,6 +274,7 @@ pub(crate) enum AttrType {
     ExtendedCommunities = 16,
     As4Path = 17,
     As4Aggregator = 18,
+    LinkState = 29,
     LargeCommunities = 32,
 }
 
@@ -293,6 +298,7 @@ impl TryFrom<u8> for AttrType {
             16 => Ok(AttrType::ExtendedCommunities),
             17 => Ok(AttrType::As4Path),
             18 => Ok(AttrType::As4Aggregator),
+            29 => Ok(AttrType::LinkState),
             32 => Ok(AttrType::LargeCommunities),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::Unknown(0)),
@@ -321,6 +327,7 @@ impl AttrType {
             AttrType::ExtendedCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::As4Path => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::As4Aggregator => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
+            AttrType::LinkState => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
             AttrType::LargeCommunities => PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE,
         }
     }
@@ -349,6 +356,7 @@ impl AttrType {
                 | AttrType::ExtendedCommunities
                 | AttrType::As4Path
                 | AttrType::As4Aggregator
+                | AttrType::LinkState
                 | AttrType::LargeCommunities
         )
     }

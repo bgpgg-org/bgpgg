@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use super::bgpls::{LsTlv, LsTlvType};
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::utils::ParserError;
 use crate::log::warn;
@@ -152,53 +153,6 @@ impl LsProtocolId {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
-pub enum LsTlvType {
-    LocalNodeDescriptors = 256,
-    RemoteNodeDescriptors = 257,
-    LinkLocalRemoteId = 258,
-    Ipv4InterfaceAddr = 259,
-    Ipv4NeighborAddr = 260,
-    Ipv6InterfaceAddr = 261,
-    Ipv6NeighborAddr = 262,
-    MultiTopologyId = 263,
-    OspfRouteType = 264,
-    IpReachabilityInfo = 265,
-    AutonomousSystem = 512,
-    BgpLsId = 513,
-    OspfAreaId = 514,
-    IgpRouterId = 515,
-}
-
-impl LsTlvType {
-    fn from_u16(val: u16) -> Option<LsTlvType> {
-        match val {
-            256 => Some(LsTlvType::LocalNodeDescriptors),
-            257 => Some(LsTlvType::RemoteNodeDescriptors),
-            258 => Some(LsTlvType::LinkLocalRemoteId),
-            259 => Some(LsTlvType::Ipv4InterfaceAddr),
-            260 => Some(LsTlvType::Ipv4NeighborAddr),
-            261 => Some(LsTlvType::Ipv6InterfaceAddr),
-            262 => Some(LsTlvType::Ipv6NeighborAddr),
-            263 => Some(LsTlvType::MultiTopologyId),
-            264 => Some(LsTlvType::OspfRouteType),
-            265 => Some(LsTlvType::IpReachabilityInfo),
-            512 => Some(LsTlvType::AutonomousSystem),
-            513 => Some(LsTlvType::BgpLsId),
-            514 => Some(LsTlvType::OspfAreaId),
-            515 => Some(LsTlvType::IgpRouterId),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LsTlv {
-    pub tlv_type: u16,
-    pub value: Vec<u8>,
 }
 
 /// A single BGP-LS NLRI. Type + raw bytes always present; body parsed for known types.
