@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bgpls_nlri;
 pub mod community;
 pub mod ext_community;
 pub mod large_community;

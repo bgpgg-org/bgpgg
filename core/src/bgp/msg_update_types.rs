@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::bgpls_nlri::LsNlri;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::multiprotocol::{Afi, Safi};
 use super::utils::ParserError;
@@ -174,6 +175,7 @@ pub struct MpReachNlri {
     pub safi: Safi,
     pub next_hop: NextHopAddr,
     pub nlri: Vec<Nlri>,
+    pub ls_nlri: Vec<LsNlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
@@ -181,6 +183,7 @@ pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
     pub withdrawn_routes: Vec<Nlri>,
+    pub ls_withdrawn: Vec<LsNlri>,
 }
 
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]

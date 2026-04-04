@@ -65,7 +65,7 @@ back to the top-level PeerConfig defaults when absent.
 
 ---
 
-## Phase 2: BGP-LS NLRI Codec
+## Phase 2: BGP-LS NLRI Codec -- DONE
 
 Parse and encode BGP-LS NLRIs from/to MP_REACH_NLRI and MP_UNREACH_NLRI.
 

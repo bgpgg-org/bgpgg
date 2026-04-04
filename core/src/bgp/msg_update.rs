@@ -145,6 +145,7 @@ impl UpdateMessage {
                     safi: Safi::Unicast,
                     next_hop: *path.next_hop(),
                     nlri: make_nlri_list(&ipv6_routes, ipv6_path_id),
+                    ls_nlri: vec![],
                 }),
             });
         }
@@ -179,6 +180,7 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     withdrawn_routes: ipv6_withdrawn,
+                    ls_withdrawn: vec![],
                 }),
             });
         }
@@ -686,6 +688,7 @@ impl UpdateMessage {
                         afi,
                         safi,
                         withdrawn_routes: Vec::new(),
+                        ls_withdrawn: Vec::new(),
                     }),
                 }],
                 nlri_list: Vec::new(),
@@ -855,6 +858,7 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             nlri: vec![nlri_v4(10, 0, 0, 0, 8, None)],
+            ls_nlri: vec![],
         }
     }
 
@@ -1310,12 +1314,14 @@ mod tests {
                 safi: Safi::Unicast,
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
                 nlri: vec![nlri_v4(10, 0, 0, 0, 8, path_id)],
+                ls_nlri: vec![],
             };
 
             let mp_unreach = MpUnreachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 withdrawn_routes: vec![nlri_v4(20, 0, 0, 0, 8, path_id)],
+                ls_withdrawn: vec![],
             };
 
             let path_attributes = vec![
@@ -1718,6 +1724,7 @@ mod tests {
                 safi: Safi::Unicast,
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                 nlri: vec![nlri_v4(10, 11, 12, 0, 24, None)],
+                ls_nlri: vec![],
             }),
         };
         let mp_reach_bytes = write_path_attribute(&mp_reach, false);
@@ -2104,6 +2111,7 @@ mod tests {
                             afi: Afi::Ipv6,
                             safi: Safi::Unicast,
                             withdrawn_routes: vec![],
+                            ls_withdrawn: vec![],
                         }),
                     }],
                     nlri_list: vec![],
@@ -2285,6 +2293,7 @@ mod tests {
                         prefix: prefix_10,
                         path_id: None,
                     }],
+                    ls_nlri: vec![],
                 }),
             }],
             nlri_list: vec![Nlri {
@@ -2314,6 +2323,7 @@ mod tests {
                     safi: Safi::Unicast,
                     next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                     nlri: vec![nlri_mp],
+                    ls_nlri: vec![],
                 }),
             }],
             nlri_list: vec![nlri_traditional],
@@ -2338,6 +2348,7 @@ mod tests {
                     afi: Afi::Ipv4,
                     safi: Safi::Unicast,
                     withdrawn_routes: vec![withdrawn_mp],
+                    ls_withdrawn: vec![],
                 }),
             }],
             nlri_list: vec![],

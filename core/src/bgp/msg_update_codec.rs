@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::bgpls_nlri::{parse_ls_nlri_list, write_ls_nlri_list};
 use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
@@ -635,11 +636,10 @@ pub(super) fn read_attr_mp_reach_nlri(
     let cursor = HEADER_SIZE + next_hop_len;
     let nlri_bytes = &bytes[cursor + RESERVED_SIZE..];
 
-    let nlri = match afi {
-        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
-        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
-        // TODO(bgpls): Phase 2 adds LS NLRI parsing
-        Afi::LinkState => vec![],
+    let (nlri, ls_nlri) = match afi {
+        Afi::Ipv4 => (parse_nlri_list(nlri_bytes, add_path)?, vec![]),
+        Afi::Ipv6 => (parse_nlri_v6_list(nlri_bytes, add_path)?, vec![]),
+        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes)?),
     };
 
     Ok(MpReachNlri {
@@ -647,6 +647,7 @@ pub(super) fn read_attr_mp_reach_nlri(
         safi,
         next_hop,
         nlri,
+        ls_nlri,
     })
 }
 
@@ -668,17 +669,17 @@ pub(super) fn read_attr_mp_unreach_nlri(
     let add_path = format.add_path.contains(&AfiSafi::new(afi, safi));
 
     let nlri_bytes = &bytes[3..];
-    let withdrawn_routes = match afi {
-        Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
-        Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
-        // TODO(bgpls): Phase 2 adds LS NLRI parsing
-        Afi::LinkState => vec![],
+    let (withdrawn_routes, ls_withdrawn) = match afi {
+        Afi::Ipv4 => (parse_nlri_list(nlri_bytes, add_path)?, vec![]),
+        Afi::Ipv6 => (parse_nlri_v6_list(nlri_bytes, add_path)?, vec![]),
+        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes)?),
     };
 
     Ok(MpUnreachNlri {
         afi,
         safi,
         withdrawn_routes,
+        ls_withdrawn,
     })
 }
 
@@ -706,8 +707,12 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     // Reserved (1 byte)
     bytes.push(0);
 
-    // NLRI - each entry may have its own path_id (RFC 7911)
-    bytes.extend_from_slice(&write_nlri_list(&mp_reach.nlri));
+    // NLRI - IP prefixes or BGP-LS NLRIs
+    if mp_reach.afi == Afi::LinkState {
+        bytes.extend_from_slice(&write_ls_nlri_list(&mp_reach.ls_nlri));
+    } else {
+        bytes.extend_from_slice(&write_nlri_list(&mp_reach.nlri));
+    }
 
     bytes
 }
@@ -721,7 +726,11 @@ pub(super) fn write_attr_mp_unreach_nlri(mp_unreach: &MpUnreachNlri) -> Vec<u8> 
     // SAFI (1 byte)
     bytes.push(mp_unreach.safi as u8);
 
-    bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
+    if mp_unreach.afi == Afi::LinkState {
+        bytes.extend_from_slice(&write_ls_nlri_list(&mp_unreach.ls_withdrawn));
+    } else {
+        bytes.extend_from_slice(&write_nlri_list(&mp_unreach.withdrawn_routes));
+    }
 
     bytes
 }
@@ -1277,6 +1286,9 @@ pub(super) fn write_path_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::bgpls_nlri::{
+        build_ls_nlri, LsDescriptors, LsNlriType, LsProtocolId, NodeDescriptor,
+    };
     use crate::bgp::msg_notification::{BgpError, UpdateMessageError};
     use crate::bgp::msg_update_types::AttrType;
     use crate::bgp::{
@@ -2081,6 +2093,7 @@ mod tests {
                 nlri_v4(10, 0, 0, 0, 8, Some(1)),
                 nlri_v4(172, 16, 0, 0, 16, Some(2)),
             ],
+            ls_nlri: vec![],
         };
 
         let bytes = write_attr_mp_reach_nlri(&mp_reach);
@@ -2090,6 +2103,75 @@ mod tests {
         assert_eq!(parsed.safi, mp_reach.safi);
         assert_eq!(parsed.next_hop, mp_reach.next_hop);
         assert_eq!(parsed.nlri, mp_reach.nlri);
+    }
+
+    #[test]
+    fn test_mp_reach_ls_roundtrip() {
+        let ls_entries = vec![build_ls_nlri(
+            LsNlriType::Node,
+            LsProtocolId::Direct,
+            1,
+            LsDescriptors::Node {
+                local_node: NodeDescriptor {
+                    as_number: Some(65001),
+                    igp_router_id: Some(vec![10, 0, 0, 1]),
+                    ..Default::default()
+                },
+            },
+        )];
+
+        let mp_reach = MpReachNlri {
+            afi: Afi::LinkState,
+            safi: Safi::LinkState,
+            next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            nlri: vec![],
+            ls_nlri: ls_entries,
+        };
+
+        let reach_bytes = write_attr_mp_reach_nlri(&mp_reach);
+        let parsed = read_attr_mp_reach_nlri(&reach_bytes, DEFAULT_FORMAT).unwrap();
+
+        assert_eq!(parsed.afi, Afi::LinkState);
+        assert_eq!(parsed.safi, Safi::LinkState);
+        assert!(parsed.nlri.is_empty());
+        assert_eq!(parsed.ls_nlri.len(), 1);
+        assert_eq!(parsed.ls_nlri[0].nlri_type, LsNlriType::Node as u16);
+        let body = parsed.ls_nlri[0]
+            .body
+            .as_ref()
+            .expect("expected parsed body");
+        assert_eq!(body.protocol_id(), Some(LsProtocolId::Direct));
+    }
+
+    #[test]
+    fn test_mp_unreach_ls_roundtrip() {
+        let ls_entries = vec![build_ls_nlri(
+            LsNlriType::Node,
+            LsProtocolId::Direct,
+            1,
+            LsDescriptors::Node {
+                local_node: NodeDescriptor {
+                    as_number: Some(65001),
+                    igp_router_id: Some(vec![10, 0, 0, 1]),
+                    ..Default::default()
+                },
+            },
+        )];
+
+        let mp_unreach = MpUnreachNlri {
+            afi: Afi::LinkState,
+            safi: Safi::LinkState,
+            withdrawn_routes: vec![],
+            ls_withdrawn: ls_entries,
+        };
+
+        let unreach_bytes = write_attr_mp_unreach_nlri(&mp_unreach);
+        let parsed = read_attr_mp_unreach_nlri(&unreach_bytes, DEFAULT_FORMAT).unwrap();
+
+        assert_eq!(parsed.afi, Afi::LinkState);
+        assert_eq!(parsed.safi, Safi::LinkState);
+        assert!(parsed.withdrawn_routes.is_empty());
+        assert_eq!(parsed.ls_withdrawn.len(), 1);
     }
 
     #[test]
