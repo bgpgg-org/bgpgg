@@ -9,35 +9,59 @@ NLRIs carry topology keys (node/link/prefix identifiers), and the BGP-LS Attribu
 bgpgg targets: dumb pipe (propagator/reflector) first, then gRPC injection (producer)
 and gRPC query (consumer feed). No IGP integration.
 
-## Phase 1: AFI/SAFI and Capability Negotiation
+## Phase 1: AFI/SAFI and Capability Negotiation -- DONE
 
 Add LinkState AFI/SAFI to the existing multiprotocol machinery.
 
-### Files to change
+### Changes made
 
 - `core/src/bgp/multiprotocol.rs`
-  - Add `Afi::LinkState = 16388` variant
-  - Add `Safi::LinkState = 71` variant
-  - Update `TryFrom<u16>` for Afi, `TryFrom<u8>` for Safi
-  - Update `Display` impls
-  - Update `default_afi_safis()` -- do NOT include LS by default (security: topology is sensitive)
+  - Added `Afi::LinkState = 16388`, `Safi::LinkState = 71`
+  - Updated `TryFrom`, `Display`, serde impls
 
 - `core/src/config.rs`
-  - Add `bgp_ls: bool` (default false) to PeerConfig
-  - When enabled, include AfiSafi(LinkState, LinkState) in peer's negotiated families
+  - Added `afi_safis: Vec<AfiSafi>` (default empty) to PeerConfig
+  - Generic: works for BGP-LS, flowspec, EVPN, etc.
+
+- `proto/bgp.proto`
+  - Added `repeated AfiSafi afi_safis = 23` to SessionConfig (reuses existing AfiSafi message)
+
+- `core/src/grpc/service.rs`
+  - Added `proto_to_afi_safis()` converter, updated proto_to_peer_config / peer_config_to_proto
+
+- `core/src/peer/messages.rs`
+  - `build_optional_params()` appends config.afi_safis to default list
+  - `process_received_open()` includes config.afi_safis in local set for negotiation
 
 - `core/src/peer/mod.rs`
-  - `PeerCapabilities` -- handle new AfiSafi in multiprotocol set
-  - `from_capability_bytes()` already works if Afi/Safi TryFrom accepts new values
+  - No changes needed: `PeerCapabilities.multiprotocol` is `HashSet<AfiSafi>`, already generic
 
 - `core/src/bgp/msg.rs`
-  - `AddPathMask` -- reserve a bit for BGP-LS (not needed day one, but plan the slot)
+  - `AddPathMask` -- wildcard for new AFI/SAFI combos (LS bit added in Phase 5)
+
+- `core/src/bgp/msg_update_codec.rs`
+  - Extracted `parse_mp_next_hop()` / `parse_ipv4_next_hop()` / `parse_ipv6_next_hop()`
+  - LS next hop uses IPv4 or IPv6 based on length (RFC 9552 Section 5.5)
+  - LS NLRI parsing returns empty vec (Phase 2 placeholder)
+  - Updated `validate_mp_reach_buffer()` to accept LS next hop lengths
+
+- `core/src/rib/rib_loc.rs`, `core/src/rib/rib_out.rs`
+  - Stub arms for `Afi::LinkState` with TODO(bgpls) comments
+
+### Design note: per-family config
+
+All major implementations (FRR, Juniper, BIRD, GoBGP) use per-AFI/SAFI config blocks where
+policy, prefix-limits, add-path, and next-hop-self are configured per family. Phase 1 adds
+the family list only. Per-family sub-config will be added later by extending AfiSafiConfig
+with optional override fields (max_prefix, add_path_send, import_policy, etc.) that fall
+back to the top-level PeerConfig defaults when absent.
 
 ### Tests
 
-- Capability negotiation: peer advertises AFI 16388 / SAFI 71, verify accepted
-- Peer with bgp_ls: false rejects/ignores LS capability
-- OPEN message encodes LS capability correctly
+- `test_extract_capabilities_afi_safis` -- LS in/out of afi_safis, capability negotiation
+- `test_afi_safi_from_capability_bytes` -- BGP-LS bytes 0x4004/0x47 round-trip
+- `test_afi_try_from`, `test_safi_try_from` -- 16388 and 71 accepted
+- `test_default_afi_safis` -- defaults are IPv4/IPv6 unicast only
 
 ---
 
@@ -364,12 +388,20 @@ Wire up the codec and RIB so bgpgg can receive, store, and propagate BGP-LS rout
 
 ### Adj-RIB-Out
 
+- Rekey from `IpNetwork` to `RouteKey` so LS routes live alongside IP routes
 - Per-peer adj_rib_out needs LS tracking for ADD-PATH support
-- Key: raw NLRI bytes + path_id
+- Key: RouteKey + path_id
 - Same pattern as existing adj_rib_out for IP prefixes
+
+### ADD-PATH for BGP-LS
+
+Add `(Afi::LinkState, Safi::LinkState) => 1 << 6` to `AddPathMask::from_afi_safi()`.
+The bitmask approach is fine — adding a bit per family is trivial and keeps `MessageFormat`
+`Copy` for the hot path.
 
 ### Files to change
 
+- `core/src/bgp/msg.rs` -- add LS bit to AddPathMask
 - `core/src/peer/established.rs` (or equivalent) -- handle LS in UPDATE processing
 - `core/src/server/propagate.rs` -- propagate LS routes
 - `core/src/server/ops.rs` -- server operations for LS route changes
@@ -502,13 +534,35 @@ message LsRoute {
 
 ### Peer config
 
+BGP-LS is enabled via the generic `afi-safis` list (added in Phase 1):
+
 ```yaml
 peers:
   10.0.0.1:
     asn: 65001
-    bgp_ls:
-      enabled: true                    # enable AFI 16388 / SAFI 71
-      instance_id: 0                   # 8-byte BGP-LS Instance-ID (default 0)
+    afi-safis:
+      - afi: 16388
+        safi: 71
+```
+
+### Per-family sub-config (future)
+
+Extend `AfiSafiConfig` with per-family overrides. `None` = inherit from top-level PeerConfig.
+
+```yaml
+peers:
+  10.0.0.1:
+    asn: 65001
+    max-prefix:
+      limit: 10000                     # global default
+    afi-safis:
+      - afi: 16388                     # BGP-LS
+        safi: 71
+        max-prefix:
+          limit: 100000               # override for LS
+      - afi: 1                         # override IPv4 unicast defaults
+        safi: 1
+        add-path-send: all
 ```
 
 ### Global config
@@ -520,9 +574,9 @@ bgp_ls:
 
 ### Files to change
 
-- `core/src/config.rs` -- BgpLsConfig struct, add to PeerConfig and ServerConfig
-- `proto/bgp.proto` -- SessionConfig: add bgp_ls_enabled, bgp_ls_instance_id
-- `core/src/grpc/service.rs` -- proto_to_peer_config must include LS fields
+- `core/src/config.rs` -- per-family AfiSafiConfig with optional overrides, global BgpLsConfig
+- `proto/bgp.proto` -- extend AfiSafiConfig with per-family fields
+- `core/src/grpc/service.rs` -- convert extended AfiSafiConfig fields
 
 ---
 

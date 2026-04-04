@@ -216,16 +216,19 @@ fn validate_mp_reach_buffer(
     header_size: usize,
     reserved_size: usize,
 ) -> Result<(), ParserError> {
-    // Validate next hop length based on AFI: IPv4=4 bytes, IPv6=16 or 32 bytes (global or global+link-local)
-    // Per RFC 2545: IPv6 MP_REACH_NLRI must have IPv6 next hop (16 or 32 bytes)
-    match (afi, next_hop_len) {
-        (Afi::Ipv4, 4) | (Afi::Ipv6, 16) | (Afi::Ipv6, 32) => {}
-        _ => {
-            return Err(ParserError::BgpError {
-                error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
-                data: Vec::new(),
-            });
-        }
+    // Validate next hop length based on AFI.
+    // IPv4=4, IPv6=16 or 32 (global or global+link-local per RFC 2545).
+    // BGP-LS uses IPv4 or IPv6 next hop based on session type (RFC 9552 Section 5.5).
+    let valid = match afi {
+        Afi::Ipv4 => next_hop_len == 4,
+        Afi::Ipv6 => next_hop_len == 16 || next_hop_len == 32,
+        Afi::LinkState => next_hop_len == 4 || next_hop_len == 16 || next_hop_len == 32,
+    };
+    if !valid {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::AttributeLengthError),
+            data: Vec::new(),
+        });
     }
 
     let min_total_size = header_size + next_hop_len + reserved_size;
@@ -237,6 +240,46 @@ fn validate_mp_reach_buffer(
     }
 
     Ok(())
+}
+
+fn parse_mp_next_hop(
+    bytes: &[u8],
+    offset: usize,
+    afi: Afi,
+    next_hop_len: usize,
+) -> Result<NextHopAddr, ParserError> {
+    match afi {
+        Afi::Ipv4 => parse_ipv4_next_hop(bytes, offset),
+        Afi::Ipv6 => parse_ipv6_next_hop(bytes, offset),
+        Afi::LinkState => match next_hop_len {
+            4 => parse_ipv4_next_hop(bytes, offset),
+            16 | 32 => parse_ipv6_next_hop(bytes, offset),
+            _ => Err(ParserError::BgpError {
+                error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+                data: Vec::new(),
+            }),
+        },
+    }
+}
+
+fn parse_ipv4_next_hop(bytes: &[u8], offset: usize) -> Result<NextHopAddr, ParserError> {
+    let mut octets = [0u8; 4];
+    octets.copy_from_slice(&bytes[offset..offset + 4]);
+    let addr = Ipv4Addr::from(octets);
+    if !is_valid_unicast_ipv4(u32::from(addr)) {
+        return Err(ParserError::BgpError {
+            error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
+            data: Vec::new(),
+        });
+    }
+    Ok(NextHopAddr::Ipv4(addr))
+}
+
+fn parse_ipv6_next_hop(bytes: &[u8], offset: usize) -> Result<NextHopAddr, ParserError> {
+    // Use first 16 bytes (global address), ignore link-local if present (32-byte form)
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(&bytes[offset..offset + 16]);
+    Ok(NextHopAddr::Ipv6(Ipv6Addr::from(octets)))
 }
 
 pub(super) fn parse_attr_type(
@@ -588,36 +631,15 @@ pub(super) fn read_attr_mp_reach_nlri(
 
     validate_mp_reach_buffer(&afi, next_hop_len, bytes, HEADER_SIZE, RESERVED_SIZE)?;
 
-    // Extract next hop
-    let next_hop = match afi {
-        Afi::Ipv4 => {
-            let mut octets = [0u8; 4];
-            octets.copy_from_slice(&bytes[HEADER_SIZE..HEADER_SIZE + 4]);
-            let addr = Ipv4Addr::from(octets);
-            if !is_valid_unicast_ipv4(u32::from(addr)) {
-                return Err(ParserError::BgpError {
-                    error: BgpError::UpdateMessageError(
-                        UpdateMessageError::InvalidNextHopAttribute,
-                    ),
-                    data: Vec::new(),
-                });
-            }
-            NextHopAddr::Ipv4(addr)
-        }
-        Afi::Ipv6 => {
-            // Use first 16 bytes (global nexthop), ignore link-local if present
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&bytes[HEADER_SIZE..HEADER_SIZE + 16]);
-            NextHopAddr::Ipv6(Ipv6Addr::from(octets))
-        }
-    };
-
+    let next_hop = parse_mp_next_hop(bytes, HEADER_SIZE, afi, next_hop_len)?;
     let cursor = HEADER_SIZE + next_hop_len;
     let nlri_bytes = &bytes[cursor + RESERVED_SIZE..];
 
     let nlri = match afi {
         Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
         Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
+        // TODO(bgpls): Phase 2 adds LS NLRI parsing
+        Afi::LinkState => vec![],
     };
 
     Ok(MpReachNlri {
@@ -649,6 +671,8 @@ pub(super) fn read_attr_mp_unreach_nlri(
     let withdrawn_routes = match afi {
         Afi::Ipv4 => parse_nlri_list(nlri_bytes, add_path)?,
         Afi::Ipv6 => parse_nlri_v6_list(nlri_bytes, add_path)?,
+        // TODO(bgpls): Phase 2 adds LS NLRI parsing
+        Afi::LinkState => vec![],
     };
 
     Ok(MpUnreachNlri {

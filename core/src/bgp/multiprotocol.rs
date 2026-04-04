@@ -23,6 +23,7 @@ use std::fmt;
 pub enum Afi {
     Ipv4 = 1,
     Ipv6 = 2,
+    LinkState = 16388,
 }
 
 impl Serialize for Afi {
@@ -43,6 +44,7 @@ impl fmt::Display for Afi {
         match self {
             Afi::Ipv4 => write!(f, "IPv4"),
             Afi::Ipv6 => write!(f, "IPv6"),
+            Afi::LinkState => write!(f, "LinkState"),
         }
     }
 }
@@ -54,6 +56,7 @@ impl TryFrom<u16> for Afi {
         match value {
             1 => Ok(Afi::Ipv4),
             2 => Ok(Afi::Ipv6),
+            16388 => Ok(Afi::LinkState),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
                 data: Vec::new(),
@@ -69,6 +72,7 @@ pub enum Safi {
     Unicast = 1,
     Multicast = 2,
     MplsLabel = 4,
+    LinkState = 71,
 }
 
 impl From<Safi> for u8 {
@@ -97,6 +101,7 @@ impl fmt::Display for Safi {
             Safi::Unicast => write!(f, "Unicast"),
             Safi::Multicast => write!(f, "Multicast"),
             Safi::MplsLabel => write!(f, "MPLS-labeled"),
+            Safi::LinkState => write!(f, "LinkState"),
         }
     }
 }
@@ -109,6 +114,7 @@ impl TryFrom<u8> for Safi {
             1 => Ok(Safi::Unicast),
             2 => Ok(Safi::Multicast),
             4 => Ok(Safi::MplsLabel),
+            71 => Ok(Safi::LinkState),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
                 data: Vec::new(),
@@ -169,6 +175,7 @@ mod tests {
     fn test_afi_try_from() {
         assert_eq!(Afi::try_from(1).unwrap(), Afi::Ipv4);
         assert_eq!(Afi::try_from(2).unwrap(), Afi::Ipv6);
+        assert_eq!(Afi::try_from(16388).unwrap(), Afi::LinkState);
         assert!(Afi::try_from(99).is_err());
     }
 
@@ -177,6 +184,7 @@ mod tests {
         assert_eq!(Safi::try_from(1).unwrap(), Safi::Unicast);
         assert_eq!(Safi::try_from(2).unwrap(), Safi::Multicast);
         assert_eq!(Safi::try_from(4).unwrap(), Safi::MplsLabel);
+        assert_eq!(Safi::try_from(71).unwrap(), Safi::LinkState);
         assert!(Safi::try_from(99).is_err());
     }
 
@@ -205,6 +213,12 @@ mod tests {
         // Unknown SAFI
         let bytes = [0x00, 0x01, 0x00, 0x99];
         assert!(AfiSafi::from_capability_bytes(&bytes).is_err());
+
+        // BGP-LS: AFI=16388 (0x4004), SAFI=71 (0x47)
+        let bytes = [0x40, 0x04, 0x00, 0x47];
+        let afi_safi = AfiSafi::from_capability_bytes(&bytes).unwrap();
+        assert_eq!(afi_safi.afi, Afi::LinkState);
+        assert_eq!(afi_safi.safi, Safi::LinkState);
     }
 
     #[test]
@@ -214,6 +228,7 @@ mod tests {
             AfiSafi::new(Afi::Ipv6, Safi::Unicast),
             AfiSafi::new(Afi::Ipv4, Safi::Multicast),
             AfiSafi::new(Afi::Ipv6, Safi::Multicast),
+            AfiSafi::new(Afi::LinkState, Safi::LinkState),
         ];
         for afi_safi in cases {
             let json = serde_json::to_string(&afi_safi).unwrap();
@@ -226,11 +241,24 @@ mod tests {
     fn test_display() {
         assert_eq!(format!("{}", Afi::Ipv4), "IPv4");
         assert_eq!(format!("{}", Afi::Ipv6), "IPv6");
+        assert_eq!(format!("{}", Afi::LinkState), "LinkState");
         assert_eq!(format!("{}", Safi::Unicast), "Unicast");
         assert_eq!(format!("{}", Safi::Multicast), "Multicast");
         assert_eq!(format!("{}", Safi::MplsLabel), "MPLS-labeled");
+        assert_eq!(format!("{}", Safi::LinkState), "LinkState");
 
         let afi_safi = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
         assert_eq!(format!("{}", afi_safi), "IPv6/Unicast");
+
+        let ls = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+        assert_eq!(format!("{}", ls), "LinkState/LinkState");
+    }
+
+    #[test]
+    fn test_default_afi_safis() {
+        let defaults = default_afi_safis();
+        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults[0], AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+        assert_eq!(defaults[1], AfiSafi::new(Afi::Ipv6, Safi::Unicast));
     }
 }

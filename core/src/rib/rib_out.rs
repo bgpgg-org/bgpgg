@@ -51,10 +51,12 @@ impl AdjRibOut {
     }
 
     /// Remove all entries for a given AFI.
+    // TODO(bgpls): rekey from IpNetwork to RouteKey so LS routes live here too.
     pub fn clear_afi(&mut self, afi: Afi) {
         self.routes.retain(|prefix, _| match afi {
             Afi::Ipv4 => !matches!(prefix, IpNetwork::V4(_)),
             Afi::Ipv6 => !matches!(prefix, IpNetwork::V6(_)),
+            Afi::LinkState => true, // no LS routes in this table yet
         });
     }
 
@@ -101,6 +103,7 @@ impl AdjRibOut {
             .filter(|prefix| match afi {
                 Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
                 Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
+                Afi::LinkState => false, // no LS routes in this table yet
             })
             .copied()
             .collect()

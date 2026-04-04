@@ -238,6 +238,9 @@ pub struct PeerConfig {
     /// RFC 8097: Attach RPKI Origin Validation State extended community on export
     #[serde(default)]
     pub send_rpki_community: bool,
+    /// Additional AFI/SAFIs beyond default IPv4/IPv6 unicast (e.g. BGP-LS)
+    #[serde(default)]
+    pub afi_safis: Vec<AfiSafi>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -356,6 +359,7 @@ impl Default for PeerConfig {
             ttl_min: None,
             llgr: None,
             send_rpki_community: false,
+            afi_safis: Vec::new(),
         }
     }
 }

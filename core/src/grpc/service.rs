@@ -383,6 +383,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
         send_rpki_community: cfg
             .send_rpki_community
             .unwrap_or(defaults.send_rpki_community),
+        afi_safis: proto_to_afi_safis(&cfg.afi_safis)?,
     })
 }
 
@@ -410,6 +411,18 @@ fn proto_to_llgr_config(proto: Option<proto::LlgrConfig>) -> Result<Option<LlgrC
         stale_time: llgr.stale_time_secs,
         afi_safis,
     }))
+}
+
+fn proto_to_afi_safis(entries: &[proto::AfiSafi]) -> Result<Vec<AfiSafi>, String> {
+    let mut result = Vec::new();
+    for entry in entries {
+        let afi =
+            Afi::try_from(entry.afi as u16).map_err(|_| format!("unknown AFI {}", entry.afi))?;
+        let safi =
+            Safi::try_from(entry.safi as u8).map_err(|_| format!("unknown SAFI {}", entry.safi))?;
+        result.push(AfiSafi::new(afi, safi));
+    }
+    Ok(result)
 }
 
 /// Convert internal PeerConfig to proto SessionConfig
@@ -475,6 +488,14 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
         ttl_min: config.ttl_min.map(|v| v as u32),
         llgr,
         send_rpki_community: Some(config.send_rpki_community),
+        afi_safis: config
+            .afi_safis
+            .iter()
+            .map(|afi_safi| proto::AfiSafi {
+                afi: afi_safi.afi as u16 as u32,
+                safi: afi_safi.safi as u8 as u32,
+            })
+            .collect(),
     }
 }
 

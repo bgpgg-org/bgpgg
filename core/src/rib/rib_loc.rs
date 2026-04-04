@@ -459,6 +459,8 @@ impl<A: PathIdAllocator> LocRib<A> {
                 .keys()
                 .map(|k| IpNetwork::V6(*k))
                 .collect(),
+            // TODO(bgpls): add link_state table to LocRib
+            Afi::LinkState => Vec::new(),
         }
     }
 
@@ -468,6 +470,8 @@ impl<A: PathIdAllocator> LocRib<A> {
         let routes: Box<dyn Iterator<Item = &Route>> = match afi {
             Afi::Ipv4 => Box::new(self.ipv4_unicast.values()),
             Afi::Ipv6 => Box::new(self.ipv6_unicast.values()),
+            // TODO(bgpls): add link_state table to LocRib
+            Afi::LinkState => return Vec::new(),
         };
         if all_paths {
             routes
