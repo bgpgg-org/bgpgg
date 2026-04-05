@@ -451,31 +451,37 @@ Integration tests (core/tests/mgmt.rs):
 
 ---
 
-## Phase 7: Config and Operational Knobs
+## Phase 7: Config and Operational Knobs -- DONE
 
-### Peer config
+### Changes made
 
-BGP-LS is enabled via the generic `afi-safis` list (added in Phase 1):
+**Per-family config overrides.** `AfiSafiConfig` struct in `config.rs` wraps AFI/SAFI with
+optional `max_prefix` and `add_path_send` overrides. `PeerConfig.afi_safis` changed from
+`Vec<AfiSafi>` to `Vec<AfiSafiConfig>`. `PeerConfig::afi_safi_list()` extracts plain
+`Vec<AfiSafi>` for protocol-level callers (capability negotiation, LLGR).
+`PeerConfig::effective_max_prefix(&AfiSafi)` resolves per-family override or peer-level fallback.
+Validation rejects duplicate AFI/SAFI entries.
 
-```yaml
-peers:
-  10.0.0.1:
-    asn: 65001
-    afi-safis:
-      - afi: 16388
-        safi: 71
-```
+**Per-family max-prefix enforcement.** `ops.rs` max-prefix check changed from aggregate
+`prefix_count()` to per-family `family_count()`. Each family in the UPDATE is checked
+independently via `effective_max_prefix()`. Discard action only drops announcements for the
+over-limit family, not the entire UPDATE. `AdjRibIn::family_count(&AfiSafi)` added for
+per-family counting.
 
-### Per-family sub-config (future)
+**Global BGP-LS config.** `BgpLsConfig { max_ls_entries: u32 }` on `Config` (default 0 =
+unlimited). `LocRibConfig` struct passed to `LocRib::new()`. Guard in `upsert_path()` rejects
+new LS entries at capacity (updates to existing NLRIs always allowed). `add_local_route()`
+returns `Result<RouteDelta, LocRibError>` so gRPC injection gets a proper error on rejection.
 
-Extend `AfiSafiConfig` with per-family overrides. `None` = inherit from top-level PeerConfig.
+**Proto split.** `AfiSafi` message remains plain (afi + safi only, used by LLGR). New
+`AfiSafiConfig` message carries per-family overrides (used by SessionConfig.afi_safis).
 
 ```yaml
 peers:
   10.0.0.1:
     asn: 65001
     max-prefix:
-      limit: 10000                     # global default
+      limit: 10000                     # peer-level default
     afi-safis:
       - afi: 16388                     # BGP-LS
         safi: 71
@@ -484,20 +490,37 @@ peers:
       - afi: 1                         # override IPv4 unicast defaults
         safi: 1
         add-path-send: all
+
+bgp-ls:
+  max-ls-entries: 100000               # max LS NLRIs in Loc-RIB (0 = unlimited)
 ```
 
-### Global config
+### Files changed
 
-```yaml
-bgp_ls:
-  max_rib_entries: 100000             # max LS NLRIs in RIB (0 = unlimited)
-```
+- `core/src/config.rs` -- `AfiSafiConfig`, `BgpLsConfig`, `effective_max_prefix()`, validation
+- `core/src/rib/rib_loc.rs` -- `LocRibConfig`, `LocRibError`, `max_ls_entries` guard, `add_local_route` returns Result
+- `core/src/rib/rib_in.rs` -- `family_count(&AfiSafi)`
+- `core/src/server/ops.rs` -- per-family max-prefix enforcement
+- `core/src/server/ops_mgmt.rs` -- handle `add_local_route` Result
+- `core/src/server/mod.rs` -- pass `LocRibConfig` to `LocRib::new()`
+- `core/src/grpc/service.rs` -- `proto_to_afi_safis` returns `Vec<AfiSafiConfig>`, proto round-trip
+- `core/src/peer/messages.rs` -- use `afi_safi_list()` for capability negotiation
+- `proto/bgp.proto` -- `AfiSafiConfig` message, `SessionConfig` uses it
 
-### Files to change
+### Tests
 
-- `core/src/config.rs` -- per-family AfiSafiConfig with optional overrides, global BgpLsConfig
-- `proto/bgp.proto` -- extend AfiSafiConfig with per-family fields
-- `core/src/grpc/service.rs` -- convert extended AfiSafiConfig fields
+- `test_effective_max_prefix` -- table-driven: per-family override, fallback, both absent
+- `test_effective_max_prefix_different_families` -- LS override vs IPv4 peer-level fallback
+- `test_afi_safi_list` -- extracts plain AfiSafi from AfiSafiConfig vec
+- `test_validate_duplicate_afi_safis` -- duplicate rejection
+- `test_afi_safi_config_yaml_deserialization` -- new format with overrides
+- `test_afi_safi_config_yaml_minimal` -- backward-compatible old format
+- `test_bgp_ls_config_default`, `test_bgp_ls_config_yaml` -- global config
+- `test_family_count` -- per-family counting in AdjRibIn
+- `test_max_ls_entries` -- table-driven: unlimited, capped, under limit
+- `test_max_ls_entries_update_existing_allowed` -- update at capacity OK, new key rejected
+- `test_max_ls_entries_does_not_affect_ip` -- LS limit doesn't block IPv4
+- `test_add_local_route_rejected_at_capacity` -- LocRibError returned
 
 ---
 
@@ -551,7 +574,7 @@ and NLRI building so the actual test logic is obvious.
    verify bgpgg preserves and propagates them unchanged to another peer. FakePeer needed
    here because real servers can't originate arbitrary unknown TLVs.
 
-6. **Max RIB entries** -- configure max_rib_entries limit, inject routes up to the limit,
+6. **Max RIB entries** -- configure max_ls_entries limit, inject routes up to the limit,
    verify the next injection is rejected/dropped.
 
 7. **Best path selection** -- two peers announce same LS NLRI with different LOCAL_PREF,

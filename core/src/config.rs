@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use crate::bgp::msg_open_types::LlgrEntry;
-use crate::bgp::multiprotocol::{default_afi_safis, AfiSafi};
+use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
 use crate::net::bind_addr_from_ip;
 use crate::rpki::vrp::RpkiValidation;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -156,6 +157,38 @@ pub enum AddPathSend {
     All,
 }
 
+/// Per address-family configuration overrides.
+/// Fields set to None inherit from the peer-level PeerConfig defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AfiSafiConfig {
+    pub afi: Afi,
+    pub safi: Safi,
+    /// Override peer-level max_prefix for this family.
+    #[serde(default)]
+    pub max_prefix: Option<MaxPrefixSetting>,
+    /// Override peer-level add_path_send for this family.
+    #[serde(default)]
+    pub add_path_send: Option<AddPathSend>,
+}
+
+impl AfiSafiConfig {
+    /// Create a config entry with no overrides (just AFI/SAFI enablement).
+    pub fn new(afi: Afi, safi: Safi) -> Self {
+        Self {
+            afi,
+            safi,
+            max_prefix: None,
+            add_path_send: None,
+        }
+    }
+
+    /// Return the plain AfiSafi for protocol-level use.
+    pub fn afi_safi(&self) -> AfiSafi {
+        AfiSafi::new(self.afi, self.safi)
+    }
+}
+
 /// Peer configuration in YAML config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -238,9 +271,10 @@ pub struct PeerConfig {
     /// RFC 8097: Attach RPKI Origin Validation State extended community on export
     #[serde(default)]
     pub send_rpki_community: bool,
-    /// Additional AFI/SAFIs beyond default IPv4/IPv6 unicast (e.g. BGP-LS)
+    /// Additional AFI/SAFIs beyond default IPv4/IPv6 unicast (e.g. BGP-LS).
+    /// Each entry can optionally override peer-level settings for that family.
     #[serde(default)]
-    pub afi_safis: Vec<AfiSafi>,
+    pub afi_safis: Vec<AfiSafiConfig>,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -300,6 +334,21 @@ impl PeerConfig {
         }
     }
 
+    /// Extract plain AfiSafi list for protocol-level use (capability negotiation, etc.).
+    pub fn afi_safi_list(&self) -> Vec<AfiSafi> {
+        self.afi_safis.iter().map(|c| c.afi_safi()).collect()
+    }
+
+    /// Get the effective max_prefix setting for a given address family.
+    /// Returns the per-family override if present, else the peer-level default.
+    pub fn effective_max_prefix(&self, family: &AfiSafi) -> Option<MaxPrefixSetting> {
+        self.afi_safis
+            .iter()
+            .find(|c| c.afi == family.afi && c.safi == family.safi)
+            .and_then(|c| c.max_prefix)
+            .or(self.max_prefix)
+    }
+
     /// Validate peer configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.rr_client && self.rs_client {
@@ -325,6 +374,16 @@ impl PeerConfig {
                     "LLGR requires graceful-restart to be enabled (RFC 9494 Section 4.5)"
                         .to_string(),
                 );
+            }
+        }
+        // Reject duplicate AFI/SAFI entries
+        let mut seen = HashSet::new();
+        for entry in &self.afi_safis {
+            if !seen.insert((entry.afi, entry.safi)) {
+                return Err(format!(
+                    "duplicate afi-safis entry: {}/{}",
+                    entry.afi, entry.safi
+                ));
             }
         }
         Ok(())
@@ -720,6 +779,15 @@ pub struct LargeCommunityActionConfig {
     pub large_communities: Vec<String>,
 }
 
+/// BGP-LS operational limits (RFC 9552).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BgpLsConfig {
+    /// Maximum number of LS NLRIs in Loc-RIB. 0 = unlimited.
+    #[serde(default)]
+    pub max_ls_entries: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -764,6 +832,9 @@ pub struct Config {
     /// RFC 7313: Max seconds to retain stale routes after BoRR. None = no limit.
     #[serde(default = "default_enhanced_rr_stale_ttl")]
     pub enhanced_rr_stale_ttl: Option<u64>,
+    /// BGP-LS operational configuration (RFC 9552).
+    #[serde(default)]
+    pub bgp_ls: BgpLsConfig,
 }
 
 fn default_listen_addr() -> String {
@@ -807,6 +878,7 @@ impl Config {
             cluster_id: None,
             llgr: None,
             enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
+            bgp_ls: BgpLsConfig::default(),
         }
     }
 
@@ -871,6 +943,7 @@ impl Default for Config {
             cluster_id: None,
             llgr: None,
             enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
+            bgp_ls: BgpLsConfig::default(),
         }
     }
 }
@@ -1249,5 +1322,168 @@ ssh-private-key-file: /etc/bgp/rpki_ssh.key
         let cfg: RpkiCacheConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.transport, TransportType::Ssh);
         assert!(cfg.ssh_known_hosts_file.is_none());
+    }
+
+    #[test]
+    fn test_effective_max_prefix() {
+        let cases = vec![
+            // (per-family override, peer-level, expected limit)
+            (Some(500), Some(1000), Some(500)), // per-family wins
+            (None, Some(1000), Some(1000)),     // fallback to peer-level
+            (Some(500), None, Some(500)),       // per-family only
+            (None, None, None),                 // both absent
+        ];
+        for (family_limit, peer_limit, expected_limit) in cases {
+            let config = PeerConfig {
+                max_prefix: peer_limit.map(|limit| MaxPrefixSetting {
+                    limit,
+                    action: MaxPrefixAction::Terminate,
+                }),
+                afi_safis: vec![AfiSafiConfig {
+                    afi: Afi::LinkState,
+                    safi: Safi::LinkState,
+                    max_prefix: family_limit.map(|limit| MaxPrefixSetting {
+                        limit,
+                        action: MaxPrefixAction::Terminate,
+                    }),
+                    add_path_send: None,
+                }],
+                ..Default::default()
+            };
+            let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+            let effective = config.effective_max_prefix(&ls_family);
+            assert_eq!(
+                effective.map(|s| s.limit),
+                expected_limit,
+                "family_limit={family_limit:?}, peer_limit={peer_limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_effective_max_prefix_different_families() {
+        let config = PeerConfig {
+            max_prefix: Some(MaxPrefixSetting {
+                limit: 1000,
+                action: MaxPrefixAction::Terminate,
+            }),
+            afi_safis: vec![AfiSafiConfig {
+                afi: Afi::LinkState,
+                safi: Safi::LinkState,
+                max_prefix: Some(MaxPrefixSetting {
+                    limit: 5000,
+                    action: MaxPrefixAction::Discard,
+                }),
+                add_path_send: None,
+            }],
+            ..Default::default()
+        };
+        // LS family uses override
+        let ls = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+        let ls_setting = config.effective_max_prefix(&ls).unwrap();
+        assert_eq!(ls_setting.limit, 5000);
+        assert!(matches!(ls_setting.action, MaxPrefixAction::Discard));
+
+        // IPv4 family falls back to peer-level
+        let ipv4 = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let ipv4_setting = config.effective_max_prefix(&ipv4).unwrap();
+        assert_eq!(ipv4_setting.limit, 1000);
+        assert!(matches!(ipv4_setting.action, MaxPrefixAction::Terminate));
+    }
+
+    #[test]
+    fn test_afi_safi_list() {
+        let config = PeerConfig {
+            afi_safis: vec![
+                AfiSafiConfig::new(Afi::LinkState, Safi::LinkState),
+                AfiSafiConfig::new(Afi::Ipv4, Safi::Unicast),
+            ],
+            ..Default::default()
+        };
+        let list = config.afi_safi_list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], AfiSafi::new(Afi::LinkState, Safi::LinkState));
+        assert_eq!(list[1], AfiSafi::new(Afi::Ipv4, Safi::Unicast));
+    }
+
+    #[test]
+    fn test_validate_duplicate_afi_safis() {
+        let config = PeerConfig {
+            afi_safis: vec![
+                AfiSafiConfig::new(Afi::LinkState, Safi::LinkState),
+                AfiSafiConfig::new(Afi::LinkState, Safi::LinkState),
+            ],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn test_afi_safi_config_yaml_deserialization() {
+        // New format with per-family overrides
+        let yaml = r#"
+address: "10.0.0.1"
+afi-safis:
+  - afi: 16388
+    safi: 71
+    max-prefix:
+      limit: 5000
+      action: discard
+  - afi: 1
+    safi: 1
+    add-path-send: all
+"#;
+        let config: PeerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.afi_safis.len(), 2);
+
+        let ls = &config.afi_safis[0];
+        assert_eq!(ls.afi, Afi::LinkState);
+        assert_eq!(ls.safi, Safi::LinkState);
+        assert_eq!(ls.max_prefix.unwrap().limit, 5000);
+        assert!(matches!(
+            ls.max_prefix.unwrap().action,
+            MaxPrefixAction::Discard
+        ));
+
+        let ipv4 = &config.afi_safis[1];
+        assert_eq!(ipv4.afi, Afi::Ipv4);
+        assert_eq!(ipv4.safi, Safi::Unicast);
+        assert!(matches!(ipv4.add_path_send, Some(AddPathSend::All)));
+    }
+
+    #[test]
+    fn test_afi_safi_config_yaml_minimal() {
+        // Backward-compatible: just afi/safi, no overrides
+        let yaml = r#"
+address: "10.0.0.1"
+afi-safis:
+  - afi: 16388
+    safi: 71
+"#;
+        let config: PeerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.afi_safis.len(), 1);
+        assert_eq!(config.afi_safis[0].afi, Afi::LinkState);
+        assert!(config.afi_safis[0].max_prefix.is_none());
+        assert!(config.afi_safis[0].add_path_send.is_none());
+    }
+
+    #[test]
+    fn test_bgp_ls_config_default() {
+        let config = Config::default();
+        assert_eq!(config.bgp_ls.max_ls_entries, 0);
+    }
+
+    #[test]
+    fn test_bgp_ls_config_yaml() {
+        let yaml = r#"
+asn: 65000
+router-id: 1.1.1.1
+bgp-ls:
+  max-ls-entries: 50000
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.bgp_ls.max_ls_entries, 50000);
     }
 }

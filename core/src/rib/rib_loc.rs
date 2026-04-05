@@ -14,7 +14,7 @@
 
 use crate::bgp::bgpls_nlri::LsNlri;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::log::{debug, info};
+use crate::log::{debug, info, warn};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::PendingRoute;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
@@ -27,7 +27,14 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+#[derive(Debug)]
+pub enum LocRibError {
+    /// The LS table is at capacity (max_ls_entries limit).
+    MaxLsEntriesReached { limit: u32 },
+}
+
 /// Result of applying a peer update to the Loc-RIB.
+#[derive(Debug)]
 pub struct RouteDelta {
     /// Routes where the best path changed (for non-ADD-PATH peers)
     pub best_changed: Vec<RouteKey>,
@@ -62,6 +69,13 @@ impl RouteDelta {
 #[cfg(test)]
 use std::net::Ipv4Addr;
 
+/// Configuration for the Loc-RIB.
+#[derive(Debug, Clone, Default)]
+pub struct LocRibConfig {
+    /// Maximum number of BGP-LS entries. 0 = unlimited.
+    pub max_ls_entries: u32,
+}
+
 /// Loc-RIB: Local routing table
 ///
 /// Contains the best paths selected after applying import policies
@@ -75,6 +89,8 @@ pub struct LocRib<A: PathIdAllocator = BitmapPathIdAllocator> {
 
     /// ADD-PATH local path ID allocator (RFC 7911)
     path_ids: A,
+
+    config: LocRibConfig,
 }
 
 // Path manipulation helpers — operate on Route, independent of container type.
@@ -180,7 +196,8 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
     }
 
-    fn upsert_path(&mut self, key: RouteKey, path: Arc<Path>) {
+    /// Insert or update a path. Returns false if rejected due to max_ls_entries limit.
+    fn upsert_path(&mut self, key: RouteKey, path: Arc<Path>) -> bool {
         let route = match &key {
             RouteKey::Prefix(IpNetwork::V4(net)) => self
                 .ipv4_unicast
@@ -189,6 +206,12 @@ impl<A: PathIdAllocator> LocRib<A> {
                 .ipv6_unicast
                 .get_or_insert(*net, Route { key, paths: vec![] }),
             RouteKey::LinkState(nlri) => {
+                if self.config.max_ls_entries > 0
+                    && !self.link_state.contains_key(nlri)
+                    && self.link_state.len() >= self.config.max_ls_entries as usize
+                {
+                    return false;
+                }
                 let nlri_clone = nlri.clone();
                 self.link_state
                     .entry(nlri_clone)
@@ -196,6 +219,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             }
         };
         upsert_path_in_route(route, path, &mut self.path_ids);
+        true
     }
 
     fn get_peer_route_keys(&self, peer_ip: IpAddr) -> Vec<RouteKey> {
@@ -295,6 +319,7 @@ impl<A: PathIdAllocator> LocRib<A> {
             })
             .collect();
 
+        let mut rejected: HashSet<RouteKey> = HashSet::new();
         for pending_route in pending_routes {
             match pending_route {
                 PendingRoute::Withdraw((key, remote_path_id)) => {
@@ -307,8 +332,12 @@ impl<A: PathIdAllocator> LocRib<A> {
                 }) => {
                     let mut path = (**path_arc).clone();
                     if import_policy(key, &mut path) {
-                        info!(route_key = ?key, peer_ip = %peer_ip, "adding route to Loc-RIB");
-                        self.upsert_path(key.clone(), Arc::new(path));
+                        if self.upsert_path(key.clone(), Arc::new(path)) {
+                            info!(route_key = ?key, peer_ip = %peer_ip, "adding route to Loc-RIB");
+                        } else {
+                            warn!(route_key = ?key, peer_ip = %peer_ip, "route rejected: max LS entries reached");
+                            rejected.insert(key.clone());
+                        }
                     } else {
                         debug!(route_key = ?key, peer_ip = %peer_ip, "route rejected by import policy");
                         self.remove_peer_path(key, peer_ip, path_arc.remote_path_id);
@@ -317,6 +346,10 @@ impl<A: PathIdAllocator> LocRib<A> {
             }
         }
 
+        let affected: Vec<RouteKey> = affected
+            .into_iter()
+            .filter(|key| !rejected.contains(key))
+            .collect();
         let best_changed = affected
             .iter()
             .filter(|key| self.best_path_changed(key, old_best.get(*key)))
@@ -331,17 +364,18 @@ impl<A: PathIdAllocator> LocRib<A> {
 
 impl Default for LocRib {
     fn default() -> Self {
-        Self::new()
+        Self::new(LocRibConfig::default())
     }
 }
 
 impl LocRib {
-    pub fn new() -> Self {
+    pub fn new(config: LocRibConfig) -> Self {
         LocRib {
             ipv4_unicast: PrefixMap::new(),
             ipv6_unicast: PrefixMap::new(),
             link_state: HashMap::new(),
             path_ids: BitmapPathIdAllocator::new(),
+            config,
         }
     }
 }
@@ -353,11 +387,17 @@ impl<A: PathIdAllocator> LocRib<A> {
             ipv6_unicast: PrefixMap::new(),
             link_state: HashMap::new(),
             path_ids,
+            config: LocRibConfig::default(),
         }
     }
 
-    /// Add a locally originated route
-    pub fn add_local_route(&mut self, key: RouteKey, path_attrs: PathAttrs) -> RouteDelta {
+    /// Add a locally originated route.
+    /// Returns Err if the route was rejected (e.g. max LS entries reached).
+    pub fn add_local_route(
+        &mut self,
+        key: RouteKey,
+        path_attrs: PathAttrs,
+    ) -> Result<RouteDelta, LocRibError> {
         let old_best = self.get_best_path(&key).map(Arc::clone);
         let path = Arc::new(Path {
             local_path_id: None,
@@ -370,16 +410,20 @@ impl<A: PathIdAllocator> LocRib<A> {
                 ..path_attrs
             },
         });
-        self.upsert_path(key.clone(), path);
+        if !self.upsert_path(key.clone(), path) {
+            return Err(LocRibError::MaxLsEntriesReached {
+                limit: self.config.max_ls_entries,
+            });
+        }
         let best_changed = if self.best_path_changed(&key, old_best.as_ref()) {
             vec![key.clone()]
         } else {
             vec![]
         };
-        RouteDelta {
+        Ok(RouteDelta {
             best_changed,
             changed: vec![key],
-        }
+        })
     }
 
     /// Remove a locally originated route
@@ -680,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_new_loc_rib() {
-        let loc_rib = LocRib::new();
+        let loc_rib = LocRib::default();
         assert!(loc_rib.get_routes(None).is_empty());
         assert_eq!(loc_rib.routes_len(), 0);
     }
@@ -755,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_paths_same_prefix_different_peers() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
@@ -869,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_removes_empty_routes() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip, test_bgp_id());
@@ -883,31 +927,33 @@ mod tests {
 
     #[test]
     fn test_add_and_remove_local_route() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
         let key = RouteKey::Prefix(prefix);
-        loc_rib.add_local_route(
-            key.clone(),
-            PathAttrs {
-                next_hop: NextHopAddr::Ipv4(next_hop),
-                origin: Origin::IGP,
-                as_path: vec![],
-                source: RouteSource::Local,
-                local_pref: None,
-                med: None,
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
-                ls_attr: None,
-            },
-        );
+        loc_rib
+            .add_local_route(
+                key.clone(),
+                PathAttrs {
+                    next_hop: NextHopAddr::Ipv4(next_hop),
+                    origin: Origin::IGP,
+                    as_path: vec![],
+                    source: RouteSource::Local,
+                    local_pref: None,
+                    med: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                    ls_attr: None,
+                },
+            )
+            .expect("add_local_route should succeed");
         assert_eq!(loc_rib.routes_len(), 1);
         assert!(loc_rib.has_route(&key));
 
@@ -921,30 +967,32 @@ mod tests {
 
     #[test]
     fn test_add_local_route_with_custom_local_pref() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let next_hop = Ipv4Addr::new(192, 0, 2, 1);
 
-        loc_rib.add_local_route(
-            RouteKey::Prefix(prefix),
-            PathAttrs {
-                next_hop: NextHopAddr::Ipv4(next_hop),
-                origin: Origin::IGP,
-                as_path: vec![],
-                source: RouteSource::Local,
-                local_pref: Some(200),
-                med: None,
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
-                ls_attr: None,
-            },
-        );
+        loc_rib
+            .add_local_route(
+                RouteKey::Prefix(prefix),
+                PathAttrs {
+                    next_hop: NextHopAddr::Ipv4(next_hop),
+                    origin: Origin::IGP,
+                    as_path: vec![],
+                    source: RouteSource::Local,
+                    local_pref: Some(200),
+                    med: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                    ls_attr: None,
+                },
+            )
+            .expect("add_local_route should succeed");
 
         let path = loc_rib.get_best_path(&RouteKey::Prefix(prefix)).unwrap();
         assert_eq!(path.local_pref(), Some(200));
@@ -952,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_mixed_ipv4_ipv6_routes() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
 
         let prefix_v4 = IpNetwork::V4(Ipv4Net {
@@ -983,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_get_routes_family_filter() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
         let path = create_test_path(peer_ip, test_bgp_id());
 
@@ -1046,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_remove_routes_from_peer_mixed() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
 
@@ -1077,7 +1125,7 @@ mod tests {
 
     #[test]
     fn test_empty_tables() {
-        let loc_rib = LocRib::new();
+        let loc_rib = LocRib::default();
         assert_eq!(loc_rib.routes_len(), 0);
         assert_eq!(loc_rib.get_routes(None).len(), 0);
     }
@@ -1086,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_path_id_allocated_on_add() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let path = create_test_path(test_peer_ip(), test_bgp_id());
 
@@ -1101,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_path_id_reused_on_replace() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let peer_ip = test_peer_ip();
 
@@ -1136,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_identical_path_is_noop() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let path = create_test_path(test_peer_ip(), test_bgp_id());
 
@@ -1155,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_path_id_different_sources_get_unique_ids() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
 
         loc_rib.upsert_path(
@@ -1175,7 +1223,7 @@ mod tests {
 
     #[test]
     fn test_path_id_different_remote_path_id_coexist() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
         let peer_ip = test_peer_ip();
 
@@ -1222,26 +1270,28 @@ mod tests {
         let prefix = create_test_prefix();
 
         let key = RouteKey::Prefix(prefix);
-        loc_rib.add_local_route(
-            key.clone(),
-            PathAttrs {
-                next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
-                origin: Origin::IGP,
-                as_path: vec![],
-                source: RouteSource::Local,
-                local_pref: None,
-                med: None,
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
-                ls_attr: None,
-            },
-        );
+        loc_rib
+            .add_local_route(
+                key.clone(),
+                PathAttrs {
+                    next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                    origin: Origin::IGP,
+                    as_path: vec![],
+                    source: RouteSource::Local,
+                    local_pref: None,
+                    med: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                    ls_attr: None,
+                },
+            )
+            .expect("add_local_route should succeed");
         loc_rib.remove_local_route(&key);
 
         assert_eq!(loc_rib.path_ids.freed, vec![1]);
@@ -1269,7 +1319,7 @@ mod tests {
 
     #[test]
     fn test_get_all_paths() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let prefix = create_test_prefix();
 
         // Empty prefix -> empty vec
@@ -1295,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_apply_peer_update_returns_changed() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer1 = test_peer_ip();
         let peer2 = test_peer_ip2();
         let prefix = create_test_prefix();
@@ -1341,7 +1391,7 @@ mod tests {
 
     #[test]
     fn test_stale_cleared_on_replacement() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let ipv4_uni = AfiSafi {
@@ -1399,7 +1449,7 @@ mod tests {
     fn test_stale_addpath_partial_resend() {
         // Two paths from same peer via ADD-PATH. Peer restarts, only re-sends one.
         // Sweep should remove the stale path but keep the refreshed one.
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let ipv4_uni = AfiSafi {
@@ -1570,7 +1620,7 @@ mod tests {
 
     #[test]
     fn test_announce_then_withdraw_same_path() {
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         let peer_ip = test_peer_ip();
         let prefix = create_test_prefix();
         let path = create_test_path(peer_ip, test_bgp_id());
@@ -1845,5 +1895,91 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().any(|rp| rp.key == key1));
         assert!(paths.iter().any(|rp| rp.key == key2));
+    }
+
+    #[test]
+    fn test_max_ls_entries() {
+        let cases = vec![
+            // (max_ls_entries, num_inserts, expected_count)
+            (0, 5, 5), // unlimited
+            (3, 5, 3), // capped at 3
+            (5, 3, 3), // under limit
+            (1, 1, 1), // exactly at limit
+        ];
+        for (max_ls, num_inserts, expected) in cases {
+            let mut loc_rib = LocRib::new(LocRibConfig {
+                max_ls_entries: max_ls,
+            });
+            for i in 0..num_inserts {
+                let nlri = test_ls_nlri(i as u8);
+                let key = ls_key(nlri);
+                let path = create_test_path(test_peer_ip(), test_bgp_id());
+                loc_rib.upsert_path(key, path);
+            }
+            let routes = loc_rib.get_routes(Some(AfiSafi::new(Afi::LinkState, Safi::LinkState)));
+            assert_eq!(
+                routes.len(),
+                expected as usize,
+                "max_ls={max_ls}, inserts={num_inserts}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_ls_entries_update_existing_allowed() {
+        let mut loc_rib = LocRib::new(LocRibConfig { max_ls_entries: 1 });
+        let nlri = test_ls_nlri(1);
+        let key = ls_key(nlri);
+
+        // First insert succeeds
+        let path1 = create_test_path(test_peer_ip(), test_bgp_id());
+        assert!(loc_rib.upsert_path(key.clone(), path1));
+
+        // Update to same key succeeds even at capacity
+        let path2 = create_test_path("10.0.0.2".parse().unwrap(), Ipv4Addr::new(2, 2, 2, 2));
+        assert!(loc_rib.upsert_path(key.clone(), path2));
+
+        // New key rejected
+        let nlri2 = test_ls_nlri(2);
+        let key2 = ls_key(nlri2);
+        let path3 = create_test_path(test_peer_ip(), test_bgp_id());
+        assert!(!loc_rib.upsert_path(key2, path3));
+    }
+
+    #[test]
+    fn test_max_ls_entries_does_not_affect_ip() {
+        let mut loc_rib = LocRib::new(LocRibConfig { max_ls_entries: 1 });
+
+        // Fill LS table to capacity
+        let nlri = test_ls_nlri(1);
+        let key = ls_key(nlri);
+        loc_rib.upsert_path(key, create_test_path(test_peer_ip(), test_bgp_id()));
+
+        // IPv4 insert still works
+        let prefix_key = RouteKey::Prefix(create_test_prefix());
+        assert!(loc_rib.upsert_path(
+            prefix_key.clone(),
+            create_test_path(test_peer_ip(), test_bgp_id()),
+        ));
+        assert!(loc_rib.get_best_path(&prefix_key).is_some());
+    }
+
+    #[test]
+    fn test_add_local_route_rejected_at_capacity() {
+        let mut loc_rib = LocRib::new(LocRibConfig { max_ls_entries: 1 });
+        let nlri1 = test_ls_nlri(1);
+        let key1 = ls_key(nlri1);
+        let attrs = create_test_path(test_peer_ip(), test_bgp_id())
+            .attrs
+            .clone();
+        assert!(loc_rib.add_local_route(key1, attrs.clone()).is_ok());
+
+        let nlri2 = test_ls_nlri(2);
+        let key2 = ls_key(nlri2);
+        let result = loc_rib.add_local_route(key2, attrs);
+        assert!(
+            matches!(result, Err(LocRibError::MaxLsEntriesReached { limit: 1 })),
+            "expected MaxLsEntriesReached, got {result:?}"
+        );
     }
 }

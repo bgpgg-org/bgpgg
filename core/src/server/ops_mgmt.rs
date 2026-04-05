@@ -754,10 +754,15 @@ impl BgpServer {
     ) {
         info!(?key, next_hop = ?attrs.next_hop, "adding route via request");
 
-        let delta = self.loc_rib.add_local_route(key, attrs);
-        self.propagate_routes(delta, None).await;
-
-        let _ = response.send(Ok(()));
+        match self.loc_rib.add_local_route(key, attrs) {
+            Ok(delta) => {
+                self.propagate_routes(delta, None).await;
+                let _ = response.send(Ok(()));
+            }
+            Err(err) => {
+                let _ = response.send(Err(format!("{err:?}")));
+            }
+        }
     }
 
     async fn handle_remove_route(

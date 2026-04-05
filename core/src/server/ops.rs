@@ -829,28 +829,40 @@ impl BgpServer {
             scrub_ebgp_pending_routes(&mut routes);
         }
 
-        // Max-prefix check
-        if let Some(setting) = peer.config.max_prefix {
-            let current = peer.adj_rib_in.prefix_count();
-            if current > setting.limit as usize {
-                match setting.action {
-                    MaxPrefixAction::Terminate => {
-                        warn!(%peer_ip, limit = setting.limit, current,
-                              "max prefix limit exceeded");
-                        if peer.config.allow_automatic_stop {
-                            self.handle_max_prefix_terminate(peer_ip).await;
-                        } else {
-                            warn!(%peer_ip, "allow_automatic_stop=false, discarding update");
+        // Per-family max-prefix check: each family uses its own override or falls back
+        // to the peer-level max_prefix setting.
+        let families_in_update: HashSet<AfiSafi> =
+            routes.iter().map(|r| r.route_key().afi_safi()).collect();
+        let mut discard_families: HashSet<AfiSafi> = HashSet::new();
+        for family in &families_in_update {
+            if let Some(setting) = peer.config.effective_max_prefix(family) {
+                let current = peer.adj_rib_in.family_count(family);
+                if current > setting.limit as usize {
+                    match setting.action {
+                        MaxPrefixAction::Terminate => {
+                            warn!(%peer_ip, %family, limit = setting.limit, current,
+                                  "max prefix limit exceeded");
+                            if peer.config.allow_automatic_stop {
+                                self.handle_max_prefix_terminate(peer_ip).await;
+                            } else {
+                                warn!(%peer_ip, "allow_automatic_stop=false, discarding update");
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    MaxPrefixAction::Discard => {
-                        warn!(%peer_ip, limit = setting.limit, current,
-                              "max prefix limit reached, discarding new prefixes");
-                        reject_announcements(&mut routes);
+                        MaxPrefixAction::Discard => {
+                            warn!(%peer_ip, %family, limit = setting.limit, current,
+                                  "max prefix limit reached, discarding new prefixes");
+                            discard_families.insert(*family);
+                        }
                     }
                 }
             }
+        }
+        if !discard_families.is_empty() {
+            routes.retain(|r| match r {
+                PendingRoute::Announce(rp) => !discard_families.contains(&rp.key.afi_safi()),
+                PendingRoute::Withdraw(_) => true,
+            });
         }
 
         // Import policy + loc-rib update (routes processed in arrival order)

@@ -107,6 +107,16 @@ impl AdjRibIn {
         self.ipv4_unicast.len() + self.ipv6_unicast.len() + self.link_state.len()
     }
 
+    /// Return the route count for a specific address family.
+    pub fn family_count(&self, family: &AfiSafi) -> usize {
+        match (family.afi, family.safi) {
+            (Afi::Ipv4, Safi::Unicast) => self.ipv4_unicast.len(),
+            (Afi::Ipv6, Safi::Unicast) => self.ipv6_unicast.len(),
+            (Afi::LinkState, Safi::LinkState) => self.link_state.len(),
+            _ => 0,
+        }
+    }
+
     pub fn clear(&mut self) {
         self.ipv4_unicast.clear();
         self.ipv6_unicast.clear();
@@ -509,5 +519,45 @@ mod tests {
 
         rib_in.remove_route(&prefix_key(prefix), None);
         assert_eq!(rib_in.prefix_count(), 0);
+    }
+
+    #[test]
+    fn test_family_count() {
+        use crate::bgp::bgpls_nlri::{
+            build_ls_nlri, LsDescriptors, LsNlriType, LsProtocolId, NodeDescriptor,
+        };
+
+        let mut rib_in = AdjRibIn::new();
+
+        // Add IPv4 route
+        let prefix = create_test_prefix();
+        let path = create_test_path(test_peer_ip(), test_bgp_id());
+        rib_in.add_route(prefix_key(prefix), path);
+
+        // Add LS route
+        let nlri = build_ls_nlri(
+            LsNlriType::Node,
+            LsProtocolId::IsIsL1,
+            0,
+            LsDescriptors::Node {
+                local_node: NodeDescriptor {
+                    igp_router_id: Some(vec![1]),
+                    ..NodeDescriptor::default()
+                },
+            },
+        );
+        let ls_path = create_test_path(test_peer_ip(), test_bgp_id());
+        rib_in.add_route(RouteKey::LinkState(nlri), ls_path);
+
+        let cases = vec![
+            (Afi::Ipv4, Safi::Unicast, 1),
+            (Afi::Ipv6, Safi::Unicast, 0),
+            (Afi::LinkState, Safi::LinkState, 1),
+        ];
+        for (afi, safi, expected) in cases {
+            let family = AfiSafi::new(afi, safi);
+            assert_eq!(rib_in.family_count(&family), expected, "family={family}");
+        }
+        assert_eq!(rib_in.prefix_count(), 2);
     }
 }

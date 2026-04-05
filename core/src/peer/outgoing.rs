@@ -2078,7 +2078,7 @@ mod tests {
             nh2,
         );
 
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         loc_rib.apply_peer_update(
             test_ip(2),
             &[PendingRoute::Announce(RoutePath::new(

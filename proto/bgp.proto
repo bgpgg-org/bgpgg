@@ -85,6 +85,15 @@ message AfiSafi {
     uint32 safi = 2;  // IANA Subsequent Address Family Identifier
 }
 
+// Per address-family configuration with optional overrides.
+// None fields inherit from peer-level SessionConfig defaults.
+message AfiSafiConfig {
+    uint32 afi = 1;
+    uint32 safi = 2;
+    optional MaxPrefixSetting max_prefix = 3;
+    optional AddPathSendMode add_path_send = 4;
+}
+
 // Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
 message SessionConfig {
     optional uint64 idle_hold_time_secs = 1;      // Auto-reconnect delay. Unset disables (default: 30s)
@@ -109,7 +118,7 @@ message SessionConfig {
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
     optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
-    repeated AfiSafi afi_safis = 23;  // additional AFI/SAFIs beyond default IPv4/IPv6 unicast
+    repeated AfiSafiConfig afi_safis = 23;  // additional AFI/SAFIs beyond default IPv4/IPv6 unicast
 }
 
 // Add peer request/response

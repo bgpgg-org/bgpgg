@@ -49,7 +49,7 @@ fn build_optional_params(
     llgr: &Option<LlgrConfig>,
 ) -> Vec<OptionalParam> {
     let mut afi_safis = default_afi_safis();
-    afi_safis.extend(&config.afi_safis);
+    afi_safis.extend(config.afi_safi_list());
     let mut optional_params = Vec::new();
 
     // Add multiprotocol capabilities (RFC 4760)
@@ -256,7 +256,7 @@ impl Peer {
 
         // Negotiate multiprotocol capabilities (intersection of local and peer)
         let mut local_afi_safis = default_afi_safis();
-        local_afi_safis.extend(&self.config.afi_safis);
+        local_afi_safis.extend(self.config.afi_safi_list());
         let negotiated_multiprotocol =
             negotiate_multiprotocol(&local_afi_safis, &peer_capabilities.multiprotocol);
 
@@ -659,7 +659,7 @@ mod tests {
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
     use crate::bgp::DEFAULT_FORMAT;
-    use crate::config::LlgrConfig;
+    use crate::config::{AfiSafiConfig, LlgrConfig};
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
     use crate::rib::{Path, PathAttrs, RouteSource};
@@ -955,7 +955,7 @@ mod tests {
 
         // LS in afi_safis: LS capability present alongside IPv4/IPv6 unicast
         let config = PeerConfig {
-            afi_safis: vec![ls],
+            afi_safis: vec![AfiSafiConfig::new(Afi::LinkState, Safi::LinkState)],
             ..PeerConfig::default()
         };
         let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);

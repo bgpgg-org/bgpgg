@@ -16,7 +16,9 @@ use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
+use crate::config::{
+    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
+};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
@@ -420,14 +422,34 @@ fn proto_to_llgr_config(proto: Option<proto::LlgrConfig>) -> Result<Option<LlgrC
     }))
 }
 
-fn proto_to_afi_safis(entries: &[proto::AfiSafi]) -> Result<Vec<AfiSafi>, String> {
+fn proto_to_afi_safis(entries: &[proto::AfiSafiConfig]) -> Result<Vec<AfiSafiConfig>, String> {
     let mut result = Vec::new();
     for entry in entries {
         let afi =
             Afi::try_from(entry.afi as u16).map_err(|_| format!("unknown AFI {}", entry.afi))?;
         let safi =
             Safi::try_from(entry.safi as u8).map_err(|_| format!("unknown SAFI {}", entry.safi))?;
-        result.push(AfiSafi::new(afi, safi));
+        let max_prefix = entry.max_prefix.as_ref().map(|mp| MaxPrefixSetting {
+            limit: mp.limit,
+            action: match proto::MaxPrefixAction::try_from(mp.action) {
+                Ok(proto::MaxPrefixAction::Discard) => MaxPrefixAction::Discard,
+                _ => MaxPrefixAction::Terminate,
+            },
+        });
+        let add_path_send = entry.add_path_send.and_then(|v| {
+            proto::AddPathSendMode::try_from(v)
+                .ok()
+                .map(|mode| match mode {
+                    proto::AddPathSendMode::AddPathSendDisabled => AddPathSend::Disabled,
+                    proto::AddPathSendMode::AddPathSendAll => AddPathSend::All,
+                })
+        });
+        result.push(AfiSafiConfig {
+            afi,
+            safi,
+            max_prefix,
+            add_path_send,
+        });
     }
     Ok(result)
 }
@@ -498,9 +520,24 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
         afi_safis: config
             .afi_safis
             .iter()
-            .map(|afi_safi| proto::AfiSafi {
-                afi: afi_safi.afi as u16 as u32,
-                safi: afi_safi.safi as u8 as u32,
+            .map(|entry| {
+                let max_prefix = entry.max_prefix.as_ref().map(|mp| proto::MaxPrefixSetting {
+                    limit: mp.limit,
+                    action: match mp.action {
+                        MaxPrefixAction::Terminate => 0,
+                        MaxPrefixAction::Discard => 1,
+                    },
+                });
+                let add_path_send = entry.add_path_send.map(|aps| match aps {
+                    AddPathSend::All => proto::AddPathSendMode::AddPathSendAll as i32,
+                    AddPathSend::Disabled => proto::AddPathSendMode::AddPathSendDisabled as i32,
+                });
+                proto::AfiSafiConfig {
+                    afi: entry.afi as u16 as u32,
+                    safi: entry.safi as u8 as u32,
+                    max_prefix,
+                    add_path_send,
+                }
             })
             .collect(),
     }
