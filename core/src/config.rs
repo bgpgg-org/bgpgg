@@ -795,13 +795,16 @@ pub struct LargeCommunityActionConfig {
     pub large_communities: Vec<String>,
 }
 
-/// BGP-LS operational limits (RFC 9552).
+/// BGP-LS operational configuration (RFC 9552).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct BgpLsConfig {
     /// Maximum number of LS NLRIs in Loc-RIB. 0 = unlimited.
     #[serde(default)]
     pub max_ls_entries: u32,
+    /// RFC 9552 Section 8.2.3: BGP-LS Instance-ID applied to locally originated NLRIs.
+    #[serde(default)]
+    pub instance_id: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

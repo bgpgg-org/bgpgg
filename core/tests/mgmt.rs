@@ -1244,6 +1244,50 @@ async fn test_remove_ls_route() {
     );
 }
 
+/// RFC 9552 Section 8.2.3: configured Instance-ID is applied to locally originated LS routes.
+#[tokio::test]
+async fn test_ls_instance_id_config() {
+    let mut config = Config::new(64512, "127.0.0.1:0", Ipv4Addr::new(127, 0, 0, 1), 90);
+    config.bgp_ls.instance_id = 99;
+    let server = start_test_server(config).await;
+
+    // Inject LS route with identifier=0 (unset by caller)
+    let nlri = make_ls_node_nlri(65001, &[10, 0, 0, 1]);
+    assert_eq!(nlri.identifier, 0);
+
+    server
+        .client
+        .add_route(AddRouteRequest {
+            route: Some(add_route_request::Route::Ls(Box::new(AddLsRouteRequest {
+                nlri: Some(nlri),
+                attribute: Some(make_ls_attr("router1")),
+                next_hop: None,
+            }))),
+        })
+        .await
+        .unwrap();
+
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest {
+            afi: Some(16388),
+            safi: Some(71),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(routes.len(), 1);
+
+    let stored_nlri = match &routes[0].key {
+        Some(route::Key::LsNlri(n)) => n,
+        _ => panic!("expected LS NLRI key"),
+    };
+    assert_eq!(
+        stored_nlri.identifier, 99,
+        "configured instance_id should be applied"
+    );
+}
+
 #[tokio::test]
 async fn test_list_routes_family_filter() {
     let server = start_test_server(Config::new(

@@ -191,6 +191,15 @@ impl LsNlri {
             Safi::LinkState
         }
     }
+
+    /// Set the Instance-ID (identifier) on a parsed NLRI and re-encode raw bytes.
+    /// No-op if body is not parsed (opaque NLRI).
+    pub fn set_identifier(&mut self, identifier: u64) {
+        if let Some(ref mut body) = self.body {
+            body.identifier = identifier;
+            self.raw = encode_ls_nlri_body(body.protocol_id, body.identifier, &body.descriptors);
+        }
+    }
 }
 
 /// Parsed NLRI body: Protocol-ID + Identifier + type-specific descriptors.
@@ -743,7 +752,11 @@ pub fn build_ls_nlri(
 }
 
 /// Encode the NLRI body: Protocol-ID (1) + Identifier (8) + descriptor TLVs.
-fn encode_ls_nlri_body(protocol_id: u8, identifier: u64, descriptors: &LsDescriptors) -> Vec<u8> {
+pub(crate) fn encode_ls_nlri_body(
+    protocol_id: u8,
+    identifier: u64,
+    descriptors: &LsDescriptors,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(protocol_id);
     bytes.extend_from_slice(&identifier.to_be_bytes());

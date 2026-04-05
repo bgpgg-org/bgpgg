@@ -748,10 +748,16 @@ impl BgpServer {
 
     async fn handle_add_route(
         &mut self,
-        key: RouteKey,
+        mut key: RouteKey,
         attrs: PathAttrs,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        // RFC 9552 Section 8.2.3: apply configured Instance-ID to locally originated LS NLRIs.
+        let instance_id = self.config.bgp_ls.instance_id;
+        if let RouteKey::LinkState(ref mut nlri) = key {
+            nlri.set_identifier(instance_id);
+        }
+
         info!(?key, next_hop = ?attrs.next_hop, "adding route via request");
 
         match self.loc_rib.add_local_route(key, attrs) {

@@ -415,3 +415,37 @@ async fn test_ls_session_down_cleanup() {
     )
     .await;
 }
+
+/// RFC 9552 Section 8.2.2: LS NLRIs without BGP-LS Attribute (type 29) SHOULD
+/// be preserved and propagated so consumers detect loss of link-state info
+/// rather than assuming deletion.
+#[tokio::test]
+async fn test_ls_nlri_without_attribute_propagates() {
+    let (server1, server2) = setup_two_peered_servers(ls_peer_config()).await;
+
+    let nlri = make_ls_node_nlri(65002, &[10, 0, 0, 2]);
+
+    // Inject LS route WITHOUT BGP-LS Attribute (type 29)
+    announce_route(
+        &server2,
+        RouteParams::Ls(LsRouteParams {
+            nlri: Some(nlri.clone()),
+            attribute: None,
+            next_hop: Some(server2.address.to_string()),
+        }),
+    )
+    .await;
+
+    // Route should propagate with no ls_attribute
+    poll_route_exists(
+        &server1,
+        expected_route(
+            nlri,
+            PathParams {
+                ls_attribute: None,
+                ..PathParams::from_peer(&server2)
+            },
+        ),
+    )
+    .await;
+}

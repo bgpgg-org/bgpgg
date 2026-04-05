@@ -87,7 +87,12 @@ impl UpdateMessage {
     }
 
     /// Create an UPDATE for BGP-LS routes. NLRIs go in MP_REACH_NLRI with AFI 16388.
-    pub fn new_ls(path: &Path, ls_nlri: Vec<LsNlri>, afi_safi: AfiSafi, format: MessageFormat) -> Self {
+    pub fn new_ls(
+        path: &Path,
+        ls_nlri: Vec<LsNlri>,
+        afi_safi: AfiSafi,
+        format: MessageFormat,
+    ) -> Self {
         let mut path_attributes = Self::build_common_path_attrs(path);
 
         path_attributes.push(PathAttribute {
@@ -155,7 +160,11 @@ impl UpdateMessage {
     }
 
     /// Create a withdrawal UPDATE for BGP-LS routes via MP_UNREACH_NLRI.
-    pub fn new_ls_withdraw(ls_withdrawn: Vec<LsNlri>, afi_safi: AfiSafi, format: MessageFormat) -> Self {
+    pub fn new_ls_withdraw(
+        ls_withdrawn: Vec<LsNlri>,
+        afi_safi: AfiSafi,
+        format: MessageFormat,
+    ) -> Self {
         let path_attributes = vec![PathAttribute {
             flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
             value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
@@ -2556,7 +2565,8 @@ mod tests {
             }
 
             let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
-            let msg = UpdateMessage::new_ls(&path, vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
+            let msg =
+                UpdateMessage::new_ls(&path, vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
 
             assert_eq!(msg.ls_nlri_list().len(), 1, "case: {}", tc.name);
             assert_eq!(msg.ls_attr().is_some(), tc.has_ls_attr, "case: {}", tc.name);

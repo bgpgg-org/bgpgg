@@ -231,7 +231,10 @@ impl BgpServer {
             }
             let ls_families = [
                 (ls_withdrawn, AfiSafi::new(Afi::LinkState, Safi::LinkState)),
-                (ls_vpn_withdrawn, AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn)),
+                (
+                    ls_vpn_withdrawn,
+                    AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn),
+                ),
             ];
             for (batch, afi_safi) in ls_families {
                 if !batch.is_empty() {
