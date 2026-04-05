@@ -31,7 +31,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::DefinedSetType;
-use crate::rib::{PathAttrs, Route, RouteKey};
+use crate::rib::{PathAttrs, Route};
 use crate::types::PeerDownReason;
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
@@ -1575,9 +1575,8 @@ fn send_initial_bmp_state_to_task(
     response: oneshot::Sender<Result<(), String>>,
 ) {
     use crate::bgp::msg::MessageFormat;
-    use crate::bgp::msg_update::UpdateMessage;
-    use crate::peer::outgoing::batch_announcements_by_path;
-    use crate::rib::PrefixPath;
+    use crate::peer::outgoing::batch_announcements;
+    use crate::rib::RoutePath;
 
     // Send all PeerUp messages first
     for (peer_ip, peer_info) in &established_peers {
@@ -1615,26 +1614,19 @@ fn send_initial_bmp_state_to_task(
                 enhanced_rr: false,
             };
 
-            // Convert routes to UpdateMessages, batching by shared path attributes.
-            // Phase 5: generalize PrefixPath to handle LS routes in BMP monitoring.
-            let announcements: Vec<PrefixPath> = routes
+            // Build BMP Route Monitoring messages for this peer's routes.
+            let announcements: Vec<RoutePath> = routes
                 .iter()
                 .flat_map(|route| {
-                    route.paths.iter().filter_map(|path| {
-                        if let RouteKey::Prefix(prefix) = route.key {
-                            Some(PrefixPath {
-                                prefix,
-                                path: Arc::clone(path),
-                            })
-                        } else {
-                            None
-                        }
+                    route.paths.iter().map(|path| RoutePath {
+                        key: route.key.clone(),
+                        path: Arc::clone(path),
                     })
                 })
                 .collect();
-            let batches = batch_announcements_by_path(&announcements);
+            let batches = batch_announcements(&announcements);
             for batch in batches {
-                let update = UpdateMessage::new(&batch.path, batch.prefixes, format);
+                let update = batch.to_update(format);
                 let _ = task_tx.send(Arc::new(BmpOp::RouteMonitoring {
                     peer_ip,
                     peer_as: asn,

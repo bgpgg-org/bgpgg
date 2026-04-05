@@ -22,8 +22,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::bgp::utils::ParserError;
 use crate::config::{LlgrConfig, PeerConfig};
 use crate::log::{debug, error, info};
-use crate::net::IpNetwork;
-use crate::rib::PrefixPath;
+use crate::rib::{RouteKey, RoutePath, Withdrawal};
 use crate::server::ops::ServerOp;
 use crate::server::ConnectionType;
 use crate::types::PeerDownReason;
@@ -201,32 +200,29 @@ pub struct LocalConfig {
     pub llgr: Option<LlgrConfig>,
 }
 
-/// (prefix, remote_path_id) — None means remove all paths from peer (non-ADD-PATH)
-pub type Withdrawal = (IpNetwork, Option<u32>);
-
 /// A pending route announcement or withdrawal awaiting flush to server.
 #[derive(Debug, Clone)]
 pub enum PendingRoute {
-    Announce(PrefixPath),
+    Announce(RoutePath),
     Withdraw(Withdrawal),
 }
 
 impl PendingRoute {
-    pub fn prefix(&self) -> IpNetwork {
+    pub fn route_key(&self) -> RouteKey {
         match self {
-            PendingRoute::Announce(prefix_path) => prefix_path.prefix,
-            PendingRoute::Withdraw((prefix, _)) => *prefix,
+            PendingRoute::Announce(route_path) => route_path.key.clone(),
+            PendingRoute::Withdraw((key, _)) => key.clone(),
         }
     }
 
     /// Split a slice into separate announced and withdrawn lists.
-    pub fn split(routes: &[PendingRoute]) -> (Vec<PrefixPath>, Vec<Withdrawal>) {
+    pub fn split(routes: &[PendingRoute]) -> (Vec<RoutePath>, Vec<Withdrawal>) {
         let mut announced = Vec::new();
         let mut withdrawn = Vec::new();
         for route in routes {
             match route {
-                PendingRoute::Announce(prefix_path) => announced.push(prefix_path.clone()),
-                PendingRoute::Withdraw(withdrawal) => withdrawn.push(*withdrawal),
+                PendingRoute::Announce(route_path) => announced.push(route_path.clone()),
+                PendingRoute::Withdraw(withdrawal) => withdrawn.push(withdrawal.clone()),
             }
         }
         (announced, withdrawn)
@@ -234,7 +230,7 @@ impl PendingRoute {
 }
 
 /// (announced routes, withdrawn routes)
-pub(super) type RouteChanges = (Vec<PrefixPath>, Vec<Withdrawal>);
+pub(super) type RouteChanges = (Vec<RoutePath>, Vec<Withdrawal>);
 
 mod fsm;
 mod incoming;

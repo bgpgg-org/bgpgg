@@ -15,16 +15,13 @@
 use super::{BgpServer, BmpOp};
 use crate::bgp::msg::{AddPathMask, MessageFormat};
 use crate::bgp::msg_update::UpdateMessage;
-use crate::bgp::msg_update_types::Nlri;
 use crate::bgp::multiprotocol::{Afi, Safi};
 use crate::log::{error, info, warn};
 use crate::peer::outgoing::{
-    batch_announcements_by_path, propagate_routes_to_peer, should_propagate_to_peer,
-    PeerExportContext,
+    batch_announcements, propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
 };
-use crate::peer::Withdrawal;
 use crate::rib::rib_loc::RouteDelta;
-use crate::rib::{PrefixPath, RouteKey};
+use crate::rib::{split_withdrawals, RouteKey, RoutePath, Withdrawal};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -118,8 +115,13 @@ impl BgpServer {
             return;
         };
 
-        if safi != Safi::Unicast {
-            warn!(?safi, "unsupported SAFI");
+        if !matches!(
+            (afi, safi),
+            (Afi::Ipv4, Safi::Unicast)
+                | (Afi::Ipv6, Safi::Unicast)
+                | (Afi::LinkState, Safi::LinkState)
+        ) {
+            warn!(?afi, ?safi, "unsupported AFI/SAFI");
             return;
         }
         if peer_info.export_policies.is_empty() {
@@ -199,7 +201,7 @@ impl BgpServer {
         peer_as: u32,
         peer_bgp_id: u32,
         withdrawn: &[Withdrawal],
-        announced: &[PrefixPath],
+        announced: &[RoutePath],
     ) {
         // Mirror the actual BGP session encoding
         let peer_info = self.peers.get(&peer_ip);
@@ -214,29 +216,34 @@ impl BgpServer {
             enhanced_rr: false,
         };
 
-        // Send withdrawals if any
+        // Send withdrawals (split IP and LS into separate UPDATEs)
         if !withdrawn.is_empty() {
-            let nlri: Vec<Nlri> = withdrawn
-                .iter()
-                .map(|(prefix, path_id)| Nlri {
-                    prefix: *prefix,
-                    path_id: *path_id,
-                })
-                .collect();
-            let update = UpdateMessage::new_withdraw(nlri, format);
-            self.broadcast_bmp(BmpOp::RouteMonitoring {
-                peer_ip,
-                peer_as,
-                peer_bgp_id,
-                update,
-            });
+            let (ip_withdrawn, ls_withdrawn) = split_withdrawals(withdrawn);
+            if !ip_withdrawn.is_empty() {
+                let update = UpdateMessage::new_withdraw(ip_withdrawn, format);
+                self.broadcast_bmp(BmpOp::RouteMonitoring {
+                    peer_ip,
+                    peer_as,
+                    peer_bgp_id,
+                    update,
+                });
+            }
+            if !ls_withdrawn.is_empty() {
+                let update = UpdateMessage::new_ls_withdraw(ls_withdrawn, format);
+                self.broadcast_bmp(BmpOp::RouteMonitoring {
+                    peer_ip,
+                    peer_as,
+                    peer_bgp_id,
+                    update,
+                });
+            }
         }
 
         // Send announcements batched by path attributes
         if !announced.is_empty() {
-            let batches = batch_announcements_by_path(announced);
+            let batches = batch_announcements(announced);
             for batch in batches {
-                let update = UpdateMessage::new(&batch.path, batch.prefixes, format);
+                let update = batch.to_update(format);
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
                     peer_ip,
                     peer_as,

@@ -1099,21 +1099,6 @@ pub(super) fn read_path_attributes(
         cursor += offset_usize;
     }
 
-    // Validate that we don't have both NEXT_HOP and MP_REACH_NLRI
-    let has_next_hop = path_attributes
-        .iter()
-        .any(|attr| matches!(attr.value, PathAttrValue::NextHop(_)));
-    let has_mp_reach = path_attributes
-        .iter()
-        .any(|attr| matches!(attr.value, PathAttrValue::MpReachNlri(_)));
-
-    if has_next_hop && has_mp_reach {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList),
-            data: Vec::new(),
-        });
-    }
-
     Ok((path_attributes, treat_as_withdraw))
 }
 
@@ -2393,19 +2378,20 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_both_next_hop_and_mp_reach() {
-        // Create attributes with both NEXT_HOP and MP_REACH_NLRI
+    fn test_next_hop_with_mp_reach_ignored() {
+        // RFC 4760 Section 3: when MP_REACH_NLRI is present, NEXT_HOP is ignored.
+        // NEXT_HOP says 10.10.10.10, MP_REACH says 192.168.1.1 -- MP_REACH wins.
         let mut attrs_bytes = Vec::new();
 
-        // NEXT_HOP attribute (flags=0x40, type=3, length=4, value=192.168.1.1)
+        // NEXT_HOP attribute with a different address than MP_REACH
         attrs_bytes.extend_from_slice(&[
             0x40, // flags: TRANSITIVE
             0x03, // type: NEXT_HOP
             0x04, // length: 4
-            192, 168, 1, 1, // next_hop: 192.168.1.1
+            10, 10, 10, 10, // next_hop: 10.10.10.10
         ]);
 
-        // MP_REACH_NLRI attribute using sample data
+        // MP_REACH_NLRI with next_hop 192.168.1.1
         attrs_bytes.extend_from_slice(&[
             0x80,                             // flags: OPTIONAL
             0x0e,                             // type: MP_REACH_NLRI
@@ -2413,17 +2399,17 @@ mod tests {
         ]);
         attrs_bytes.extend_from_slice(MP_REACH_IPV4_SAMPLE);
 
-        // Should fail with MalformedAttributeList
-        let result = read_path_attributes(&attrs_bytes, DEFAULT_FORMAT);
-        assert!(result.is_err());
-        if let Err(ParserError::BgpError { error, .. }) = result {
-            assert_eq!(
-                error,
-                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
-            );
-        } else {
-            panic!("Expected MalformedAttributeList error");
-        }
+        let (attrs, _) = read_path_attributes(&attrs_bytes, DEFAULT_FORMAT).unwrap();
+
+        // MP_REACH next-hop is used, not the NEXT_HOP attribute
+        let mp_reach = attrs.iter().find_map(|attr| match &attr.value {
+            PathAttrValue::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        });
+        assert_eq!(
+            mp_reach.unwrap().next_hop,
+            NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1))
+        );
     }
 
     // RFC 6793 Attribute Discard Tests

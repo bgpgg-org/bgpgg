@@ -14,7 +14,7 @@
 
 use crate::bgp::msg_update::UpdateMessage;
 use crate::log::{info, warn};
-use crate::rib::{Path, PrefixPath, RouteSource};
+use crate::rib::{Path, RouteKey, RoutePath, RouteSource};
 use std::sync::Arc;
 
 use super::{Peer, RouteChanges, SessionType, Withdrawal};
@@ -42,19 +42,23 @@ impl Peer {
         (announced, withdrawn)
     }
 
-    /// Extract withdrawn routes from an UPDATE message.
+    /// Extract withdrawn routes from an UPDATE message (IP + BGP-LS).
     fn process_withdrawals(&self, update_msg: &UpdateMessage) -> Vec<Withdrawal> {
         let mut withdrawn = Vec::new();
         for entry in update_msg.withdrawn_routes() {
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, "withdrawing route");
-            withdrawn.push((entry.prefix, entry.path_id));
+            withdrawn.push((RouteKey::Prefix(entry.prefix), entry.path_id));
+        }
+        for ls_nlri in update_msg.ls_withdrawn_list() {
+            info!(nlri_type = ls_nlri.nlri_type, peer_ip = %self.addr, "withdrawing LS route");
+            withdrawn.push((RouteKey::LinkState(ls_nlri), None));
         }
         withdrawn
     }
 
     /// Build Path objects from UPDATE attributes and extract NLRI.
     /// Pure deserialization — no validation or filtering.
-    fn process_announcements(&self, update_msg: &UpdateMessage) -> Vec<PrefixPath> {
+    fn process_announcements(&self, update_msg: &UpdateMessage) -> Vec<RoutePath> {
         let Some(peer_bgp_id) = self.bgp_id else {
             return vec![];
         };
@@ -79,8 +83,19 @@ impl Peer {
             path_clone.remote_path_id = entry.path_id;
             let path_arc = Arc::new(path_clone);
             info!(prefix = ?entry.prefix, peer_ip = %self.addr, med = ?path_arc.med(), "announcing route");
-            announced.push(PrefixPath {
-                prefix: entry.prefix,
+            announced.push(RoutePath {
+                key: RouteKey::Prefix(entry.prefix),
+                path: path_arc,
+            });
+        }
+
+        // BGP-LS NLRIs share the same Path (same attributes in the UPDATE).
+        // All NLRIs in a single UPDATE share the same path attributes (RFC 4271 Section 4.3).
+        for ls_nlri in update_msg.ls_nlri_list() {
+            let path_arc = Arc::new(path.clone());
+            info!(nlri_type = ls_nlri.nlri_type, peer_ip = %self.addr, "announcing LS route");
+            announced.push(RoutePath {
+                key: RouteKey::LinkState(ls_nlri),
                 path: path_arc,
             });
         }

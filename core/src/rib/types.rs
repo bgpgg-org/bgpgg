@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::bgp::bgpls_nlri::LsNlri;
+use crate::bgp::msg_update_types::Nlri;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
@@ -27,18 +29,49 @@ pub enum RouteKey {
     LinkState(LsNlri),
 }
 
-/// A single prefix with a single path, used for propagation and wire encoding.
+impl RouteKey {
+    pub fn afi_safi(&self) -> AfiSafi {
+        match self {
+            RouteKey::Prefix(prefix) => prefix.afi_safi(),
+            RouteKey::LinkState(_) => AfiSafi::new(Afi::LinkState, Safi::LinkState),
+        }
+    }
+}
+
+/// (route_key, remote_path_id) -- None means remove all paths from peer (non-ADD-PATH)
+pub type Withdrawal = (RouteKey, Option<u32>);
+
+/// Split withdrawals into IP (as Nlri) and LS (as LsNlri) for separate UPDATE encoding.
+pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>) {
+    let mut ip_withdrawn = Vec::new();
+    let mut ls_withdrawn = Vec::new();
+    for (key, path_id) in withdrawn {
+        match key {
+            RouteKey::Prefix(prefix) => {
+                ip_withdrawn.push(Nlri {
+                    prefix: *prefix,
+                    path_id: *path_id,
+                });
+            }
+            RouteKey::LinkState(nlri) => ls_withdrawn.push(nlri.clone()),
+        }
+    }
+    (ip_withdrawn, ls_withdrawn)
+}
+
+/// A single route with a single path, used for propagation and wire encoding.
+/// Carries any address family via RouteKey (IP prefix, BGP-LS NLRI, etc.).
 #[derive(Debug, Clone)]
-pub struct PrefixPath {
-    pub prefix: IpNetwork,
+pub struct RoutePath {
+    pub key: RouteKey,
     pub path: Arc<Path>,
 }
 
-impl PrefixPath {
-    /// Create a new PrefixPath, wrapping the path in an Arc
-    pub fn new(prefix: IpNetwork, path: Path) -> Self {
+impl RoutePath {
+    /// Create a new RoutePath, wrapping the path in an Arc
+    pub fn new(key: RouteKey, path: Path) -> Self {
         Self {
-            prefix,
+            key,
             path: Arc::new(path),
         }
     }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::bgp::multiprotocol::Afi;
-use crate::net::IpNetwork;
 use crate::rib::{Path, Route, RouteKey};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,9 +20,9 @@ use std::sync::Arc;
 /// Adj-RIB-Out: Per-peer output routing table
 ///
 /// Tracks routes actually exported to a specific BGP peer.
-/// Keyed by prefix, then by local_path_id within each prefix.
+/// Keyed by RouteKey (IP prefix or BGP-LS NLRI), then by local_path_id.
 pub struct AdjRibOut {
-    routes: HashMap<IpNetwork, HashMap<u32, Arc<Path>>>,
+    routes: HashMap<RouteKey, HashMap<u32, Arc<Path>>>,
 }
 
 impl AdjRibOut {
@@ -35,29 +34,24 @@ impl AdjRibOut {
 
     /// Insert a route into the adj-rib-out.
     /// The path must have a local_path_id assigned.
-    pub fn insert(&mut self, prefix: IpNetwork, path: Arc<Path>) {
+    pub fn insert(&mut self, key: RouteKey, path: Arc<Path>) {
         let path_id = path.local_path_id.expect("loc-rib path must have ID");
-        self.routes.entry(prefix).or_default().insert(path_id, path);
+        self.routes.entry(key).or_default().insert(path_id, path);
     }
 
-    /// Remove a specific path by prefix and path_id.
-    pub fn remove_path(&mut self, prefix: &IpNetwork, path_id: u32) {
-        if let Some(paths) = self.routes.get_mut(prefix) {
+    /// Remove a specific path by route key and path_id.
+    pub fn remove_path(&mut self, key: &RouteKey, path_id: u32) {
+        if let Some(paths) = self.routes.get_mut(key) {
             paths.remove(&path_id);
             if paths.is_empty() {
-                self.routes.remove(prefix);
+                self.routes.remove(key);
             }
         }
     }
 
     /// Remove all entries for a given AFI.
-    // TODO(bgpls): rekey from IpNetwork to RouteKey so LS routes live here too.
     pub fn clear_afi(&mut self, afi: Afi) {
-        self.routes.retain(|prefix, _| match afi {
-            Afi::Ipv4 => !matches!(prefix, IpNetwork::V4(_)),
-            Afi::Ipv6 => !matches!(prefix, IpNetwork::V6(_)),
-            Afi::LinkState => true, // no LS routes in this table yet
-        });
+        self.routes.retain(|key, _| key.afi_safi().afi != afi);
     }
 
     /// Clear all routes (used on peer disconnect).
@@ -65,28 +59,24 @@ impl AdjRibOut {
         self.routes.clear();
     }
 
-    /// Get all path_ids for a given prefix.
-    pub fn path_ids_for_prefix(&self, prefix: &IpNetwork) -> Vec<u32> {
+    /// Get all path_ids for a given route key.
+    pub fn path_ids(&self, key: &RouteKey) -> Vec<u32> {
         self.routes
-            .get(prefix)
+            .get(key)
             .map(|paths| paths.keys().copied().collect())
             .unwrap_or_default()
     }
 
     /// Get paths that are in adj-rib-out but not in the active set.
     /// Used to identify stale routes that need to be withdrawn.
-    pub fn stale_paths(
-        &self,
-        prefix: &IpNetwork,
-        active: &[crate::rib::PrefixPath],
-    ) -> Vec<Arc<Path>> {
-        let Some(paths) = self.routes.get(prefix) else {
+    pub fn stale_paths(&self, key: &RouteKey, active: &[crate::rib::RoutePath]) -> Vec<Arc<Path>> {
+        let Some(paths) = self.routes.get(key) else {
             return vec![];
         };
 
         let active_ids: HashSet<u32> = active
             .iter()
-            .filter_map(|pp| pp.path.local_path_id)
+            .filter_map(|rp| rp.path.local_path_id)
             .collect();
 
         paths
@@ -96,25 +86,21 @@ impl AdjRibOut {
             .collect()
     }
 
-    /// Get all prefixes for a given AFI.
-    pub fn prefixes_for_afi(&self, afi: Afi) -> Vec<IpNetwork> {
+    /// Get all route keys for a given AFI.
+    pub fn keys_for_afi(&self, afi: Afi) -> Vec<RouteKey> {
         self.routes
             .keys()
-            .filter(|prefix| match afi {
-                Afi::Ipv4 => matches!(prefix, IpNetwork::V4(_)),
-                Afi::Ipv6 => matches!(prefix, IpNetwork::V6(_)),
-                Afi::LinkState => false, // no LS routes in this table yet
-            })
-            .copied()
+            .filter(|key| key.afi_safi().afi == afi)
+            .cloned()
             .collect()
     }
 
-    /// Get all routes grouped by prefix, suitable for gRPC responses.
+    /// Get all routes, suitable for gRPC responses.
     pub fn get_routes(&self) -> Vec<Route> {
         self.routes
             .iter()
-            .map(|(prefix, paths)| Route {
-                key: RouteKey::Prefix(*prefix),
+            .map(|(key, paths)| Route {
+                key: key.clone(),
                 paths: paths.values().cloned().collect(),
             })
             .collect()
@@ -130,6 +116,7 @@ impl Default for AdjRibOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::IpNetwork;
     use crate::test_helpers::create_test_path_with;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -141,46 +128,47 @@ mod tests {
         })
     }
 
-    fn prefix_v4(s: &str) -> IpNetwork {
-        s.parse().unwrap()
+    fn route_key_v4(s: &str) -> RouteKey {
+        let prefix: IpNetwork = s.parse().unwrap();
+        RouteKey::Prefix(prefix)
     }
 
     #[test]
     fn test_insert_and_get_routes() {
         let mut rib = AdjRibOut::new();
-        let prefix = prefix_v4("10.0.0.0/24");
+        let key = route_key_v4("10.0.0.0/24");
         let path = make_path(1);
 
-        rib.insert(prefix, path.clone());
+        rib.insert(key.clone(), path.clone());
 
         let routes = rib.get_routes();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].key, RouteKey::Prefix(prefix));
+        assert_eq!(routes[0].key, key);
         assert_eq!(routes[0].paths.len(), 1);
     }
 
     #[test]
     fn test_remove_path() {
         let mut rib = AdjRibOut::new();
-        let prefix = prefix_v4("10.0.0.0/24");
-        rib.insert(prefix, make_path(1));
-        rib.insert(prefix, make_path(2));
+        let key = route_key_v4("10.0.0.0/24");
+        rib.insert(key.clone(), make_path(1));
+        rib.insert(key.clone(), make_path(2));
 
-        rib.remove_path(&prefix, 1);
-        let ids = rib.path_ids_for_prefix(&prefix);
+        rib.remove_path(&key, 1);
+        let ids = rib.path_ids(&key);
         assert_eq!(ids, vec![2]);
     }
 
     #[test]
-    fn test_path_ids_for_prefix() {
+    fn test_path_ids() {
         let mut rib = AdjRibOut::new();
-        let prefix_a = prefix_v4("10.0.0.0/24");
-        let prefix_b = prefix_v4("10.0.1.0/24");
-        rib.insert(prefix_a, make_path(1));
-        rib.insert(prefix_a, make_path(2));
-        rib.insert(prefix_b, make_path(3));
+        let key_a = route_key_v4("10.0.0.0/24");
+        let key_b = route_key_v4("10.0.1.0/24");
+        rib.insert(key_a.clone(), make_path(1));
+        rib.insert(key_a.clone(), make_path(2));
+        rib.insert(key_b, make_path(3));
 
-        let mut ids = rib.path_ids_for_prefix(&prefix_a);
+        let mut ids = rib.path_ids(&key_a);
         ids.sort();
         assert_eq!(ids, vec![1, 2]);
     }
@@ -188,8 +176,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut rib = AdjRibOut::new();
-        rib.insert(prefix_v4("10.0.0.0/24"), make_path(1));
-        rib.insert(prefix_v4("10.0.1.0/24"), make_path(2));
+        rib.insert(route_key_v4("10.0.0.0/24"), make_path(1));
+        rib.insert(route_key_v4("10.0.1.0/24"), make_path(2));
 
         rib.clear();
         assert_eq!(rib.get_routes().len(), 0);
@@ -197,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_stale_paths() {
-        let prefix = prefix_v4("10.0.0.0/24");
+        let key = route_key_v4("10.0.0.0/24");
 
         struct Case {
             name: &'static str,
@@ -208,7 +196,7 @@ mod tests {
 
         let cases = vec![
             Case {
-                name: "prefix not in rib",
+                name: "key not in rib",
                 in_rib: vec![],
                 active: vec![],
                 expected: vec![],
@@ -242,19 +230,19 @@ mod tests {
         for tc in cases {
             let mut rib = AdjRibOut::new();
             for id in &tc.in_rib {
-                rib.insert(prefix, make_path(*id));
+                rib.insert(key.clone(), make_path(*id));
             }
-            let active: Vec<crate::rib::PrefixPath> = tc
+            let active: Vec<crate::rib::RoutePath> = tc
                 .active
                 .iter()
-                .map(|id| crate::rib::PrefixPath {
-                    prefix,
+                .map(|id| crate::rib::RoutePath {
+                    key: key.clone(),
                     path: make_path(*id),
                 })
                 .collect();
 
             let mut stale_ids: Vec<u32> = rib
-                .stale_paths(&prefix, &active)
+                .stale_paths(&key, &active)
                 .iter()
                 .filter_map(|p| p.local_path_id)
                 .collect();
@@ -270,17 +258,14 @@ mod tests {
     #[test]
     fn test_clear_afi() {
         let mut rib = AdjRibOut::new();
-        let prefix_v4_a = prefix_v4("10.0.0.0/24");
-        let prefix_v4_b = prefix_v4("10.0.1.0/24");
-        rib.insert(prefix_v4_a, make_path(1));
-        rib.insert(prefix_v4_b, make_path(2));
+        rib.insert(route_key_v4("10.0.0.0/24"), make_path(1));
+        rib.insert(route_key_v4("10.0.1.0/24"), make_path(2));
 
         rib.clear_afi(Afi::Ipv4);
         assert_eq!(rib.get_routes().len(), 0);
 
         // Insert new route after clear
-        let new_prefix = prefix_v4("192.168.0.0/24");
-        rib.insert(new_prefix, make_path(3));
+        rib.insert(route_key_v4("192.168.0.0/24"), make_path(3));
         assert_eq!(rib.get_routes().len(), 1);
     }
 }

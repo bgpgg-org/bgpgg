@@ -20,7 +20,7 @@ use crate::peer::PendingRoute;
 use crate::rib::path_id::{BitmapPathIdAllocator, PathIdAllocator};
 use crate::rib::stale::{apply_stale_to_route, mark_stale, StaleStrategy};
 use crate::rib::types::RouteKey;
-use crate::rib::{Path, PathAttrs, PrefixPath, Route, RouteSource};
+use crate::rib::{Path, PathAttrs, Route, RoutePath, RouteSource};
 use crate::rpki::vrp::RpkiValidation;
 use crate::table::PrefixMap;
 use std::collections::{HashMap, HashSet};
@@ -274,44 +274,39 @@ impl<A: PathIdAllocator> LocRib<A> {
         import_policy: F,
     ) -> RouteDelta
     where
-        F: Fn(&IpNetwork, &mut Path) -> bool,
+        F: Fn(&RouteKey, &mut Path) -> bool,
     {
-        let affected: Vec<IpNetwork> = pending_routes
+        let affected: Vec<RouteKey> = pending_routes
             .iter()
-            .map(|route| route.prefix())
+            .map(|route| route.route_key())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let old_best: HashMap<IpNetwork, Arc<Path>> = affected
+        let old_best: HashMap<RouteKey, Arc<Path>> = affected
             .iter()
-            .filter_map(|prefix| {
-                let key = RouteKey::Prefix(*prefix);
-                self.get_best_path(&key)
-                    .map(|best| (*prefix, Arc::clone(best)))
+            .filter_map(|key| {
+                self.get_best_path(key)
+                    .map(|best| (key.clone(), Arc::clone(best)))
             })
             .collect();
 
         for pending_route in pending_routes {
             match pending_route {
-                PendingRoute::Withdraw((prefix, remote_path_id)) => {
-                    info!(prefix = ?prefix, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
-                    self.remove_peer_path(&RouteKey::Prefix(*prefix), peer_ip, *remote_path_id);
+                PendingRoute::Withdraw((key, remote_path_id)) => {
+                    info!(route_key = ?key, peer_ip = %peer_ip, "withdrawing route from Loc-RIB");
+                    self.remove_peer_path(key, peer_ip, *remote_path_id);
                 }
-                PendingRoute::Announce(PrefixPath {
-                    prefix,
+                PendingRoute::Announce(RoutePath {
+                    key,
                     path: path_arc,
                 }) => {
                     let mut path = (**path_arc).clone();
-                    if import_policy(prefix, &mut path) {
-                        info!(prefix = ?prefix, peer_ip = %peer_ip, "adding route to Loc-RIB");
-                        self.upsert_path(RouteKey::Prefix(*prefix), Arc::new(path));
+                    if import_policy(key, &mut path) {
+                        info!(route_key = ?key, peer_ip = %peer_ip, "adding route to Loc-RIB");
+                        self.upsert_path(key.clone(), Arc::new(path));
                     } else {
-                        debug!(prefix = ?prefix, peer_ip = %peer_ip, "route rejected by import policy");
-                        self.remove_peer_path(
-                            &RouteKey::Prefix(*prefix),
-                            peer_ip,
-                            path_arc.remote_path_id,
-                        );
+                        debug!(route_key = ?key, peer_ip = %peer_ip, "route rejected by import policy");
+                        self.remove_peer_path(key, peer_ip, path_arc.remote_path_id);
                     }
                 }
             }
@@ -319,15 +314,12 @@ impl<A: PathIdAllocator> LocRib<A> {
 
         let best_changed = affected
             .iter()
-            .filter(|prefix| {
-                let key = RouteKey::Prefix(**prefix);
-                self.best_path_changed(&key, old_best.get(*prefix))
-            })
-            .map(|prefix| RouteKey::Prefix(*prefix))
+            .filter(|key| self.best_path_changed(key, old_best.get(*key)))
+            .cloned()
             .collect();
         RouteDelta {
             best_changed,
-            changed: affected.into_iter().map(RouteKey::Prefix).collect(),
+            changed: affected,
         }
     }
 }
@@ -493,27 +485,19 @@ impl<A: PathIdAllocator> LocRib<A> {
     }
 
     /// Get paths for an AFI. If `all_paths` is true, returns every path
-    /// (ADD-PATH); otherwise returns only the best path per prefix.
-    /// Returns PrefixPath (IP-only). Phase 5 replaces this with RouteKey-based
-    /// propagation that handles LS routes via get_routes_afi + get_all_paths.
-    pub fn get_paths(&self, afi: Afi, all_paths: bool) -> Vec<PrefixPath> {
+    /// (ADD-PATH); otherwise returns only the best path per route key.
+    pub fn get_paths(&self, afi: Afi, all_paths: bool) -> Vec<RoutePath> {
         let routes: Box<dyn Iterator<Item = &Route>> = match afi {
             Afi::Ipv4 => Box::new(self.ipv4_unicast.values()),
             Afi::Ipv6 => Box::new(self.ipv6_unicast.values()),
-            Afi::LinkState => return Vec::new(),
-        };
-        // IPv4/IPv6 tables only contain Prefix keys; LS filtered out above.
-        // Phase 5 replaces this method with RouteKey-based propagation.
-        let to_prefix = |route: &Route| match route.key {
-            RouteKey::Prefix(ip) => ip,
-            RouteKey::LinkState(_) => unreachable!("LS filtered by early return"),
+            Afi::LinkState => Box::new(self.link_state.values()),
         };
         if all_paths {
             routes
                 .flat_map(|route| {
-                    let prefix = to_prefix(route);
-                    route.paths.iter().map(move |path| PrefixPath {
-                        prefix,
+                    let key = route.key.clone();
+                    route.paths.iter().map(move |path| RoutePath {
+                        key: key.clone(),
                         path: Arc::clone(path),
                     })
                 })
@@ -521,9 +505,8 @@ impl<A: PathIdAllocator> LocRib<A> {
         } else {
             routes
                 .filter_map(|route| {
-                    let prefix = to_prefix(route);
-                    route.paths.first().map(|path| PrefixPath {
-                        prefix,
+                    route.paths.first().map(|path| RoutePath {
+                        key: route.key.clone(),
                         path: Arc::clone(path),
                     })
                 })
@@ -1056,11 +1039,11 @@ mod tests {
 
         let ipv4_routes = loc_rib.get_paths(Afi::Ipv4, false);
         assert_eq!(ipv4_routes.len(), 1);
-        assert_eq!(ipv4_routes[0].prefix, prefix_v4);
+        assert_eq!(ipv4_routes[0].key, RouteKey::Prefix(prefix_v4));
 
         let ipv6_routes = loc_rib.get_paths(Afi::Ipv6, false);
         assert_eq!(ipv6_routes.len(), 1);
-        assert_eq!(ipv6_routes[0].prefix, prefix_v6);
+        assert_eq!(ipv6_routes[0].key, RouteKey::Prefix(prefix_v6));
     }
 
     #[test]
@@ -1336,8 +1319,8 @@ mod tests {
 
         let delta = loc_rib.apply_peer_update(
             peer2,
-            &[PendingRoute::Announce(PrefixPath {
-                prefix,
+            &[PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: worse_path,
             })],
             |_, _| true,
@@ -1390,8 +1373,8 @@ mod tests {
         });
         loc_rib.apply_peer_update(
             peer_ip,
-            &[PendingRoute::Announce(PrefixPath {
-                prefix,
+            &[PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: refreshed_path,
             })],
             |_, _| true,
@@ -1449,8 +1432,8 @@ mod tests {
         });
         loc_rib.apply_peer_update(
             peer_ip,
-            &[PendingRoute::Announce(PrefixPath {
-                prefix,
+            &[PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: refreshed,
             })],
             |_, _| true,
@@ -1514,8 +1497,8 @@ mod tests {
 
         let delta1 = loc_rib.apply_peer_update(
             peer_high,
-            &[PendingRoute::Announce(PrefixPath {
-                prefix,
+            &[PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: path_high,
             })],
             |_prefix, _path| true,
@@ -1532,8 +1515,8 @@ mod tests {
 
         let delta2 = loc_rib.apply_peer_update(
             peer_low,
-            &[PendingRoute::Announce(PrefixPath {
-                prefix,
+            &[PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: path_low,
             })],
             |_prefix, _path| true,
@@ -1596,11 +1579,11 @@ mod tests {
         let remote_path_id = path.remote_path_id;
 
         let routes = vec![
-            PendingRoute::Announce(PrefixPath {
-                prefix,
+            PendingRoute::Announce(RoutePath {
+                key: RouteKey::Prefix(prefix),
                 path: path.clone(),
             }),
-            PendingRoute::Withdraw((prefix, remote_path_id)),
+            PendingRoute::Withdraw((RouteKey::Prefix(prefix), remote_path_id)),
         ];
 
         loc_rib.apply_peer_update(peer_ip, &routes, |_, _| true);
@@ -1774,5 +1757,65 @@ mod tests {
         assert_eq!(loc_rib.get_routes_afi(Afi::LinkState).len(), 2);
         assert!(loc_rib.get_best_path(&key1).is_some());
         assert!(loc_rib.get_best_path(&key2).is_some());
+    }
+
+    #[test]
+    fn test_apply_peer_update_ls_route() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let key = ls_key(test_ls_nlri(1));
+        let path = create_test_path(test_peer_ip(), test_bgp_id());
+
+        let routes = vec![PendingRoute::Announce(RoutePath {
+            key: key.clone(),
+            path,
+        })];
+        let delta = loc_rib.apply_peer_update(test_peer_ip(), &routes, |_key, _path| true);
+
+        assert!(loc_rib.get_best_path(&key).is_some());
+        assert!(delta.best_changed.contains(&key));
+        assert!(delta.changed.contains(&key));
+    }
+
+    #[test]
+    fn test_apply_peer_update_ls_withdrawal() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let key = ls_key(test_ls_nlri(1));
+        let path = create_test_path(test_peer_ip(), test_bgp_id());
+
+        // Insert first
+        let routes = vec![PendingRoute::Announce(RoutePath {
+            key: key.clone(),
+            path,
+        })];
+        loc_rib.apply_peer_update(test_peer_ip(), &routes, |_key, _path| true);
+        assert!(loc_rib.get_best_path(&key).is_some());
+
+        // Withdraw
+        let routes = vec![PendingRoute::Withdraw((key.clone(), None))];
+        let delta = loc_rib.apply_peer_update(test_peer_ip(), &routes, |_key, _path| true);
+
+        assert!(loc_rib.get_best_path(&key).is_none());
+        assert!(delta.best_changed.contains(&key));
+    }
+
+    #[test]
+    fn test_get_paths_ls() {
+        let mut loc_rib = LocRib::with_path_ids(FakeAllocator::new());
+        let key1 = ls_key(test_ls_nlri(1));
+        let key2 = ls_key(test_ls_nlri(2));
+
+        loc_rib.upsert_path(
+            key1.clone(),
+            create_test_path(test_peer_ip(), test_bgp_id()),
+        );
+        loc_rib.upsert_path(
+            key2.clone(),
+            create_test_path(test_peer_ip(), test_bgp_id()),
+        );
+
+        let paths = loc_rib.get_paths(Afi::LinkState, false);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|rp| rp.key == key1));
+        assert!(paths.iter().any(|rp| rp.key == key2));
     }
 }

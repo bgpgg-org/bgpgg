@@ -403,6 +403,7 @@ impl Path {
 mod tests {
     use super::*;
     use crate::bgp::DEFAULT_FORMAT;
+    use crate::net::IpNetwork;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -715,7 +716,8 @@ mod tests {
                 ls_attr: None,
             },
         };
-        let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
+        let prefix: IpNetwork = "10.0.0.0/24".parse().unwrap();
+        let update = UpdateMessage::new(&path, vec![prefix], DEFAULT_FORMAT);
         let path = Path::from_update_msg(&update, source, false);
         assert!(path.is_some());
         let path = path.unwrap();
