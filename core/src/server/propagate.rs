@@ -120,6 +120,7 @@ impl BgpServer {
             (Afi::Ipv4, Safi::Unicast)
                 | (Afi::Ipv6, Safi::Unicast)
                 | (Afi::LinkState, Safi::LinkState)
+                | (Afi::LinkState, Safi::LinkStateVpn)
         ) {
             warn!(?afi, ?safi, "unsupported AFI/SAFI");
             return;
@@ -216,9 +217,9 @@ impl BgpServer {
             enhanced_rr: false,
         };
 
-        // Send withdrawals (split IP and LS into separate UPDATEs)
+        // Send withdrawals (split IP, LS, and LS-VPN into separate UPDATEs)
         if !withdrawn.is_empty() {
-            let (ip_withdrawn, ls_withdrawn) = split_withdrawals(withdrawn);
+            let (ip_withdrawn, ls_withdrawn, ls_vpn_withdrawn) = split_withdrawals(withdrawn);
             if !ip_withdrawn.is_empty() {
                 let update = UpdateMessage::new_withdraw(ip_withdrawn, format);
                 self.broadcast_bmp(BmpOp::RouteMonitoring {
@@ -228,14 +229,20 @@ impl BgpServer {
                     update,
                 });
             }
-            if !ls_withdrawn.is_empty() {
-                let update = UpdateMessage::new_ls_withdraw(ls_withdrawn, format);
-                self.broadcast_bmp(BmpOp::RouteMonitoring {
-                    peer_ip,
-                    peer_as,
-                    peer_bgp_id,
-                    update,
-                });
+            let ls_families = [
+                (ls_withdrawn, AfiSafi::new(Afi::LinkState, Safi::LinkState)),
+                (ls_vpn_withdrawn, AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn)),
+            ];
+            for (batch, afi_safi) in ls_families {
+                if !batch.is_empty() {
+                    let update = UpdateMessage::new_ls_withdraw(batch, afi_safi, format);
+                    self.broadcast_bmp(BmpOp::RouteMonitoring {
+                        peer_ip,
+                        peer_as,
+                        peer_bgp_id,
+                        update,
+                    });
+                }
             }
         }
 

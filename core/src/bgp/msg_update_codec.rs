@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::bgpls_attr::parse_ls_attr;
-use super::bgpls_nlri::{parse_ls_nlri_list, write_ls_nlri_list};
+use super::bgpls_nlri::{parse_ls_nlri_list, write_ls_nlri_list, RD_LEN};
 use super::msg::MessageFormat;
 use super::msg_notification::{BgpError, UpdateMessageError};
 use super::msg_update::{TOTAL_ATTR_LENGTH_SIZE, WITHDRAWN_ROUTES_LENGTH_SIZE};
@@ -214,18 +214,28 @@ fn optional_attribute_error(attr_bytes: &[u8]) -> ParserError {
 
 fn validate_mp_reach_buffer(
     afi: &Afi,
+    safi: &Safi,
     next_hop_len: usize,
     bytes: &[u8],
     header_size: usize,
     reserved_size: usize,
 ) -> Result<(), ParserError> {
-    // Validate next hop length based on AFI.
+    // Validate next hop length based on AFI/SAFI.
     // IPv4=4, IPv6=16 or 32 (global or global+link-local per RFC 2545).
     // BGP-LS uses IPv4 or IPv6 next hop based on session type (RFC 9552 Section 5.5).
-    let valid = match afi {
-        Afi::Ipv4 => next_hop_len == 4,
-        Afi::Ipv6 => next_hop_len == 16 || next_hop_len == 32,
-        Afi::LinkState => next_hop_len == 4 || next_hop_len == 16 || next_hop_len == 32,
+    // BGP-LS-VPN (SAFI 72) prepends an 8-byte all-zero RD to the next hop.
+    let valid = match (afi, safi) {
+        (Afi::Ipv4, Safi::Unicast | Safi::Multicast | Safi::MplsLabel) => next_hop_len == 4,
+        (Afi::Ipv6, Safi::Unicast | Safi::Multicast | Safi::MplsLabel) => {
+            next_hop_len == 16 || next_hop_len == 32
+        }
+        (Afi::LinkState, Safi::LinkStateVpn) => {
+            next_hop_len == RD_LEN + 4 || next_hop_len == RD_LEN + 16
+        }
+        (Afi::LinkState, Safi::LinkState) => {
+            next_hop_len == 4 || next_hop_len == 16 || next_hop_len == 32
+        }
+        _ => false,
     };
     if !valid {
         return Err(ParserError::BgpError {
@@ -267,9 +277,12 @@ fn parse_mp_next_hop(
         Afi::Ipv6 => Ok(parse_ipv6_next_hop(bytes, offset)),
         // RFC 9552 Section 5.5: BGP-LS next-hop has no forwarding semantic,
         // so skip unicast validation (e.g. 0.0.0.0 is valid).
+        // VPN (SAFI 72) prepends 8-byte all-zero RD: skip it to reach the address.
         Afi::LinkState => match next_hop_len {
             4 => Ok(parse_ipv4_next_hop(bytes, offset)),
+            n if n == RD_LEN + 4 => Ok(parse_ipv4_next_hop(bytes, offset + RD_LEN)),
             16 | 32 => Ok(parse_ipv6_next_hop(bytes, offset)),
+            n if n == RD_LEN + 16 => Ok(parse_ipv6_next_hop(bytes, offset + RD_LEN)),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
                 data: Vec::new(),
@@ -642,7 +655,7 @@ pub(super) fn read_attr_mp_reach_nlri(
     // Resolve ADD-PATH from the AFI/SAFI declared in this attribute
     let add_path = format.add_path.contains(&AfiSafi::new(afi, safi));
 
-    validate_mp_reach_buffer(&afi, next_hop_len, bytes, HEADER_SIZE, RESERVED_SIZE)?;
+    validate_mp_reach_buffer(&afi, &safi, next_hop_len, bytes, HEADER_SIZE, RESERVED_SIZE)?;
 
     let next_hop = parse_mp_next_hop(bytes, HEADER_SIZE, afi, next_hop_len)?;
     let cursor = HEADER_SIZE + next_hop_len;
@@ -651,7 +664,7 @@ pub(super) fn read_attr_mp_reach_nlri(
     let (nlri, ls_nlri) = match afi {
         Afi::Ipv4 => (parse_nlri_list(nlri_bytes, add_path)?, vec![]),
         Afi::Ipv6 => (parse_nlri_v6_list(nlri_bytes, add_path)?, vec![]),
-        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes)?),
+        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes, safi)?),
     };
 
     Ok(MpReachNlri {
@@ -684,7 +697,7 @@ pub(super) fn read_attr_mp_unreach_nlri(
     let (withdrawn_routes, ls_withdrawn) = match afi {
         Afi::Ipv4 => (parse_nlri_list(nlri_bytes, add_path)?, vec![]),
         Afi::Ipv6 => (parse_nlri_v6_list(nlri_bytes, add_path)?, vec![]),
-        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes)?),
+        Afi::LinkState => (vec![], parse_ls_nlri_list(nlri_bytes, safi)?),
     };
 
     Ok(MpUnreachNlri {
@@ -704,14 +717,27 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
     // SAFI (1 byte)
     bytes.push(mp_reach.safi as u8);
 
-    // Next hop length and address
+    let vpn = mp_reach.safi == Safi::LinkStateVpn;
+
+    // Next hop length and address.
+    // RFC 9552 Section 5.5: VPN SAFI prepends 8-byte all-zero RD to next hop.
     match &mp_reach.next_hop {
         NextHopAddr::Ipv4(addr) => {
-            bytes.push(4); // Length
+            if vpn {
+                bytes.push((RD_LEN + 4) as u8);
+                bytes.extend_from_slice(&[0u8; RD_LEN]);
+            } else {
+                bytes.push(4);
+            }
             bytes.extend_from_slice(&addr.octets());
         }
         NextHopAddr::Ipv6(addr) => {
-            bytes.push(16); // Length (global only)
+            if vpn {
+                bytes.push((RD_LEN + 16) as u8);
+                bytes.extend_from_slice(&[0u8; RD_LEN]);
+            } else {
+                bytes.push(16);
+            }
             bytes.extend_from_slice(&addr.octets());
         }
     }
@@ -2126,6 +2152,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            None,
         )];
 
         let mp_reach = MpReachNlri {
@@ -2164,6 +2191,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            None,
         )];
 
         let mp_unreach = MpUnreachNlri {

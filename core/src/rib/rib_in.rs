@@ -90,7 +90,9 @@ impl AdjRibIn {
             Some(af) => match (af.afi, af.safi) {
                 (Afi::Ipv4, Safi::Unicast) => self.ipv4_unicast.values().cloned().collect(),
                 (Afi::Ipv6, Safi::Unicast) => self.ipv6_unicast.values().cloned().collect(),
-                (Afi::LinkState, Safi::LinkState) => self.link_state.values().cloned().collect(),
+                (Afi::LinkState, Safi::LinkState | Safi::LinkStateVpn) => {
+                    self.link_state.values().cloned().collect()
+                }
                 _ => vec![],
             },
             None => {
@@ -112,7 +114,7 @@ impl AdjRibIn {
         match (family.afi, family.safi) {
             (Afi::Ipv4, Safi::Unicast) => self.ipv4_unicast.len(),
             (Afi::Ipv6, Safi::Unicast) => self.ipv6_unicast.len(),
-            (Afi::LinkState, Safi::LinkState) => self.link_state.len(),
+            (Afi::LinkState, Safi::LinkState | Safi::LinkStateVpn) => self.link_state.len(),
             _ => 0,
         }
     }
@@ -135,7 +137,7 @@ impl AdjRibIn {
                 self.ipv6_unicast.clear();
                 count
             }
-            (Afi::LinkState, Safi::LinkState) => {
+            (Afi::LinkState, Safi::LinkState | Safi::LinkStateVpn) => {
                 let count = self.link_state.len();
                 self.link_state.clear();
                 count
@@ -545,6 +547,7 @@ mod tests {
                     ..NodeDescriptor::default()
                 },
             },
+            None,
         );
         let ls_path = create_test_path(test_peer_ip(), test_bgp_id());
         rib_in.add_route(RouteKey::LinkState(nlri), ls_path);

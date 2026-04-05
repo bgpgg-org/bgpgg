@@ -73,6 +73,7 @@ pub enum Safi {
     Multicast = 2,
     MplsLabel = 4,
     LinkState = 71,
+    LinkStateVpn = 72,
 }
 
 impl From<Safi> for u8 {
@@ -102,6 +103,7 @@ impl fmt::Display for Safi {
             Safi::Multicast => write!(f, "Multicast"),
             Safi::MplsLabel => write!(f, "MPLS-labeled"),
             Safi::LinkState => write!(f, "LinkState"),
+            Safi::LinkStateVpn => write!(f, "LinkState-VPN"),
         }
     }
 }
@@ -115,6 +117,7 @@ impl TryFrom<u8> for Safi {
             2 => Ok(Safi::Multicast),
             4 => Ok(Safi::MplsLabel),
             71 => Ok(Safi::LinkState),
+            72 => Ok(Safi::LinkStateVpn),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::OptionalAttributeError),
                 data: Vec::new(),
@@ -193,6 +196,7 @@ mod tests {
         assert_eq!(Safi::try_from(2).unwrap(), Safi::Multicast);
         assert_eq!(Safi::try_from(4).unwrap(), Safi::MplsLabel);
         assert_eq!(Safi::try_from(71).unwrap(), Safi::LinkState);
+        assert_eq!(Safi::try_from(72).unwrap(), Safi::LinkStateVpn);
         assert!(Safi::try_from(99).is_err());
     }
 
@@ -237,6 +241,7 @@ mod tests {
             AfiSafi::new(Afi::Ipv4, Safi::Multicast),
             AfiSafi::new(Afi::Ipv6, Safi::Multicast),
             AfiSafi::new(Afi::LinkState, Safi::LinkState),
+            AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn),
         ];
         for afi_safi in cases {
             let json = serde_json::to_string(&afi_safi).unwrap();
@@ -254,6 +259,7 @@ mod tests {
         assert_eq!(format!("{}", Safi::Multicast), "Multicast");
         assert_eq!(format!("{}", Safi::MplsLabel), "MPLS-labeled");
         assert_eq!(format!("{}", Safi::LinkState), "LinkState");
+        assert_eq!(format!("{}", Safi::LinkStateVpn), "LinkState-VPN");
 
         let afi_safi = AfiSafi::new(Afi::Ipv6, Safi::Unicast);
         assert_eq!(format!("{}", afi_safi), "IPv6/Unicast");

@@ -603,9 +603,9 @@ impl BgpServer {
     /// AFI/SAFI is absent from GR cap, or no GR cap at all.
     fn sweep_gr_stale(&mut self, peer_ip: IpAddr, capabilities: &PeerCapabilities) -> RouteDelta {
         let stale = self.loc_rib.stale_afi_safis(peer_ip);
-        let to_clear = match &capabilities.graceful_restart {
+        let to_clear: Vec<AfiSafi> = match &capabilities.graceful_restart {
             Some(cap) => cap.filter_stale(stale),
-            None => stale,
+            None => stale.into_iter().collect(),
         };
         self.loc_rib.remove_peer_routes_stale(peer_ip, &to_clear)
     }
@@ -616,10 +616,10 @@ impl BgpServer {
         let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             return RouteDelta::new();
         };
-        let stale = peer_info.llgr_timers.keys();
-        let to_clear = match &capabilities.llgr {
+        let stale: HashSet<AfiSafi> = peer_info.llgr_timers.keys().into_iter().collect();
+        let to_clear: Vec<AfiSafi> = match &capabilities.llgr {
             Some(cap) => cap.filter_stale(stale),
-            None => stale,
+            None => stale.into_iter().collect(),
         };
         for afi_safi in &to_clear {
             peer_info.llgr_timers.cancel(afi_safi);

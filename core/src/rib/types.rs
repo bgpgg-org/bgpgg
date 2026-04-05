@@ -14,7 +14,7 @@
 
 use crate::bgp::bgpls_nlri::LsNlri;
 use crate::bgp::msg_update_types::Nlri;
-use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use crate::bgp::multiprotocol::{Afi, AfiSafi};
 use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
@@ -33,7 +33,7 @@ impl RouteKey {
     pub fn afi_safi(&self) -> AfiSafi {
         match self {
             RouteKey::Prefix(prefix) => prefix.afi_safi(),
-            RouteKey::LinkState(_) => AfiSafi::new(Afi::LinkState, Safi::LinkState),
+            RouteKey::LinkState(nlri) => AfiSafi::new(Afi::LinkState, nlri.safi()),
         }
     }
 }
@@ -41,10 +41,12 @@ impl RouteKey {
 /// (route_key, remote_path_id) -- None means remove all paths from peer (non-ADD-PATH)
 pub type Withdrawal = (RouteKey, Option<u32>);
 
-/// Split withdrawals into IP (as Nlri) and LS (as LsNlri) for separate UPDATE encoding.
-pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>) {
+/// Split withdrawals into IP (as Nlri), LS (SAFI 71), and LS-VPN (SAFI 72)
+/// for separate UPDATE encoding.
+pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>, Vec<LsNlri>) {
     let mut ip_withdrawn = Vec::new();
     let mut ls_withdrawn = Vec::new();
+    let mut ls_vpn_withdrawn = Vec::new();
     for (key, path_id) in withdrawn {
         match key {
             RouteKey::Prefix(prefix) => {
@@ -53,10 +55,16 @@ pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>) {
                     path_id: *path_id,
                 });
             }
-            RouteKey::LinkState(nlri) => ls_withdrawn.push(nlri.clone()),
+            RouteKey::LinkState(nlri) => {
+                if nlri.is_vpn() {
+                    ls_vpn_withdrawn.push(nlri.clone());
+                } else {
+                    ls_withdrawn.push(nlri.clone());
+                }
+            }
         }
     }
-    (ip_withdrawn, ls_withdrawn)
+    (ip_withdrawn, ls_withdrawn, ls_vpn_withdrawn)
 }
 
 /// A single route with a single path, used for propagation and wire encoding.

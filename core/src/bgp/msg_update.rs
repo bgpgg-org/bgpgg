@@ -87,14 +87,14 @@ impl UpdateMessage {
     }
 
     /// Create an UPDATE for BGP-LS routes. NLRIs go in MP_REACH_NLRI with AFI 16388.
-    pub fn new_ls(path: &Path, ls_nlri: Vec<LsNlri>, format: MessageFormat) -> Self {
+    pub fn new_ls(path: &Path, ls_nlri: Vec<LsNlri>, afi_safi: AfiSafi, format: MessageFormat) -> Self {
         let mut path_attributes = Self::build_common_path_attrs(path);
 
         path_attributes.push(PathAttribute {
             flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
             value: PathAttrValue::MpReachNlri(MpReachNlri {
-                afi: Afi::LinkState,
-                safi: Safi::LinkState,
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
                 next_hop: *path.next_hop(),
                 nlri: vec![],
                 ls_nlri,
@@ -155,12 +155,12 @@ impl UpdateMessage {
     }
 
     /// Create a withdrawal UPDATE for BGP-LS routes via MP_UNREACH_NLRI.
-    pub fn new_ls_withdraw(ls_withdrawn: Vec<LsNlri>, format: MessageFormat) -> Self {
+    pub fn new_ls_withdraw(ls_withdrawn: Vec<LsNlri>, afi_safi: AfiSafi, format: MessageFormat) -> Self {
         let path_attributes = vec![PathAttribute {
             flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
             value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::LinkState,
-                safi: Safi::LinkState,
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
                 withdrawn_routes: vec![],
                 ls_withdrawn,
             }),
@@ -2238,6 +2238,7 @@ mod tests {
                                 nlri_type: 1,
                                 raw: vec![1, 2, 3],
                                 body: None,
+                                route_distinguisher: None,
                             }],
                         }),
                     }],
@@ -2544,6 +2545,7 @@ mod tests {
                         ..NodeDescriptor::default()
                     },
                 },
+                None,
             );
 
             let mut path = test_path();
@@ -2553,7 +2555,8 @@ mod tests {
                 ))]));
             }
 
-            let msg = UpdateMessage::new_ls(&path, vec![ls_nlri.clone()], DEFAULT_FORMAT);
+            let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+            let msg = UpdateMessage::new_ls(&path, vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
 
             assert_eq!(msg.ls_nlri_list().len(), 1, "case: {}", tc.name);
             assert_eq!(msg.ls_attr().is_some(), tc.has_ls_attr, "case: {}", tc.name);
@@ -2591,9 +2594,11 @@ mod tests {
                     ..NodeDescriptor::default()
                 },
             },
+            None,
         );
 
-        let msg = UpdateMessage::new_ls_withdraw(vec![ls_nlri.clone()], DEFAULT_FORMAT);
+        let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+        let msg = UpdateMessage::new_ls_withdraw(vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
 
         let decoded = UpdateMessage::from_bytes(msg.to_bytes(), DEFAULT_FORMAT).unwrap();
         let decoded_ls = decoded.ls_withdrawn_list();

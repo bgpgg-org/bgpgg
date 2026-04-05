@@ -79,7 +79,7 @@ impl AnnouncementBatch {
                         _ => None,
                     })
                     .collect();
-                UpdateMessage::new_ls(&self.path, ls_nlri, format)
+                UpdateMessage::new_ls(&self.path, ls_nlri, self.afi_safi, format)
             }
         }
     }
@@ -378,13 +378,13 @@ fn send_update(ctx: &PeerExportContext, msg: UpdateMessage, count: usize, label:
     }
 }
 
-/// Send withdrawal messages to a peer, splitting IP and LS into separate UPDATEs.
+/// Send withdrawal messages to a peer, splitting IP, LS, and LS-VPN into separate UPDATEs.
 fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Withdrawal>, format: MessageFormat) {
     if withdrawn.is_empty() {
         return;
     }
 
-    let (ip_withdrawn, ls_withdrawn) = split_withdrawals(&withdrawn);
+    let (ip_withdrawn, ls_withdrawn, ls_vpn_withdrawn) = split_withdrawals(&withdrawn);
 
     if !ip_withdrawn.is_empty() {
         let count = ip_withdrawn.len();
@@ -396,13 +396,26 @@ fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Withdrawal>, format:
         );
     }
 
+    let ls_afi_safi = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+    let ls_vpn_afi_safi = AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn);
+
     if !ls_withdrawn.is_empty() {
         let count = ls_withdrawn.len();
         send_update(
             ctx,
-            UpdateMessage::new_ls_withdraw(ls_withdrawn, format),
+            UpdateMessage::new_ls_withdraw(ls_withdrawn, ls_afi_safi, format),
             count,
             "LS withdrawals",
+        );
+    }
+
+    if !ls_vpn_withdrawn.is_empty() {
+        let count = ls_vpn_withdrawn.len();
+        send_update(
+            ctx,
+            UpdateMessage::new_ls_withdraw(ls_vpn_withdrawn, ls_vpn_afi_safi, format),
+            count,
+            "LS-VPN withdrawals",
         );
     }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::multiprotocol::Safi;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -155,12 +156,41 @@ impl LsProtocolId {
     }
 }
 
+/// RFC 4364: Route Distinguisher length in bytes.
+pub const RD_LEN: usize = 8;
+
+/// RFC 4364: 8-byte Route Distinguisher used to create distinct VPN-scoped routes.
+pub type RouteDistinguisher = [u8; RD_LEN];
+
 /// A single BGP-LS NLRI. Type + raw bytes always present; body parsed for known types.
+///
+/// For SAFI 72 (BGP-LS-VPN), the NLRI body is prefixed with an 8-byte Route
+/// Distinguisher per RFC 9552 Section 5.2 Figure 6.  The `raw` field always
+/// stores the body *without* the RD; the RD is kept separately so that the
+/// same encode/decode helpers work for both SAFIs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LsNlri {
     pub nlri_type: u16,
     pub raw: Vec<u8>,
     pub body: Option<LsNlriBody>,
+    /// Route Distinguisher for SAFI 72 NLRIs. None for SAFI 71.
+    pub route_distinguisher: Option<RouteDistinguisher>,
+}
+
+impl LsNlri {
+    /// True when this NLRI carries a Route Distinguisher (SAFI 72 / BGP-LS-VPN).
+    pub fn is_vpn(&self) -> bool {
+        self.route_distinguisher.is_some()
+    }
+
+    /// Returns the SAFI for this NLRI: LinkStateVpn if it has an RD, LinkState otherwise.
+    pub fn safi(&self) -> Safi {
+        if self.is_vpn() {
+            Safi::LinkStateVpn
+        } else {
+            Safi::LinkState
+        }
+    }
 }
 
 /// Parsed NLRI body: Protocol-ID + Identifier + type-specific descriptors.
@@ -248,10 +278,12 @@ fn make_parser_error() -> ParserError {
 /// Parse a list of BGP-LS NLRIs from MP_REACH_NLRI or MP_UNREACH_NLRI bytes.
 ///
 /// Each NLRI: NLRI Type (2) + Total NLRI Length (2) + body.
+/// For SAFI 72 (LinkStateVpn), each body starts with an 8-byte Route Distinguisher
+/// before the Protocol-ID + Identifier + descriptor TLVs (RFC 9552 Section 5.2).
 /// Unknown NLRI types are preserved as opaque per RFC 9552 Section 5.2.
 /// Returns Err only for unrecoverable length errors that prevent parsing
 /// the rest of the UPDATE.
-pub fn parse_ls_nlri_list(bytes: &[u8]) -> Result<Vec<LsNlri>, ParserError> {
+pub fn parse_ls_nlri_list(bytes: &[u8], safi: Safi) -> Result<Vec<LsNlri>, ParserError> {
     let mut entries = Vec::new();
     let mut cursor = 0;
 
@@ -278,11 +310,29 @@ pub fn parse_ls_nlri_list(bytes: &[u8]) -> Result<Vec<LsNlri>, ParserError> {
             return Err(make_parser_error());
         }
 
-        let body = &bytes[cursor..cursor + total_len];
+        let full_body = &bytes[cursor..cursor + total_len];
 
-        let raw = body.to_vec();
+        // For VPN SAFI, strip the 8-byte Route Distinguisher prefix.
+        let (route_distinguisher, ls_body) = if safi == Safi::LinkStateVpn {
+            if full_body.len() < RD_LEN {
+                warn!(
+                    nlri_type,
+                    len = full_body.len(),
+                    "BGP-LS VPN NLRI too short for Route Distinguisher"
+                );
+                cursor += total_len;
+                continue;
+            }
+            let mut rd = RouteDistinguisher::default();
+            rd.copy_from_slice(&full_body[..RD_LEN]);
+            (Some(rd), &full_body[RD_LEN..])
+        } else {
+            (None, full_body)
+        };
+
+        let raw = ls_body.to_vec();
         let parsed = match LsNlriType::from_u16(nlri_type) {
-            Some(known_type) => match parse_ls_nlri_body(known_type, body) {
+            Some(known_type) => match parse_ls_nlri_body(known_type, ls_body) {
                 Ok(nlri) => Some(nlri),
                 Err(nlri_err) => {
                     warn!(
@@ -299,6 +349,7 @@ pub fn parse_ls_nlri_list(bytes: &[u8]) -> Result<Vec<LsNlri>, ParserError> {
             nlri_type,
             raw,
             body: parsed,
+            route_distinguisher,
         });
 
         cursor += total_len;
@@ -648,23 +699,34 @@ fn parse_prefix_descriptor(
 }
 
 /// Encode a list of BGP-LS NLRI entries to wire bytes for MP_REACH/MP_UNREACH.
+/// For VPN NLRIs with a Route Distinguisher, the RD is prepended to the body
+/// and included in the Total NLRI Length.
 pub fn write_ls_nlri_list(entries: &[LsNlri]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for entry in entries {
+        let rd_len = if entry.route_distinguisher.is_some() {
+            RD_LEN
+        } else {
+            0
+        };
         bytes.extend_from_slice(&entry.nlri_type.to_be_bytes());
-        bytes.extend_from_slice(&(entry.raw.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&((entry.raw.len() + rd_len) as u16).to_be_bytes());
+        if let Some(rd) = &entry.route_distinguisher {
+            bytes.extend_from_slice(rd);
+        }
         bytes.extend_from_slice(&entry.raw);
     }
     bytes
 }
 
 /// Build an LsNlri from structured data (for gRPC injection / tests).
-/// Encodes the body to set the `raw` field.
+/// Encodes the body to set the `raw` field. Pass a Route Distinguisher for SAFI 72.
 pub fn build_ls_nlri(
     nlri_type: LsNlriType,
     protocol_id: LsProtocolId,
     identifier: u64,
     descriptors: LsDescriptors,
+    route_distinguisher: Option<RouteDistinguisher>,
 ) -> LsNlri {
     let protocol_id = protocol_id as u8;
     let raw = encode_ls_nlri_body(protocol_id, identifier, &descriptors);
@@ -676,6 +738,7 @@ pub fn build_ls_nlri(
             identifier,
             descriptors,
         }),
+        route_distinguisher,
     }
 }
 
@@ -814,7 +877,7 @@ mod tests {
 
     fn round_trip(entries: &[LsNlri]) -> Vec<LsNlri> {
         let wire = write_ls_nlri_list(entries);
-        parse_ls_nlri_list(&wire).expect("round-trip parse failed")
+        parse_ls_nlri_list(&wire, Safi::LinkState).expect("round-trip parse failed")
     }
 
     /// Wrap raw NLRI body bytes in the wire framing for parse_ls_nlri_list.
@@ -1051,7 +1114,13 @@ mod tests {
         ];
 
         for (name, nlri_type, protocol_id, identifier, descriptors) in cases {
-            let entry = build_ls_nlri(nlri_type, protocol_id, identifier, descriptors.clone());
+            let entry = build_ls_nlri(
+                nlri_type,
+                protocol_id,
+                identifier,
+                descriptors.clone(),
+                None,
+            );
             let parsed = round_trip(std::slice::from_ref(&entry));
             let body = unwrap_body(&parsed[0]);
             assert_eq!(parsed[0].nlri_type, nlri_type as u16, "{name}: nlri_type");
@@ -1067,6 +1136,7 @@ mod tests {
             nlri_type: 99,
             raw: vec![0xDE, 0xAD, 0xBE, 0xEF],
             body: None,
+            route_distinguisher: None,
         };
         let parsed = round_trip(std::slice::from_ref(&opaque));
         assert_eq!(parsed[0].nlri_type, 99);
@@ -1090,6 +1160,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            None,
         );
         let parsed = round_trip(std::slice::from_ref(&entry));
         match &unwrap_body(&parsed[0]).descriptors {
@@ -1118,6 +1189,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            None,
         );
         let parsed = round_trip(std::slice::from_ref(&entry));
         match &unwrap_body(&parsed[0]).descriptors {
@@ -1141,6 +1213,7 @@ mod tests {
                 LsDescriptors::Node {
                     local_node: sample_node(65001, &[10, 0, 0, 1]),
                 },
+                None,
             ),
             build_ls_nlri(
                 LsNlriType::PrefixV4,
@@ -1153,11 +1226,13 @@ mod tests {
                         ..Default::default()
                     },
                 },
+                None,
             ),
             LsNlri {
                 nlri_type: 42,
                 raw: vec![0xFF],
                 body: None,
+                route_distinguisher: None,
             },
         ];
 
@@ -1260,6 +1335,7 @@ mod tests {
             LsDescriptors::Node {
                 local_node: sample_node(65002, &[10, 0, 0, 2]),
             },
+            None,
         );
 
         let mut wire = Vec::new();
@@ -1270,7 +1346,7 @@ mod tests {
         wire.extend_from_slice(&(good_entry.raw.len() as u16).to_be_bytes());
         wire.extend_from_slice(&good_entry.raw);
 
-        let parsed = parse_ls_nlri_list(&wire).expect("list-level should succeed");
+        let parsed = parse_ls_nlri_list(&wire, Safi::LinkState).expect("list-level should succeed");
         assert_eq!(parsed.len(), 2, "both NLRIs preserved");
         assert!(parsed[0].body.is_none(), "bad NLRI not parsed");
         assert_eq!(unwrap_body(&parsed[1]).identifier, 2);
@@ -1368,7 +1444,7 @@ mod tests {
 
         for (name, nlri_type, body) in cases {
             let wire = wrap_nlri_raw(nlri_type, body);
-            let parsed = parse_ls_nlri_list(&wire).unwrap_or_else(|_| {
+            let parsed = parse_ls_nlri_list(&wire, Safi::LinkState).unwrap_or_else(|_| {
                 panic!("{name}: list-level parse should succeed");
             });
             assert_eq!(parsed.len(), 1, "{name}: NLRI preserved for propagation");
@@ -1391,7 +1467,7 @@ mod tests {
         ];
 
         for (name, wire) in cases {
-            let result = parse_ls_nlri_list(&wire);
+            let result = parse_ls_nlri_list(&wire, Safi::LinkState);
             if name == "empty input" {
                 assert!(result.expect("empty should be ok").is_empty(), "{name}");
             } else {

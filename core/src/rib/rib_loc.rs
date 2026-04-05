@@ -282,7 +282,9 @@ impl<A: PathIdAllocator> LocRib<A> {
             Some(af) => match (af.afi, af.safi) {
                 (Afi::Ipv4, Safi::Unicast) => self.ipv4_unicast.values().collect(),
                 (Afi::Ipv6, Safi::Unicast) => self.ipv6_unicast.values().collect(),
-                (Afi::LinkState, Safi::LinkState) => self.link_state.values().collect(),
+                (Afi::LinkState, Safi::LinkState | Safi::LinkStateVpn) => {
+                    self.link_state.values().collect()
+                }
                 _ => vec![],
             },
             None => self
@@ -559,7 +561,9 @@ impl<A: PathIdAllocator> LocRib<A> {
         let count = match (afi_safi.afi, afi_safi.safi) {
             (Afi::Ipv4, Safi::Unicast) => mark_stale(self.ipv4_unicast.values_mut(), peer_ip),
             (Afi::Ipv6, Safi::Unicast) => mark_stale(self.ipv6_unicast.values_mut(), peer_ip),
-            (Afi::LinkState, Safi::LinkState) => mark_stale(self.link_state.values_mut(), peer_ip),
+            (Afi::LinkState, Safi::LinkState | Safi::LinkStateVpn) => {
+                mark_stale(self.link_state.values_mut(), peer_ip)
+            }
             _ => 0,
         };
 
@@ -634,31 +638,24 @@ impl<A: PathIdAllocator> LocRib<A> {
     }
 
     /// Get all AFI/SAFIs that have stale paths for a peer
-    pub fn stale_afi_safis(&self, peer_ip: IpAddr) -> Vec<AfiSafi> {
+    pub fn stale_afi_safis(&self, peer_ip: IpAddr) -> HashSet<AfiSafi> {
         let has_stale = |route: &Route| {
             route
                 .paths
                 .iter()
                 .any(|p| p.is_from_peer(peer_ip) && p.stale)
         };
-        let mut result = Vec::new();
+        let mut result = HashSet::new();
         if self.ipv4_unicast.values().any(has_stale) {
-            result.push(AfiSafi {
-                afi: Afi::Ipv4,
-                safi: Safi::Unicast,
-            });
+            result.insert(AfiSafi::new(Afi::Ipv4, Safi::Unicast));
         }
         if self.ipv6_unicast.values().any(has_stale) {
-            result.push(AfiSafi {
-                afi: Afi::Ipv6,
-                safi: Safi::Unicast,
-            });
+            result.insert(AfiSafi::new(Afi::Ipv6, Safi::Unicast));
         }
-        if self.link_state.values().any(has_stale) {
-            result.push(AfiSafi {
-                afi: Afi::LinkState,
-                safi: Safi::LinkState,
-            });
+        for (nlri, route) in &self.link_state {
+            if has_stale(route) {
+                result.insert(AfiSafi::new(Afi::LinkState, nlri.safi()));
+            }
         }
         result
     }
@@ -1686,6 +1683,7 @@ mod tests {
                     ..NodeDescriptor::default()
                 },
             },
+            None,
         )
     }
 

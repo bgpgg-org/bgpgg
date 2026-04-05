@@ -645,6 +645,7 @@ impl Condition {
                     }
                     AfiSafiMatch::BgpLs => {
                         route_afi_safi == AfiSafi::new(Afi::LinkState, Safi::LinkState)
+                            || route_afi_safi == AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn)
                     }
                 }
             }
@@ -1096,6 +1097,7 @@ mod tests {
                     },
                 },
             }),
+            route_distinguisher: None,
         })
     }
 
@@ -1400,6 +1402,7 @@ mod tests {
             nlri_type: 1,
             raw: vec![],
             body: None,
+            route_distinguisher: None,
         });
         assert!(Condition::LsNlriType(LsNlriTypeMatch::Node).matches(&opaque_key, &path));
     }
@@ -1436,6 +1439,7 @@ mod tests {
             nlri_type: 1,
             raw: vec![],
             body: None,
+            route_distinguisher: None,
         });
         assert!(!Condition::LsProtocolId(LsProtocolIdMatch::Direct).matches(&opaque, &path));
     }
@@ -1454,6 +1458,7 @@ mod tests {
             nlri_type: 1,
             raw: vec![],
             body: None,
+            route_distinguisher: None,
         });
         assert!(!Condition::LsInstanceId(42).matches(&opaque, &path));
     }
@@ -1478,6 +1483,7 @@ mod tests {
             nlri_type: 1,
             raw: vec![],
             body: None,
+            route_distinguisher: None,
         });
         assert!(!Condition::LsNodeAs(65001).matches(&opaque, &path));
     }
@@ -1513,6 +1519,7 @@ mod tests {
             nlri_type: 1,
             raw: vec![],
             body: None,
+            route_distinguisher: None,
         });
         assert!(!Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&opaque, &path));
     }

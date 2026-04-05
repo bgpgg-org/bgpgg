@@ -266,6 +266,7 @@ pub fn proto_to_ls_nlri(proto_nlri: &proto::LsNlri) -> Result<LsNlri, String> {
         protocol_id,
         identifier,
         descriptors,
+        None,
     ))
 }
 
