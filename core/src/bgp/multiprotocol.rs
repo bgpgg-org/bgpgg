@@ -135,6 +135,14 @@ impl AfiSafi {
         AfiSafi { afi, safi }
     }
 
+    /// Try to construct from optional raw numeric AFI/SAFI values.
+    /// Returns None if either is absent or unrecognized.
+    pub fn from_raw(afi: Option<u32>, safi: Option<u32>) -> Option<Self> {
+        let afi = Afi::try_from(afi? as u16).ok()?;
+        let safi = Safi::try_from(safi? as u8).ok()?;
+        Some(AfiSafi { afi, safi })
+    }
+
     /// Parse AFI/SAFI from BGP OPEN message multiprotocol capability
     /// Format: [AFI_HIGH, AFI_LOW, RESERVED, SAFI]
     pub fn from_capability_bytes(val: &[u8]) -> Result<Self, ParserError> {

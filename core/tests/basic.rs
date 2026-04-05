@@ -16,7 +16,10 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{BgpState, Origin, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    remove_route_request, route, BgpState, ListRoutesRequest, Origin, RemoveRouteRequest, RibType,
+    Route, SessionConfig,
+};
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -39,7 +42,9 @@ async fn test_announce_withdraw() {
     // Server2 withdraws the route
     server2
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .expect("Failed to withdraw route");
 
@@ -70,7 +75,9 @@ async fn test_announce_withdraw_mesh() {
     // Server1 withdraws the route
     server1
         .client
-        .remove_route("10.1.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.1.0.0/24".to_string())),
+        })
         .await
         .expect("Failed to withdraw route from server 1");
 
@@ -169,7 +176,9 @@ async fn test_announce_withdraw_four_node_mesh() {
     // Server1 withdraws the route
     server1
         .client
-        .remove_route("10.1.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.1.0.0/24".to_string())),
+        })
         .await
         .expect("Failed to withdraw route from server 1");
 
@@ -177,7 +186,11 @@ async fn test_announce_withdraw_four_node_mesh() {
     poll_until_with_timeout(
         || async {
             for server in [&server2, &server3, &server4] {
-                let Ok(routes) = server.client.get_routes().await else {
+                let Ok(routes) = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
                 if !routes.is_empty() {
@@ -386,7 +399,7 @@ async fn test_as_loop_prevention() {
     // which contains server1_b's own ASN (65001)
     let routes = server1_b
         .client
-        .get_routes()
+        .list_routes(ListRoutesRequest::default())
         .await
         .expect("Failed to get routes from server 1_B");
     assert_eq!(
@@ -457,13 +470,19 @@ async fn test_ipv6_route_exchange() {
     // Server2 withdraws both routes
     server2
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .expect("Failed to withdraw IPv4 route");
 
     server2
         .client
-        .remove_route("2001:db8::/32".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix(
+                "2001:db8::/32".to_string(),
+            )),
+        })
         .await
         .expect("Failed to withdraw IPv6 route");
 
@@ -509,7 +528,11 @@ async fn test_ipv6_nexthop_rewrite() {
     // Withdraw the route
     server2
         .client
-        .remove_route("2001:db8::/32".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix(
+                "2001:db8::/32".to_string(),
+            )),
+        })
         .await
         .expect("Failed to withdraw IPv6 route");
 
@@ -603,7 +626,6 @@ async fn test_loc_rib_stores_multiple_paths() {
     poll_rib(&[(
         &server2,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![
                 build_path(PathParams {
                     as_path: vec![as_sequence(vec![65001])],
@@ -622,6 +644,7 @@ async fn test_loc_rib_stores_multiple_paths() {
                     ..Default::default()
                 }),
             ],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;
@@ -675,9 +698,13 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     poll_until(
         || async {
             hub.client
-                .get_adj_rib_out(&ds_addr)
+                .list_routes(ListRoutesRequest {
+                    rib_type: Some(RibType::AdjOut as i32),
+                    peer_address: Some(ds_addr.clone()),
+                    ..Default::default()
+                })
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         "adj-rib-out toward downstream should have route",
     )
@@ -686,31 +713,45 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     // s1 withdraws -> best changes to s2's path (different local_path_id)
     server1
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .unwrap();
 
     // Wait for downstream to see s2's path
     poll_until(
         || async {
-            downstream.client.get_routes().await.is_ok_and(|routes| {
-                routes.iter().any(|r| {
-                    r.prefix == "10.0.0.0/24"
-                        && r.paths
-                            .first()
-                            .is_some_and(|p| p.as_path.iter().any(|seg| seg.asns.contains(&65002)))
+            downstream
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .is_ok_and(|routes| {
+                    routes.iter().any(|r| {
+                        route_has_prefix(r, "10.0.0.0/24")
+                            && r.paths.first().is_some_and(|p| {
+                                p.as_path.iter().any(|seg| seg.asns.contains(&65002))
+                            })
+                    })
                 })
-            })
         },
         "downstream should receive s2's route",
     )
     .await;
 
     // Key assertion: exactly 1 path, no stale entries
-    let adj_out = hub.client.get_adj_rib_out(&ds_addr).await.unwrap();
+    let adj_out = hub
+        .client
+        .list_routes(ListRoutesRequest {
+            rib_type: Some(RibType::AdjOut as i32),
+            peer_address: Some(ds_addr.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     let route = adj_out
         .iter()
-        .find(|r| r.prefix == "10.0.0.0/24")
+        .find(|r| route_has_prefix(r, "10.0.0.0/24"))
         .expect("route should exist in adj-rib-out");
     assert_eq!(
         route.paths.len(),

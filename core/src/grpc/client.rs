@@ -22,7 +22,6 @@ use super::proto::{
     AddRouteRequest,
     // RPKI
     AddRpkiCacheRequest,
-    AsPathSegment,
     DefinedSetConfig,
     DefinedSetInfo,
     DisablePeerRequest,
@@ -38,7 +37,6 @@ use super::proto::{
     ListRoutesRequest,
     ListRpkiCachesRequest,
     ListRpkiCachesResponse,
-    Origin,
     Peer,
     PeerStatistics,
     PolicyInfo,
@@ -56,120 +54,8 @@ use super::proto::{
     StatementConfig,
 };
 use std::net::Ipv4Addr;
+use tokio_stream::StreamExt;
 use tonic::transport::Channel;
-
-/// Convert internal u64 representation to proto ExtendedCommunity
-fn u64_to_proto_extcomm(extcomm: u64) -> super::proto::ExtendedCommunity {
-    use super::proto;
-    use crate::bgp::ext_community::*;
-
-    let typ = ext_type(extcomm);
-    let subtype = ext_subtype(extcomm);
-    let value_bytes = ext_value(extcomm);
-    let is_transitive = (typ & TYPE_NON_TRANSITIVE_BIT) == 0;
-    let base_type = typ & !TYPE_NON_TRANSITIVE_BIT;
-
-    let community = match base_type {
-        TYPE_TWO_OCTET_AS => {
-            let asn = u16::from_be_bytes([value_bytes[0], value_bytes[1]]);
-            let local_admin_bytes = u32::from_be_bytes([
-                value_bytes[2],
-                value_bytes[3],
-                value_bytes[4],
-                value_bytes[5],
-            ]);
-
-            // Link Bandwidth has same base type but different subtype
-            if subtype == SUBTYPE_LINK_BANDWIDTH {
-                let bandwidth = f32::from_bits(local_admin_bytes);
-                proto::extended_community::Community::LinkBandwidth(
-                    proto::extended_community::LinkBandwidth {
-                        is_transitive,
-                        asn: asn as u32,
-                        bandwidth,
-                    },
-                )
-            } else {
-                proto::extended_community::Community::TwoOctetAs(
-                    proto::extended_community::TwoOctetAsSpecific {
-                        is_transitive,
-                        sub_type: subtype as u32,
-                        asn: asn as u32,
-                        local_admin: local_admin_bytes,
-                    },
-                )
-            }
-        }
-
-        TYPE_IPV4_ADDRESS => {
-            let ip = Ipv4Addr::new(
-                value_bytes[0],
-                value_bytes[1],
-                value_bytes[2],
-                value_bytes[3],
-            );
-            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
-            proto::extended_community::Community::Ipv4Address(
-                proto::extended_community::IPv4AddressSpecific {
-                    is_transitive,
-                    sub_type: subtype as u32,
-                    address: ip.to_string(),
-                    local_admin: local_admin as u32,
-                },
-            )
-        }
-
-        TYPE_FOUR_OCTET_AS => {
-            let asn = u32::from_be_bytes([
-                value_bytes[0],
-                value_bytes[1],
-                value_bytes[2],
-                value_bytes[3],
-            ]);
-            let local_admin = u16::from_be_bytes([value_bytes[4], value_bytes[5]]);
-            proto::extended_community::Community::FourOctetAs(
-                proto::extended_community::FourOctetAsSpecific {
-                    is_transitive,
-                    sub_type: subtype as u32,
-                    asn,
-                    local_admin: local_admin as u32,
-                },
-            )
-        }
-
-        TYPE_TRANSITIVE_OPAQUE => {
-            proto::extended_community::Community::Opaque(proto::extended_community::Opaque {
-                is_transitive,
-                value: value_bytes.to_vec(),
-            })
-        }
-
-        _ => {
-            // Unknown type - preserve all 7 bytes (subtype + value)
-            let mut value = vec![subtype];
-            value.extend_from_slice(&value_bytes);
-            proto::extended_community::Community::Unknown(proto::extended_community::Unknown {
-                type_code: typ as u32,
-                value,
-            })
-        }
-    };
-
-    proto::ExtendedCommunity {
-        community: Some(community),
-    }
-}
-
-/// Convert internal LargeCommunity to proto LargeCommunity
-fn large_community_to_proto(
-    large_comm: &crate::bgp::msg_update_types::LargeCommunity,
-) -> super::proto::LargeCommunity {
-    super::proto::LargeCommunity {
-        global_admin: large_comm.global_admin,
-        local_data_1: large_comm.local_data_1,
-        local_data_2: large_comm.local_data_2,
-    }
-}
 
 /// Simplified wrapper around the gRPC client that hides boilerplate
 #[derive(Clone)]
@@ -198,113 +84,26 @@ impl BgpClient {
         Ok(Self { inner, router_id })
     }
 
-    /// Get all routes from the Loc-RIB
-    pub async fn get_routes(&self) -> Result<Vec<Route>, tonic::Status> {
+    /// List routes. Caller builds ListRoutesRequest with rib_type, peer_address, afi, safi.
+    pub async fn list_routes(&self, req: ListRoutesRequest) -> Result<Vec<Route>, tonic::Status> {
         Ok(self
             .inner
             .clone()
-            .list_routes(ListRoutesRequest {
-                rib_type: None,
-                peer_address: None,
-            })
+            .list_routes(req)
             .await?
             .into_inner()
             .routes)
     }
 
-    /// Get all routes from the Loc-RIB using streaming
-    pub async fn get_routes_stream(&self) -> Result<Vec<Route>, tonic::Status> {
-        use tokio_stream::StreamExt;
-
-        let mut stream = self
-            .inner
-            .clone()
-            .list_routes_stream(ListRoutesRequest {
-                rib_type: None,
-                peer_address: None,
-            })
-            .await?
-            .into_inner();
-
-        let mut routes = Vec::new();
-        while let Some(route) = stream.next().await {
-            routes.push(route?);
-        }
-        Ok(routes)
-    }
-
-    /// Get routes from a specific peer's Adj-RIB-In
-    pub async fn get_adj_rib_in(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
-        use super::proto::RibType;
-
-        Ok(self
-            .inner
-            .clone()
-            .list_routes(ListRoutesRequest {
-                rib_type: Some(RibType::AdjIn as i32),
-                peer_address: Some(peer_address.to_string()),
-            })
-            .await?
-            .into_inner()
-            .routes)
-    }
-
-    /// Get routes from a specific peer's Adj-RIB-Out (computed on-demand)
-    pub async fn get_adj_rib_out(&self, peer_address: &str) -> Result<Vec<Route>, tonic::Status> {
-        use super::proto::RibType;
-
-        Ok(self
-            .inner
-            .clone()
-            .list_routes(ListRoutesRequest {
-                rib_type: Some(RibType::AdjOut as i32),
-                peer_address: Some(peer_address.to_string()),
-            })
-            .await?
-            .into_inner()
-            .routes)
-    }
-
-    /// Get routes from Adj-RIB-In using streaming
-    pub async fn get_adj_rib_in_stream(
+    /// List routes using streaming.
+    pub async fn list_routes_stream(
         &self,
-        peer_address: &str,
+        req: ListRoutesRequest,
     ) -> Result<Vec<Route>, tonic::Status> {
-        use super::proto::RibType;
-        use tokio_stream::StreamExt;
-
         let mut stream = self
             .inner
             .clone()
-            .list_routes_stream(ListRoutesRequest {
-                rib_type: Some(RibType::AdjIn as i32),
-                peer_address: Some(peer_address.to_string()),
-            })
-            .await?
-            .into_inner();
-
-        let mut routes = Vec::new();
-        while let Some(route) = stream.next().await {
-            routes.push(route?);
-        }
-        Ok(routes)
-    }
-
-    /// Get routes from Adj-RIB-Out using streaming
-    pub async fn get_adj_rib_out_stream(
-        &self,
-        peer_address: &str,
-    ) -> Result<Vec<Route>, tonic::Status> {
-        use super::proto::RibType;
-        use tokio_stream::StreamExt;
-
-        let mut stream = self
-            .inner
-            .clone()
-            .list_routes_stream(ListRoutesRequest {
-                rib_type: Some(RibType::AdjOut as i32),
-                peer_address: Some(peer_address.to_string()),
-            })
+            .list_routes_stream(req)
             .await?
             .into_inner();
 
@@ -328,8 +127,6 @@ impl BgpClient {
 
     /// Get all configured peers using streaming
     pub async fn get_peers_stream(&self) -> Result<Vec<Peer>, tonic::Status> {
-        use tokio_stream::StreamExt;
-
         let mut stream = self
             .inner
             .clone()
@@ -433,55 +230,9 @@ impl BgpClient {
         Ok(())
     }
 
-    /// Add a route to the global RIB
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_route(
-        &self,
-        prefix: String,
-        next_hop: String,
-        origin: Origin,
-        as_path: Vec<AsPathSegment>,
-        local_pref: Option<u32>,
-        med: Option<u32>,
-        atomic_aggregate: bool,
-        communities: Vec<u32>,
-        extended_communities: Vec<u64>,
-        large_communities: Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        originator_id: Option<String>,
-        cluster_list: Vec<String>,
-    ) -> Result<String, tonic::Status> {
-        // Convert u64 extended communities to proto format
-        let extended_communities_proto = extended_communities
-            .into_iter()
-            .map(u64_to_proto_extcomm)
-            .collect();
-
-        // Convert LargeCommunity to proto format
-        let large_communities_proto = large_communities
-            .iter()
-            .map(large_community_to_proto)
-            .collect();
-
-        let resp = self
-            .inner
-            .clone()
-            .add_route(AddRouteRequest {
-                prefix,
-                next_hop,
-                origin: origin.into(),
-                as_path,
-                local_pref,
-                med,
-                atomic_aggregate,
-                communities,
-                extended_communities: extended_communities_proto,
-                large_communities: large_communities_proto,
-                originator_id,
-                cluster_list,
-            })
-            .await?
-            .into_inner();
-
+    /// Add a route to the global RIB.
+    pub async fn add_route(&self, req: AddRouteRequest) -> Result<String, tonic::Status> {
+        let resp = self.inner.clone().add_route(req).await?.into_inner();
         if resp.success {
             Ok(resp.message)
         } else {
@@ -489,85 +240,24 @@ impl BgpClient {
         }
     }
 
-    /// Add multiple routes using streaming API for better performance
-    #[allow(clippy::type_complexity)]
+    /// Add multiple routes using streaming API.
     pub async fn add_route_stream(
         &self,
-        routes: Vec<(
-            String,
-            String,
-            Origin,
-            Vec<AsPathSegment>,
-            Option<u32>,
-            Option<u32>,
-            bool,
-            Vec<u32>,
-            Vec<u64>,
-            Vec<crate::bgp::msg_update_types::LargeCommunity>,
-        )>,
+        routes: Vec<AddRouteRequest>,
     ) -> Result<u64, tonic::Status> {
-        let requests = routes.into_iter().map(
-            |(
-                prefix,
-                next_hop,
-                origin,
-                as_path,
-                local_pref,
-                med,
-                atomic_aggregate,
-                communities,
-                extended_communities,
-                large_communities,
-            )| {
-                // Convert u64 extended communities to proto format
-                let extended_communities_proto = extended_communities
-                    .into_iter()
-                    .map(u64_to_proto_extcomm)
-                    .collect();
-
-                // Convert LargeCommunity to proto format
-                let large_communities_proto = large_communities
-                    .iter()
-                    .map(large_community_to_proto)
-                    .collect();
-
-                AddRouteRequest {
-                    prefix,
-                    next_hop,
-                    origin: origin.into(),
-                    as_path,
-                    local_pref,
-                    med,
-                    atomic_aggregate,
-                    communities,
-                    extended_communities: extended_communities_proto,
-                    large_communities: large_communities_proto,
-                    originator_id: None,
-                    cluster_list: vec![],
-                }
-            },
-        );
-
-        let stream = tokio_stream::iter(requests);
+        let stream = tokio_stream::iter(routes);
         let resp = self
             .inner
             .clone()
             .add_route_stream(stream)
             .await?
             .into_inner();
-
         Ok(resp.count)
     }
 
-    /// Remove a route from all established peers
-    pub async fn remove_route(&self, prefix: String) -> Result<String, tonic::Status> {
-        let resp = self
-            .inner
-            .clone()
-            .remove_route(RemoveRouteRequest { prefix })
-            .await?
-            .into_inner();
-
+    /// Remove a route from the global RIB.
+    pub async fn remove_route(&self, req: RemoveRouteRequest) -> Result<String, tonic::Status> {
+        let resp = self.inner.clone().remove_route(req).await?.into_inner();
         if resp.success {
             Ok(resp.message)
         } else {

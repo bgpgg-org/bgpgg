@@ -16,7 +16,10 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::config::Config;
-use bgpgg::grpc::proto::{AddPathSendMode, BgpState, Origin, ResetType, Route, SessionConfig};
+use bgpgg::grpc::proto::{
+    remove_route_request, route, AddPathSendMode, BgpState, ListRoutesRequest, Origin,
+    RemoveRouteRequest, ResetType, RibType, Route, SessionConfig,
+};
 use std::net::Ipv4Addr;
 
 /// ADD-PATH config: send all paths + receive path IDs
@@ -84,7 +87,6 @@ async fn send_and_validate_addpath_routes(
     poll_rib(&[(
         server3,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![
                 build_path(PathParams {
                     as_path: vec![as_sequence(vec![65001])],
@@ -103,6 +105,7 @@ async fn send_and_validate_addpath_routes(
                     ..Default::default()
                 }),
             ],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;
@@ -122,7 +125,6 @@ async fn send_and_validate_addpath_routes(
 /// Expected rib: 10.0.0.0/24 with one or more paths, all from the same peer/next_hop.
 fn expected_routes(peer_addr: &str, as_paths: Vec<Vec<u32>>) -> Vec<Route> {
     vec![Route {
-        prefix: "10.0.0.0/24".to_string(),
         paths: as_paths
             .into_iter()
             .map(|as_path| {
@@ -136,6 +138,7 @@ fn expected_routes(peer_addr: &str, as_paths: Vec<Vec<u32>>) -> Vec<Route> {
                 })
             })
             .collect(),
+        key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
     }]
 }
 
@@ -158,7 +161,9 @@ async fn test_addpath_withdraw() {
 
     server1
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .unwrap();
 
@@ -359,11 +364,15 @@ async fn test_addpath_rr_no_reflect_to_originator() {
     poll_until_stable(
         || async {
             rr.client
-                .get_adj_rib_out(&client1_addr)
+                .list_routes(ListRoutesRequest {
+                    rib_type: Some(RibType::AdjOut as i32),
+                    peer_address: Some(client1_addr.clone()),
+                    ..Default::default()
+                })
                 .await
                 .is_ok_and(|routes| {
                     routes.iter().any(|r| {
-                        r.prefix == "10.0.0.0/24"
+                        route_has_prefix(r, "10.0.0.0/24")
                             && r.paths.len() == 1
                             && r.paths[0].next_hop == "192.168.2.1"
                     })
@@ -433,8 +442,8 @@ async fn test_addpath_per_path_withdrawal() {
     poll_rib_addpath(&[(
         &server,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![ibgp_path("192.168.1.1"), ibgp_path("192.168.2.1")],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;
@@ -447,12 +456,12 @@ async fn test_addpath_per_path_withdrawal() {
     poll_until_stable(
         || async {
             let expected = vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
                 paths: vec![ibgp_path("192.168.2.1")],
+                key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
             }];
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes_match(&routes, &expected, ExpectPathId::Distinct))
         },
@@ -479,12 +488,12 @@ async fn test_addpath_per_path_withdrawal() {
     poll_until_stable(
         || async {
             let expected = vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
                 paths: vec![ibgp_path("192.168.3.1")],
+                key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
             }];
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes_match(&routes, &expected, ExpectPathId::Distinct))
         },
@@ -524,9 +533,9 @@ async fn test_originator_id_rejection_preserves_other_paths() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         Duration::from_secs(1),
         "Timeout waiting for valid path to stabilize",
@@ -553,9 +562,9 @@ async fn test_originator_id_rejection_preserves_other_paths() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         Duration::from_secs(2),
         "Valid path was removed by ORIGINATOR_ID loop rejection of another path",
@@ -598,7 +607,7 @@ async fn test_addpath_soft_reset_withdraws_stale_paths() {
         || async {
             server4
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes.is_empty())
         },
@@ -611,7 +620,11 @@ async fn test_addpath_soft_reset_withdraws_stale_paths() {
         || async {
             server3
                 .client
-                .get_adj_rib_out(&server4_addr)
+                .list_routes(ListRoutesRequest {
+                    rib_type: Some(RibType::AdjOut as i32),
+                    peer_address: Some(server4_addr.clone()),
+                    ..Default::default()
+                })
                 .await
                 .is_ok_and(|routes| routes.is_empty())
         },
@@ -674,8 +687,8 @@ async fn test_addpath_graceful_restart_stale_sweep() {
     poll_rib_addpath(&[(
         &server,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![ibgp_path("192.168.1.1"), ibgp_path("192.168.2.1")],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;
@@ -690,12 +703,12 @@ async fn test_addpath_graceful_restart_stale_sweep() {
     poll_until_stable(
         || async {
             let expected = vec![Route {
-                prefix: "10.0.0.0/24".to_string(),
                 paths: vec![ibgp_path("192.168.1.1")],
+                key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
             }];
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes_match(&routes, &expected, ExpectPathId::Distinct))
         },
@@ -840,7 +853,7 @@ async fn test_addpath_graceful_restart_identical_readvertise() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes.len() == 1 && routes[0].paths.len() == 1)
         },
@@ -859,7 +872,7 @@ async fn test_addpath_graceful_restart_identical_readvertise() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes.len() == 1 && routes[0].paths.len() == 1)
         },
@@ -897,7 +910,6 @@ async fn test_addpath_ibgp() {
     poll_rib_addpath(&[(
         &server4,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![
                 build_path(PathParams {
                     as_path: vec![as_sequence(vec![65001])],
@@ -916,6 +928,7 @@ async fn test_addpath_ibgp() {
                     ..Default::default()
                 }),
             ],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;

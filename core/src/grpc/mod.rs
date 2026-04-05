@@ -13,7 +13,8 @@
 // limitations under the License.
 
 pub mod client;
-mod proto_community;
+pub mod proto_community;
+pub(crate) mod proto_ls;
 mod proto_policy;
 pub mod service;
 

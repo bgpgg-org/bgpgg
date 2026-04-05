@@ -26,7 +26,7 @@ use bgpgg::grpc::proto::{
     defined_set_config,
     extended_community::{Community, Opaque},
     ActionsConfig, ConditionsConfig, DefinedSetConfig, ExtendedCommunity, ExtendedCommunitySetData,
-    MatchSetRef, Route, RpkiValidation, StatementConfig,
+    ListRoutesRequest, MatchSetRef, Route, RpkiValidation, StatementConfig,
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
@@ -107,7 +107,11 @@ async fn test_export_policy_prefix_match() {
         // Verify routes propagate and stay stable
         poll_until_stable(
             || async {
-                let routes = server1.client.get_routes().await.unwrap();
+                let routes = server1
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                    .unwrap();
                 routes_match(&routes, &expected, ExpectPathId::Present)
             },
             Duration::from_millis(500),
@@ -250,7 +254,11 @@ async fn test_export_policy_large_community_match() {
 
     poll_until_stable(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes_match(&routes, &expected, ExpectPathId::Present)
         },
         Duration::from_millis(500),
@@ -396,7 +404,11 @@ async fn test_export_policy_ext_community_match() {
 
     poll_until_stable(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes_match(&routes, &expected, ExpectPathId::Present)
         },
         Duration::from_millis(500),

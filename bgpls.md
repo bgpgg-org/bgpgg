@@ -368,115 +368,86 @@ per RFC 9552 Section 5.5.
 
 ---
 
-## Phase 6: gRPC API
+## Phase 6: gRPC API -- DONE
 
-Expose BGP-LS routes via gRPC for injection (producer) and query (consumer feed).
+Expose BGP-LS routes via the existing unified gRPC API. A BGP-LS route is a route --
+same `AddRoute`/`RemoveRoute`/`ListRoutes` RPCs, not separate LS-specific RPCs.
 
-### Proto changes (`proto/bgp.proto`)
+### Design decision: oneof per route type
+
+`AddRouteRequest`, `RemoveRouteRequest`, and `Route` use `oneof` to discriminate route
+types. Each type gets its own sub-message with only relevant fields. Adding flowspec or
+EVPN is just a new variant -- no field pollution.
 
 ```protobuf
-// New RPCs
-rpc AddLsRoute(AddLsRouteRequest) returns (AddLsRouteResponse);
-rpc RemoveLsRoute(RemoveLsRouteRequest) returns (RemoveLsRouteResponse);
-rpc ListLsRoutes(ListLsRoutesRequest) returns (ListLsRoutesResponse);
-rpc ListLsRoutesStream(ListLsRoutesRequest) returns (stream LsRoute);
-
-// LS NLRI types
-enum LsNlriType {
-    LS_NODE = 0;
-    LS_LINK = 1;
-    LS_PREFIX_V4 = 2;
-    LS_PREFIX_V6 = 3;
+message AddRouteRequest {
+    oneof route {
+        AddIpRouteRequest ip = 1;
+        AddLsRouteRequest ls = 2;
+    }
 }
-
-enum LsProtocolId {
-    LS_ISIS_L1 = 0;
-    LS_ISIS_L2 = 1;
-    LS_OSPFV2 = 2;
-    LS_DIRECT = 3;
-    LS_STATIC = 4;
-    LS_OSPFV3 = 5;
+message RemoveRouteRequest {
+    oneof key {
+        string prefix = 1;
+        LsNlri ls_nlri = 2;
+    }
 }
-
-message LsNodeDescriptor {
-    optional uint32 as_number = 1;
-    optional uint32 bgp_ls_id = 2;
-    optional uint32 ospf_area_id = 3;
-    bytes igp_router_id = 4;
-}
-
-message LsTlv {
-    uint32 type = 1;
-    bytes value = 2;
-}
-
-message LsNlri {
-    LsNlriType nlri_type = 1;
-    LsProtocolId protocol_id = 2;
-    uint64 identifier = 3;
-    LsNodeDescriptor local_node = 4;
-    optional LsNodeDescriptor remote_node = 5;       // link only
-    repeated LsTlv link_descriptors = 6;              // link only
-    repeated LsTlv prefix_descriptors = 7;            // prefix only
-}
-
-message LsAttribute {
-    repeated LsTlv tlvs = 1;
-    // Convenience fields for well-known TLVs (populated from tlvs)
-    optional string node_name = 10;
-    optional uint32 igp_metric = 11;
-    optional float max_link_bandwidth = 12;
-    optional string link_name = 13;
-    // ... more as needed
-}
-
-message AddLsRouteRequest {
-    LsNlri nlri = 1;
-    LsAttribute attribute = 2;
-}
-
-message AddLsRouteResponse {
-    bool success = 1;
-    string message = 2;
-}
-
-message RemoveLsRouteRequest {
-    LsNlri nlri = 1;
-}
-
-message ListLsRoutesRequest {
-    optional RibType rib_type = 1;
-    optional string peer_address = 2;
-    optional LsNlriType nlri_type = 3;  // filter by type
-}
-
-message LsRoute {
-    LsNlri nlri = 1;
-    LsAttribute attribute = 2;
-    // Standard BGP path info
-    repeated uint32 as_path = 3;
-    string next_hop = 4;
-    string peer_address = 5;
-    uint32 local_pref = 6;
-    bool best = 7;
+message Route {
+    repeated Path paths = 1;
+    oneof key {
+        string prefix = 2;
+        LsNlri ls_nlri = 3;
+    }
 }
 ```
 
-### Implementation
+Large oneof variants (`LsNlri`, `AddIpRouteRequest`) are boxed via `prost_build::boxed()`
+in `core/build.rs` to avoid enum size bloat.
 
-- `core/src/grpc/service.rs` -- implement new RPCs
-  - AddLsRoute: convert proto -> LsNlri + LsAttribute, inject into RIB as local route
-  - RemoveLsRoute: withdraw by NLRI key
-  - ListLsRoutes: iterate LocRib.link_state, convert to proto
-  - ListLsRoutesStream: streaming version
+### Proto messages
+
+LS-specific types in `proto/bgp.proto`:
+
+- `LsNlriType`, `LsProtocolId` enums
+- `LsNodeDescriptor`, `LsLinkDescriptor`, `LsPrefixDescriptor` -- typed NLRI descriptors
+- `LsNlri` -- full NLRI with type, protocol_id, identifier, descriptors
+- `LsNodeAttribute`, `LsLinkAttribute`, `LsPrefixAttribute` -- typed attribute fields
+- `LsAttribute` -- raw TLVs + typed node/link/prefix sub-messages
+- `AddIpRouteRequest`, `AddLsRouteRequest` -- per-type injection messages
+- `ListRoutesRequest` has `afi`/`safi` fields for family filtering
+
+### Changes made
+
+- `proto/bgp.proto` -- oneof-based `AddRouteRequest`, `RemoveRouteRequest`, `Route`;
+  all LS message types
+- `core/build.rs` -- `.boxed()` for large oneof variants
+- `core/src/grpc/proto_ls.rs` (NEW) -- bidirectional proto<->internal conversion for
+  all LS types (NLRI, descriptors, attributes)
+- `core/src/grpc/service.rs` -- `add_route`/`remove_route` match on oneof variant;
+  `route_to_proto` populates LS fields for LinkState routes
+- `core/src/grpc/client.rs` -- thin wrappers: `add_route(AddRouteRequest)`,
+  `remove_route(RemoveRouteRequest)`, `list_routes(ListRoutesRequest)`.
+  Caller builds proto struct directly.
+- `core/src/rib/rib_loc.rs` -- `add_local_route`/`remove_local_route` generalized
+  from `IpNetwork` to `RouteKey`. Unified `get_routes(Option<AfiSafi>)` across all
+  three RIBs (LocRib, AdjRibIn, AdjRibOut) -- goes straight to the right per-family
+  table, no post-filtering.
+- `core/src/server/ops_mgmt.rs` -- `MgmtOp::AddRoute`/`RemoveRoute` use `RouteKey`.
+  `GetRoutes`/`GetRoutesStream` pass `AfiSafi` filter to RIB.
+- `core/src/bgp/multiprotocol.rs` -- `AfiSafi::from_raw(Option<u32>, Option<u32>)`
+- `cli/src/commands/global.rs` -- `rib add-ls node` and `rib del-ls node` subcommands;
+  `rib show` displays LS routes with type/protocol/node info
 
 ### Tests
 
-- Inject LS route via gRPC, verify in RIB
-- Inject LS route via gRPC, verify propagated to peer
-- Query LS routes via gRPC
-- Withdraw LS route via gRPC
-- Filter by NLRI type in query
+Unit tests (proto_ls.rs): NLRI roundtrip (node, link), attribute roundtrip (node, link bandwidth).
+Unit tests (rib_loc.rs): `test_get_routes_family_filter` -- table-driven, verifies
+actual Route objects for each family filter including unsupported AFI/SAFI.
+
+Integration tests (core/tests/mgmt.rs):
+- `test_add_ls_route` -- inject via gRPC, verify in Loc-RIB with NLRI + attribute intact
+- `test_remove_ls_route` -- inject then withdraw, verify removal
+- `test_list_routes_family_filter` -- IP + LS routes coexist, filter by AFI/SAFI
 
 ---
 

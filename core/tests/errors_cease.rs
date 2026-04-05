@@ -23,7 +23,7 @@ use bgpgg::config::Config;
 #[allow(hidden_glob_reexports)]
 use bgpgg::config::PeerConfig;
 use bgpgg::grpc::proto::{
-    AdminState, BgpState, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
+    AdminState, BgpState, ListRoutesRequest, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -146,7 +146,7 @@ async fn test_max_prefix_limit() {
 
             let routes = server2
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .expect("Failed to get routes");
             assert!(

@@ -37,11 +37,14 @@ pub use utils::*;
 use bgpgg::bgp::community;
 use bgpgg::bgp::ext_community::*;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
+use bgpgg::bgp::msg_update_types::LargeCommunity;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
+    self, add_route_request,
     extended_community::{Community, TwoOctetAsSpecific},
-    AsPathSegment, BgpState, ExtendedCommunity, Origin, SessionConfig, UnknownAttribute,
+    AddIpRouteRequest, AddRouteRequest, AsPathSegment, BgpState, ExtendedCommunity,
+    ListRoutesRequest, Origin, SessionConfig, UnknownAttribute,
 };
 use std::net::Ipv4Addr;
 
@@ -1060,7 +1063,11 @@ async fn test_well_known_communities() {
     // Wait for route to propagate, then verify stability
     poll_until_stable(
         || async {
-            let Ok(routes) = server2.client.get_routes().await else {
+            let Ok(routes) = server2
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
 
@@ -1177,9 +1184,6 @@ async fn test_extended_communities_filtering() {
 
 #[tokio::test]
 async fn test_large_community_propagation() {
-    use bgpgg::bgp::msg_update_types::LargeCommunity;
-    use bgpgg::grpc::proto;
-
     let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
 
     let large_comms = vec![
@@ -1781,40 +1785,40 @@ async fn test_best_path_selection() {
     for case in &cases {
         server1
             .client
-            .add_route(
-                case.prefix.to_string(),
-                case.s1_next_hop.to_string(),
-                case.s1_origin,
-                case.s1_as_path.clone(),
-                case.s1_local_pref,
-                case.s1_med,
-                false,
-                case.s1_communities.clone(),
-                vec![],
-                vec![],
-                case.s1_originator_id.map(str::to_string),
-                case.s1_cluster_list.iter().map(|s| s.to_string()).collect(),
-            )
+            .add_route(AddRouteRequest {
+                route: Some(add_route_request::Route::Ip(Box::new(AddIpRouteRequest {
+                    prefix: case.prefix.to_string(),
+                    next_hop: case.s1_next_hop.to_string(),
+                    origin: case.s1_origin as i32,
+                    as_path: case.s1_as_path.clone(),
+                    local_pref: case.s1_local_pref,
+                    med: case.s1_med,
+                    communities: case.s1_communities.clone(),
+                    originator_id: case.s1_originator_id.map(str::to_string),
+                    cluster_list: case.s1_cluster_list.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                }))),
+            })
             .await
             .unwrap();
     }
     for case in &cases {
         server2
             .client
-            .add_route(
-                case.prefix.to_string(),
-                case.s2_next_hop.to_string(),
-                case.s2_origin,
-                case.s2_as_path.clone(),
-                case.s2_local_pref,
-                case.s2_med,
-                false,
-                case.s2_communities.clone(),
-                vec![],
-                vec![],
-                case.s2_originator_id.map(str::to_string),
-                case.s2_cluster_list.iter().map(|s| s.to_string()).collect(),
-            )
+            .add_route(AddRouteRequest {
+                route: Some(add_route_request::Route::Ip(Box::new(AddIpRouteRequest {
+                    prefix: case.prefix.to_string(),
+                    next_hop: case.s2_next_hop.to_string(),
+                    origin: case.s2_origin as i32,
+                    as_path: case.s2_as_path.clone(),
+                    local_pref: case.s2_local_pref,
+                    med: case.s2_med,
+                    communities: case.s2_communities.clone(),
+                    originator_id: case.s2_originator_id.map(str::to_string),
+                    cluster_list: case.s2_cluster_list.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                }))),
+            })
             .await
             .unwrap();
     }
@@ -1826,10 +1830,14 @@ async fn test_best_path_selection() {
         let expected_peer = if case.s1_wins { &s1_addr } else { &s2_addr };
         poll_until(
             || async {
-                let Ok(routes) = server3.client.get_routes().await else {
+                let Ok(routes) = server3
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
-                let Some(route) = routes.iter().find(|r| r.prefix == case.prefix) else {
+                let Some(route) = routes.iter().find(|r| route_has_prefix(r, case.prefix)) else {
                     return false;
                 };
                 let Some(best) = route.paths.first() else {

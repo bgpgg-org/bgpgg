@@ -18,7 +18,9 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
-use bgpgg::grpc::proto::{BgpState, Origin, SessionConfig};
+use bgpgg::grpc::proto::{
+    remove_route_request, BgpState, ListRoutesRequest, Origin, RemoveRouteRequest, SessionConfig,
+};
 use std::net::Ipv4Addr;
 
 /// RFC 4456 Section 8: ORIGINATOR_ID loop detection.
@@ -80,10 +82,14 @@ async fn test_rr_originator_id_loop_detection() {
     // The poisoned route (originator_id=RR's rid) should never appear on Client2
     poll_while(
         || async {
-            let Ok(routes) = client2.client.get_routes().await else {
+            let Ok(routes) = client2
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
-            routes.len() == 1 && routes[0].prefix == "10.1.0.0/24"
+            routes.len() == 1 && route_has_prefix(&routes[0], "10.1.0.0/24")
         },
         Duration::from_secs(2),
         "Poisoned route with RR's own ORIGINATOR_ID should not appear on Client2",
@@ -306,11 +312,11 @@ async fn test_route_reflector_mixed_topology() {
     // We already confirmed Client got it (so RR processed the route), now verify NC2 stability
     poll_while(
         || async {
-            let Ok(routes) = nc2.client.get_routes().await else {
+            let Ok(routes) = nc2.client.list_routes(ListRoutesRequest::default()).await else {
                 return false;
             };
             // NC2 should only have the client route, not NC1's route
-            routes.len() == 1 && routes[0].prefix == "10.1.0.0/24"
+            routes.len() == 1 && route_has_prefix(&routes[0], "10.1.0.0/24")
         },
         Duration::from_secs(2),
         "NC2 should not receive non-client route from NC1",
@@ -375,10 +381,14 @@ async fn test_rr_cluster_loop_detection() {
     // RR2 rejected the route (cluster loop), so neither RR2 nor Client2 should have it
     poll_while(
         || async {
-            let Ok(rr2_routes) = rr2.client.get_routes().await else {
+            let Ok(rr2_routes) = rr2.client.list_routes(ListRoutesRequest::default()).await else {
                 return false;
             };
-            let Ok(client2_routes) = client2.client.get_routes().await else {
+            let Ok(client2_routes) = client2
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             rr2_routes.is_empty() && client2_routes.is_empty()
@@ -560,7 +570,9 @@ async fn test_rr_withdrawal_reflection() {
     // Withdraw and verify reflected withdrawal
     client1
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .unwrap();
     poll_route_withdrawal(&[&client2]).await;

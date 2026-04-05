@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::grpc::proto::{AsPathSegment, AsPathSegmentType, Origin};
+use bgpgg::grpc::proto::{
+    add_route_request, remove_route_request, route, AddIpRouteRequest, AddLsRouteRequest,
+    AddRouteRequest, AsPathSegment, AsPathSegmentType, ListRoutesRequest, LsNlri, LsNlriType,
+    LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest,
+};
 use bgpgg::grpc::BgpClient;
 
-use crate::{GlobalCommands, RibCommands};
+use crate::{AddLsCommands, DelLsCommands, GlobalCommands, RibCommands};
 
 pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std::error::Error>> {
     let client = BgpClient::connect(addr.clone())
@@ -25,7 +29,7 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
     match cmd {
         GlobalCommands::Rib(rib_cmd) => match rib_cmd {
             RibCommands::Show => {
-                let routes = client.get_routes().await?;
+                let routes = client.list_routes(ListRoutesRequest::default()).await?;
 
                 if routes.is_empty() {
                     println!("No routes in global RIB");
@@ -37,6 +41,11 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
                     println!("{}", "-".repeat(100));
 
                     for route in routes {
+                        let prefix_str = match &route.key {
+                            Some(route::Key::Prefix(p)) => p.clone(),
+                            Some(route::Key::LsNlri(nlri)) => format_ls_nlri(nlri),
+                            None => "unknown".to_string(),
+                        };
                         for path in route.paths.iter() {
                             let as_path_str = format_as_path(&path.as_path);
                             let as_path_display = if as_path_str.len() > 20 {
@@ -53,7 +62,7 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
 
                             println!(
                                 "{:<20} {:<15} {:<20} {:<10} {:<15} {:<20}",
-                                route.prefix,
+                                prefix_str,
                                 path.next_hop,
                                 as_path_display,
                                 format_origin(path.origin()),
@@ -80,29 +89,102 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
                 let communities_vec = parse_communities(community)?;
 
                 let msg = client
-                    .add_route(
-                        prefix.clone(),
-                        nexthop,
-                        origin_enum,
-                        as_path_segments,
-                        local_pref,
-                        med,
-                        atomic_aggregate,
-                        communities_vec,
-                        vec![], // extended_communities
-                        vec![], // large_communities
-                        None,   // originator_id
-                        vec![], // cluster_list
-                    )
+                    .add_route(AddRouteRequest {
+                        route: Some(add_route_request::Route::Ip(Box::new(AddIpRouteRequest {
+                            prefix: prefix.clone(),
+                            next_hop: nexthop,
+                            origin: origin_enum as i32,
+                            as_path: as_path_segments,
+                            local_pref,
+                            med,
+                            atomic_aggregate,
+                            communities: communities_vec,
+                            ..Default::default()
+                        }))),
+                    })
                     .await?;
 
                 println!("{}", msg);
             }
 
             RibCommands::Del { prefix } => {
-                let msg = client.remove_route(prefix.clone()).await?;
+                let msg = client
+                    .remove_route(RemoveRouteRequest {
+                        key: Some(remove_route_request::Key::Prefix(prefix.clone())),
+                    })
+                    .await?;
                 println!("{}", msg);
             }
+
+            RibCommands::AddLs(ls_cmd) => match ls_cmd {
+                AddLsCommands::Node {
+                    asn,
+                    router_id,
+                    protocol,
+                    identifier,
+                    name,
+                } => {
+                    let protocol_id = parse_ls_protocol(&protocol)?;
+                    let router_id_bytes = parse_router_id(&router_id)?;
+                    let attribute = name.map(|node_name| bgpgg::grpc::proto::LsAttribute {
+                        node: Some(LsNodeAttribute {
+                            name: Some(node_name),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    let msg = client
+                        .add_route(AddRouteRequest {
+                            route: Some(add_route_request::Route::Ls(Box::new(
+                                AddLsRouteRequest {
+                                    nlri: Some(LsNlri {
+                                        nlri_type: LsNlriType::LsNode as i32,
+                                        protocol_id: protocol_id as i32,
+                                        identifier,
+                                        local_node: Some(LsNodeDescriptor {
+                                            as_number: Some(asn),
+                                            igp_router_id: router_id_bytes,
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    attribute,
+                                    next_hop: None,
+                                },
+                            ))),
+                        })
+                        .await?;
+                    println!("{}", msg);
+                }
+            },
+
+            RibCommands::DelLs(ls_cmd) => match ls_cmd {
+                DelLsCommands::Node {
+                    asn,
+                    router_id,
+                    protocol,
+                    identifier,
+                } => {
+                    let protocol_id = parse_ls_protocol(&protocol)?;
+                    let router_id_bytes = parse_router_id(&router_id)?;
+                    let msg = client
+                        .remove_route(RemoveRouteRequest {
+                            key: Some(remove_route_request::Key::LsNlri(Box::new(LsNlri {
+                                nlri_type: LsNlriType::LsNode as i32,
+                                protocol_id: protocol_id as i32,
+                                identifier,
+                                local_node: Some(LsNodeDescriptor {
+                                    as_number: Some(asn),
+                                    igp_router_id: router_id_bytes,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }))),
+                        })
+                        .await?;
+                    println!("{}", msg);
+                }
+            },
         },
 
         GlobalCommands::Info => {
@@ -113,7 +195,7 @@ pub async fn handle(addr: String, cmd: GlobalCommands) -> Result<(), Box<dyn std
         }
 
         GlobalCommands::Summary => {
-            let routes = client.get_routes().await?;
+            let routes = client.list_routes(ListRoutesRequest::default()).await?;
             let peers = client.get_peers().await?;
 
             let total_routes = routes.len();
@@ -274,6 +356,70 @@ fn parse_communities(communities: Vec<String>) -> Result<Vec<u32>, Box<dyn std::
         .collect()
 }
 
+fn parse_ls_protocol(protocol: &str) -> Result<LsProtocolId, Box<dyn std::error::Error>> {
+    match protocol.to_lowercase().as_str() {
+        "isis-l1" => Ok(LsProtocolId::LsIsisL1),
+        "isis-l2" => Ok(LsProtocolId::LsIsisL2),
+        "ospfv2" => Ok(LsProtocolId::LsOspfv2),
+        "direct" => Ok(LsProtocolId::LsDirect),
+        "static" => Ok(LsProtocolId::LsStatic),
+        "ospfv3" => Ok(LsProtocolId::LsOspfv3),
+        _ => Err(format!(
+            "Invalid protocol: {}. Must be isis-l1, isis-l2, ospfv2, direct, static, or ospfv3",
+            protocol
+        )
+        .into()),
+    }
+}
+
+fn parse_router_id(router_id: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let addr: std::net::Ipv4Addr = router_id
+        .parse()
+        .map_err(|_| format!("Invalid router ID: {}", router_id))?;
+    Ok(addr.octets().to_vec())
+}
+
+fn format_ls_nlri(nlri: &LsNlri) -> String {
+    let nlri_type = match LsNlriType::try_from(nlri.nlri_type) {
+        Ok(LsNlriType::LsNode) => "Node",
+        Ok(LsNlriType::LsLink) => "Link",
+        Ok(LsNlriType::LsPrefixV4) => "PrefixV4",
+        Ok(LsNlriType::LsPrefixV6) => "PrefixV6",
+        _ => "Unknown",
+    };
+    let protocol = match LsProtocolId::try_from(nlri.protocol_id) {
+        Ok(LsProtocolId::LsIsisL1) => "ISIS-L1",
+        Ok(LsProtocolId::LsIsisL2) => "ISIS-L2",
+        Ok(LsProtocolId::LsOspfv2) => "OSPFv2",
+        Ok(LsProtocolId::LsDirect) => "Direct",
+        Ok(LsProtocolId::LsStatic) => "Static",
+        Ok(LsProtocolId::LsOspfv3) => "OSPFv3",
+        _ => "?",
+    };
+    let node_info = nlri
+        .local_node
+        .as_ref()
+        .map(|nd| {
+            let asn = nd.as_number.map(|a| a.to_string()).unwrap_or_default();
+            let rid = if nd.igp_router_id.len() == 4 {
+                format!(
+                    "{}.{}.{}.{}",
+                    nd.igp_router_id[0],
+                    nd.igp_router_id[1],
+                    nd.igp_router_id[2],
+                    nd.igp_router_id[3]
+                )
+            } else if !nd.igp_router_id.is_empty() {
+                format!("{:?}", nd.igp_router_id)
+            } else {
+                String::new()
+            };
+            format!("AS{} {}", asn, rid)
+        })
+        .unwrap_or_default();
+    format!("LS/{}/{} {}", nlri_type, protocol, node_info)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +522,52 @@ mod tests {
             asns: vec![100, 200, 300],
         }];
         assert_eq!(format_as_path(&segments), "{100,200,300}");
+    }
+
+    #[test]
+    fn test_parse_ls_protocol() {
+        assert!(matches!(
+            parse_ls_protocol("direct").unwrap(),
+            LsProtocolId::LsDirect
+        ));
+        assert!(matches!(
+            parse_ls_protocol("isis-l1").unwrap(),
+            LsProtocolId::LsIsisL1
+        ));
+        assert!(matches!(
+            parse_ls_protocol("ospfv2").unwrap(),
+            LsProtocolId::LsOspfv2
+        ));
+        assert!(parse_ls_protocol("invalid").is_err());
+    }
+
+    #[test]
+    fn test_parse_router_id() {
+        assert_eq!(parse_router_id("10.0.0.1").unwrap(), vec![10, 0, 0, 1]);
+        assert_eq!(
+            parse_router_id("192.168.1.1").unwrap(),
+            vec![192, 168, 1, 1]
+        );
+        assert!(parse_router_id("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn test_format_ls_nlri() {
+        let nlri = LsNlri {
+            nlri_type: LsNlriType::LsNode as i32,
+            protocol_id: LsProtocolId::LsDirect as i32,
+            identifier: 0,
+            local_node: Some(LsNodeDescriptor {
+                as_number: Some(65001),
+                igp_router_id: vec![10, 0, 0, 1],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let formatted = format_ls_nlri(&nlri);
+        assert!(formatted.contains("Node"));
+        assert!(formatted.contains("Direct"));
+        assert!(formatted.contains("65001"));
+        assert!(formatted.contains("10.0.0.1"));
     }
 }

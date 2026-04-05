@@ -21,7 +21,9 @@ pub use utils::*;
 
 use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::config::BmpConfig;
-use bgpgg::grpc::proto::{BgpState, SessionConfig};
+use bgpgg::grpc::proto::{
+    remove_route_request, BgpState, ListRoutesRequest, RemoveRouteRequest, SessionConfig,
+};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
@@ -73,7 +75,11 @@ async fn test_add_bmp_server_with_existing_peers() {
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap();
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",
@@ -270,7 +276,11 @@ async fn test_route_monitoring_on_updates() {
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",
@@ -309,14 +319,20 @@ async fn test_route_monitoring_on_updates() {
     // Withdraw one route
     server2
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .unwrap();
 
     // Wait for route to be withdrawn
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 1
         },
         "Timeout waiting for route withdrawal",
@@ -337,7 +353,11 @@ async fn test_route_monitoring_on_updates() {
     // Wait for new route
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for new route",
@@ -472,7 +492,11 @@ async fn test_bmp_statistics() {
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",

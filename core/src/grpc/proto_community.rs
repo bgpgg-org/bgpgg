@@ -164,7 +164,7 @@ pub(super) fn proto_extcomm_to_u64(proto: &proto::ExtendedCommunity) -> Result<u
 }
 
 /// Convert internal u64 representation to proto ExtendedCommunity
-pub(super) fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
+pub fn u64_to_proto_extcomm(extcomm: u64) -> proto::ExtendedCommunity {
     let typ = ext_type(extcomm);
     let subtype = ext_subtype(extcomm);
     let value_bytes = ext_value(extcomm);
@@ -315,7 +315,7 @@ pub(super) fn proto_large_community_to_internal(
 }
 
 /// Convert internal LargeCommunity struct to proto LargeCommunity
-pub(super) fn internal_to_proto_large_community(
+pub fn internal_to_proto_large_community(
     large_comm: &crate::bgp::msg_update_types::LargeCommunity,
 ) -> proto::LargeCommunity {
     proto::LargeCommunity {

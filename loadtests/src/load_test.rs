@@ -21,6 +21,7 @@ use crate::{
 };
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_client::BgpServiceClient;
+use bgpgg::grpc::proto::route;
 use bgpgg::net::IpNetwork;
 use bgpgg::rib::Path;
 use std::collections::HashMap;
@@ -336,6 +337,8 @@ async fn verify_loc_rib(client: &mut BgpClient, expected_best_paths: &HashMap<Ip
         .list_routes_stream(bgpgg::grpc::proto::ListRoutesRequest {
             rib_type: Some(bgpgg::grpc::proto::RibType::Global as i32),
             peer_address: None,
+            afi: None,
+            safi: None,
         })
         .await
         .expect("Failed to start route stream")
@@ -349,7 +352,11 @@ async fn verify_loc_rib(client: &mut BgpClient, expected_best_paths: &HashMap<Ip
 
     let mut mismatches = Vec::new();
     for route in &routes {
-        let prefix: IpNetwork = route.prefix.parse().expect("Failed to parse prefix");
+        let prefix_str = match &route.key {
+            Some(route::Key::Prefix(p)) => p.as_str(),
+            _ => continue,
+        };
+        let prefix: IpNetwork = prefix_str.parse().expect("Failed to parse prefix");
 
         if let Some(expected_path) = expected_best_paths.get(&prefix) {
             if route.paths.is_empty() {
@@ -722,6 +729,8 @@ async fn test_route_convergence() {
                 .list_routes_stream(bgpgg::grpc::proto::ListRoutesRequest {
                     rib_type: Some(bgpgg::grpc::proto::RibType::AdjOut as i32),
                     peer_address: Some(peer_addr.clone()),
+                    afi: None,
+                    safi: None,
                 })
                 .await
                 .expect("Failed to start adj-rib-out stream")
@@ -760,6 +769,8 @@ async fn test_route_convergence() {
             .list_routes_stream(bgpgg::grpc::proto::ListRoutesRequest {
                 rib_type: Some(bgpgg::grpc::proto::RibType::AdjOut as i32),
                 peer_address: Some(peer_addr.clone()),
+                afi: None,
+                safi: None,
             })
             .await
             .expect("Failed to start adj-rib-out stream")
@@ -772,8 +783,11 @@ async fn test_route_convergence() {
 
         let mut mismatches = Vec::new();
         for route in &routes {
-            let prefix: bgpgg::net::IpNetwork =
-                route.prefix.parse().expect("Failed to parse prefix");
+            let prefix_str = match &route.key {
+                Some(route::Key::Prefix(p)) => p.as_str(),
+                _ => continue,
+            };
+            let prefix: bgpgg::net::IpNetwork = prefix_str.parse().expect("Failed to parse prefix");
 
             if let Some(expected_path) = expected_best_paths.get(&prefix) {
                 if route.paths.is_empty() {

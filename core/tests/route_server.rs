@@ -23,7 +23,8 @@ use bgpgg::bgp::msg_update_types::LargeCommunity as BgpLargeCommunity;
 use bgpgg::grpc::proto::{
     self as proto,
     extended_community::{Community, TwoOctetAsSpecific},
-    AddPathSendMode, BgpState, ExtendedCommunity, Origin, Route, SessionConfig, UnknownAttribute,
+    route, AddPathSendMode, BgpState, ExtendedCommunity, ListRoutesRequest, Origin, Route,
+    SessionConfig, UnknownAttribute,
 };
 use std::net::Ipv4Addr;
 
@@ -132,7 +133,6 @@ async fn test_rs_addpath_no_path_hiding() {
     poll_rib(&[(
         &client3,
         vec![Route {
-            prefix: "10.0.0.0/24".to_string(),
             paths: vec![
                 build_path(PathParams {
                     next_hop: client1.address.to_string(),
@@ -149,6 +149,7 @@ async fn test_rs_addpath_no_path_hiding() {
                     ..Default::default()
                 }),
             ],
+            key: Some(route::Key::Prefix("10.0.0.0/24".to_string())),
         }],
     )])
     .await;
@@ -625,11 +626,11 @@ async fn test_rs_well_known_communities_block_propagation() {
         assert!(
             !client2
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .unwrap()
                 .iter()
-                .any(|r| r.prefix == "10.0.0.0/24"),
+                .any(|r| route_has_prefix(r, "10.0.0.0/24")),
             "case '{name}': community route should not be forwarded to RS client",
         );
     }

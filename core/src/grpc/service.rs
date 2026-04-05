@@ -19,7 +19,7 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::{AddPathSend, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
-use crate::rib::PathAttrs;
+use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
 use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
@@ -102,6 +102,7 @@ use super::proto_community::{
     internal_to_proto_large_community, proto_extcomm_to_u64, proto_large_community_to_internal,
     u64_to_proto_extcomm,
 };
+use super::proto_ls;
 use super::proto_policy::{
     defined_set_config_to_proto, policy_info_to_proto, proto_to_defined_set_config,
     proto_to_statement_config,
@@ -115,15 +116,19 @@ type RouteStream =
     std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<ProtoRoute, Status>> + Send>>;
 
 /// Convert internal route to proto Route
-fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
-    let prefix_str = match &route.key {
-        crate::rib::RouteKey::Prefix(IpNetwork::V4(v4)) => {
-            format!("{}/{}", v4.address, v4.prefix_length)
-        }
-        crate::rib::RouteKey::Prefix(IpNetwork::V6(v6)) => {
-            format!("{}/{}", v6.address, v6.prefix_length)
-        }
-        crate::rib::RouteKey::LinkState(_) => String::new(),
+fn route_to_proto(route: Route) -> ProtoRoute {
+    let key = match &route.key {
+        RouteKey::Prefix(IpNetwork::V4(v4)) => Some(proto::route::Key::Prefix(format!(
+            "{}/{}",
+            v4.address, v4.prefix_length
+        ))),
+        RouteKey::Prefix(IpNetwork::V6(v6)) => Some(proto::route::Key::Prefix(format!(
+            "{}/{}",
+            v6.address, v6.prefix_length
+        ))),
+        RouteKey::LinkState(nlri) => Some(proto::route::Key::LsNlri(Box::new(
+            proto_ls::ls_nlri_to_proto(nlri),
+        ))),
     };
 
     let proto_paths: Vec<ProtoPath> = route
@@ -213,18 +218,19 @@ fn route_to_proto(route: crate::rib::Route) -> ProtoRoute {
                 RpkiValidation::Invalid => proto::RpkiValidation::RpkiInvalid,
             }
             .into(),
+            ls_attribute: path.attrs.ls_attr.as_ref().map(proto_ls::ls_attr_to_proto),
         })
         .collect();
 
     ProtoRoute {
-        prefix: prefix_str,
         paths: proto_paths,
+        key,
     }
 }
 
-/// Parse an AddRouteRequest into internal types
-fn parse_add_route_request(
-    req: &AddRouteRequest,
+/// Parse an AddIpRouteRequest into internal types
+fn parse_add_ip_route(
+    req: &proto::AddIpRouteRequest,
 ) -> Result<(IpNetwork, NextHopAddr, Origin, Vec<AsPathSegment>), String> {
     // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
     let parts: Vec<&str> = req.prefix.split('/').collect();
@@ -810,70 +816,109 @@ impl BgpService for BgpGrpcService {
         request: Request<AddRouteRequest>,
     ) -> Result<Response<AddRouteResponse>, Status> {
         let req = request.into_inner();
-        let prefix_str = req.prefix.clone();
 
-        // Parse request using helper
-        let (prefix, next_hop, origin, as_path) = match parse_add_route_request(&req) {
-            Ok(parsed) => parsed,
-            Err(e) => {
+        let (key, attrs, description) = match req.route {
+            Some(proto::add_route_request::Route::Ls(ls)) => {
+                let nlri_msg = ls
+                    .nlri
+                    .ok_or_else(|| Status::invalid_argument("ls route requires nlri"))?;
+                let nlri = proto_ls::proto_to_ls_nlri(&nlri_msg)
+                    .map_err(|e| Status::invalid_argument(format!("invalid ls_nlri: {e}")))?;
+                let ls_attr = ls.attribute.as_ref().map(proto_ls::proto_to_ls_attr);
+                let next_hop = if let Some(ref nh) = ls.next_hop {
+                    let addr: std::net::IpAddr = nh
+                        .parse()
+                        .map_err(|_| Status::invalid_argument("invalid next_hop"))?;
+                    match addr {
+                        std::net::IpAddr::V4(v4) => NextHopAddr::Ipv4(v4),
+                        std::net::IpAddr::V6(v6) => NextHopAddr::Ipv6(v6),
+                    }
+                } else {
+                    NextHopAddr::Ipv4(std::net::Ipv4Addr::UNSPECIFIED)
+                };
+                let description = format!("LS {:?}", nlri.nlri_type);
+                let key = RouteKey::LinkState(nlri);
+                let attrs = PathAttrs {
+                    origin: Origin::IGP,
+                    as_path: vec![],
+                    next_hop,
+                    source: RouteSource::Local,
+                    local_pref: None,
+                    med: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
+                    communities: vec![],
+                    extended_communities: vec![],
+                    large_communities: vec![],
+                    unknown_attrs: vec![],
+                    originator_id: None,
+                    cluster_list: vec![],
+                    ls_attr,
+                };
+                (key, attrs, description)
+            }
+            Some(proto::add_route_request::Route::Ip(ip)) => {
+                let (prefix, next_hop, origin, as_path) =
+                    parse_add_ip_route(&ip).map_err(Status::invalid_argument)?;
+                let extended_communities: Vec<u64> = ip
+                    .extended_communities
+                    .iter()
+                    .map(proto_extcomm_to_u64)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        Status::invalid_argument(format!("Invalid extended community: {e}"))
+                    })?;
+                let large_communities = ip
+                    .large_communities
+                    .iter()
+                    .map(proto_large_community_to_internal)
+                    .collect();
+                let originator_id = ip
+                    .originator_id
+                    .as_ref()
+                    .map(|s| s.parse::<std::net::Ipv4Addr>())
+                    .transpose()
+                    .map_err(|_| Status::invalid_argument("Invalid originator_id"))?;
+                let cluster_list: Vec<std::net::Ipv4Addr> = ip
+                    .cluster_list
+                    .iter()
+                    .map(|s| s.parse::<std::net::Ipv4Addr>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| Status::invalid_argument("Invalid cluster_list"))?;
+                let description = ip.prefix.clone();
+                let key = RouteKey::Prefix(prefix);
+                let attrs = PathAttrs {
+                    origin,
+                    as_path,
+                    next_hop,
+                    source: RouteSource::Local,
+                    local_pref: ip.local_pref,
+                    med: ip.med,
+                    atomic_aggregate: ip.atomic_aggregate,
+                    aggregator: None,
+                    communities: ip.communities,
+                    extended_communities,
+                    large_communities,
+                    unknown_attrs: vec![],
+                    originator_id,
+                    cluster_list,
+                    ls_attr: None,
+                };
+                (key, attrs, description)
+            }
+            None => {
                 return Ok(Response::new(AddRouteResponse {
                     success: false,
-                    message: e,
-                }))
+                    message: "request must contain either ip or ls route".to_string(),
+                }));
             }
         };
-
-        // Convert proto extended communities to internal u64
-        let extended_communities: Vec<u64> = req
-            .extended_communities
-            .iter()
-            .map(proto_extcomm_to_u64)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| Status::invalid_argument(format!("Invalid extended community: {}", e)))?;
-
-        // Convert proto large communities to internal LargeCommunity
-        let large_communities = req
-            .large_communities
-            .iter()
-            .map(proto_large_community_to_internal)
-            .collect();
-
-        // Parse RFC 4456 route reflector attributes
-        let originator_id = req
-            .originator_id
-            .as_ref()
-            .map(|s| s.parse::<std::net::Ipv4Addr>())
-            .transpose()
-            .map_err(|_| Status::invalid_argument("Invalid originator_id IP address"))?;
-
-        let cluster_list: Vec<std::net::Ipv4Addr> = req
-            .cluster_list
-            .iter()
-            .map(|s| s.parse::<std::net::Ipv4Addr>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| Status::invalid_argument("Invalid cluster_list IP address"))?;
 
         // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgmt_req = MgmtOp::AddRoute {
-            prefix,
-            attrs: PathAttrs {
-                origin,
-                as_path,
-                next_hop,
-                source: crate::rib::RouteSource::Local,
-                local_pref: req.local_pref,
-                med: req.med,
-                atomic_aggregate: req.atomic_aggregate,
-                aggregator: None,
-                communities: req.communities,
-                extended_communities,
-                large_communities,
-                unknown_attrs: vec![],
-                originator_id,
-                cluster_list,
-                ls_attr: None,
-            },
+            key: Box::new(key),
+            attrs: Box::new(attrs),
             response: tx,
         };
 
@@ -882,11 +927,10 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
-        // Wait for response
         match rx.await {
             Ok(Ok(())) => Ok(Response::new(AddRouteResponse {
                 success: true,
-                message: format!("Route {} added", prefix_str),
+                message: format!("Route {} added", description),
             })),
             Ok(Err(e)) => Ok(Response::new(AddRouteResponse {
                 success: false,
@@ -906,72 +950,72 @@ impl BgpService for BgpGrpcService {
         while let Some(req) = stream.next().await {
             let req = req?;
 
-            // Parse request using helper
-            let (prefix, next_hop, origin, as_path) = match parse_add_route_request(&req) {
-                Ok(parsed) => parsed,
-                Err(_) => continue, // Skip invalid routes
+            let ip = match req.route {
+                Some(proto::add_route_request::Route::Ip(ip)) => ip,
+                _ => continue, // Stream only supports IP routes
             };
 
-            // Convert proto extended communities to internal u64
-            let extended_communities: Vec<u64> = match req
+            let (prefix, next_hop, origin, as_path) = match parse_add_ip_route(&ip) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+
+            let extended_communities: Vec<u64> = match ip
                 .extended_communities
                 .iter()
                 .map(proto_extcomm_to_u64)
                 .collect::<Result<Vec<_>, _>>()
             {
                 Ok(ec) => ec,
-                Err(_) => continue, // Skip routes with invalid extended communities
+                Err(_) => continue,
             };
 
-            // Convert proto large communities to internal LargeCommunity
-            let large_communities = req
+            let large_communities = ip
                 .large_communities
                 .iter()
                 .map(proto_large_community_to_internal)
                 .collect();
 
-            // Parse RFC 4456 route reflector attributes
-            let originator_id = match req
+            let originator_id = match ip
                 .originator_id
                 .as_ref()
                 .map(|s| s.parse::<std::net::Ipv4Addr>())
                 .transpose()
             {
                 Ok(id) => id,
-                Err(_) => continue, // Skip routes with invalid originator_id
+                Err(_) => continue,
             };
 
-            let cluster_list: Vec<std::net::Ipv4Addr> = match req
+            let cluster_list: Vec<std::net::Ipv4Addr> = match ip
                 .cluster_list
                 .iter()
                 .map(|s| s.parse::<std::net::Ipv4Addr>())
                 .collect::<Result<Vec<_>, _>>()
             {
                 Ok(cl) => cl,
-                Err(_) => continue, // Skip routes with invalid cluster_list
+                Err(_) => continue,
             };
 
-            // Send request to BGP server
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mgmt_req = MgmtOp::AddRoute {
-                prefix,
-                attrs: PathAttrs {
+                key: Box::new(RouteKey::Prefix(prefix)),
+                attrs: Box::new(PathAttrs {
                     origin,
                     as_path,
                     next_hop,
-                    source: crate::rib::RouteSource::Local,
-                    local_pref: req.local_pref,
-                    med: req.med,
-                    atomic_aggregate: req.atomic_aggregate,
+                    source: RouteSource::Local,
+                    local_pref: ip.local_pref,
+                    med: ip.med,
+                    atomic_aggregate: ip.atomic_aggregate,
                     aggregator: None,
-                    communities: req.communities,
+                    communities: ip.communities,
                     extended_communities,
                     large_communities,
                     unknown_attrs: vec![],
                     originator_id,
                     cluster_list,
                     ls_attr: None,
-                },
+                }),
                 response: tx,
             };
 
@@ -979,7 +1023,6 @@ impl BgpService for BgpGrpcService {
                 break;
             }
 
-            // Wait for response
             if let Ok(Ok(())) = rx.await {
                 count += 1;
             }
@@ -997,40 +1040,50 @@ impl BgpService for BgpGrpcService {
     ) -> Result<Response<RemoveRouteResponse>, Status> {
         let req = request.into_inner();
 
-        // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
-        let parts: Vec<&str> = req.prefix.split('/').collect();
-        if parts.len() != 2 {
-            return Ok(Response::new(RemoveRouteResponse {
-                success: false,
-                message:
-                    "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)"
-                        .to_string(),
-            }));
-        }
-
-        let address: IpAddr = parts[0]
-            .parse()
-            .map_err(|_| Status::invalid_argument("Invalid IP address in prefix"))?;
-        let prefix_length: u8 = parts[1]
-            .parse()
-            .map_err(|_| Status::invalid_argument("Invalid prefix length"))?;
-
-        let prefix = match address {
-            IpAddr::V4(ipv4) => IpNetwork::V4(Ipv4Net {
-                address: ipv4,
-                prefix_length,
-            }),
-            IpAddr::V6(ipv6) => IpNetwork::V6(Ipv6Net {
-                address: ipv6,
-                prefix_length,
-            }),
+        let (key, description) = match req.key {
+            Some(proto::remove_route_request::Key::LsNlri(ref proto_nlri)) => {
+                let nlri = proto_ls::proto_to_ls_nlri(proto_nlri)
+                    .map_err(|e| Status::invalid_argument(format!("invalid ls_nlri: {e}")))?;
+                let desc = format!("LS {:?}", nlri.nlri_type);
+                (RouteKey::LinkState(nlri), desc)
+            }
+            Some(proto::remove_route_request::Key::Prefix(ref prefix_str)) => {
+                let parts: Vec<&str> = prefix_str.split('/').collect();
+                if parts.len() != 2 {
+                    return Ok(Response::new(RemoveRouteResponse {
+                        success: false,
+                        message: "Invalid prefix format, expected CIDR".to_string(),
+                    }));
+                }
+                let address: IpAddr = parts[0]
+                    .parse()
+                    .map_err(|_| Status::invalid_argument("Invalid IP address"))?;
+                let prefix_length: u8 = parts[1]
+                    .parse()
+                    .map_err(|_| Status::invalid_argument("Invalid prefix length"))?;
+                let prefix = match address {
+                    IpAddr::V4(ipv4) => IpNetwork::V4(Ipv4Net {
+                        address: ipv4,
+                        prefix_length,
+                    }),
+                    IpAddr::V6(ipv6) => IpNetwork::V6(Ipv6Net {
+                        address: ipv6,
+                        prefix_length,
+                    }),
+                };
+                (RouteKey::Prefix(prefix), prefix_str.clone())
+            }
+            None => {
+                return Ok(Response::new(RemoveRouteResponse {
+                    success: false,
+                    message: "request must contain either prefix or ls_nlri".to_string(),
+                }));
+            }
         };
 
-        // Send request to BGP server
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let prefix_str = req.prefix.clone();
         let mgmt_req = MgmtOp::RemoveRoute {
-            prefix,
+            key: Box::new(key),
             response: tx,
         };
 
@@ -1039,11 +1092,10 @@ impl BgpService for BgpGrpcService {
             .await
             .map_err(|_| Status::internal("failed to send request"))?;
 
-        // Wait for response
         match rx.await {
             Ok(Ok(())) => Ok(Response::new(RemoveRouteResponse {
                 success: true,
-                message: format!("Route {} removed", prefix_str),
+                message: format!("Route {} removed", description),
             })),
             Ok(Err(e)) => Ok(Response::new(RemoveRouteResponse {
                 success: false,
@@ -1064,6 +1116,8 @@ impl BgpService for BgpGrpcService {
         let mgmt_req = MgmtOp::GetRoutes {
             rib_type: req.rib_type,
             peer_address: req.peer_address,
+            afi: req.afi,
+            safi: req.safi,
             response: tx,
         };
 
@@ -1100,6 +1154,8 @@ impl BgpService for BgpGrpcService {
         let mgmt_req = MgmtOp::GetRoutesStream {
             rib_type: req.rib_type,
             peer_address: req.peer_address,
+            afi: req.afi,
+            safi: req.safi,
             tx,
         };
         self.mgmt_request_tx

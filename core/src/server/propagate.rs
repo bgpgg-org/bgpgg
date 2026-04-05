@@ -15,7 +15,7 @@
 use super::{BgpServer, BmpOp};
 use crate::bgp::msg::{AddPathMask, MessageFormat};
 use crate::bgp::msg_update::UpdateMessage;
-use crate::bgp::multiprotocol::{Afi, Safi};
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::log::{error, info, warn};
 use crate::peer::outgoing::{
     batch_announcements, propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
@@ -182,7 +182,7 @@ impl BgpServer {
 
         let all_keys: Vec<RouteKey> = self
             .loc_rib
-            .get_routes_afi(afi)
+            .get_routes(Some(AfiSafi::new(afi, safi)))
             .iter()
             .map(|route| route.key.clone())
             .collect();

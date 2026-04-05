@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bgp::multiprotocol::Afi;
+use crate::bgp::multiprotocol::{Afi, AfiSafi};
 use crate::rib::{Path, Route, RouteKey};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -96,9 +96,10 @@ impl AdjRibOut {
     }
 
     /// Get all routes, suitable for gRPC responses.
-    pub fn get_routes(&self) -> Vec<Route> {
+    pub fn get_routes(&self, afi_safi: Option<AfiSafi>) -> Vec<Route> {
         self.routes
             .iter()
+            .filter(|(key, _)| afi_safi.is_none_or(|af| key.afi_safi() == af))
             .map(|(key, paths)| Route {
                 key: key.clone(),
                 paths: paths.values().cloned().collect(),
@@ -141,7 +142,7 @@ mod tests {
 
         rib.insert(key.clone(), path.clone());
 
-        let routes = rib.get_routes();
+        let routes = rib.get_routes(None);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].key, key);
         assert_eq!(routes[0].paths.len(), 1);
@@ -180,7 +181,7 @@ mod tests {
         rib.insert(route_key_v4("10.0.1.0/24"), make_path(2));
 
         rib.clear();
-        assert_eq!(rib.get_routes().len(), 0);
+        assert_eq!(rib.get_routes(None).len(), 0);
     }
 
     #[test]
@@ -262,10 +263,10 @@ mod tests {
         rib.insert(route_key_v4("10.0.1.0/24"), make_path(2));
 
         rib.clear_afi(Afi::Ipv4);
-        assert_eq!(rib.get_routes().len(), 0);
+        assert_eq!(rib.get_routes(None).len(), 0);
 
         // Insert new route after clear
         rib.insert(route_key_v4("192.168.0.0/24"), make_path(3));
-        assert_eq!(rib.get_routes().len(), 1);
+        assert_eq!(rib.get_routes(None).len(), 1);
     }
 }

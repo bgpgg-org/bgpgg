@@ -85,12 +85,22 @@ impl AdjRibIn {
         }
     }
 
-    pub fn get_all_routes(&self) -> Vec<Route> {
-        let mut routes = Vec::new();
-        routes.extend(self.ipv4_unicast.values().cloned());
-        routes.extend(self.ipv6_unicast.values().cloned());
-        routes.extend(self.link_state.values().cloned());
-        routes
+    pub fn get_routes(&self, afi_safi: Option<AfiSafi>) -> Vec<Route> {
+        match afi_safi {
+            Some(af) => match (af.afi, af.safi) {
+                (Afi::Ipv4, Safi::Unicast) => self.ipv4_unicast.values().cloned().collect(),
+                (Afi::Ipv6, Safi::Unicast) => self.ipv6_unicast.values().cloned().collect(),
+                (Afi::LinkState, Safi::LinkState) => self.link_state.values().cloned().collect(),
+                _ => vec![],
+            },
+            None => {
+                let mut routes = Vec::new();
+                routes.extend(self.ipv4_unicast.values().cloned());
+                routes.extend(self.ipv6_unicast.values().cloned());
+                routes.extend(self.link_state.values().cloned());
+                routes
+            }
+        }
     }
 
     pub fn prefix_count(&self) -> usize {
@@ -216,7 +226,7 @@ mod tests {
     #[test]
     fn test_new_adj_rib_in() {
         let rib_in = AdjRibIn::new();
-        assert_eq!(rib_in.get_all_routes().len(), 0);
+        assert_eq!(rib_in.get_routes(None).len(), 0);
     }
 
     #[test]
@@ -227,7 +237,7 @@ mod tests {
 
         rib_in.add_route(prefix_key(prefix), path.clone());
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].key, RouteKey::Prefix(prefix));
         assert_eq!(routes[0].paths[0].attrs, path.attrs);
@@ -250,7 +260,7 @@ mod tests {
         rib_in.add_route(prefix_key(prefix1), path1.clone());
         rib_in.add_route(prefix_key(prefix2), path2.clone());
 
-        let mut routes = rib_in.get_all_routes();
+        let mut routes = rib_in.get_routes(None);
         routes.sort_by_key(|r| format!("{:?}", r.key));
 
         let mut expected = [
@@ -286,7 +296,7 @@ mod tests {
         rib_in.add_route(prefix_key(prefix), path1);
         rib_in.add_route(prefix_key(prefix), Arc::clone(&path2));
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes.len(), 1);
         assert_eq!(
             routes[0].paths[0].as_path(),
@@ -316,7 +326,7 @@ mod tests {
 
         rib_in.remove_route(&prefix_key(prefix1), None);
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes.len(), 1);
         assert_eq!(
             routes[0],
@@ -333,7 +343,7 @@ mod tests {
         let prefix = create_test_prefix();
 
         rib_in.remove_route(&prefix_key(prefix), None);
-        assert_eq!(rib_in.get_all_routes().len(), 0);
+        assert_eq!(rib_in.get_routes(None).len(), 0);
     }
 
     #[test]
@@ -389,10 +399,10 @@ mod tests {
             create_test_path(peer_ip, test_bgp_id()),
         );
 
-        assert_eq!(rib_in.get_all_routes().len(), 2);
+        assert_eq!(rib_in.get_routes(None).len(), 2);
 
         rib_in.clear();
-        assert_eq!(rib_in.get_all_routes().len(), 0);
+        assert_eq!(rib_in.get_routes(None).len(), 0);
     }
 
     #[test]
@@ -415,7 +425,7 @@ mod tests {
         rib_in.add_route(prefix_key(prefix), path1);
         rib_in.add_route(prefix_key(prefix), path2);
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes.len(), 1, "same prefix should be one Route");
         assert_eq!(routes[0].paths.len(), 2, "two paths should coexist");
     }
@@ -437,7 +447,7 @@ mod tests {
         rib_in.add_route(prefix_key(prefix), path1);
         rib_in.add_route(prefix_key(prefix), path1_updated);
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes[0].paths.len(), 1, "same path_id should replace");
         assert_eq!(routes[0].paths[0].med(), Some(20));
     }
@@ -456,10 +466,10 @@ mod tests {
 
         rib_in.add_route(prefix_key(prefix), path1);
         rib_in.add_route(prefix_key(prefix), path2);
-        assert_eq!(rib_in.get_all_routes()[0].paths.len(), 2);
+        assert_eq!(rib_in.get_routes(None)[0].paths.len(), 2);
 
         rib_in.remove_route(&prefix_key(prefix), Some(1));
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].paths.len(), 1);
         assert_eq!(routes[0].paths[0].remote_path_id, Some(2));
@@ -493,7 +503,7 @@ mod tests {
         rib_in.add_route(prefix_key(prefix), path1);
         rib_in.add_route(prefix_key(prefix), path2);
 
-        let routes = rib_in.get_all_routes();
+        let routes = rib_in.get_routes(None);
         assert_eq!(routes[0].paths.len(), 1);
         assert_eq!(routes[0].paths[0].med(), Some(50));
 
