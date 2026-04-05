@@ -654,6 +654,22 @@ pub struct ConditionsConfig {
     pub community: Option<String>, // Single community value
     #[serde(default)]
     pub rpki_validation: Option<RpkiValidationConfig>,
+
+    // Address family condition
+    #[serde(default)]
+    pub afi_safi: Option<String>,
+
+    // BGP-LS conditions
+    #[serde(default)]
+    pub ls_nlri_type: Option<String>,
+    #[serde(default)]
+    pub ls_protocol_id: Option<String>,
+    #[serde(default)]
+    pub ls_instance_id: Option<u64>,
+    #[serde(default)]
+    pub ls_node_as: Option<u32>,
+    #[serde(default)]
+    pub ls_node_router_id: Option<String>,
 }
 
 /// Reference to a defined set with match option

@@ -43,11 +43,11 @@ use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
-    AddPathSendMode, AddRouteRequest, AdminState, Aggregator, AsPathSegment, AsPathSegmentType,
-    BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity, GracefulRestartConfig,
-    LargeCommunity, ListRoutesRequest, LlgrConfig as ProtoLlgrConfig, Origin, Path, Peer,
-    PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig,
-    UnknownAttribute,
+    AddPathSendMode, AddRouteRequest, AdminState, AfiSafiConfig, Aggregator, AsPathSegment,
+    AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
+    GracefulRestartConfig, LargeCommunity, ListRoutesRequest, LlgrConfig as ProtoLlgrConfig,
+    Origin, Path, Peer, PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig,
+    StatementConfig, UnknownAttribute,
 };
 use bgpgg::grpc::proto_community::{internal_to_proto_large_community, u64_to_proto_extcomm};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
@@ -164,6 +164,7 @@ pub struct PeerConfig {
     pub add_path_send: Option<bool>,
     pub add_path_receive: Option<bool>,
     pub send_rpki_community: Option<bool>,
+    pub afi_safis: Vec<AfiSafiConfig>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -1192,6 +1193,7 @@ pub async fn chain_servers<const N: usize>(
         }),
         add_path_receive: config.add_path_receive,
         send_rpki_community: config.send_rpki_community,
+        afi_safis: config.afi_safis.clone(),
         ..Default::default()
     };
 

@@ -639,13 +639,8 @@ fn evaluate_export_policy(
     route_key: &RouteKey,
     path: &mut Path,
 ) -> bool {
-    let prefix = match route_key {
-        RouteKey::Prefix(p) => p,
-        // BGP-LS routes: no prefix-based policy yet (Phase 8), default accept
-        RouteKey::LinkState(_) => return true,
-    };
     for policy in policies {
-        match policy.evaluate(prefix, path) {
+        match policy.evaluate(route_key, path) {
             PolicyResult::Accept => return true,
             PolicyResult::Reject => return false,
             PolicyResult::Continue => continue,

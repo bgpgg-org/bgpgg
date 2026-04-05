@@ -336,11 +336,11 @@ MP_REACH_NLRI per UPDATE):
 
 **Propagation.** `propagate_routes_to_peer()` iterates per AFI/SAFI, filters by
 `route_key.afi_safi()`. `compute_export_path`, `build_export_attrs`,
-`build_export_next_hop` all take `&RouteKey`. LS routes: no prefix-based policy
-(default accept, Phase 8 adds LS policy); next-hop follows standard BGP rules
-per RFC 9552 Section 5.5.
+`build_export_next_hop` all take `&RouteKey`. LS routes flow through the same policy
+engine as prefix routes (Phase 8); next-hop follows standard BGP rules per
+RFC 9552 Section 5.5.
 
-**Server.** `apply_import()` handles `RouteKey::LinkState` (skip VRP, default accept).
+**Server.** `apply_import()` passes `route_key` to `policy.evaluate()` (skip VRP for LS).
 `validate_afi_safi()` uses `RouteKey::afi_safi()`. `resend_routes_to_peer()` supports
 `Safi::LinkState`.
 
@@ -524,24 +524,53 @@ bgp-ls:
 
 ---
 
-## Phase 8: Policy Extensions (future)
+## Phase 8: Policy Extensions (DONE)
 
-New match conditions for BGP-LS specific filtering:
+Six new match conditions for BGP-LS specific filtering. The policy signature chain
+was changed from `&IpNetwork` to `&RouteKey` so both prefix and LS routes flow through
+the same policy engine. BGP-LS routes are no longer unconditionally accepted — they
+follow default-deny like prefix routes (built-in default policies still accept all).
 
-- `match afi-safi bgp-ls` -- match on address family (may already work)
-- `match ls-nlri-type node|link|prefix-v4|prefix-v6`
-- `match ls-protocol-id direct|static|ospfv2|...`
-- `match ls-instance-id <value>`
-- `match ls-node-as <asn>`
-- `match ls-node-router-id <ip>`
+**New conditions:**
 
-These enable per-peer topology filtering (e.g., show partner only abstracted topology).
+- `afi-safi: bgp-ls|ipv4-unicast|ipv6-unicast` -- match on address family
+- `ls-nlri-type: node|link|prefix-v4|prefix-v6` -- filter by NLRI type
+- `ls-protocol-id: direct|static|ospfv2|ospfv3|isis-l1|isis-l2` -- filter by origin IGP
+- `ls-instance-id: <u64>` -- filter by BGP-LS Instance ID
+- `ls-node-as: <u32>` -- filter by node's AS number
+- `ls-node-router-id: <ip>` -- filter by node's IGP router ID (IPv4/IPv6)
 
-### Files to change
+All LS conditions return `false` for prefix routes, and prefix conditions return `false`
+for LS routes. Path-based conditions (neighbor, as-path, community, route-type, rpki) work
+for both families unchanged.
 
-- `core/src/policy/sets.rs` -- new LsMatchSet types
-- `core/src/policy/statement.rs` -- new conditions
-- `proto/bgp.proto` -- policy proto messages for LS conditions
+**YAML config example:**
+```yaml
+policy-definitions:
+  - name: ls-only-nodes
+    statements:
+      - conditions:
+          afi-safi: bgp-ls
+          ls-nlri-type: node
+          ls-node-as: 65001
+        actions:
+          accept: true
+      - actions:
+          reject: true
+```
+
+### Files changed
+
+- `core/src/bgp/bgpls_nlri.rs` -- `LsDescriptors::local_node()` helper
+- `core/src/policy/statement.rs` -- `AfiSafiMatch`, `LsNlriTypeMatch`, `LsProtocolIdMatch`
+  enums; six new `Condition` variants; `matches()` takes `&RouteKey`; `add_conditions()` /
+  `to_config()` for new fields; 10 new tests
+- `core/src/policy/mod.rs` -- `Policy::evaluate()` / `accept()` take `&RouteKey`
+- `core/src/config.rs` -- six new `ConditionsConfig` fields
+- `core/src/peer/outgoing.rs` -- `evaluate_export_policy()` passes `route_key` directly
+- `core/src/server/ops.rs` -- `apply_import()` passes `route_key` directly
+- `proto/bgp.proto` -- `ConditionsConfig` fields 10-15
+- `core/src/grpc/proto_policy.rs` -- proto conversion for new fields
 
 ---
 
@@ -595,10 +624,10 @@ New test function `test_rr_bgpls_reflection()`. Same topology pattern as
 `test_route_reflector_basic()`: client1 -> RR -> client2. Inject LS NLRI on client1,
 poll until client2 has it, verify ORIGINATOR_ID and CLUSTER_LIST set correctly.
 
-### Policy tests (in `core/tests/policy.rs`)
+### Policy tests (in `core/tests/policy.rs`) -- DONE
 
-- Import deny on AFI/SAFI BGP-LS -- LS route rejected, IP routes on same session accepted
-- Export deny on AFI/SAFI BGP-LS -- LS route not propagated to peer
+- `test_import_policy_deny_bgp_ls` -- LS route rejected on import, IP route on same session accepted
+- `test_export_policy_deny_bgp_ls` -- LS route blocked in adj-rib-out by export policy, IP route exported normally
 
 ### Error handling tests (in `core/tests/bgpls.rs`)
 
@@ -635,7 +664,7 @@ from RFC 9552 Section 8.2:
 5. Phase 5 (Processing + Propagation) -- wiring, uses existing patterns
 6. Phase 6 (gRPC) -- follows existing AddRoute/ListRoutes patterns
 7. Phase 7 (Config) -- small, can be partially done alongside earlier phases
-8. Phase 8 (Policy) -- future, not needed for initial release
+8. Phase 8 (Policy) -- fine-grained LS topology filtering
 
 Phases 1-5 make bgpgg a correct BGP-LS propagator (dumb pipe / route reflector).
 Phase 6 adds producer/consumer capability.

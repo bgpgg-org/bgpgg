@@ -131,6 +131,12 @@ pub(super) fn proto_to_statement_config(
                     Err(_) => None,
                 }
             }),
+            afi_safi: c.afi_safi,
+            ls_nlri_type: c.ls_nlri_type,
+            ls_protocol_id: c.ls_protocol_id,
+            ls_instance_id: c.ls_instance_id,
+            ls_node_as: c.ls_node_as,
+            ls_node_router_id: c.ls_node_router_id,
         }
     });
 
@@ -314,6 +320,12 @@ pub(super) fn policy_info_to_proto(info: PolicyInfoResponse) -> PolicyInfo {
                     }
                     .into()
                 }),
+                afi_safi: s.conditions.afi_safi,
+                ls_nlri_type: s.conditions.ls_nlri_type,
+                ls_protocol_id: s.conditions.ls_protocol_id,
+                ls_instance_id: s.conditions.ls_instance_id,
+                ls_node_as: s.conditions.ls_node_as,
+                ls_node_router_id: s.conditions.ls_node_router_id,
             });
 
             let (add_communities, remove_communities) = if let Some(comm) = s.actions.community {

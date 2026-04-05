@@ -1101,18 +1101,12 @@ fn apply_import(
     if path.attrs.local_pref.is_none() {
         path.attrs.local_pref = Some(100);
     }
-    match route_key {
-        RouteKey::Prefix(prefix) => {
-            for policy in policies {
-                match policy.evaluate(prefix, path) {
-                    PolicyResult::Accept => return true,
-                    PolicyResult::Reject => return false,
-                    PolicyResult::Continue => continue,
-                }
-            }
-            false
+    for policy in policies {
+        match policy.evaluate(route_key, path) {
+            PolicyResult::Accept => return true,
+            PolicyResult::Reject => return false,
+            PolicyResult::Continue => continue,
         }
-        // BGP-LS routes: no prefix-based policy yet (Phase 8), default accept
-        RouteKey::LinkState(_) => true,
     }
+    false
 }

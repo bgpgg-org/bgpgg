@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::bgpls_nlri::LsProtocolId;
+use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::{
     ActionsConfig, ConditionsConfig, LocalPrefActionConfig, MatchOptionConfig, MedActionConfig,
     StatementConfig,
@@ -21,7 +23,7 @@ use crate::policy::sets::{
     AsPathSet, CommunitySet, DefinedSets, ExtCommunitySet, LargeCommunitySet, NeighborSet,
     PrefixSet,
 };
-use crate::rib::{Path, RouteSource};
+use crate::rib::{Path, RouteKey, RouteSource};
 use crate::rpki::vrp::RpkiValidation;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -61,6 +63,34 @@ pub enum LargeCommunityOp {
     Add(Vec<crate::bgp::msg_update_types::LargeCommunity>),
     Remove(Vec<crate::bgp::msg_update_types::LargeCommunity>),
     Replace(Vec<crate::bgp::msg_update_types::LargeCommunity>),
+}
+
+/// AFI/SAFI match for policy conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfiSafiMatch {
+    Ipv4Unicast,
+    Ipv6Unicast,
+    BgpLs,
+}
+
+/// BGP-LS NLRI type match for policy conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsNlriTypeMatch {
+    Node,
+    Link,
+    PrefixV4,
+    PrefixV6,
+}
+
+/// BGP-LS protocol ID match for policy conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsProtocolIdMatch {
+    IsIsL1,
+    IsIsL2,
+    OspfV2,
+    Direct,
+    Static,
+    OspfV3,
 }
 
 // ============================================================================
@@ -162,6 +192,49 @@ impl Statement {
                 }
                 Condition::RpkiValidation(state) => {
                     conditions.rpki_validation = Some((*state).into());
+                }
+                Condition::AfiSafi(afi_safi_match) => {
+                    conditions.afi_safi = Some(
+                        match afi_safi_match {
+                            AfiSafiMatch::Ipv4Unicast => "ipv4-unicast",
+                            AfiSafiMatch::Ipv6Unicast => "ipv6-unicast",
+                            AfiSafiMatch::BgpLs => "bgp-ls",
+                        }
+                        .to_string(),
+                    );
+                }
+                Condition::LsNlriType(nlri_type) => {
+                    conditions.ls_nlri_type = Some(
+                        match nlri_type {
+                            LsNlriTypeMatch::Node => "node",
+                            LsNlriTypeMatch::Link => "link",
+                            LsNlriTypeMatch::PrefixV4 => "prefix-v4",
+                            LsNlriTypeMatch::PrefixV6 => "prefix-v6",
+                        }
+                        .to_string(),
+                    );
+                }
+                Condition::LsProtocolId(proto) => {
+                    conditions.ls_protocol_id = Some(
+                        match proto {
+                            LsProtocolIdMatch::IsIsL1 => "isis-l1",
+                            LsProtocolIdMatch::IsIsL2 => "isis-l2",
+                            LsProtocolIdMatch::OspfV2 => "ospfv2",
+                            LsProtocolIdMatch::Direct => "direct",
+                            LsProtocolIdMatch::Static => "static",
+                            LsProtocolIdMatch::OspfV3 => "ospfv3",
+                        }
+                        .to_string(),
+                    );
+                }
+                Condition::LsInstanceId(id) => {
+                    conditions.ls_instance_id = Some(*id);
+                }
+                Condition::LsNodeAs(asn) => {
+                    conditions.ls_node_as = Some(*asn);
+                }
+                Condition::LsNodeRouterId(ip) => {
+                    conditions.ls_node_router_id = Some(ip.to_string());
                 }
             }
         }
@@ -305,15 +378,15 @@ impl Statement {
     }
 
     /// Check if all conditions match
-    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
+    fn matches(&self, route_key: &RouteKey, path: &Path) -> bool {
         // Empty conditions means match everything
-        self.conditions.is_empty() || self.conditions.iter().all(|c| c.matches(prefix, path))
+        self.conditions.is_empty() || self.conditions.iter().all(|c| c.matches(route_key, path))
     }
 
     /// Apply all actions if conditions match
     /// Returns None if no match, Some(accept) if matched
-    pub(super) fn apply(&self, prefix: &IpNetwork, path: &mut Path) -> Option<bool> {
-        if self.matches(prefix, path) {
+    pub(super) fn apply(&self, route_key: &RouteKey, path: &mut Path) -> Option<bool> {
+        if self.matches(route_key, path) {
             let mut accept = true;
             for action in &self.actions {
                 if !action.apply(path) {
@@ -452,16 +525,28 @@ pub enum Condition {
     LargeCommunitySet(Arc<LargeCommunitySet>, MatchOptionConfig),
     RouteType(RouteType),
     RpkiValidation(RpkiValidation),
+    AfiSafi(AfiSafiMatch),
+    LsNlriType(LsNlriTypeMatch),
+    LsProtocolId(LsProtocolIdMatch),
+    LsInstanceId(u64),
+    LsNodeAs(u32),
+    LsNodeRouterId(IpAddr),
 }
 
 impl Condition {
-    fn matches(&self, prefix: &IpNetwork, path: &Path) -> bool {
+    fn matches(&self, route_key: &RouteKey, path: &Path) -> bool {
         match self {
-            Condition::Prefix(p) => prefix == p,
-            Condition::PrefixSet(set, match_opt) => match match_opt {
-                MatchOptionConfig::Any => set.prefixes.iter().any(|pm| pm.contains(prefix)),
-                MatchOptionConfig::All => set.prefixes.iter().all(|pm| pm.contains(prefix)),
-                MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
+            Condition::Prefix(p) => match route_key {
+                RouteKey::Prefix(prefix) => prefix == p,
+                RouteKey::LinkState(_) => false,
+            },
+            Condition::PrefixSet(set, match_opt) => match route_key {
+                RouteKey::Prefix(prefix) => match match_opt {
+                    MatchOptionConfig::Any => set.prefixes.iter().any(|pm| pm.contains(prefix)),
+                    MatchOptionConfig::All => set.prefixes.iter().all(|pm| pm.contains(prefix)),
+                    MatchOptionConfig::Invert => !set.prefixes.iter().any(|pm| pm.contains(prefix)),
+                },
+                RouteKey::LinkState(_) => false,
             },
             Condition::Neighbor(neighbor) => path
                 .source()
@@ -549,6 +634,70 @@ impl Condition {
                     | (RouteType::Local, RouteSource::Local)
             ),
             Condition::RpkiValidation(state) => path.rpki_state == *state,
+            Condition::AfiSafi(afi_safi_match) => {
+                let route_afi_safi = route_key.afi_safi();
+                match afi_safi_match {
+                    AfiSafiMatch::Ipv4Unicast => {
+                        route_afi_safi == AfiSafi::new(Afi::Ipv4, Safi::Unicast)
+                    }
+                    AfiSafiMatch::Ipv6Unicast => {
+                        route_afi_safi == AfiSafi::new(Afi::Ipv6, Safi::Unicast)
+                    }
+                    AfiSafiMatch::BgpLs => {
+                        route_afi_safi == AfiSafi::new(Afi::LinkState, Safi::LinkState)
+                    }
+                }
+            }
+            Condition::LsNlriType(nlri_type_match) => match route_key {
+                RouteKey::LinkState(ls) => matches!(
+                    (nlri_type_match, ls.nlri_type),
+                    (LsNlriTypeMatch::Node, 1)
+                        | (LsNlriTypeMatch::Link, 2)
+                        | (LsNlriTypeMatch::PrefixV4, 3)
+                        | (LsNlriTypeMatch::PrefixV6, 4)
+                ),
+                _ => false,
+            },
+            Condition::LsProtocolId(proto_match) => match route_key {
+                RouteKey::LinkState(ls) => ls.body.as_ref().is_some_and(|body| {
+                    let expected = match proto_match {
+                        LsProtocolIdMatch::IsIsL1 => LsProtocolId::IsIsL1,
+                        LsProtocolIdMatch::IsIsL2 => LsProtocolId::IsIsL2,
+                        LsProtocolIdMatch::OspfV2 => LsProtocolId::OspfV2,
+                        LsProtocolIdMatch::Direct => LsProtocolId::Direct,
+                        LsProtocolIdMatch::Static => LsProtocolId::Static,
+                        LsProtocolIdMatch::OspfV3 => LsProtocolId::OspfV3,
+                    };
+                    body.protocol_id() == Some(expected)
+                }),
+                _ => false,
+            },
+            Condition::LsInstanceId(id) => match route_key {
+                RouteKey::LinkState(ls) => {
+                    ls.body.as_ref().is_some_and(|body| body.identifier == *id)
+                }
+                _ => false,
+            },
+            Condition::LsNodeAs(asn) => match route_key {
+                RouteKey::LinkState(ls) => ls
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.descriptors.local_node().as_number == Some(*asn)),
+                _ => false,
+            },
+            Condition::LsNodeRouterId(ip) => match route_key {
+                RouteKey::LinkState(ls) => ls.body.as_ref().is_some_and(|body| {
+                    body.descriptors
+                        .local_node()
+                        .igp_router_id
+                        .as_ref()
+                        .is_some_and(|rid| match ip {
+                            IpAddr::V4(v4) => rid.as_slice() == v4.octets(),
+                            IpAddr::V6(v6) => rid.as_slice() == v6.octets(),
+                        })
+                }),
+                _ => false,
+            },
         }
     }
 }
@@ -691,6 +840,69 @@ fn add_conditions(
 
     if let Some(rpki_config) = cond.rpki_validation {
         stmt = stmt.when(Condition::RpkiValidation(rpki_config.into()));
+    }
+
+    if let Some(ref afi_safi_str) = cond.afi_safi {
+        let afi_safi = match afi_safi_str.as_str() {
+            "ipv4-unicast" => AfiSafiMatch::Ipv4Unicast,
+            "ipv6-unicast" => AfiSafiMatch::Ipv6Unicast,
+            "bgp-ls" => AfiSafiMatch::BgpLs,
+            _ => {
+                return Err(format!(
+                    "invalid afi-safi '{}' (must be 'ipv4-unicast', 'ipv6-unicast', or 'bgp-ls')",
+                    afi_safi_str
+                ))
+            }
+        };
+        stmt = stmt.when(Condition::AfiSafi(afi_safi));
+    }
+
+    if let Some(ref nlri_type_str) = cond.ls_nlri_type {
+        let nlri_type = match nlri_type_str.as_str() {
+            "node" => LsNlriTypeMatch::Node,
+            "link" => LsNlriTypeMatch::Link,
+            "prefix-v4" => LsNlriTypeMatch::PrefixV4,
+            "prefix-v6" => LsNlriTypeMatch::PrefixV6,
+            _ => {
+                return Err(format!(
+                "invalid ls-nlri-type '{}' (must be 'node', 'link', 'prefix-v4', or 'prefix-v6')",
+                nlri_type_str
+            ))
+            }
+        };
+        stmt = stmt.when(Condition::LsNlriType(nlri_type));
+    }
+
+    if let Some(ref proto_str) = cond.ls_protocol_id {
+        let proto = match proto_str.as_str() {
+            "isis-l1" => LsProtocolIdMatch::IsIsL1,
+            "isis-l2" => LsProtocolIdMatch::IsIsL2,
+            "ospfv2" => LsProtocolIdMatch::OspfV2,
+            "direct" => LsProtocolIdMatch::Direct,
+            "static" => LsProtocolIdMatch::Static,
+            "ospfv3" => LsProtocolIdMatch::OspfV3,
+            _ => {
+                return Err(format!(
+                    "invalid ls-protocol-id '{}' (must be 'isis-l1', 'isis-l2', 'ospfv2', 'ospfv3', 'direct', or 'static')",
+                    proto_str
+                ))
+            }
+        };
+        stmt = stmt.when(Condition::LsProtocolId(proto));
+    }
+
+    if let Some(instance_id) = cond.ls_instance_id {
+        stmt = stmt.when(Condition::LsInstanceId(instance_id));
+    }
+
+    if let Some(asn) = cond.ls_node_as {
+        stmt = stmt.when(Condition::LsNodeAs(asn));
+    }
+
+    if let Some(ref router_id_str) = cond.ls_node_router_id {
+        let router_id = IpAddr::from_str(router_id_str)
+            .map_err(|e| format!("invalid ls-node-router-id '{}': {}", router_id_str, e))?;
+        stmt = stmt.when(Condition::LsNodeRouterId(router_id));
     }
 
     Ok(stmt)
@@ -842,6 +1054,7 @@ fn parse_community_value(s: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::bgpls_nlri::{LsDescriptors, LsNlri, LsNlriBody, LsNlriType, NodeDescriptor};
     use crate::config::PolicyDefinitionConfig;
     use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
@@ -851,6 +1064,39 @@ mod tests {
 
     fn test_ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
+
+    fn prefix_key(prefix: IpNetwork) -> RouteKey {
+        RouteKey::Prefix(prefix)
+    }
+
+    fn test_prefix_key() -> RouteKey {
+        prefix_key(test_prefix())
+    }
+
+    /// Create an LS route key with configurable fields for testing.
+    fn make_ls_route_key(
+        nlri_type: LsNlriType,
+        protocol_id: u8,
+        identifier: u64,
+        as_number: Option<u32>,
+        igp_router_id: Option<Vec<u8>>,
+    ) -> RouteKey {
+        RouteKey::LinkState(LsNlri {
+            nlri_type: nlri_type as u16,
+            raw: vec![],
+            body: Some(LsNlriBody {
+                protocol_id,
+                identifier,
+                descriptors: LsDescriptors::Node {
+                    local_node: NodeDescriptor {
+                        as_number,
+                        igp_router_id,
+                        ..Default::default()
+                    },
+                },
+            }),
+        })
     }
 
     #[test]
@@ -863,7 +1109,7 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
+        assert_eq!(statement.apply(&test_prefix_key(), &mut path), Some(true));
         assert_eq!(path.local_pref(), Some(100));
     }
 
@@ -886,12 +1132,16 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
 
-        assert_eq!(statement.apply(&prefix, &mut path), Some(true));
+        assert_eq!(statement.apply(&prefix_key(prefix), &mut path), Some(true));
         assert_eq!(path.local_pref(), Some(200));
 
         path.attrs.local_pref = None;
-        assert_eq!(statement.apply(&other_prefix, &mut path), None);
+        assert_eq!(statement.apply(&prefix_key(other_prefix), &mut path), None);
         assert_eq!(path.local_pref(), None);
+
+        // Prefix conditions ignore LS routes
+        let ls_key = make_ls_route_key(LsNlriType::Node, 4, 0, None, None);
+        assert_eq!(statement.apply(&ls_key, &mut path), None);
     }
 
     #[test]
@@ -909,14 +1159,14 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert_eq!(statement.apply(&prefix, &mut path1), Some(true));
+        assert_eq!(statement.apply(&prefix_key(prefix), &mut path1), Some(true));
         assert_eq!(path1.local_pref(), Some(200));
 
         let mut path2 = create_path(RouteSource::Ebgp {
             peer_ip: test_ip(2),
             bgp_id: std::net::Ipv4Addr::new(2, 2, 2, 2),
         });
-        assert_eq!(statement.apply(&prefix, &mut path2), None);
+        assert_eq!(statement.apply(&prefix_key(prefix), &mut path2), None);
         assert_eq!(path2.local_pref(), None);
     }
 
@@ -933,7 +1183,7 @@ mod tests {
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
         path.attrs.med = Some(100);
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(true));
+        assert_eq!(statement.apply(&test_prefix_key(), &mut path), Some(true));
         assert_eq!(path.local_pref(), Some(200));
         assert_eq!(path.med(), None);
     }
@@ -945,7 +1195,7 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert_eq!(statement.apply(&test_prefix(), &mut path), Some(false));
+        assert_eq!(statement.apply(&test_prefix_key(), &mut path), Some(false));
     }
 
     #[test]
@@ -955,7 +1205,7 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert!(policy.accept(&test_prefix(), &mut path));
+        assert!(policy.accept(&test_prefix_key(), &mut path));
     }
 
     #[test]
@@ -965,7 +1215,7 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert!(!policy.accept(&test_prefix(), &mut path));
+        assert!(!policy.accept(&test_prefix_key(), &mut path));
     }
 
     #[test]
@@ -993,14 +1243,14 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert!(policy.accept(&prefix, &mut path1));
+        assert!(policy.accept(&prefix_key(prefix), &mut path1));
         assert_eq!(path1.local_pref(), Some(200));
 
         let mut path2 = create_path(RouteSource::Ebgp {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        assert!(policy.accept(&other_prefix, &mut path2));
+        assert!(policy.accept(&prefix_key(other_prefix), &mut path2));
         assert_eq!(path2.local_pref(), Some(100));
     }
 
@@ -1078,5 +1328,304 @@ mod tests {
 
         // Now we can directly compare policies!
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_afi_safi_condition() {
+        let mut path = create_path(RouteSource::Local);
+        let ipv4_key = test_prefix_key();
+        let ls_key = make_ls_route_key(LsNlriType::Node, 4, 0, Some(65001), None);
+
+        let cases = vec![
+            // (condition, route_key, expected)
+            (AfiSafiMatch::Ipv4Unicast, &ipv4_key, true),
+            (AfiSafiMatch::BgpLs, &ipv4_key, false),
+            (AfiSafiMatch::BgpLs, &ls_key, true),
+            (AfiSafiMatch::Ipv4Unicast, &ls_key, false),
+            (AfiSafiMatch::Ipv6Unicast, &ipv4_key, false),
+            (AfiSafiMatch::Ipv6Unicast, &ls_key, false),
+        ];
+        for (afi_safi_match, route_key, expected) in cases {
+            let cond = Condition::AfiSafi(afi_safi_match);
+            assert_eq!(
+                cond.matches(route_key, &path),
+                expected,
+                "AfiSafi({:?}) vs {:?}",
+                afi_safi_match,
+                route_key.afi_safi()
+            );
+        }
+
+        // Verify it works in a statement (accept BGP-LS, reject everything else)
+        let policy = Policy::new("test".to_string())
+            .with(
+                Statement::new()
+                    .when(Condition::AfiSafi(AfiSafiMatch::BgpLs))
+                    .then(Action::Accept),
+            )
+            .with(Statement::new().then(Action::Reject));
+
+        assert!(policy.accept(&ls_key, &mut path));
+        assert!(!policy.accept(&ipv4_key, &mut path));
+    }
+
+    #[test]
+    fn test_ls_nlri_type_condition() {
+        let path = create_path(RouteSource::Local);
+        let cases = vec![
+            (LsNlriTypeMatch::Node, LsNlriType::Node, true),
+            (LsNlriTypeMatch::Node, LsNlriType::Link, false),
+            (LsNlriTypeMatch::Link, LsNlriType::Link, true),
+            (LsNlriTypeMatch::PrefixV4, LsNlriType::PrefixV4, true),
+            (LsNlriTypeMatch::PrefixV6, LsNlriType::PrefixV6, true),
+            (LsNlriTypeMatch::PrefixV4, LsNlriType::PrefixV6, false),
+        ];
+        for (match_type, nlri_type, expected) in cases {
+            let key = make_ls_route_key(nlri_type, 4, 0, None, None);
+            let cond = Condition::LsNlriType(match_type);
+            assert_eq!(
+                cond.matches(&key, &path),
+                expected,
+                "LsNlriType({:?}) vs {:?}",
+                match_type,
+                nlri_type
+            );
+        }
+
+        // Prefix routes never match
+        assert!(!Condition::LsNlriType(LsNlriTypeMatch::Node).matches(&test_prefix_key(), &path));
+
+        // No body (opaque NLRI) — nlri_type is always available
+        let opaque_key = RouteKey::LinkState(LsNlri {
+            nlri_type: 1,
+            raw: vec![],
+            body: None,
+        });
+        assert!(Condition::LsNlriType(LsNlriTypeMatch::Node).matches(&opaque_key, &path));
+    }
+
+    #[test]
+    fn test_ls_protocol_id_condition() {
+        use crate::bgp::bgpls_nlri::LsProtocolId as Proto;
+
+        let path = create_path(RouteSource::Local);
+        let cases = vec![
+            (LsProtocolIdMatch::Direct, Proto::Direct as u8, true),
+            (LsProtocolIdMatch::Static, Proto::Static as u8, true),
+            (LsProtocolIdMatch::OspfV2, Proto::OspfV2 as u8, true),
+            (LsProtocolIdMatch::OspfV3, Proto::OspfV3 as u8, true),
+            (LsProtocolIdMatch::IsIsL1, Proto::IsIsL1 as u8, true),
+            (LsProtocolIdMatch::IsIsL2, Proto::IsIsL2 as u8, true),
+            (LsProtocolIdMatch::Direct, Proto::Static as u8, false),
+            (LsProtocolIdMatch::OspfV2, Proto::OspfV3 as u8, false),
+        ];
+        for (match_proto, proto_id, expected) in cases {
+            let key = make_ls_route_key(LsNlriType::Node, proto_id, 0, None, None);
+            let cond = Condition::LsProtocolId(match_proto);
+            assert_eq!(
+                cond.matches(&key, &path),
+                expected,
+                "LsProtocolId({:?}) vs proto_id={}",
+                match_proto,
+                proto_id
+            );
+        }
+
+        // No body -> false
+        let opaque = RouteKey::LinkState(LsNlri {
+            nlri_type: 1,
+            raw: vec![],
+            body: None,
+        });
+        assert!(!Condition::LsProtocolId(LsProtocolIdMatch::Direct).matches(&opaque, &path));
+    }
+
+    #[test]
+    fn test_ls_instance_id_condition() {
+        let path = create_path(RouteSource::Local);
+        let key = make_ls_route_key(LsNlriType::Node, 4, 42, None, None);
+
+        assert!(Condition::LsInstanceId(42).matches(&key, &path));
+        assert!(!Condition::LsInstanceId(99).matches(&key, &path));
+        assert!(!Condition::LsInstanceId(42).matches(&test_prefix_key(), &path));
+
+        // No body -> false
+        let opaque = RouteKey::LinkState(LsNlri {
+            nlri_type: 1,
+            raw: vec![],
+            body: None,
+        });
+        assert!(!Condition::LsInstanceId(42).matches(&opaque, &path));
+    }
+
+    #[test]
+    fn test_ls_node_as_condition() {
+        let path = create_path(RouteSource::Local);
+        let key = make_ls_route_key(LsNlriType::Node, 4, 0, Some(65001), None);
+
+        assert!(Condition::LsNodeAs(65001).matches(&key, &path));
+        assert!(!Condition::LsNodeAs(65002).matches(&key, &path));
+
+        // No AS number set
+        let key_no_as = make_ls_route_key(LsNlriType::Node, 4, 0, None, None);
+        assert!(!Condition::LsNodeAs(65001).matches(&key_no_as, &path));
+
+        // Prefix routes never match
+        assert!(!Condition::LsNodeAs(65001).matches(&test_prefix_key(), &path));
+
+        // No body -> false
+        let opaque = RouteKey::LinkState(LsNlri {
+            nlri_type: 1,
+            raw: vec![],
+            body: None,
+        });
+        assert!(!Condition::LsNodeAs(65001).matches(&opaque, &path));
+    }
+
+    #[test]
+    fn test_ls_node_router_id_condition() {
+        let path = create_path(RouteSource::Local);
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let key = make_ls_route_key(
+            LsNlriType::Node,
+            4,
+            0,
+            None,
+            Some(router_id.octets().to_vec()),
+        );
+
+        // Match
+        assert!(Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&key, &path));
+        // Mismatch
+        assert!(
+            !Condition::LsNodeRouterId(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))).matches(&key, &path)
+        );
+        // No router ID set
+        let key_no_rid = make_ls_route_key(LsNlriType::Node, 4, 0, None, None);
+        assert!(!Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&key_no_rid, &path));
+        // Prefix routes never match
+        assert!(
+            !Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&test_prefix_key(), &path)
+        );
+
+        // No body -> false
+        let opaque = RouteKey::LinkState(LsNlri {
+            nlri_type: 1,
+            raw: vec![],
+            body: None,
+        });
+        assert!(!Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&opaque, &path));
+    }
+
+    #[test]
+    fn test_combined_ls_conditions() {
+        let mut path = create_path(RouteSource::Local);
+        let key = make_ls_route_key(LsNlriType::Node, 4, 0, Some(65001), None);
+
+        let policy = Policy::new("test".to_string()).with(
+            Statement::new()
+                .when(Condition::AfiSafi(AfiSafiMatch::BgpLs))
+                .when(Condition::LsNlriType(LsNlriTypeMatch::Node))
+                .when(Condition::LsNodeAs(65001))
+                .then(Action::Accept),
+        );
+
+        // All three conditions match
+        assert!(policy.accept(&key, &mut path));
+
+        // Wrong NLRI type -> no match -> reject
+        let link_key = make_ls_route_key(LsNlriType::Link, 4, 0, Some(65001), None);
+        assert!(!policy.accept(&link_key, &mut path));
+
+        // Wrong AS -> no match -> reject
+        let wrong_as_key = make_ls_route_key(LsNlriType::Node, 4, 0, Some(65002), None);
+        assert!(!policy.accept(&wrong_as_key, &mut path));
+    }
+
+    #[test]
+    fn test_ls_condition_config() {
+        let defined_sets = DefinedSets::default();
+
+        // Valid config roundtrips correctly
+        let config = StatementConfig {
+            name: None,
+            conditions: ConditionsConfig {
+                afi_safi: Some("bgp-ls".to_string()),
+                ls_nlri_type: Some("node".to_string()),
+                ls_protocol_id: Some("direct".to_string()),
+                ls_instance_id: Some(42),
+                ls_node_as: Some(65001),
+                ls_node_router_id: Some("10.0.0.1".to_string()),
+                ..Default::default()
+            },
+            actions: ActionsConfig {
+                accept: Some(true),
+                ..Default::default()
+            },
+        };
+        let statement = build_statement(&config, &defined_sets).unwrap();
+        let roundtripped = statement.to_config();
+        assert_eq!(roundtripped.conditions.afi_safi, Some("bgp-ls".to_string()));
+        assert_eq!(
+            roundtripped.conditions.ls_nlri_type,
+            Some("node".to_string())
+        );
+        assert_eq!(
+            roundtripped.conditions.ls_protocol_id,
+            Some("direct".to_string())
+        );
+        assert_eq!(roundtripped.conditions.ls_instance_id, Some(42));
+        assert_eq!(roundtripped.conditions.ls_node_as, Some(65001));
+        assert_eq!(
+            roundtripped.conditions.ls_node_router_id,
+            Some("10.0.0.1".to_string())
+        );
+
+        // Invalid values rejected
+        let invalid_cases = vec![
+            (
+                "afi_safi",
+                ConditionsConfig {
+                    afi_safi: Some("invalid".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ls_nlri_type",
+                ConditionsConfig {
+                    ls_nlri_type: Some("invalid".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ls_protocol_id",
+                ConditionsConfig {
+                    ls_protocol_id: Some("invalid".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ls_node_router_id",
+                ConditionsConfig {
+                    ls_node_router_id: Some("not-an-ip".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (field, conditions) in invalid_cases {
+            let config = StatementConfig {
+                name: None,
+                conditions,
+                actions: ActionsConfig {
+                    accept: Some(true),
+                    ..Default::default()
+                },
+            };
+            assert!(
+                build_statement(&config, &defined_sets).is_err(),
+                "expected error for invalid {}",
+                field
+            );
+        }
     }
 }

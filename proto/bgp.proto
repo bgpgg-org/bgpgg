@@ -666,6 +666,13 @@ message ConditionsConfig {
     optional string neighbor = 7;  // Direct neighbor match
     optional MatchSetRef match_ext_community_set = 8;
     optional RpkiValidation rpki_validation = 9;
+    optional string afi_safi = 10;  // Address family match
+    // BGP-LS policy conditions
+    optional string ls_nlri_type = 11;
+    optional string ls_protocol_id = 12;
+    optional uint64 ls_instance_id = 13;
+    optional uint32 ls_node_as = 14;
+    optional string ls_node_router_id = 15;
 }
 
 message MatchSetRef {

@@ -197,6 +197,18 @@ pub enum LsDescriptors {
     },
 }
 
+impl LsDescriptors {
+    /// Returns a reference to the local node descriptor present in all NLRI types.
+    pub fn local_node(&self) -> &NodeDescriptor {
+        match self {
+            LsDescriptors::Node { local_node } => local_node,
+            LsDescriptors::Link { local_node, .. } => local_node,
+            LsDescriptors::PrefixV4 { local_node, .. } => local_node,
+            LsDescriptors::PrefixV6 { local_node, .. } => local_node,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct NodeDescriptor {
     pub as_number: Option<u32>,
