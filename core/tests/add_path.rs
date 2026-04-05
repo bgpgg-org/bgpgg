@@ -74,11 +74,11 @@ async fn send_and_validate_addpath_routes(
     for (server, next_hop) in [(server1, "192.168.1.1"), (server2, "192.168.2.1")] {
         announce_route(
             server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: next_hop.to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }
@@ -351,11 +351,11 @@ async fn test_addpath_rr_no_reflect_to_originator() {
     for (server, next_hop) in [(&client1, "192.168.1.1"), (&client2, "192.168.2.1")] {
         announce_route(
             server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: next_hop.to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }
@@ -787,20 +787,20 @@ async fn test_addpath_per_afi_safi_negotiation() {
 
         announce_route(
             &server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
         announce_route(
             &server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "2001:db8::/32".to_string(),
                 next_hop: "2001:db8::1".to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
 
@@ -894,11 +894,11 @@ async fn test_addpath_ibgp() {
     for (server, next_hop) in [(&server1, "192.168.1.1"), (&server2, "192.168.2.1")] {
         announce_route(
             server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: next_hop.to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }

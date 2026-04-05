@@ -30,11 +30,11 @@ async fn test_announce_withdraw() {
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -63,11 +63,11 @@ async fn test_announce_withdraw_mesh() {
     announce_and_verify_route(
         &server1,
         &[&server2, &server3],
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
         PathParams::from_peer(&server1),
     )
     .await;
@@ -124,11 +124,11 @@ async fn test_announce_withdraw_four_node_mesh() {
     // Server1 announces a route
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -286,11 +286,11 @@ async fn test_ibgp_split_horizon() {
     // Server1 announces a route
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -370,11 +370,11 @@ async fn test_as_loop_prevention() {
     announce_and_verify_route(
         &server1_a,
         &[&server2],
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
         PathParams::from_peer(&server1_a),
     )
     .await;
@@ -431,21 +431,21 @@ async fn test_ipv6_route_exchange() {
     // Server2 announces both IPv4 and IPv6 routes to Server1 via gRPC
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "2001:db8::/32".to_string(),
             next_hop: "2001:db8::1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -516,11 +516,11 @@ async fn test_ipv6_nexthop_rewrite() {
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "2001:db8::/32".to_string(),
             next_hop: "2001:db8::1".to_string(),
             ..Default::default()
-        },
+        }),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -572,11 +572,11 @@ async fn test_route_advertised_when_peer_becomes_established() {
     // Announce route while peer is still in OpenConfirm (not Established)
     announce_route(
         &server,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -613,11 +613,11 @@ async fn test_loc_rib_stores_multiple_paths() {
     for server in [&server1, &server3] {
         announce_route(
             server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }
@@ -684,11 +684,11 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     for (server, hop) in [(&server1, "192.168.1.1"), (&server2, "192.168.2.1")] {
         announce_route(
             server,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: hop.to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }
@@ -824,11 +824,11 @@ async fn test_next_hop_self() {
         // A announces 10.0.0.0/24
         announce_route(
             &server_a,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
 

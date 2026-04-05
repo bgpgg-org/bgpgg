@@ -80,11 +80,11 @@ async fn test_export_policy_prefix_match() {
         for (i, prefix) in tc.announced.iter().enumerate() {
             announce_route(
                 &server2,
-                RouteParams {
+                RouteParams::Ip(IpRouteParams {
                     prefix: prefix.to_string(),
                     next_hop: format!("192.168.1.{}", i + 1),
                     ..Default::default()
-                },
+                }),
             )
             .await;
         }
@@ -197,35 +197,35 @@ async fn test_export_policy_large_community_match() {
     // Announce route with blocked large community (should be rejected)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             large_communities: vec![LargeCommunity::new(65536, 100, 200)],
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Announce route with different large community (should propagate)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
             large_communities: vec![LargeCommunity::new(65536, 999, 999)],
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Announce route with no large communities (should propagate)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.3".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -342,35 +342,35 @@ async fn test_export_policy_ext_community_match() {
     // Announce route with blocked ext community (should be rejected)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             extended_communities: vec![0x0002FDE800000064u64], // rt:65000:100
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Announce route with different ext community (should propagate)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
             extended_communities: vec![0x0002FDE8000003E7u64], // rt:65000:999
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Announce route with no ext communities (should propagate)
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.3".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -538,11 +538,11 @@ async fn test_import_policy_rpki_validation() {
     for prefix in ["10.0.0.0/24", "172.16.0.0/24", "192.168.1.0/24"] {
         announce_route(
             &server2,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: server2.address.to_string(),
                 ..Default::default()
-            },
+            }),
         )
         .await;
     }
@@ -675,12 +675,12 @@ async fn test_rpki_state_community_set_policy() {
     // Announce route from server1 with RPKI state valid community
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: server1.address.to_string(),
             extended_communities: vec![rpki_valid_ec],
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -790,11 +790,11 @@ async fn test_import_policy_deny_bgp_ls() {
     // server2 originates an IP route and an LS route
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: server2.address.to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -853,11 +853,11 @@ async fn test_export_policy_deny_bgp_ls() {
     // server2 originates an IP route and an LS route
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: server2.address.to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -896,7 +896,6 @@ async fn test_export_policy_deny_bgp_ls() {
             peer_address: Some(server1.address.to_string()),
             afi: Some(16388),
             safi: Some(71),
-            ..Default::default()
         })
         .await
         .unwrap();

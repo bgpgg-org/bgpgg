@@ -43,11 +43,11 @@ use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
-    AddPathSendMode, AddRouteRequest, AdminState, AfiSafiConfig, Aggregator, AsPathSegment,
-    AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
-    GracefulRestartConfig, LargeCommunity, ListRoutesRequest, LlgrConfig as ProtoLlgrConfig,
-    Origin, Path, Peer, PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig,
-    StatementConfig, UnknownAttribute,
+    AddLsRouteRequest, AddPathSendMode, AddRouteRequest, AdminState, AfiSafiConfig, Aggregator,
+    AsPathSegment, AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig,
+    ExtendedCommunity, GracefulRestartConfig, LargeCommunity, ListRoutesRequest,
+    LlgrConfig as ProtoLlgrConfig, LsAttribute, LsNlri, Origin, Path, Peer, PeerStatistics,
+    PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
 };
 use bgpgg::grpc::proto_community::{internal_to_proto_large_community, u64_to_proto_extcomm};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
@@ -67,6 +67,15 @@ pub fn route_prefix(route: &Route) -> &str {
     match &route.key {
         Some(route::Key::Prefix(p)) => p.as_str(),
         _ => panic!("expected IP prefix key, got {:?}", route.key),
+    }
+}
+
+/// Returns a hashable string key for any route (IP prefix or LS NLRI debug repr).
+fn route_key_string(route: &Route) -> String {
+    match &route.key {
+        Some(route::Key::Prefix(p)) => p.clone(),
+        Some(route::Key::LsNlri(n)) => format!("ls:{:?}", n),
+        None => "none".to_string(),
     }
 }
 
@@ -219,6 +228,8 @@ pub struct PathParams {
     pub aggregator: Option<Aggregator>,
     /// RFC 6811: RPKI origin validation state
     pub rpki_validation: i32,
+    /// RFC 9552: BGP-LS attribute (type 29)
+    pub ls_attribute: Option<LsAttribute>,
 }
 
 impl PathParams {
@@ -235,11 +246,46 @@ impl PathParams {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
+pub enum ExpectedRouteKey {
+    Prefix(String),
+    Ls(LsNlri),
+}
+
+impl From<&str> for ExpectedRouteKey {
+    fn from(prefix: &str) -> Self {
+        ExpectedRouteKey::Prefix(prefix.to_string())
+    }
+}
+
+impl From<&String> for ExpectedRouteKey {
+    fn from(prefix: &String) -> Self {
+        ExpectedRouteKey::Prefix(prefix.clone())
+    }
+}
+
+impl From<&&str> for ExpectedRouteKey {
+    fn from(prefix: &&str) -> Self {
+        ExpectedRouteKey::Prefix((*prefix).to_string())
+    }
+}
+
+impl From<LsNlri> for ExpectedRouteKey {
+    fn from(nlri: LsNlri) -> Self {
+        ExpectedRouteKey::Ls(nlri)
+    }
+}
+
 /// Build a single-path Route for test assertions.
-pub fn expected_route(prefix: &str, params: PathParams) -> Route {
+/// Accepts `&str` (IP prefix) or `LsNlri` (BGP-LS) as key.
+pub fn expected_route(key: impl Into<ExpectedRouteKey>, params: PathParams) -> Route {
+    let key = match key.into() {
+        ExpectedRouteKey::Prefix(p) => route::Key::Prefix(p),
+        ExpectedRouteKey::Ls(n) => route::Key::LsNlri(Box::new(n)),
+    };
     Route {
         paths: vec![build_path(params)],
-        key: Some(route::Key::Prefix(prefix.to_string())),
+        key: Some(key),
     }
 }
 
@@ -263,7 +309,7 @@ pub fn build_path(params: PathParams) -> Path {
         remote_path_id: params.remote_path_id,
         aggregator: params.aggregator,
         rpki_validation: params.rpki_validation,
-        ls_attribute: None,
+        ls_attribute: params.ls_attribute,
     }
 }
 
@@ -340,11 +386,13 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
     }
 
     if matches!(expect, ExpectPathId::Distinct) {
-        let actual_map: HashMap<_, _> =
-            actual.iter().map(|r| (route_prefix(r), &r.paths)).collect();
+        let actual_map: HashMap<_, _> = actual
+            .iter()
+            .map(|r| (route_key_string(r), &r.paths))
+            .collect();
         let expected_map: HashMap<_, _> = expected
             .iter()
-            .map(|r| (route_prefix(r), &r.paths))
+            .map(|r| (route_key_string(r), &r.paths))
             .collect();
 
         if actual_map.len() != expected_map.len() {
@@ -372,7 +420,7 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
             .iter()
             .map(|r| {
                 (
-                    route_prefix(r).to_string(),
+                    route_key_string(r),
                     strip_route_path_ids(r).paths.first().cloned(),
                 )
             })
@@ -381,7 +429,7 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
             .iter()
             .map(|r| {
                 (
-                    route_prefix(r).to_string(),
+                    route_key_string(r),
                     strip_route_path_ids(r).paths.first().cloned(),
                 )
             })
@@ -1087,9 +1135,31 @@ pub async fn verify_peer_statistics(
     );
 }
 
-/// Parameters for announcing a route
+/// Parameters for announcing a route.
+///
+/// ```
+/// // IP route
+/// announce_route(server, RouteParams::Ip(IpRouteParams {
+///     prefix: "10.0.0.0/24".to_string(),
+///     next_hop: "192.168.1.1".to_string(),
+///     ..Default::default()
+/// })).await;
+///
+/// // BGP-LS route
+/// announce_route(server, RouteParams::Ls(LsRouteParams {
+///     nlri: Some(nlri),
+///     attribute: Some(attr),
+///     ..Default::default()
+/// })).await;
+/// ```
+#[allow(clippy::large_enum_variant)]
+pub enum RouteParams {
+    Ip(IpRouteParams),
+    Ls(LsRouteParams),
+}
+
 #[derive(Default)]
-pub struct RouteParams {
+pub struct IpRouteParams {
     pub prefix: String,
     pub next_hop: String,
     pub origin: Option<Origin>,
@@ -1100,61 +1170,52 @@ pub struct RouteParams {
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<bgpgg::bgp::msg_update_types::LargeCommunity>,
-    /// RFC 4456: ORIGINATOR_ID (IPv4 address as string)
     pub originator_id: Option<String>,
-    /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
     pub cluster_list: Vec<String>,
 }
 
-/// Announce a route with customizable attributes
-///
-/// # Example
-/// ```
-/// // Simple announcement with defaults
-/// announce_route(server, RouteParams {
-///     prefix: "10.0.0.0/24".to_string(),
-///     next_hop: "192.168.1.1".to_string(),
-///     ..Default::default()
-/// }).await;
-///
-/// // With custom attributes
-/// announce_route(server, RouteParams {
-///     prefix: "10.0.0.0/24".to_string(),
-///     next_hop: "192.168.1.1".to_string(),
-///     med: Some(100),
-///     communities: vec![65000 << 16 | 100],
-///     ..Default::default()
-/// }).await;
-/// ```
+#[derive(Default)]
+pub struct LsRouteParams {
+    pub nlri: Option<LsNlri>,
+    pub attribute: Option<LsAttribute>,
+    pub next_hop: Option<String>,
+}
+
 pub async fn announce_route(server: &TestServer, params: RouteParams) {
-    server
-        .client
-        .add_route(AddRouteRequest {
+    let request = match params {
+        RouteParams::Ip(ip) => AddRouteRequest {
             route: Some(add_route_request::Route::Ip(Box::new(AddIpRouteRequest {
-                prefix: params.prefix,
-                next_hop: params.next_hop,
-                origin: params.origin.unwrap_or(Origin::Igp) as i32,
-                as_path: params.as_path,
-                local_pref: params.local_pref,
-                med: params.med,
-                atomic_aggregate: params.atomic_aggregate,
-                communities: params.communities,
-                extended_communities: params
+                prefix: ip.prefix,
+                next_hop: ip.next_hop,
+                origin: ip.origin.unwrap_or(Origin::Igp) as i32,
+                as_path: ip.as_path,
+                local_pref: ip.local_pref,
+                med: ip.med,
+                atomic_aggregate: ip.atomic_aggregate,
+                communities: ip.communities,
+                extended_communities: ip
                     .extended_communities
                     .iter()
                     .map(|ec| u64_to_proto_extcomm(*ec))
                     .collect(),
-                large_communities: params
+                large_communities: ip
                     .large_communities
                     .iter()
                     .map(internal_to_proto_large_community)
                     .collect(),
-                originator_id: params.originator_id,
-                cluster_list: params.cluster_list,
+                originator_id: ip.originator_id,
+                cluster_list: ip.cluster_list,
             }))),
-        })
-        .await
-        .unwrap();
+        },
+        RouteParams::Ls(ls) => AddRouteRequest {
+            route: Some(add_route_request::Route::Ls(Box::new(AddLsRouteRequest {
+                nlri: ls.nlri,
+                attribute: ls.attribute,
+                next_hop: ls.next_hop,
+            }))),
+        },
+    };
+    server.client.add_route(request).await.unwrap();
 }
 
 /// Chains BGP servers together in a linear topology (active-active peering)
@@ -1308,7 +1369,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     RouteParams::Ip(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() }),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),
@@ -1323,7 +1384,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     RouteParams::Ip(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() }),
 ///     PathParams {
 ///         as_path: vec![],
 ///         next_hop: "192.168.1.1".to_string(),
@@ -1338,7 +1399,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2, &s3, &s4],
-///     RouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() },
+///     RouteParams::Ip(IpRouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() }),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),
@@ -1355,7 +1416,12 @@ pub async fn announce_and_verify_route(
     announce_params: RouteParams,
     expected_path: PathParams,
 ) {
-    let prefix = announce_params.prefix.clone();
+    let key = match &announce_params {
+        RouteParams::Ip(ip) => route::Key::Prefix(ip.prefix.clone()),
+        RouteParams::Ls(ls) => {
+            route::Key::LsNlri(Box::new(ls.nlri.clone().expect("ls_nlri required")))
+        }
+    };
     announce_route(source, announce_params).await;
 
     let mut expectations = Vec::new();
@@ -1364,7 +1430,7 @@ pub async fn announce_and_verify_route(
             *dest,
             vec![Route {
                 paths: vec![build_path(expected_path.clone())],
-                key: Some(route::Key::Prefix(prefix.clone())),
+                key: Some(key.clone()),
             }],
         ));
     }
@@ -1547,6 +1613,7 @@ pub async fn setup_rr(
     rrs: Vec<&TestServer>,
     clients_per_rr: Vec<Vec<&TestServer>>,
     non_clients: Vec<&TestServer>,
+    client_config: SessionConfig,
 ) {
     assert_eq!(
         rrs.len(),
@@ -1556,18 +1623,18 @@ pub async fn setup_rr(
 
     let rr_client_cfg = SessionConfig {
         rr_client: Some(true),
-        ..Default::default()
+        ..client_config.clone()
     };
 
     for (rr, rr_clients) in rrs.iter().zip(clients_per_rr.iter()) {
         for client in rr_clients {
             rr.add_peer_with_config(client, rr_client_cfg.clone()).await;
-            client.add_peer(rr).await;
+            client.add_peer_with_config(rr, client_config.clone()).await;
         }
 
         for nc in &non_clients {
-            rr.add_peer(nc).await;
-            nc.add_peer(rr).await;
+            rr.add_peer_with_config(nc, client_config.clone()).await;
+            nc.add_peer_with_config(rr, client_config.clone()).await;
         }
     }
 

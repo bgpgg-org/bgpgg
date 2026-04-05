@@ -252,11 +252,24 @@ fn parse_mp_next_hop(
     next_hop_len: usize,
 ) -> Result<NextHopAddr, ParserError> {
     match afi {
-        Afi::Ipv4 => parse_ipv4_next_hop(bytes, offset),
-        Afi::Ipv6 => parse_ipv6_next_hop(bytes, offset),
+        Afi::Ipv4 => {
+            let addr = parse_ipv4_addr(bytes, offset);
+            if !is_valid_unicast_ipv4(u32::from(addr)) {
+                return Err(ParserError::BgpError {
+                    error: BgpError::UpdateMessageError(
+                        UpdateMessageError::InvalidNextHopAttribute,
+                    ),
+                    data: Vec::new(),
+                });
+            }
+            Ok(NextHopAddr::Ipv4(addr))
+        }
+        Afi::Ipv6 => Ok(parse_ipv6_next_hop(bytes, offset)),
+        // RFC 9552 Section 5.5: BGP-LS next-hop has no forwarding semantic,
+        // so skip unicast validation (e.g. 0.0.0.0 is valid).
         Afi::LinkState => match next_hop_len {
-            4 => parse_ipv4_next_hop(bytes, offset),
-            16 | 32 => parse_ipv6_next_hop(bytes, offset),
+            4 => Ok(parse_ipv4_next_hop(bytes, offset)),
+            16 | 32 => Ok(parse_ipv6_next_hop(bytes, offset)),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
                 data: Vec::new(),
@@ -265,24 +278,21 @@ fn parse_mp_next_hop(
     }
 }
 
-fn parse_ipv4_next_hop(bytes: &[u8], offset: usize) -> Result<NextHopAddr, ParserError> {
+fn parse_ipv4_addr(bytes: &[u8], offset: usize) -> Ipv4Addr {
     let mut octets = [0u8; 4];
     octets.copy_from_slice(&bytes[offset..offset + 4]);
-    let addr = Ipv4Addr::from(octets);
-    if !is_valid_unicast_ipv4(u32::from(addr)) {
-        return Err(ParserError::BgpError {
-            error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
-            data: Vec::new(),
-        });
-    }
-    Ok(NextHopAddr::Ipv4(addr))
+    Ipv4Addr::from(octets)
 }
 
-fn parse_ipv6_next_hop(bytes: &[u8], offset: usize) -> Result<NextHopAddr, ParserError> {
+fn parse_ipv4_next_hop(bytes: &[u8], offset: usize) -> NextHopAddr {
+    NextHopAddr::Ipv4(parse_ipv4_addr(bytes, offset))
+}
+
+fn parse_ipv6_next_hop(bytes: &[u8], offset: usize) -> NextHopAddr {
     // Use first 16 bytes (global address), ignore link-local if present (32-byte form)
     let mut octets = [0u8; 16];
     octets.copy_from_slice(&bytes[offset..offset + 16]);
-    Ok(NextHopAddr::Ipv6(Ipv6Addr::from(octets)))
+    NextHopAddr::Ipv6(Ipv6Addr::from(octets))
 }
 
 pub(super) fn parse_attr_type(

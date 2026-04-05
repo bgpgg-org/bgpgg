@@ -110,22 +110,22 @@ async fn test_rs_addpath_no_path_hiding() {
     // Client1 announces 10.0.0.0/24
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client1.address.to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Client2 announces same prefix
     announce_route(
         &client2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client2.address.to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -180,22 +180,22 @@ async fn test_rs_no_add_path_no_path_hiding() {
     // Client1 (IGP origin) is preferred over Client2 (Incomplete origin); policy blocks it for Client3.
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client1.address.to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     announce_route(
         &client2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client2.address.to_string(),
             origin: Some(Origin::Incomplete),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -274,7 +274,7 @@ async fn test_rs_addpath_receive_rejected() {
 #[tokio::test]
 async fn test_rs_attribute_transparency() {
     struct Case {
-        route: RouteParams,
+        route: IpRouteParams,
         expected: PathParams,
     }
 
@@ -285,7 +285,7 @@ async fn test_rs_attribute_transparency() {
         // 2.2.1 + 2.2.2.1: NEXT_HOP and AS_PATH preserved without RS modification.
         // RS must not prepend its ASN (65000) to AS_PATH, must not alter NEXT_HOP.
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 as_path: vec![as_sequence(vec![65099])],
                 ..Default::default()
             },
@@ -297,7 +297,7 @@ async fn test_rs_attribute_transparency() {
         },
         // 2.2.3: MED propagated unchanged
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 med: Some(42),
                 ..Default::default()
             },
@@ -309,7 +309,7 @@ async fn test_rs_attribute_transparency() {
         },
         // 2.2.4: Standard communities (RFC 1997) preserved
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 communities: vec![community::from_asn_value(65001, 100)],
                 ..Default::default()
             },
@@ -323,7 +323,7 @@ async fn test_rs_attribute_transparency() {
         // Non-transitive ext community preservation via RS is tested separately in
         // test_rs_unknown_attr_transparency (requires FakePeer injection).
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 extended_communities: vec![from_two_octet_as(SUBTYPE_ROUTE_TARGET, 65001, 100)],
                 ..Default::default()
             },
@@ -342,7 +342,7 @@ async fn test_rs_attribute_transparency() {
         },
         // 2.2.4: Large communities (RFC 8092) preserved
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 large_communities: vec![BgpLargeCommunity::new(65001, 1, 100)],
                 ..Default::default()
             },
@@ -358,7 +358,7 @@ async fn test_rs_attribute_transparency() {
         },
         // 2.2.4: All community types preserved simultaneously
         Case {
-            route: RouteParams {
+            route: IpRouteParams {
                 communities: vec![
                     community::from_asn_value(65001, 100),
                     community::from_asn_value(65001, 200),
@@ -400,11 +400,11 @@ async fn test_rs_attribute_transparency() {
 
         announce_route(
             &client1,
-            RouteParams {
+            RouteParams::Ip(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: client1.address.to_string(),
                 ..case.route
-            },
+            }),
         )
         .await;
 

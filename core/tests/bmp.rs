@@ -53,22 +53,22 @@ async fn test_add_bmp_server_with_existing_peers() {
     // Announce routes from peer1
     announce_route(
         &peer1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Announce routes from peer2
     announce_route(
         &peer2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -255,21 +255,21 @@ async fn test_route_monitoring_on_updates() {
     // Announce routes from server2
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -342,11 +342,11 @@ async fn test_route_monitoring_on_updates() {
     // Add a new route
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.2.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -471,21 +471,21 @@ async fn test_bmp_statistics() {
     // Add routes from server2
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 

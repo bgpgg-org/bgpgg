@@ -19,7 +19,9 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::grpc::proto::{
-    remove_route_request, BgpState, ListRoutesRequest, Origin, RemoveRouteRequest, SessionConfig,
+    remove_route_request, AfiSafiConfig, BgpState, ListRoutesRequest, LsAttribute, LsNlri,
+    LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest,
+    SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -36,28 +38,34 @@ async fn test_rr_originator_id_loop_detection() {
     let rr = start_test_server(test_config(asn, 2)).await;
     let client2 = start_test_server(test_config(asn, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client, &client2]], vec![]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client, &client2]],
+        vec![],
+        SessionConfig::default(),
+    )
+    .await;
 
     // Announce a route with originator_id matching the RR's router-id (loop!)
     announce_route(
         &client,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             originator_id: Some("2.2.2.2".to_string()),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
     // Also announce a clean route to prove the path works
     announce_route(
         &client,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -111,15 +119,21 @@ async fn test_rr_ebgp_route_reflected_to_clients() {
     let ebgp_peer = start_test_server(test_config(65002, 3)).await;
     let nc = start_test_server(test_config(65001, 4)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client]], vec![&ebgp_peer, &nc]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client]],
+        vec![&ebgp_peer, &nc],
+        SessionConfig::default(),
+    )
+    .await;
 
     announce_route(
         &ebgp_peer,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -156,16 +170,22 @@ async fn test_rr_locally_originated_route() {
     let rr = start_test_server(test_config(asn, 2)).await;
     let client2 = start_test_server(test_config(asn, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client1, &client2]],
+        vec![],
+        SessionConfig::default(),
+    )
+    .await;
 
     // RR itself originates a route
     announce_route(
         &rr,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -188,9 +208,10 @@ async fn test_rr_locally_originated_route() {
 }
 
 /// Test that Route Reflector reflects routes between iBGP clients.
-/// Topology: Client1 -- RR -- Client2 (all ASN 65001)
+/// Topology: Client1 -- RR -- Client2 (all ASN 65001), LS enabled.
 /// Without RR, Client2 would not receive routes from Client1 (iBGP split horizon).
 /// With RR, Client2 receives routes reflected by the RR with ORIGINATOR_ID + CLUSTER_LIST.
+/// Also verifies BGP-LS route reflection with correct RR attributes.
 #[tokio::test]
 async fn test_route_reflector_basic() {
     let asn = 65001;
@@ -198,15 +219,23 @@ async fn test_route_reflector_basic() {
     let rr = start_test_server(test_config(asn, 2)).await;
     let client2 = start_test_server(test_config(asn, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+    let ls_config = SessionConfig {
+        afi_safis: vec![AfiSafiConfig {
+            afi: 16388,
+            safi: 71,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![], ls_config).await;
 
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -222,6 +251,56 @@ async fn test_route_reflector_basic() {
                 peer_address: rr.address.to_string(),
                 origin: Some(Origin::Igp),
                 local_pref: Some(100),
+                originator_id: Some("1.1.1.1".to_string()),
+                cluster_list: vec!["2.2.2.2".to_string()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    // BGP-LS reflection: inject LS route on client1, verify client2 gets it with RR attributes
+    let ls_nlri = LsNlri {
+        nlri_type: LsNlriType::LsNode as i32,
+        protocol_id: LsProtocolId::LsDirect as i32,
+        local_node: Some(LsNodeDescriptor {
+            as_number: Some(65001),
+            igp_router_id: vec![10, 0, 0, 1],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    announce_route(
+        &client1,
+        RouteParams::Ls(LsRouteParams {
+            nlri: Some(ls_nlri.clone()),
+            attribute: Some(LsAttribute {
+                node: Some(LsNodeAttribute {
+                    name: Some("client1-node".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            next_hop: None,
+        }),
+    )
+    .await;
+
+    poll_route_exists(
+        &client2,
+        expected_route(
+            ls_nlri,
+            PathParams {
+                peer_address: rr.address.to_string(),
+                next_hop: "0.0.0.0".to_string(),
+                local_pref: Some(100),
+                ls_attribute: Some(LsAttribute {
+                    node: Some(LsNodeAttribute {
+                        name: Some("client1-node".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
                 originator_id: Some("1.1.1.1".to_string()),
                 cluster_list: vec!["2.2.2.2".to_string()],
                 ..Default::default()
@@ -249,16 +328,22 @@ async fn test_route_reflector_mixed_topology() {
     let nc1 = start_test_server(test_config(asn, 3)).await;
     let nc2 = start_test_server(test_config(asn, 4)).await;
 
-    setup_rr(vec![&rr], vec![vec![&c1]], vec![&nc1, &nc2]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&c1]],
+        vec![&nc1, &nc2],
+        SessionConfig::default(),
+    )
+    .await;
 
     // Phase 1: Client announces route -> reflected to everyone (clients + non-clients)
     announce_route(
         &c1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -281,11 +366,11 @@ async fn test_route_reflector_mixed_topology() {
     // Phase 2: Non-client announces route -> reflected to clients only
     announce_route(
         &nc1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -348,6 +433,7 @@ async fn test_rr_cluster_loop_detection() {
         vec![&rr1, &rr2],
         vec![vec![&client1], vec![&client2]],
         vec![],
+        SessionConfig::default(),
     )
     .await;
 
@@ -355,11 +441,11 @@ async fn test_rr_cluster_loop_detection() {
     // RR2 sees 9.9.9.9 (its own cluster_id) -> rejects
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -409,15 +495,21 @@ async fn test_rr_ebgp_attribute_stripping() {
     let rr = start_test_server(test_config(65001, 2)).await;
     let ebgp_peer = start_test_server(test_config(65002, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client]], vec![&ebgp_peer]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client]],
+        vec![&ebgp_peer],
+        SessionConfig::default(),
+    )
+    .await;
 
     announce_route(
         &client,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -451,15 +543,21 @@ async fn test_rr_custom_cluster_id() {
 
     let client2 = start_test_server(test_config(asn, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client1, &client2]],
+        vec![],
+        SessionConfig::default(),
+    )
+    .await;
 
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -497,16 +595,17 @@ async fn test_rr_multi_hop_cluster_list() {
         vec![&rr1, &rr2],
         vec![vec![&client1], vec![&client2]],
         vec![],
+        SessionConfig::default(),
     )
     .await;
 
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -539,15 +638,21 @@ async fn test_rr_withdrawal_reflection() {
     let rr = start_test_server(test_config(asn, 2)).await;
     let client2 = start_test_server(test_config(asn, 3)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client1, &client2]],
+        vec![],
+        SessionConfig::default(),
+    )
+    .await;
 
     announce_route(
         &client1,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 
@@ -589,7 +694,13 @@ async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
     let client = start_test_server(test_config(65001, 1)).await;
     let rr = start_test_server(test_config(65001, 2)).await;
 
-    setup_rr(vec![&rr], vec![vec![&client]], vec![]).await;
+    setup_rr(
+        vec![&rr],
+        vec![vec![&client]],
+        vec![],
+        SessionConfig::default(),
+    )
+    .await;
 
     // Create FakePeer as eBGP peer; RR connects out to it
     let mut fake = FakePeer::new("127.0.0.3:0", 65002).await;
@@ -717,11 +828,11 @@ async fn test_rr_next_hop_self() {
 
     announce_route(
         &ebgp_peer,
-        RouteParams {
+        RouteParams::Ip(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        },
+        }),
     )
     .await;
 

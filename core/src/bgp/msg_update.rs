@@ -751,7 +751,7 @@ impl UpdateMessage {
         // Other AFI/SAFI EoR: single MP_UNREACH_NLRI with empty withdrawn routes
         if self.path_attributes.len() == 1 {
             if let PathAttrValue::MpUnreachNlri(ref mp_unreach) = self.path_attributes[0].value {
-                if mp_unreach.withdrawn_routes.is_empty() {
+                if mp_unreach.withdrawn_routes.is_empty() && mp_unreach.ls_withdrawn.is_empty() {
                     return Some(AfiSafi::new(mp_unreach.afi, mp_unreach.safi));
                 }
             }
@@ -2221,6 +2221,50 @@ mod tests {
                     format,
                 },
                 None,
+            ),
+            (
+                "MP_UNREACH_NLRI with LS withdrawn -> not EoR",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![PathAttribute {
+                        flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                        value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::LinkState,
+                            safi: Safi::LinkState,
+                            withdrawn_routes: vec![],
+                            ls_withdrawn: vec![LsNlri {
+                                nlri_type: 1,
+                                raw: vec![1, 2, 3],
+                                body: None,
+                            }],
+                        }),
+                    }],
+                    nlri_list: vec![],
+                    format,
+                },
+                None,
+            ),
+            (
+                "MP_UNREACH_NLRI LS empty -> LinkState EoR",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![PathAttribute {
+                        flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                        value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::LinkState,
+                            safi: Safi::LinkState,
+                            withdrawn_routes: vec![],
+                            ls_withdrawn: vec![],
+                        }),
+                    }],
+                    nlri_list: vec![],
+                    format,
+                },
+                Some(AfiSafi::new(Afi::LinkState, Safi::LinkState)),
             ),
         ];
 
