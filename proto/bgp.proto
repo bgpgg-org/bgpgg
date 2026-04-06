@@ -85,6 +85,15 @@ message AfiSafi {
     uint32 safi = 2;  // IANA Subsequent Address Family Identifier
 }
 
+// Per address-family configuration with optional overrides.
+// None fields inherit from peer-level SessionConfig defaults.
+message AfiSafiConfig {
+    uint32 afi = 1;
+    uint32 safi = 2;
+    optional MaxPrefixSetting max_prefix = 3;
+    optional AddPathSendMode add_path_send = 4;
+}
+
 // Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
 message SessionConfig {
     optional uint64 idle_hold_time_secs = 1;      // Auto-reconnect delay. Unset disables (default: 30s)
@@ -109,6 +118,7 @@ message SessionConfig {
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
     optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
+    repeated AfiSafiConfig afi_safis = 23;  // additional AFI/SAFIs beyond default IPv4/IPv6 unicast
 }
 
 // Add peer request/response
@@ -234,19 +244,33 @@ message Peer {
 
 // Add route request/response
 message AddRouteRequest {
+    oneof route {
+        AddIpRouteRequest ip = 1;
+        AddLsRouteRequest ls = 2;
+    }
+}
+
+// IP unicast route injection
+message AddIpRouteRequest {
     string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
-    string next_hop = 2;    // IPv4 address (e.g., "192.168.1.1")
-    Origin origin = 3;      // Route origin
-    repeated AsPathSegment as_path = 4; // Optional AS_PATH (empty = locally originated)
-    optional uint32 local_pref = 5;     // Optional LOCAL_PREF (defaults to 100)
-    optional uint32 med = 6;            // Optional MULTI_EXIT_DISC
-    bool atomic_aggregate = 7;          // ATOMIC_AGGREGATE attribute
-    repeated uint32 communities = 8;    // BGP Communities (RFC 1997)
-    repeated ExtendedCommunity extended_communities = 9; // Extended Communities (RFC 4360)
-    repeated LargeCommunity large_communities = 10; // Large Communities (RFC 8092)
-    // RFC 4456: Route Reflector attributes
-    optional string originator_id = 11;  // ORIGINATOR_ID (IPv4 address)
-    repeated string cluster_list = 12;   // CLUSTER_LIST (list of IPv4 addresses)
+    string next_hop = 2;    // IPv4 or IPv6 address
+    Origin origin = 3;
+    repeated AsPathSegment as_path = 4;
+    optional uint32 local_pref = 5;
+    optional uint32 med = 6;
+    bool atomic_aggregate = 7;
+    repeated uint32 communities = 8;
+    repeated ExtendedCommunity extended_communities = 9;
+    repeated LargeCommunity large_communities = 10;
+    optional string originator_id = 11;
+    repeated string cluster_list = 12;
+}
+
+// BGP-LS route injection (RFC 9552)
+message AddLsRouteRequest {
+    LsNlri nlri = 1;
+    optional LsAttribute attribute = 2;
+    optional string next_hop = 3;
 }
 
 message AddRouteResponse {
@@ -261,7 +285,10 @@ message AddRouteStreamResponse {
 
 // Remove route request/response
 message RemoveRouteRequest {
-    string prefix = 1;      // CIDR format (e.g., "10.0.0.0/24")
+    oneof key {
+        string prefix = 1;
+        LsNlri ls_nlri = 2;
+    }
 }
 
 message RemoveRouteResponse {
@@ -306,6 +333,8 @@ enum RibType {
 message ListRoutesRequest {
     optional RibType rib_type = 1;  // Defaults to GLOBAL
     optional string peer_address = 2;    // Required for ADJ_IN and ADJ_OUT
+    optional uint32 afi = 3;             // Filter by AFI (e.g., 16388 for BGP-LS)
+    optional uint32 safi = 4;            // Filter by SAFI (e.g., 71 for BGP-LS)
 }
 
 message ListRoutesResponse {
@@ -314,8 +343,11 @@ message ListRoutesResponse {
 
 // Route information
 message Route {
-    string prefix = 1;      // CIDR format
-    repeated Path paths = 2; // Multiple paths to same prefix
+    repeated Path paths = 1;
+    oneof key {
+        string prefix = 2;     // IP unicast: CIDR format
+        LsNlri ls_nlri = 3;   // BGP-LS: NLRI key
+    }
 }
 
 // Path information
@@ -340,6 +372,8 @@ message Path {
     optional Aggregator aggregator = 16;
     // RFC 6811: RPKI origin validation state
     RpkiValidation rpki_validation = 17;
+    // RFC 9552: BGP-LS attribute on this path
+    optional LsAttribute ls_attribute = 18;
 }
 
 message Aggregator {
@@ -632,6 +666,13 @@ message ConditionsConfig {
     optional string neighbor = 7;  // Direct neighbor match
     optional MatchSetRef match_ext_community_set = 8;
     optional RpkiValidation rpki_validation = 9;
+    optional string afi_safi = 10;  // Address family match
+    // BGP-LS policy conditions
+    optional string ls_nlri_type = 11;
+    optional string ls_protocol_id = 12;
+    optional uint64 ls_instance_id = 13;
+    optional uint32 ls_node_as = 14;
+    optional string ls_node_router_id = 15;
 }
 
 message MatchSetRef {
@@ -698,4 +739,111 @@ message SetPeerGracefulShutdownRequest {
 message SetPeerGracefulShutdownResponse {
     bool success = 1;
     string message = 2;
+}
+
+// ============================================================================
+// BGP-LS (RFC 9552)
+// ============================================================================
+
+enum LsNlriType {
+    LS_NODE = 0;
+    LS_LINK = 1;
+    LS_PREFIX_V4 = 2;
+    LS_PREFIX_V6 = 3;
+}
+
+enum LsProtocolId {
+    LS_ISIS_L1 = 0;
+    LS_ISIS_L2 = 1;
+    LS_OSPFV2 = 2;
+    LS_DIRECT = 3;
+    LS_STATIC = 4;
+    LS_OSPFV3 = 5;
+}
+
+message LsNodeDescriptor {
+    optional uint32 as_number = 1;
+    optional uint32 bgp_ls_id = 2;
+    optional uint32 ospf_area_id = 3;
+    bytes igp_router_id = 4;
+}
+
+message LsTlv {
+    uint32 type = 1;
+    bytes value = 2;
+}
+
+message LsLinkDescriptor {
+    optional uint32 link_local_id = 1;
+    optional uint32 link_remote_id = 2;
+    optional string ipv4_interface_addr = 3;
+    optional string ipv4_neighbor_addr = 4;
+    optional string ipv6_interface_addr = 5;
+    optional string ipv6_neighbor_addr = 6;
+    repeated uint32 multi_topology_id = 7;
+    repeated LsTlv unknown = 8;
+}
+
+message LsPrefixDescriptor {
+    repeated uint32 multi_topology_id = 1;
+    optional uint32 ospf_route_type = 2;
+    bytes ip_reachability = 3;
+    repeated LsTlv unknown = 4;
+}
+
+message LsNlri {
+    LsNlriType nlri_type = 1;
+    LsProtocolId protocol_id = 2;
+    uint64 identifier = 3;
+    LsNodeDescriptor local_node = 4;
+    optional LsNodeDescriptor remote_node = 5;       // Link NLRI only
+    optional LsLinkDescriptor link_descriptors = 6;   // Link NLRI only
+    optional LsPrefixDescriptor prefix_descriptors = 7; // Prefix NLRI only
+}
+
+// Node attributes (RFC 9552 Section 5.3.1)
+message LsNodeAttribute {
+    optional uint32 flag_bits = 1;
+    optional bytes opaque = 2;
+    optional string name = 3;
+    bytes isis_area_id = 4;
+    optional string ipv4_router_id = 5;
+    optional string ipv6_router_id = 6;
+}
+
+// Link attributes (RFC 9552 Section 5.3.2)
+message LsLinkAttribute {
+    optional string ipv4_router_id_local = 1;
+    optional string ipv6_router_id_local = 2;
+    optional string ipv4_router_id_remote = 3;
+    optional string ipv6_router_id_remote = 4;
+    optional uint32 admin_group = 5;
+    optional float max_link_bandwidth = 6;
+    optional float max_reservable_bandwidth = 7;
+    repeated float unreserved_bandwidth = 8;    // 8 priority levels
+    optional uint32 te_default_metric = 9;
+    optional uint32 link_protection = 10;
+    optional uint32 mpls_protocol_mask = 11;
+    optional uint32 igp_metric = 12;
+    repeated uint32 srlg = 13;
+    optional bytes opaque = 14;
+    optional string name = 15;
+}
+
+// Prefix attributes (RFC 9552 Section 5.3.3)
+message LsPrefixAttribute {
+    optional uint32 igp_flags = 1;
+    repeated uint32 igp_route_tag = 2;
+    repeated uint64 igp_extended_route_tag = 3;
+    optional uint32 metric = 4;
+    optional string ospf_forwarding_addr = 5;
+    optional bytes opaque = 6;
+}
+
+// BGP-LS Attribute (path attribute type 29)
+message LsAttribute {
+    repeated LsTlv tlvs = 1;               // Raw TLVs (always populated)
+    optional LsNodeAttribute node = 2;     // Typed node attributes
+    optional LsLinkAttribute link = 3;     // Typed link attributes
+    optional LsPrefixAttribute prefix = 4; // Typed prefix attributes
 }

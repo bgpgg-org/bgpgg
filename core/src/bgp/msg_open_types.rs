@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
+use std::collections::HashSet;
 
 pub(crate) const BGP_VERSION: u8 = 4;
 
@@ -111,7 +112,7 @@ pub trait StaleFilter {
     fn should_clear_stale(&self, afi_safi: AfiSafi) -> bool;
 
     /// Filter stale AFI/SAFIs to those that should be cleared on reconnect.
-    fn filter_stale(&self, stale: Vec<AfiSafi>) -> Vec<AfiSafi> {
+    fn filter_stale(&self, stale: HashSet<AfiSafi>) -> Vec<AfiSafi> {
         stale
             .into_iter()
             .filter(|a| self.should_clear_stale(*a))

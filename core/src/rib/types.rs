@@ -12,24 +12,73 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::bgpls_nlri::LsNlri;
+use crate::bgp::msg_update_types::Nlri;
+use crate::bgp::multiprotocol::{Afi, AfiSafi};
 use crate::net::IpNetwork;
 use crate::peer::SessionType;
 use crate::rib::path::Path;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-/// A single prefix with a single path, used for propagation and wire encoding.
+/// Identifies a route across all address families.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RouteKey {
+    Prefix(IpNetwork),
+    LinkState(Box<LsNlri>),
+}
+
+impl RouteKey {
+    pub fn afi_safi(&self) -> AfiSafi {
+        match self {
+            RouteKey::Prefix(prefix) => prefix.afi_safi(),
+            RouteKey::LinkState(nlri) => AfiSafi::new(Afi::LinkState, nlri.safi()),
+        }
+    }
+}
+
+/// (route_key, remote_path_id) -- None means remove all paths from peer (non-ADD-PATH)
+pub type Withdrawal = (RouteKey, Option<u32>);
+
+/// Split withdrawals into IP (as Nlri), LS (SAFI 71), and LS-VPN (SAFI 72)
+/// for separate UPDATE encoding.
+pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>, Vec<LsNlri>) {
+    let mut ip_withdrawn = Vec::new();
+    let mut ls_withdrawn = Vec::new();
+    let mut ls_vpn_withdrawn = Vec::new();
+    for (key, path_id) in withdrawn {
+        match key {
+            RouteKey::Prefix(prefix) => {
+                ip_withdrawn.push(Nlri {
+                    prefix: *prefix,
+                    path_id: *path_id,
+                });
+            }
+            RouteKey::LinkState(nlri) => {
+                if nlri.is_vpn() {
+                    ls_vpn_withdrawn.push((**nlri).clone());
+                } else {
+                    ls_withdrawn.push((**nlri).clone());
+                }
+            }
+        }
+    }
+    (ip_withdrawn, ls_withdrawn, ls_vpn_withdrawn)
+}
+
+/// A single route with a single path, used for propagation and wire encoding.
+/// Carries any address family via RouteKey (IP prefix, BGP-LS NLRI, etc.).
 #[derive(Debug, Clone)]
-pub struct PrefixPath {
-    pub prefix: IpNetwork,
+pub struct RoutePath {
+    pub key: RouteKey,
     pub path: Arc<Path>,
 }
 
-impl PrefixPath {
-    /// Create a new PrefixPath, wrapping the path in an Arc
-    pub fn new(prefix: IpNetwork, path: Path) -> Self {
+impl RoutePath {
+    /// Create a new RoutePath, wrapping the path in an Arc
+    pub fn new(key: RouteKey, path: Path) -> Self {
         Self {
-            prefix,
+            key,
             path: Arc::new(path),
         }
     }
@@ -114,11 +163,11 @@ impl RouteSource {
     }
 }
 
-/// Represents a route with one or more paths to a prefix
+/// Represents a route with one or more paths
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Route {
-    pub prefix: IpNetwork,
+    pub key: RouteKey,
     pub paths: Vec<Arc<Path>>,
 }
 

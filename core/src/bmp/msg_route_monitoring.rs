@@ -89,19 +89,14 @@ mod tests {
     fn test_route_monitoring_message() {
         use crate::bgp::msg_update::UpdateMessage;
         use crate::bgp::msg_update_types::Nlri;
+        use crate::bgp::nlri_v4;
         use crate::bmp::utils::PeerDistinguisher;
-        use crate::net::{IpNetwork, Ipv4Net};
         use std::net::Ipv4Addr;
 
         // Create a withdrawal UPDATE message
+        let withdrawn: Vec<Nlri> = vec![nlri_v4(10, 0, 0, 0, 24, None)];
         let update = UpdateMessage::new_withdraw(
-            vec![Nlri {
-                prefix: IpNetwork::V4(Ipv4Net {
-                    address: Ipv4Addr::new(10, 0, 0, 0),
-                    prefix_length: 24,
-                }),
-                path_id: None,
-            }],
+            withdrawn,
             MessageFormat {
                 use_4byte_asn: true,
                 add_path: AddPathMask::NONE,

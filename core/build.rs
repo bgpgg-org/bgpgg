@@ -16,6 +16,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
+        // Box large oneof variants: LsNlri vs String.
+        .boxed(".bgp.Route.key.ls_nlri")
+        .boxed(".bgp.RemoveRouteRequest.key.ls_nlri")
+        .boxed(".bgp.AddRouteRequest.route.ls")
+        .boxed(".bgp.AddRouteRequest.route.ip")
         .compile_protos(&["../proto/bgp.proto"], &["../proto"])?;
     Ok(())
 }

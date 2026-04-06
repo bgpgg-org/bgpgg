@@ -36,7 +36,7 @@ use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{Policy, PolicyContext};
 use crate::rib::rib_in::AdjRibIn;
-use crate::rib::rib_loc::LocRib;
+use crate::rib::rib_loc::{LocRib, LocRibConfig};
 use crate::rib::AdjRibOut;
 use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
 use crate::rpki::vrp::VrpTable;
@@ -527,7 +527,9 @@ impl BgpServer {
 
         Ok(BgpServer {
             peers: HashMap::new(),
-            loc_rib: LocRib::new(),
+            loc_rib: LocRib::new(LocRibConfig {
+                max_ls_entries: config.bgp_ls.max_ls_entries,
+            }),
             config,
             policy_ctx,
             local_bgp_id,

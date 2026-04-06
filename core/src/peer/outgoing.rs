@@ -14,24 +14,27 @@
 
 //! Route propagation logic for BGP UPDATE messages
 
+use crate::bgp::bgpls_nlri::LsNlri;
 use crate::bgp::community;
 use crate::bgp::ext_community::{
     from_rpki_state_community, is_rpki_state_community, is_transitive,
 };
 use crate::bgp::msg::{Message, MessageFormat, MAX_MESSAGE_SIZE};
-use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, Origin, UpdateMessage};
+use crate::bgp::msg_update::{AsPathSegment, AsPathSegmentType, UpdateMessage};
 use crate::bgp::msg_update_types::{
-    NextHopAddr, Nlri, PathAttribute, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
+    NextHopAddr, PathAttribute, NO_ADVERTISE, NO_EXPORT, NO_EXPORT_SUBCONFED,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::log::{debug, error, info, warn};
+use crate::log::{error, info, warn};
 use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerCapabilities;
 use crate::peer::PeerOp;
 use crate::policy::PolicyResult;
 use crate::rib::rib_loc::{LocRib, RouteDelta};
-use crate::rib::{AdjRibOut, Path, PathAttrs, PrefixPath, RouteSource};
+use crate::rib::{
+    split_withdrawals, AdjRibOut, Path, PathAttrs, RouteKey, RoutePath, RouteSource, Withdrawal,
+};
 use crate::rpki::vrp::RpkiValidation;
 
 #[cfg(test)]
@@ -43,12 +46,43 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// A batch of route announcements sharing the same path attributes
+/// A batch of route announcements sharing the same AFI and path attributes.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct AnnouncementBatch {
+    pub afi_safi: AfiSafi,
     pub path: Arc<Path>,
-    pub prefixes: Vec<IpNetwork>,
+    pub keys: Vec<RouteKey>,
+}
+
+impl AnnouncementBatch {
+    /// Build an UpdateMessage from this batch.
+    pub fn to_update(&self, format: MessageFormat) -> UpdateMessage {
+        match self.afi_safi.afi {
+            Afi::Ipv4 | Afi::Ipv6 => {
+                let prefixes: Vec<IpNetwork> = self
+                    .keys
+                    .iter()
+                    .filter_map(|k| match k {
+                        RouteKey::Prefix(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect();
+                UpdateMessage::new(&self.path, prefixes, format)
+            }
+            Afi::LinkState => {
+                let ls_nlri: Vec<LsNlri> = self
+                    .keys
+                    .iter()
+                    .filter_map(|k| match k {
+                        RouteKey::LinkState(nlri) => Some((**nlri).clone()),
+                        _ => None,
+                    })
+                    .collect();
+                UpdateMessage::new_ls(&self.path, ls_nlri, self.afi_safi, format)
+            }
+        }
+    }
 }
 
 /// Bundles per-peer parameters needed for route export
@@ -334,52 +368,78 @@ fn build_export_unknown_attrs(path: &Path, ctx: &PeerExportContext) -> Vec<PathA
     }
 }
 
-/// Send withdrawal messages to a peer.
-fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Nlri>, format: MessageFormat) {
+/// Send a serialized UPDATE to a peer with logging.
+fn send_update(ctx: &PeerExportContext, msg: UpdateMessage, count: usize, label: &str) {
+    let serialized = msg.serialize();
+    if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
+        error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send {label} to peer");
+    } else {
+        info!(count, peer_addr = %ctx.peer_addr, "propagated {label} to peer");
+    }
+}
+
+/// Send withdrawal messages to a peer, splitting IP, LS, and LS-VPN into separate UPDATEs.
+fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Withdrawal>, format: MessageFormat) {
     if withdrawn.is_empty() {
         return;
     }
 
-    let count = withdrawn.len();
-    let withdraw_msg = UpdateMessage::new_withdraw(withdrawn, format);
-    let serialized = withdraw_msg.serialize();
-    if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
-        error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send withdrawals to peer");
-    } else {
-        info!(count, peer_addr = %ctx.peer_addr, "propagated withdrawals to peer");
+    let (ip_withdrawn, ls_withdrawn, ls_vpn_withdrawn) = split_withdrawals(&withdrawn);
+
+    if !ip_withdrawn.is_empty() {
+        let count = ip_withdrawn.len();
+        send_update(
+            ctx,
+            UpdateMessage::new_withdraw(ip_withdrawn, format),
+            count,
+            "withdrawals",
+        );
+    }
+
+    let ls_afi_safi = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+    let ls_vpn_afi_safi = AfiSafi::new(Afi::LinkState, Safi::LinkStateVpn);
+
+    if !ls_withdrawn.is_empty() {
+        let count = ls_withdrawn.len();
+        send_update(
+            ctx,
+            UpdateMessage::new_ls_withdraw(ls_withdrawn, ls_afi_safi, format),
+            count,
+            "LS withdrawals",
+        );
+    }
+
+    if !ls_vpn_withdrawn.is_empty() {
+        let count = ls_vpn_withdrawn.len();
+        send_update(
+            ctx,
+            UpdateMessage::new_ls_withdraw(ls_vpn_withdrawn, ls_vpn_afi_safi, format),
+            count,
+            "LS-VPN withdrawals",
+        );
     }
 }
 
-/// Batching key: attributes that must match for announcements to be batched together.
-/// Includes local_path_id so ADD-PATH paths with different IDs are never merged.
-type BatchingKey = (
-    Origin,
-    Vec<AsPathSegment>,
-    NextHopAddr,
-    bool,
-    Vec<u32>,
-    Option<u32>,
-);
+/// Batching key: AFI/SAFI + path attributes + local_path_id.
+/// AFI/SAFI ensures different families never share a batch (RFC 4271 Section 6.3).
+type BatchingKey = (AfiSafi, PathAttrs, Option<u32>);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
-pub(crate) fn batch_announcements_by_path(to_announce: &[PrefixPath]) -> Vec<AnnouncementBatch> {
+pub(crate) fn batch_announcements(to_announce: &[RoutePath]) -> Vec<AnnouncementBatch> {
     let mut batches: HashMap<BatchingKey, AnnouncementBatch> = HashMap::new();
 
-    for PrefixPath { prefix, path } in to_announce {
-        let key = (
-            path.origin(),
-            path.as_path().clone(),
-            *path.next_hop(),
-            path.atomic_aggregate(),
-            path.communities().clone(),
-            path.local_path_id,
-        );
-        let batch = batches.entry(key).or_insert_with(|| AnnouncementBatch {
-            path: Arc::clone(path),
-            prefixes: Vec::new(),
-        });
-        batch.prefixes.push(*prefix);
+    for RoutePath { key, path } in to_announce {
+        let afi_safi = key.afi_safi();
+        let batch_key = (afi_safi, path.attrs.clone(), path.local_path_id);
+        let batch = batches
+            .entry(batch_key)
+            .or_insert_with(|| AnnouncementBatch {
+                afi_safi,
+                path: Arc::clone(path),
+                keys: Vec::new(),
+            });
+        batch.keys.push(key.clone());
     }
 
     batches.into_values().collect()
@@ -447,8 +507,26 @@ fn build_ibgp_next_hop(
 fn build_export_next_hop(
     path: &Path,
     ctx: &PeerExportContext,
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
 ) -> Option<NextHopAddr> {
+    // RFC 9552 Section 5.5: next hop usually set to local endpoint by producers.
+    // As propagator, follow standard BGP rules: eBGP/next-hop-self rewrite,
+    // iBGP/RS preserve (next-hop used for tiebreak per Section 5.5).
+    if matches!(route_key, RouteKey::LinkState(_)) {
+        if ctx.rs_client {
+            return Some(*path.next_hop());
+        }
+        if ctx.is_ebgp() || ctx.next_hop_self {
+            return Some(ctx.local_next_hop.into());
+        }
+        return Some(*path.next_hop());
+    }
+
+    let prefix = match route_key {
+        RouteKey::Prefix(p) => p,
+        RouteKey::LinkState(_) => return Some(*path.next_hop()),
+    };
+
     // RFC 7947: Route servers preserve NEXT_HOP unchanged
     if ctx.rs_client {
         return Some(*path.next_hop());
@@ -468,7 +546,7 @@ fn build_export_next_hop(
 fn build_export_attrs(
     path: &Path,
     ctx: &PeerExportContext,
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
 ) -> Option<PathAttrs> {
     // RFC 4456: RR attributes (skip for RS clients)
     let (originator_id, cluster_list) = if ctx.rs_client {
@@ -480,7 +558,7 @@ fn build_export_attrs(
     Some(PathAttrs {
         origin: path.attrs.origin,
         as_path: build_export_as_path(path, ctx),
-        next_hop: build_export_next_hop(path, ctx, prefix)?,
+        next_hop: build_export_next_hop(path, ctx, route_key)?,
         source: path.attrs.source,
         local_pref: build_export_local_pref(path, ctx),
         med: build_export_med(path, ctx),
@@ -492,6 +570,7 @@ fn build_export_attrs(
         unknown_attrs: build_export_unknown_attrs(path, ctx),
         originator_id,
         cluster_list,
+        ls_attr: path.attrs.ls_attr.clone(),
     })
 }
 
@@ -510,11 +589,10 @@ fn build_export_rr_attrs(
 
     // RFC 4456: When reflecting, set ORIGINATOR_ID and prepend cluster_id
     if path.source().is_ibgp() {
-        let originator_id = Some(
-            path.attrs
-                .originator_id
-                .unwrap_or_else(|| path.attrs.source.bgp_id().unwrap()),
-        );
+        let originator_id = path
+            .attrs
+            .originator_id
+            .or_else(|| path.attrs.source.bgp_id());
         let mut cluster_list = path.attrs.cluster_list.clone();
         cluster_list.insert(0, ctx.cluster_id);
         (originator_id, cluster_list)
@@ -526,7 +604,7 @@ fn build_export_rr_attrs(
 /// Apply per-prefix export filtering and attribute transformation for a peer.
 /// Returns None if the path should be filtered (RR rules, source-peer, community, policy).
 fn compute_export_path(
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
     path: &Arc<Path>,
     ctx: &PeerExportContext,
 ) -> Option<Path> {
@@ -535,14 +613,14 @@ fn compute_export_path(
     }
 
     let mut exported = Path::clone(path);
-    if !evaluate_export_policy(ctx.export_policies, prefix, &mut exported) {
+    if !evaluate_export_policy(ctx.export_policies, route_key, &mut exported) {
         return None;
     }
 
     Some(Path {
         local_path_id: exported.local_path_id,
         remote_path_id: exported.remote_path_id,
-        attrs: build_export_attrs(&exported, ctx, prefix)?,
+        attrs: build_export_attrs(&exported, ctx, route_key)?,
         stale: false,
         rpki_state: RpkiValidation::NotFound,
     })
@@ -556,14 +634,14 @@ fn compute_export_path(
 /// - Route from non-client -> reflect to clients only
 /// - Sets ORIGINATOR_ID and prepends cluster_id to CLUSTER_LIST when reflecting
 pub fn compute_routes_for_peer(
-    to_announce: &[PrefixPath],
+    to_announce: &[RoutePath],
     ctx: &PeerExportContext,
-) -> Vec<PrefixPath> {
+) -> Vec<RoutePath> {
     to_announce
         .iter()
-        .filter_map(|PrefixPath { prefix, path }| {
-            compute_export_path(prefix, path, ctx)
-                .map(|exported_path| PrefixPath::new(*prefix, exported_path))
+        .filter_map(|RoutePath { key, path }| {
+            compute_export_path(key, path, ctx)
+                .map(|exported_path| RoutePath::new(key.clone(), exported_path))
         })
         .collect()
 }
@@ -571,11 +649,11 @@ pub fn compute_routes_for_peer(
 /// Evaluate export policies. Returns true if accepted.
 fn evaluate_export_policy(
     policies: &[Arc<crate::policy::Policy>],
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
     path: &mut Path,
 ) -> bool {
     for policy in policies {
-        match policy.evaluate(prefix, path) {
+        match policy.evaluate(route_key, path) {
             PolicyResult::Accept => return true,
             PolicyResult::Reject => return false,
             PolicyResult::Continue => continue,
@@ -589,10 +667,10 @@ const CHUNK_SIZE: usize = 10_000;
 /// Export all routes to a peer, filtering through export policy.
 /// Returns the routes that were actually sent (post-policy).
 pub fn export_all_routes_to_peer(
-    routes: &[PrefixPath],
+    routes: &[RoutePath],
     ctx: &PeerExportContext,
     format: MessageFormat,
-) -> Vec<PrefixPath> {
+) -> Vec<RoutePath> {
     let mut all_sent = Vec::new();
     for chunk in routes.chunks(CHUNK_SIZE) {
         let filtered = compute_routes_for_peer(chunk, ctx);
@@ -603,30 +681,30 @@ pub fn export_all_routes_to_peer(
 }
 
 /// Batch and send announcements to a peer.
+/// Batch announcements by shared path attributes and send to peer.
+/// Each batch becomes one UPDATE. Dispatches to new() or new_ls() based on route family.
 fn send_batched_announcements(
     ctx: &PeerExportContext,
-    to_send: &[PrefixPath],
+    to_send: &[RoutePath],
     format: MessageFormat,
 ) {
-    let batches = batch_announcements_by_path(to_send);
+    let batches = batch_announcements(to_send);
 
     for batch in batches {
-        debug!(peer_addr = %ctx.peer_addr, local_pref = ?batch.path.local_pref(), med = ?batch.path.med(), "exporting route");
+        let update_msg = batch.to_update(format);
 
-        let update_msg = UpdateMessage::new(&batch.path, batch.prefixes.clone(), format);
-
-        // RFC 6793: Serialize UPDATE with ASN encoding based on peer capability
-        // RFC 4271 Section 9.2: Check message size before sending
         let serialized = update_msg.serialize();
         if serialized.len() > MAX_MESSAGE_SIZE as usize {
-            warn!(peer_addr = %ctx.peer_addr, prefix_count = batch.prefixes.len(), size = serialized.len(), max_size = MAX_MESSAGE_SIZE, "UPDATE message exceeds maximum size, not advertising");
+            warn!(peer_addr = %ctx.peer_addr, count = batch.keys.len(),
+                  size = serialized.len(), max_size = MAX_MESSAGE_SIZE,
+                  "UPDATE exceeds maximum size, not advertising");
             continue;
         }
 
         if let Err(e) = ctx.peer_tx.send(PeerOp::SendUpdate(serialized)) {
             error!(peer_addr = %ctx.peer_addr, error = %e, "failed to send UPDATE to peer");
         } else {
-            info!(count = batch.prefixes.len(), peer_addr = %ctx.peer_addr, "propagated routes to peer");
+            info!(count = batch.keys.len(), peer_addr = %ctx.peer_addr, "propagated routes to peer");
         }
     }
 }
@@ -637,35 +715,35 @@ fn send_batched_announcements(
 /// - Non-ADD-PATH RS clients: iterate in preference order, return first accepted (RFC 7947 route iteration)
 /// - Normal peers: best path only
 fn select_paths_for_export(
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
     send_add_path: bool,
     loc_rib: &LocRib,
     ctx: &PeerExportContext,
-) -> Vec<PrefixPath> {
+) -> Vec<RoutePath> {
     if send_add_path {
         loc_rib
-            .get_all_paths(prefix)
+            .get_all_paths(route_key)
             .iter()
             .filter_map(|path| {
-                compute_export_path(prefix, path, ctx)
-                    .map(|exported_path| PrefixPath::new(*prefix, exported_path))
+                compute_export_path(route_key, path, ctx)
+                    .map(|exported_path| RoutePath::new(route_key.clone(), exported_path))
             })
             .collect()
     } else if ctx.rs_client {
         // RFC 7947 route iteration: try paths in preference order, return first that passes policy.
-        for path in loc_rib.get_all_paths(prefix) {
-            if let Some(p) = compute_export_path(prefix, &path, ctx) {
-                return vec![PrefixPath::new(*prefix, p)];
+        for path in loc_rib.get_all_paths(route_key) {
+            if let Some(p) = compute_export_path(route_key, &path, ctx) {
+                return vec![RoutePath::new(route_key.clone(), p)];
             }
         }
         vec![]
     } else {
         loc_rib
-            .get_best_path(prefix)
+            .get_best_path(route_key)
             .into_iter()
             .filter_map(|path| {
-                compute_export_path(prefix, path, ctx)
-                    .map(|exported_path| PrefixPath::new(*prefix, exported_path))
+                compute_export_path(route_key, path, ctx)
+                    .map(|exported_path| RoutePath::new(route_key.clone(), exported_path))
             })
             .collect()
     }
@@ -673,27 +751,19 @@ fn select_paths_for_export(
 
 /// Build withdrawal NLRIs for stale paths.
 /// ADD-PATH mode: one withdrawal per path_id. Normal mode: one withdrawal if all paths removed.
-fn build_withdrawals_for_prefix(
-    prefix: IpNetwork,
+fn build_withdrawals_for_route(
+    route_key: &RouteKey,
     stale_paths: &[Arc<Path>],
-    export_paths: &[PrefixPath],
+    export_paths: &[RoutePath],
     send_add_path: bool,
-) -> Vec<Nlri> {
+) -> Vec<Withdrawal> {
     if send_add_path {
         stale_paths
             .iter()
-            .filter_map(|path| {
-                path.local_path_id.map(|pid| Nlri {
-                    prefix,
-                    path_id: Some(pid),
-                })
-            })
+            .filter_map(|path| path.local_path_id.map(|pid| (route_key.clone(), Some(pid))))
             .collect()
     } else if export_paths.is_empty() && !stale_paths.is_empty() {
-        vec![Nlri {
-            prefix,
-            path_id: None,
-        }]
+        vec![(route_key.clone(), None)]
     } else {
         vec![]
     }
@@ -714,34 +784,29 @@ pub fn propagate_routes_to_peer(
     loc_rib: &LocRib,
     adj_rib_out: &mut AdjRibOut,
 ) {
-    let mut announcements: Vec<PrefixPath> = Vec::new();
-    let mut stale_entries: Vec<(IpNetwork, u32)> = Vec::new();
-    let mut withdrawals = Vec::new();
-
     for afi_safi in ctx.afi_safis() {
         let send_add_path = ctx.send_format.add_path.contains(&afi_safi);
         // ADD-PATH peers need all changed paths to track per-path state.
         // RFC 7947: RS clients without ADD-PATH also need all changes to avoid path hiding.
-        let prefixes = if send_add_path || ctx.rs_client {
+        let route_keys = if send_add_path || ctx.rs_client {
             &delta.changed
         } else {
             &delta.best_changed
         };
 
-        for prefix in prefixes {
-            // Filter prefixes by AFI (IPv4 vs IPv6)
-            if !matches!(
-                (prefix, afi_safi.afi),
-                (IpNetwork::V4(_), Afi::Ipv4) | (IpNetwork::V6(_), Afi::Ipv6)
-            ) {
+        let mut announcements: Vec<RoutePath> = Vec::new();
+        let mut withdrawals: Vec<Withdrawal> = Vec::new();
+
+        for route_key in route_keys {
+            if route_key.afi_safi() != afi_safi {
                 continue;
             }
-            let export_paths = select_paths_for_export(prefix, send_add_path, loc_rib, ctx);
-            let stale_paths = adj_rib_out.stale_paths(prefix, &export_paths);
 
-            // Build wire withdrawals
-            withdrawals.extend(build_withdrawals_for_prefix(
-                *prefix,
+            let export_paths = select_paths_for_export(route_key, send_add_path, loc_rib, ctx);
+            let stale_paths = adj_rib_out.stale_paths(route_key, &export_paths);
+
+            withdrawals.extend(build_withdrawals_for_route(
+                route_key,
                 &stale_paths,
                 &export_paths,
                 send_add_path,
@@ -749,23 +814,19 @@ pub fn propagate_routes_to_peer(
 
             announcements.extend(export_paths);
 
-            // Track stale entries for adj-rib-out removal
             for path in &stale_paths {
                 if let Some(pid) = path.local_path_id {
-                    stale_entries.push((*prefix, pid));
+                    adj_rib_out.remove_path(route_key, pid);
                 }
             }
         }
-    }
 
-    send_withdrawals(ctx, withdrawals, ctx.send_format);
-    send_batched_announcements(ctx, &announcements, ctx.send_format);
+        send_withdrawals(ctx, withdrawals, ctx.send_format);
+        send_batched_announcements(ctx, &announcements, ctx.send_format);
 
-    for (prefix, path_id) in &stale_entries {
-        adj_rib_out.remove_path(prefix, *path_id);
-    }
-    for PrefixPath { prefix, path } in announcements {
-        adj_rib_out.insert(prefix, path);
+        for RoutePath { key, path } in announcements {
+            adj_rib_out.insert(key, path);
+        }
     }
 }
 
@@ -780,7 +841,7 @@ mod tests {
     use crate::policy::statement::{Action, Condition};
     use crate::policy::Statement;
     use crate::rib::rib_loc::LocRib;
-    use crate::rib::{PathAttrs, PrefixPath, RouteSource};
+    use crate::rib::{PathAttrs, RouteKey, RoutePath, RouteSource};
 
     fn test_ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
@@ -811,6 +872,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }
@@ -1022,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_announcements_by_path() {
+    fn test_batch_announcements() {
         let path_a = Arc::new(make_path(
             RouteSource::Local,
             vec![AsPathSegment {
@@ -1056,33 +1118,35 @@ mod tests {
             prefix_length: 24,
         });
         let announcements = vec![
-            PrefixPath {
-                prefix: p1,
+            RoutePath {
+                key: RouteKey::Prefix(p1),
                 path: Arc::clone(&path_a),
             },
-            PrefixPath {
-                prefix: p2,
+            RoutePath {
+                key: RouteKey::Prefix(p2),
                 path: Arc::clone(&path_b),
             },
-            PrefixPath {
-                prefix: p3,
+            RoutePath {
+                key: RouteKey::Prefix(p3),
                 path: Arc::clone(&path_a),
             },
         ];
 
-        let mut actual = batch_announcements_by_path(&announcements);
-        actual.sort_by_key(|batch| batch.prefixes.len());
+        let mut actual = batch_announcements(&announcements);
+        actual.sort_by_key(|batch| batch.keys.len());
 
         assert_eq!(
             actual,
             vec![
                 AnnouncementBatch {
+                    afi_safi: AfiSafi::new(Afi::Ipv4, Safi::Unicast),
                     path: Arc::clone(&path_b),
-                    prefixes: vec![p2],
+                    keys: vec![RouteKey::Prefix(p2)],
                 },
                 AnnouncementBatch {
+                    afi_safi: AfiSafi::new(Afi::Ipv4, Safi::Unicast),
                     path: Arc::clone(&path_a),
-                    prefixes: vec![p1, p3],
+                    keys: vec![RouteKey::Prefix(p1), RouteKey::Prefix(p3)],
                 },
             ]
         );
@@ -1192,7 +1256,8 @@ mod tests {
     #[test]
     fn test_build_export_next_hop() {
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
-        let prefix = "10.0.0.0/24".parse().unwrap();
+        let prefix: IpNetwork = "10.0.0.0/24".parse().unwrap();
+        let prefix = RouteKey::Prefix(prefix);
 
         struct TestCase {
             name: &'static str,
@@ -1356,6 +1421,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         };
 
@@ -1568,6 +1634,7 @@ mod tests {
                     unknown_attrs: vec![],
                     originator_id: None,
                     cluster_list: vec![],
+                    ls_attr: None,
                 },
             };
 
@@ -1624,8 +1691,8 @@ mod tests {
             address: Ipv4Addr::new(10, 0, 0, 0),
             prefix_length: 24,
         });
-        let routes = vec![PrefixPath {
-            prefix,
+        let routes = vec![RoutePath {
+            key: RouteKey::Prefix(prefix),
             path: Arc::new(path),
         }];
 
@@ -1832,6 +1899,7 @@ mod tests {
                     unknown_attrs: vec![],
                     originator_id: None,
                     cluster_list: vec![],
+                    ls_attr: None,
                 },
             };
 
@@ -2018,18 +2086,24 @@ mod tests {
             nh2,
         );
 
-        let mut loc_rib = LocRib::new();
+        let mut loc_rib = LocRib::default();
         loc_rib.apply_peer_update(
             test_ip(2),
-            &[PendingRoute::Announce(PrefixPath::new(prefix, path1))],
+            &[PendingRoute::Announce(RoutePath::new(
+                RouteKey::Prefix(prefix),
+                path1,
+            ))],
             |_, _| true,
         );
         loc_rib.apply_peer_update(
             test_ip(3),
-            &[PendingRoute::Announce(PrefixPath::new(prefix, path2))],
+            &[PendingRoute::Announce(RoutePath::new(
+                RouteKey::Prefix(prefix),
+                path2,
+            ))],
             |_, _| true,
         );
-        assert_eq!(loc_rib.get_all_paths(&prefix).len(), 2);
+        assert_eq!(loc_rib.get_all_paths(&RouteKey::Prefix(prefix)).len(), 2);
 
         let policies = vec![Arc::new(
             Policy::new("test".to_string())
@@ -2050,12 +2124,13 @@ mod tests {
         };
 
         // RS client iterates to path2 (passes policy)
-        let result = select_paths_for_export(&prefix, false, &loc_rib, &rs_ctx);
+        let route_key = RouteKey::Prefix(prefix);
+        let result = select_paths_for_export(&route_key, false, &loc_rib, &rs_ctx);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].path.attrs.next_hop, nh2);
 
         // Non-RS client only checks best path (path1) -> rejected
-        let result = select_paths_for_export(&prefix, false, &loc_rib, &non_rs_ctx);
+        let result = select_paths_for_export(&route_key, false, &loc_rib, &non_rs_ctx);
         assert!(result.is_empty());
     }
 
@@ -2081,6 +2156,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         };
 

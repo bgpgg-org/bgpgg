@@ -184,6 +184,55 @@ pub enum RibCommands {
         /// Prefix in CIDR format (e.g., 10.0.0.0/24)
         prefix: String,
     },
+
+    /// Add a BGP-LS route to the global RIB
+    #[command(subcommand)]
+    AddLs(AddLsCommands),
+
+    /// Delete a BGP-LS route from the global RIB
+    #[command(subcommand)]
+    DelLs(DelLsCommands),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AddLsCommands {
+    /// Add a BGP-LS Node NLRI
+    Node {
+        /// AS number of the node
+        #[arg(long)]
+        asn: u32,
+        /// IGP router ID (dotted decimal, e.g., 10.0.0.1)
+        #[arg(long)]
+        router_id: String,
+        /// BGP-LS protocol ID (isis-l1, isis-l2, ospfv2, direct, static, ospfv3)
+        #[arg(long, default_value = "direct")]
+        protocol: String,
+        /// BGP-LS identifier (default 0)
+        #[arg(long, default_value = "0")]
+        identifier: u64,
+        /// Node name (optional, set in BGP-LS attribute)
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DelLsCommands {
+    /// Delete a BGP-LS Node NLRI
+    Node {
+        /// AS number of the node
+        #[arg(long)]
+        asn: u32,
+        /// IGP router ID (dotted decimal, e.g., 10.0.0.1)
+        #[arg(long)]
+        router_id: String,
+        /// BGP-LS protocol ID (isis-l1, isis-l2, ospfv2, direct, static, ospfv3)
+        #[arg(long, default_value = "direct")]
+        protocol: String,
+        /// BGP-LS identifier (default 0)
+        #[arg(long, default_value = "0")]
+        identifier: u64,
+    },
 }
 
 #[tokio::main]
@@ -453,6 +502,69 @@ mod tests {
                 assert_eq!(prefix, "10.0.0.0/24");
             }
             _ => panic!("Expected Global Rib Del command"),
+        }
+    }
+
+    #[test]
+    fn test_global_rib_add_ls_node_command() {
+        let args = vec![
+            "bgpgg",
+            "global",
+            "rib",
+            "add-ls",
+            "node",
+            "--asn",
+            "65001",
+            "--router-id",
+            "10.0.0.1",
+            "--name",
+            "router1",
+        ];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Global(GlobalCommands::Rib(RibCommands::AddLs(AddLsCommands::Node {
+                asn,
+                router_id,
+                name,
+                protocol,
+                identifier,
+            }))) => {
+                assert_eq!(asn, 65001);
+                assert_eq!(router_id, "10.0.0.1");
+                assert_eq!(name, Some("router1".to_string()));
+                assert_eq!(protocol, "direct");
+                assert_eq!(identifier, 0);
+            }
+            _ => panic!("Expected Global Rib AddLs Node command"),
+        }
+    }
+
+    #[test]
+    fn test_global_rib_del_ls_node_command() {
+        let args = vec![
+            "bgpgg",
+            "global",
+            "rib",
+            "del-ls",
+            "node",
+            "--asn",
+            "65001",
+            "--router-id",
+            "10.0.0.1",
+        ];
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Global(GlobalCommands::Rib(RibCommands::DelLs(DelLsCommands::Node {
+                asn,
+                router_id,
+                ..
+            }))) => {
+                assert_eq!(asn, 65001);
+                assert_eq!(router_id, "10.0.0.1");
+            }
+            _ => panic!("Expected Global Rib DelLs Node command"),
         }
     }
 

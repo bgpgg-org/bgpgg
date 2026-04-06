@@ -76,11 +76,11 @@ async fn test_basic_route_refresh() {
     // Inject a route so server has something to resend
     announce_route(
         &server,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "127.0.0.2".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -223,11 +223,11 @@ async fn test_sender_wraps_with_borr_eorr() {
     // Inject a route so the server has something to re-advertise
     announce_route(
         &server,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "127.0.0.2".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 

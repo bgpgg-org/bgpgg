@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::bgp::bgpls_attr::LsAttr;
 use crate::bgp::community::LLGR_STALE;
 use crate::bgp::merge_as_paths;
 use crate::bgp::msg::AddPathMask;
@@ -45,6 +46,8 @@ pub struct PathAttrs {
     pub originator_id: Option<std::net::Ipv4Addr>,
     /// RFC 4456: CLUSTER_LIST attribute for route reflector loop prevention
     pub cluster_list: Vec<std::net::Ipv4Addr>,
+    /// RFC 9552: BGP-LS Attribute (type 29) carrying link-state properties
+    pub ls_attr: Option<LsAttr>,
 }
 
 /// Represents a BGP path with allocation metadata and attributes.
@@ -177,6 +180,7 @@ impl Path {
                 unknown_attrs: update_msg.unknown_attrs(),
                 originator_id: update_msg.originator_id(),
                 cluster_list: update_msg.cluster_list().unwrap_or_default(),
+                ls_attr: update_msg.ls_attr(),
             },
         })
     }
@@ -399,6 +403,7 @@ impl Path {
 mod tests {
     use super::*;
     use crate::bgp::DEFAULT_FORMAT;
+    use crate::net::IpNetwork;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -437,6 +442,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }
@@ -707,9 +713,11 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         };
-        let update = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
+        let prefix: IpNetwork = "10.0.0.0/24".parse().unwrap();
+        let update = UpdateMessage::new(&path, vec![prefix], DEFAULT_FORMAT);
         let path = Path::from_update_msg(&update, source, false);
         assert!(path.is_some());
         let path = path.unwrap();

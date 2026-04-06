@@ -21,7 +21,7 @@ use bgpgg::bgp::msg::MessageType;
 use bgpgg::bgp::msg::BGP_MARKER;
 use bgpgg::bgp::msg_notification::{BgpError, UpdateMessageError};
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code, Origin};
-use bgpgg::grpc::proto::BgpState;
+use bgpgg::grpc::proto::{BgpState, ListRoutesRequest};
 use std::net::Ipv4Addr;
 
 /// RFC 7606: missing well-known mandatory attribute -> treat-as-withdraw (session stays up)
@@ -73,7 +73,11 @@ async fn test_update_missing_well_known_attribute() {
         );
 
         // Route should NOT be installed
-        let routes = server.client.get_routes().await.expect("get routes");
+        let routes = server
+            .client
+            .list_routes(ListRoutesRequest::default())
+            .await
+            .expect("get routes");
         assert!(
             routes.is_empty(),
             "Test case: {} - route should be withdrawn",
@@ -154,7 +158,11 @@ async fn test_update_attribute_flags_error_origin() {
             name
         );
 
-        let routes = server.client.get_routes().await.expect("get routes");
+        let routes = server
+            .client
+            .list_routes(ListRoutesRequest::default())
+            .await
+            .expect("get routes");
         assert!(
             routes.is_empty(),
             "Test case: {} - route should be withdrawn",
@@ -210,8 +218,12 @@ async fn test_update_attribute_flags_error_med_missing_optional_bit() {
     // Route should NOT be installed (treat-as-withdraw)
     poll_while(
         || async {
-            let routes = server.client.get_routes().await.unwrap_or_default();
-            routes.iter().all(|r| r.prefix != "10.11.12.0/24")
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap_or_default();
+            routes.iter().all(|r| !route_has_prefix(r, "10.11.12.0/24"))
         },
         Duration::from_secs(1),
         "route 10.11.12.0/24 should not be installed",
@@ -323,7 +335,11 @@ async fn test_update_attribute_length_error_with_nlri() {
         "Peer should stay established (treat-as-withdraw)",
     );
 
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     assert!(routes.is_empty(), "Route should be withdrawn");
 }
 
@@ -383,7 +399,11 @@ async fn test_update_invalid_origin_attribute() {
         "Peer should stay established (treat-as-withdraw for invalid ORIGIN)"
     );
 
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     assert!(routes.is_empty(), "Route should be withdrawn");
 }
 
@@ -436,7 +456,11 @@ async fn test_update_invalid_next_hop_attribute() {
             name
         );
 
-        let routes = server.client.get_routes().await.expect("get routes");
+        let routes = server
+            .client
+            .list_routes(ListRoutesRequest::default())
+            .await
+            .expect("get routes");
         assert!(
             routes.is_empty(),
             "Test case: {} - route should be withdrawn",
@@ -472,7 +496,7 @@ async fn test_next_hop_is_local_address_rejected() {
     // Route should NOT be installed (NEXT_HOP = local address)
     let routes = server
         .client
-        .get_routes()
+        .list_routes(ListRoutesRequest::default())
         .await
         .expect("Failed to get routes");
     assert!(
@@ -538,7 +562,11 @@ async fn test_update_malformed_as_path() {
             name
         );
 
-        let routes = server.client.get_routes().await.expect("get routes");
+        let routes = server
+            .client
+            .list_routes(ListRoutesRequest::default())
+            .await
+            .expect("get routes");
         assert!(
             routes.is_empty(),
             "Test case: {} - route should be withdrawn",
@@ -590,7 +618,11 @@ async fn test_update_as_path_first_as_mismatch() {
         "peer should stay established (treat-as-withdraw)"
     );
 
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     assert!(routes.is_empty(), "route should be withdrawn");
 }
 
@@ -641,8 +673,12 @@ async fn test_update_optional_attribute_error() {
     // Route should be installed (bad optional attr discarded, rest valid)
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap_or_default();
-            routes.iter().any(|r| r.prefix == "10.11.12.0/24")
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap_or_default();
+            routes.iter().any(|r| route_has_prefix(r, "10.11.12.0/24"))
         },
         "route 10.11.12.0/24 should be installed",
     )
@@ -689,8 +725,12 @@ async fn test_update_duplicate_attribute() {
     // Route should be installed successfully
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap_or_default();
-            routes.iter().any(|r| r.prefix == "10.11.12.0/24")
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap_or_default();
+            routes.iter().any(|r| route_has_prefix(r, "10.11.12.0/24"))
         },
         "route 10.11.12.0/24 should be installed",
     )
@@ -766,7 +806,7 @@ async fn test_update_multicast_nlri_ignored() {
     // Multicast prefix should be silently ignored, not installed
     let routes = server
         .client
-        .get_routes()
+        .list_routes(ListRoutesRequest::default())
         .await
         .expect("Failed to get routes");
     assert!(routes.is_empty(), "Multicast NLRI should be ignored");
@@ -797,18 +837,28 @@ async fn test_update_ebgp_local_pref_stripped() {
     // Route should be installed (LOCAL_PREF silently stripped, not an error)
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap_or_default();
-            routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap_or_default();
+            routes
+                .iter()
+                .any(|route| route_has_prefix(route, "10.11.12.0/24"))
         },
         "route 10.11.12.0/24 should be installed",
     )
     .await;
 
     // Verify LOCAL_PREF was stripped -> defaults to 100 in Loc-RIB
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     let route = routes
         .iter()
-        .find(|route| route.prefix == "10.11.12.0/24")
+        .find(|route| route_has_prefix(route, "10.11.12.0/24"))
         .expect("route should exist");
     let path = &route.paths[0];
     assert_eq!(
@@ -866,7 +916,11 @@ async fn test_update_multiple_errors_strongest_wins() {
         "Peer should stay established (treat-as-withdraw, not session reset)"
     );
 
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     assert!(
         routes.is_empty(),
         "Route should be withdrawn (treat-as-withdraw wins)"
@@ -984,7 +1038,11 @@ async fn test_update_runt_attribute_header() {
             name
         );
 
-        let routes = server.client.get_routes().await.expect("get routes");
+        let routes = server
+            .client
+            .list_routes(ListRoutesRequest::default())
+            .await
+            .expect("get routes");
         assert!(
             routes.is_empty(),
             "Test case: {} - route should be withdrawn",
@@ -1031,7 +1089,11 @@ async fn test_update_attribute_length_overrun() {
         "peer should stay established"
     );
 
-    let routes = server.client.get_routes().await.expect("get routes");
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .expect("get routes");
     assert!(routes.is_empty(), "route should be withdrawn");
 }
 
@@ -1535,8 +1597,14 @@ async fn test_malformed_attribute_actions() {
         );
         poll_until(
             || async {
-                let routes = server.client.get_routes().await.unwrap_or_default();
-                routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+                let routes = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                    .unwrap_or_default();
+                routes
+                    .iter()
+                    .any(|route| route_has_prefix(route, "10.11.12.0/24"))
             },
             &install_msg,
         )
@@ -1570,10 +1638,14 @@ async fn test_malformed_attribute_actions() {
         if case.treat_as_withdraw {
             poll_route_withdrawal(&[&server]).await;
         } else {
-            let routes = server.client.get_routes().await.expect("get routes");
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .expect("get routes");
             let route = routes
                 .iter()
-                .find(|route| route.prefix == "10.11.12.0/24")
+                .find(|route| route_has_prefix(route, "10.11.12.0/24"))
                 .unwrap_or_else(|| {
                     panic!(
                         "Test case: {} - route should still be installed (attribute-discard)",
@@ -1639,8 +1711,14 @@ async fn test_malformed_withdrawn_routes_nlri() {
 
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap_or_default();
-            routes.iter().any(|route| route.prefix == "10.11.12.0/24")
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap_or_default();
+            routes
+                .iter()
+                .any(|route| route_has_prefix(route, "10.11.12.0/24"))
         },
         "route should be installed before malformed UPDATE",
     )

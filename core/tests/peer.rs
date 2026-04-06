@@ -21,7 +21,8 @@ use bgpgg::bgp::community;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
-    AdminState, Afi, BgpState, GracefulRestartConfig, Origin, Peer, ResetType, Safi, SessionConfig,
+    AdminState, Afi, BgpState, GracefulRestartConfig, ListRoutesRequest, Origin, Peer, ResetType,
+    Safi, SessionConfig,
 };
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
@@ -83,11 +84,11 @@ async fn test_peer_down() {
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -101,7 +102,11 @@ async fn test_peer_down() {
     // With 3-second GR timer, routes withdrawn after 3 seconds
     poll_until_with_timeout(
         || async {
-            let Ok(routes) = server1.client.get_routes().await else {
+            let Ok(routes) = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             routes.is_empty()
@@ -124,11 +129,11 @@ async fn test_peer_down_four_node_mesh() {
     announce_and_verify_route(
         &server1,
         &[&server2, &server3, &server4],
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
         PathParams::from_peer(&server1),
     )
     .await;
@@ -764,11 +769,11 @@ async fn test_mrai_rate_limiting() {
         for i in 0..num_routes {
             announce_route(
                 &server1,
-                RouteParams {
+                RouteParams::Ip(Box::new(IpRouteParams {
                     prefix: format!("10.{}.0.0/24", i),
                     next_hop: "192.168.1.1".to_string(),
                     ..Default::default()
-                },
+                })),
             )
             .await;
         }
@@ -942,11 +947,11 @@ async fn test_reset_peer_soft() {
         // Server1 announces a route to server2
         announce_route(
             &server1,
-            RouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            },
+            })),
         )
         .await;
 
@@ -1033,11 +1038,11 @@ async fn test_hard_reset_established() {
     // Server1 announces a route to server2
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -1250,11 +1255,11 @@ async fn test_graceful_restart() {
         announce_and_verify_route(
             &server1,
             &[&server2],
-            RouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            },
+            })),
             PathParams {
                 as_path: vec![as_sequence(vec![65001])],
                 next_hop: s1_addr.clone(),
@@ -1276,7 +1281,11 @@ async fn test_graceful_restart() {
             // Routes should be retained during GR timer
             poll_while(
                 || async {
-                    let Ok(routes) = server2.client.get_routes().await else {
+                    let Ok(routes) = server2
+                        .client
+                        .list_routes(ListRoutesRequest::default())
+                        .await
+                    else {
                         return false;
                     };
                     routes.len() == 1
@@ -1289,7 +1298,11 @@ async fn test_graceful_restart() {
             // After GR timer, routes withdrawn
             poll_until_with_timeout(
                 || async {
-                    let Ok(routes) = server2.client.get_routes().await else {
+                    let Ok(routes) = server2
+                        .client
+                        .list_routes(ListRoutesRequest::default())
+                        .await
+                    else {
                         return false;
                     };
                     routes.is_empty()
@@ -1394,11 +1407,11 @@ async fn test_graceful_restart_reconnect() {
     // won't block it when re-sending to the restarting peer.
     announce_route(
         &server,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -1425,9 +1438,13 @@ async fn test_graceful_restart_reconnect() {
     .await;
 
     // Route retained during GR timer (verify briefly - peer reconnects fast with idle_hold=0)
-    let routes = server.client.get_routes().await.unwrap();
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .unwrap();
     assert!(
-        routes.len() == 1 && routes[0].prefix == "10.0.0.0/24",
+        routes.len() == 1 && route_has_prefix(&routes[0], "10.0.0.0/24"),
         "route should be retained during GR"
     );
 
@@ -1483,10 +1500,10 @@ async fn test_graceful_restart_reconnect() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .ok()
-                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+                .is_some_and(|r| r.len() == 1 && route_has_prefix(&r[0], "10.0.0.0/24"))
         },
         "route should still be in RIB after reconnect",
     )
@@ -1576,10 +1593,10 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .ok()
-                .is_some_and(|r| r.len() == 1 && r[0].prefix == "10.0.0.0/24")
+                .is_some_and(|r| r.len() == 1 && route_has_prefix(&r[0], "10.0.0.0/24"))
         },
         "route should be in RIB",
     )
@@ -1601,7 +1618,11 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     .await;
 
     // Route still retained (GR timer hasn't expired)
-    let routes = server.client.get_routes().await.unwrap();
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .unwrap();
     assert_eq!(routes.len(), 1, "route should be retained during GR");
 
     // Server reconnects
@@ -1630,7 +1651,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .ok()
                 .is_some_and(|r| r.is_empty())
@@ -1925,11 +1946,11 @@ async fn test_peer_without_capabilities() {
     // Add IPv4 route - should be propagated (default behavior)
     announce_route(
         &server,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -2017,11 +2038,11 @@ async fn test_graceful_session_shutdown_initiator() {
 
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -2069,11 +2090,11 @@ async fn test_dynamic_graceful_shutdown_toggle() {
 
     announce_route(
         &server1,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
@@ -2170,7 +2191,7 @@ async fn test_gr_restart_time_zero_sweeps_immediately() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .ok()
                 .is_some_and(|r| r.len() == 1)

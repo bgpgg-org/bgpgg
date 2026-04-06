@@ -55,6 +55,9 @@ impl AddPathMask {
             (Afi::Ipv6, Safi::Multicast) => 1 << 3,
             (Afi::Ipv4, Safi::MplsLabel) => 1 << 4,
             (Afi::Ipv6, Safi::MplsLabel) => 1 << 5,
+            (Afi::LinkState, Safi::LinkState) => 1 << 6,
+            (Afi::LinkState, Safi::LinkStateVpn) => 1 << 7,
+            _ => 0,
         }
     }
 }

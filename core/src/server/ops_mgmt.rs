@@ -31,7 +31,7 @@ use crate::policy::sets::{
     PrefixSet,
 };
 use crate::policy::DefinedSetType;
-use crate::rib::{PathAttrs, Route};
+use crate::rib::{PathAttrs, Route, RouteKey};
 use crate::types::PeerDownReason;
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
@@ -40,6 +40,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bgp::msg_notification::CeaseSubcode;
+use crate::grpc::proto::RibType;
 use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
 use crate::rpki::vrp::{RpkiValidation, Vrp};
 
@@ -70,12 +71,12 @@ pub enum MgmtOp {
         response: oneshot::Sender<Result<(), String>>,
     },
     AddRoute {
-        prefix: IpNetwork,
-        attrs: PathAttrs,
+        key: Box<RouteKey>,
+        attrs: Box<PathAttrs>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRoute {
-        prefix: IpNetwork,
+        key: Box<RouteKey>,
         response: oneshot::Sender<Result<(), String>>,
     },
     GetPeers {
@@ -88,11 +89,15 @@ pub enum MgmtOp {
     GetRoutes {
         rib_type: Option<i32>,
         peer_address: Option<String>,
+        afi: Option<u32>,
+        safi: Option<u32>,
         response: oneshot::Sender<Result<Vec<Route>, String>>,
     },
     GetRoutesStream {
         rib_type: Option<i32>,
         peer_address: Option<String>,
+        afi: Option<u32>,
+        safi: Option<u32>,
         tx: mpsc::UnboundedSender<Route>,
     },
     GetPeersStream {
@@ -209,14 +214,14 @@ impl BgpServer {
                     .await;
             }
             MgmtOp::AddRoute {
-                prefix,
+                key,
                 attrs,
                 response,
             } => {
-                self.handle_add_route(prefix, attrs, response).await;
+                self.handle_add_route(*key, *attrs, response).await;
             }
-            MgmtOp::RemoveRoute { prefix, response } => {
-                self.handle_remove_route(prefix, response).await;
+            MgmtOp::RemoveRoute { key, response } => {
+                self.handle_remove_route(*key, response).await;
             }
             MgmtOp::GetPeers { response } => {
                 self.handle_get_peers(response);
@@ -227,17 +232,21 @@ impl BgpServer {
             MgmtOp::GetRoutes {
                 rib_type,
                 peer_address,
+                afi,
+                safi,
                 response,
             } => {
-                self.handle_get_routes(rib_type, peer_address, response)
+                self.handle_get_routes(rib_type, peer_address, afi, safi, response)
                     .await;
             }
             MgmtOp::GetRoutesStream {
                 rib_type,
                 peer_address,
+                afi,
+                safi,
                 tx,
             } => {
-                self.handle_get_routes_stream(rib_type, peer_address, tx)
+                self.handle_get_routes_stream(rib_type, peer_address, afi, safi, tx)
                     .await;
             }
             MgmtOp::GetPeersStream { tx } => {
@@ -739,26 +748,37 @@ impl BgpServer {
 
     async fn handle_add_route(
         &mut self,
-        prefix: IpNetwork,
+        mut key: RouteKey,
         attrs: PathAttrs,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(?prefix, next_hop = ?attrs.next_hop, "adding route via request");
+        // RFC 9552 Section 8.2.3: apply configured Instance-ID to locally originated LS NLRIs.
+        let instance_id = self.config.bgp_ls.instance_id;
+        if let RouteKey::LinkState(ref mut nlri) = key {
+            nlri.set_identifier(instance_id);
+        }
 
-        let delta = self.loc_rib.add_local_route(prefix, attrs);
-        self.propagate_routes(delta, None).await;
+        info!(?key, next_hop = ?attrs.next_hop, "adding route via request");
 
-        let _ = response.send(Ok(()));
+        match self.loc_rib.add_local_route(key, attrs) {
+            Ok(delta) => {
+                self.propagate_routes(delta, None).await;
+                let _ = response.send(Ok(()));
+            }
+            Err(err) => {
+                let _ = response.send(Err(format!("{err:?}")));
+            }
+        }
     }
 
     async fn handle_remove_route(
         &mut self,
-        prefix: IpNetwork,
+        key: RouteKey,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        info!(?prefix, "removing route via request");
+        info!(?key, "removing route via request");
 
-        let delta = self.loc_rib.remove_local_route(prefix);
+        let delta = self.loc_rib.remove_local_route(&key);
         self.propagate_routes(delta, None).await;
 
         let _ = response.send(Ok(()));
@@ -839,19 +859,25 @@ impl BgpServer {
         &self,
         rib_type: Option<i32>,
         peer_address: Option<String>,
+        afi: Option<u32>,
+        safi: Option<u32>,
         response: oneshot::Sender<Result<Vec<Route>, String>>,
     ) {
-        use crate::grpc::proto::RibType;
-
         let rib_type_enum = match rib_type {
             Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
             None => RibType::Global,
         };
 
+        let afi_safi = AfiSafi::from_raw(afi, safi);
         let result = match rib_type_enum {
-            RibType::Global => Ok(self.loc_rib.get_all_routes()),
-            RibType::AdjIn => self.get_adj_rib_in(peer_address),
-            RibType::AdjOut => self.get_adj_rib_out(peer_address),
+            RibType::Global => Ok(self
+                .loc_rib
+                .get_routes(afi_safi)
+                .into_iter()
+                .cloned()
+                .collect()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address, afi_safi),
+            RibType::AdjOut => self.get_adj_rib_out(peer_address, afi_safi),
         };
 
         let _ = response.send(result);
@@ -861,25 +887,31 @@ impl BgpServer {
         &self,
         rib_type: Option<i32>,
         peer_address: Option<String>,
+        afi: Option<u32>,
+        safi: Option<u32>,
         tx: mpsc::UnboundedSender<Route>,
     ) {
-        use crate::grpc::proto::RibType;
-
         let rib_type_enum = match rib_type {
             Some(t) => RibType::try_from(t).unwrap_or(RibType::Global),
             None => RibType::Global,
         };
 
+        let afi_safi = AfiSafi::from_raw(afi, safi);
         let routes = match rib_type_enum {
-            RibType::Global => Ok(self.loc_rib.get_all_routes()),
-            RibType::AdjIn => self.get_adj_rib_in(peer_address),
-            RibType::AdjOut => self.get_adj_rib_out(peer_address),
+            RibType::Global => Ok(self
+                .loc_rib
+                .get_routes(afi_safi)
+                .into_iter()
+                .cloned()
+                .collect()),
+            RibType::AdjIn => self.get_adj_rib_in(peer_address, afi_safi),
+            RibType::AdjOut => self.get_adj_rib_out(peer_address, afi_safi),
         };
 
         if let Ok(routes) = routes {
             for route in routes {
                 if tx.send(route).is_err() {
-                    break; // Client disconnected
+                    break;
                 }
             }
         }
@@ -1452,7 +1484,11 @@ impl BgpServer {
             .collect()
     }
 
-    fn get_adj_rib_in(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+    fn get_adj_rib_in(
+        &self,
+        peer_address: Option<String>,
+        afi_safi: Option<AfiSafi>,
+    ) -> Result<Vec<Route>, String> {
         let peer_addr = peer_address
             .ok_or("peer_address required for ADJ_IN".to_string())?
             .parse::<IpAddr>()
@@ -1467,10 +1503,14 @@ impl BgpServer {
             return Err("peer not established".to_string());
         }
 
-        Ok(peer_info.adj_rib_in.get_all_routes())
+        Ok(peer_info.adj_rib_in.get_routes(afi_safi))
     }
 
-    fn get_adj_rib_out(&self, peer_address: Option<String>) -> Result<Vec<Route>, String> {
+    fn get_adj_rib_out(
+        &self,
+        peer_address: Option<String>,
+        afi_safi: Option<AfiSafi>,
+    ) -> Result<Vec<Route>, String> {
         let peer_addr = peer_address
             .ok_or("peer_address required for ADJ_OUT".to_string())?
             .parse::<IpAddr>()
@@ -1481,7 +1521,7 @@ impl BgpServer {
             .get(&peer_addr)
             .ok_or(format!("peer {} not found", peer_addr))?;
 
-        Ok(peer_info.adj_rib_out.get_routes())
+        Ok(peer_info.adj_rib_out.get_routes(afi_safi))
     }
 
     /// Check if a policy references a specific defined set
@@ -1575,9 +1615,8 @@ fn send_initial_bmp_state_to_task(
     response: oneshot::Sender<Result<(), String>>,
 ) {
     use crate::bgp::msg::MessageFormat;
-    use crate::bgp::msg_update::UpdateMessage;
-    use crate::peer::outgoing::batch_announcements_by_path;
-    use crate::rib::PrefixPath;
+    use crate::peer::outgoing::batch_announcements;
+    use crate::rib::RoutePath;
 
     // Send all PeerUp messages first
     for (peer_ip, peer_info) in &established_peers {
@@ -1607,7 +1646,7 @@ fn send_initial_bmp_state_to_task(
             continue;
         };
         if let (Some(asn), Some(bgp_id)) = (conn.asn, conn.bgp_id) {
-            let routes = peer_info.adj_rib_in.get_all_routes();
+            let routes = peer_info.adj_rib_in.get_routes(None);
             let format = MessageFormat {
                 use_4byte_asn: peer_info.supports_4byte_asn(),
                 add_path: peer_info.add_path_receive_mask(),
@@ -1615,19 +1654,19 @@ fn send_initial_bmp_state_to_task(
                 enhanced_rr: false,
             };
 
-            // Convert routes to UpdateMessages, batching by shared path attributes
-            let announcements: Vec<PrefixPath> = routes
+            // Build BMP Route Monitoring messages for this peer's routes.
+            let announcements: Vec<RoutePath> = routes
                 .iter()
                 .flat_map(|route| {
-                    route.paths.iter().map(|path| PrefixPath {
-                        prefix: route.prefix,
+                    route.paths.iter().map(|path| RoutePath {
+                        key: route.key.clone(),
                         path: Arc::clone(path),
                     })
                 })
                 .collect();
-            let batches = batch_announcements_by_path(&announcements);
+            let batches = batch_announcements(&announcements);
             for batch in batches {
-                let update = UpdateMessage::new(&batch.path, batch.prefixes, format);
+                let update = batch.to_update(format);
                 let _ = task_tx.send(Arc::new(BmpOp::RouteMonitoring {
                     peer_ip,
                     peer_as: asn,

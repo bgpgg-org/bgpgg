@@ -18,6 +18,8 @@ pub use super::msg_update_types::{
     LargeCommunity, NextHopAddr, Origin, PathAttrFlag, PathAttrValue, PathAttribute,
 };
 
+use super::bgpls_attr::LsAttr;
+use super::bgpls_nlri::LsNlri;
 use super::msg::{Message, MessageFormat, MessageType};
 use super::msg_update_codec::{
     format_bytes_hex, read_path_attributes, validate_update_message_lengths,
@@ -37,97 +39,21 @@ pub(super) const WITHDRAWN_ROUTES_LENGTH_SIZE: usize = 2;
 pub(super) const TOTAL_ATTR_LENGTH_SIZE: usize = 2;
 
 impl UpdateMessage {
-    /// Create an UPDATE message from a Path and list of prefixes
+    /// Create an UPDATE for IP routes. IPv4 -> traditional NLRI + NEXT_HOP attr,
+    /// IPv6 -> MP_REACH_NLRI.
     pub fn new(path: &Path, nlri_list: Vec<IpNetwork>, format: MessageFormat) -> Self {
-        // Partition routes by address family
-        // IPv4 routes go in traditional NLRI field, IPv6 routes go in MP_REACH_NLRI
         let (ipv4_routes, ipv6_routes): (Vec<_>, Vec<_>) = nlri_list
             .into_iter()
             .partition(|p| matches!(p, IpNetwork::V4(_)));
 
-        let mut path_attributes = vec![
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Origin(path.origin()),
-            },
-            PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AsPath(AsPath {
-                    segments: path.as_path().clone(),
-                }),
-            },
-        ];
+        let mut path_attributes = Self::build_common_path_attrs(path);
 
-        // Traditional NEXT_HOP attribute (attr 3) - for IPv4 next hops
-        if matches!(path.next_hop(), NextHopAddr::Ipv4(_)) {
+        // Traditional NEXT_HOP attribute (attr 3) -- only for IPv4 unicast.
+        // Other families carry next-hop inside MP_REACH_NLRI (RFC 4760 Section 3).
+        if !ipv4_routes.is_empty() && matches!(path.next_hop(), NextHopAddr::Ipv4(_)) {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
                 value: PathAttrValue::NextHop(*path.next_hop()),
-            });
-        }
-
-        if let Some(pref) = path.local_pref() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::LocalPref(pref),
-            });
-        }
-
-        if let Some(metric) = path.med() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
-                value: PathAttrValue::MultiExtiDisc(metric),
-            });
-        }
-
-        if path.atomic_aggregate() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::AtomicAggregate,
-            });
-        }
-
-        if let Some(ref agg) = path.aggregator() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Aggregator(agg.clone()),
-            });
-        }
-
-        if !path.communities().is_empty() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::Communities(path.communities().clone()),
-            });
-        }
-
-        // RFC 4456: ORIGINATOR_ID is optional, non-transitive
-        if let Some(originator) = path.originator_id() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
-                value: PathAttrValue::OriginatorId(originator),
-            });
-        }
-
-        // RFC 4456: CLUSTER_LIST is optional, non-transitive
-        if !path.cluster_list().is_empty() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
-                value: PathAttrValue::ClusterList(path.cluster_list().clone()),
-            });
-        }
-
-        if !path.extended_communities().is_empty() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::ExtendedCommunities(path.extended_communities().clone()),
-            });
-        }
-
-        if !path.large_communities().is_empty() {
-            path_attributes.push(PathAttribute {
-                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
-                value: PathAttrValue::LargeCommunities(path.large_communities().clone()),
             });
         }
 
@@ -136,7 +62,6 @@ impl UpdateMessage {
         let ipv6_path_id =
             path.path_id_for(&format.add_path, &AfiSafi::new(Afi::Ipv6, Safi::Unicast));
 
-        // MP_REACH_NLRI for IPv6 routes (RFC 4760)
         if !ipv6_routes.is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
@@ -145,12 +70,10 @@ impl UpdateMessage {
                     safi: Safi::Unicast,
                     next_hop: *path.next_hop(),
                     nlri: make_nlri_list(&ipv6_routes, ipv6_path_id),
+                    ls_nlri: vec![],
                 }),
             });
         }
-
-        // Append unknown attributes
-        path_attributes.extend(path.unknown_attrs().clone());
 
         UpdateMessage {
             withdrawn_routes_len: 0,
@@ -163,15 +86,54 @@ impl UpdateMessage {
         }
     }
 
+    /// Create an UPDATE for BGP-LS routes. NLRIs go in MP_REACH_NLRI with AFI 16388.
+    pub fn new_ls(
+        path: &Path,
+        ls_nlri: Vec<LsNlri>,
+        afi_safi: AfiSafi,
+        format: MessageFormat,
+    ) -> Self {
+        let mut path_attributes = Self::build_common_path_attrs(path);
+
+        path_attributes.push(PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+            value: PathAttrValue::MpReachNlri(MpReachNlri {
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
+                next_hop: *path.next_hop(),
+                nlri: vec![],
+                ls_nlri,
+            }),
+        });
+
+        // BGP-LS Attribute (type 29) -- RFC 9552 Section 8.2.2: omit if absent
+        if let Some(ref ls_attr) = path.attrs.ls_attr {
+            path_attributes.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::LsAttr(ls_attr.clone()),
+            });
+        }
+
+        UpdateMessage {
+            withdrawn_routes_len: 0,
+            withdrawn_routes: vec![],
+            total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
+                .len() as u16,
+            path_attributes,
+            nlri_list: vec![],
+            format,
+        }
+    }
+
+    /// Create a withdrawal UPDATE for IP routes. IPv4 -> traditional withdrawn field,
+    /// IPv6 -> MP_UNREACH_NLRI.
     pub fn new_withdraw(withdrawn: Vec<Nlri>, format: MessageFormat) -> Self {
-        // Partition withdrawals by address family
         let (ipv4_withdrawn, ipv6_withdrawn): (Vec<_>, Vec<_>) = withdrawn
             .into_iter()
             .partition(|nlri| matches!(nlri.prefix, IpNetwork::V4(_)));
 
         let mut path_attributes = vec![];
 
-        // MP_UNREACH_NLRI for IPv6 withdrawals (RFC 4760)
         if !ipv6_withdrawn.is_empty() {
             path_attributes.push(PathAttribute {
                 flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
@@ -179,6 +141,7 @@ impl UpdateMessage {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     withdrawn_routes: ipv6_withdrawn,
+                    ls_withdrawn: vec![],
                 }),
             });
         }
@@ -194,6 +157,116 @@ impl UpdateMessage {
             nlri_list: vec![],
             format,
         }
+    }
+
+    /// Create a withdrawal UPDATE for BGP-LS routes via MP_UNREACH_NLRI.
+    pub fn new_ls_withdraw(
+        ls_withdrawn: Vec<LsNlri>,
+        afi_safi: AfiSafi,
+        format: MessageFormat,
+    ) -> Self {
+        let path_attributes = vec![PathAttribute {
+            flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+            value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
+                withdrawn_routes: vec![],
+                ls_withdrawn,
+            }),
+        }];
+
+        UpdateMessage {
+            withdrawn_routes_len: 0,
+            total_path_attributes_len: write_path_attributes(&path_attributes, format.use_4byte_asn)
+                .len() as u16,
+            withdrawn_routes: vec![],
+            path_attributes,
+            nlri_list: vec![],
+            format,
+        }
+    }
+
+    /// Build common path attributes shared by all UPDATE types.
+    fn build_common_path_attrs(path: &Path) -> Vec<PathAttribute> {
+        let mut attrs = vec![
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Origin(path.origin()),
+            },
+            PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AsPath(AsPath {
+                    segments: path.as_path().clone(),
+                }),
+            },
+        ];
+
+        if let Some(pref) = path.local_pref() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::LocalPref(pref),
+            });
+        }
+
+        if let Some(metric) = path.med() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                value: PathAttrValue::MultiExtiDisc(metric),
+            });
+        }
+
+        if path.atomic_aggregate() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::AtomicAggregate,
+            });
+        }
+
+        if let Some(ref agg) = path.aggregator() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Aggregator(agg.clone()),
+            });
+        }
+
+        if !path.communities().is_empty() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::Communities(path.communities().clone()),
+            });
+        }
+
+        if let Some(originator) = path.originator_id() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                value: PathAttrValue::OriginatorId(originator),
+            });
+        }
+
+        if !path.cluster_list().is_empty() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                value: PathAttrValue::ClusterList(path.cluster_list().clone()),
+            });
+        }
+
+        if !path.extended_communities().is_empty() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::ExtendedCommunities(path.extended_communities().clone()),
+            });
+        }
+
+        if !path.large_communities().is_empty() {
+            attrs.push(PathAttribute {
+                flags: PathAttrFlag(PathAttrFlag::OPTIONAL | PathAttrFlag::TRANSITIVE),
+                value: PathAttrValue::LargeCommunities(path.large_communities().clone()),
+            });
+        }
+
+        attrs.extend(path.unknown_attrs().clone());
+
+        attrs
     }
 
     pub fn nlri_prefixes(&self) -> Vec<IpNetwork> {
@@ -233,6 +306,32 @@ impl UpdateMessage {
         }
 
         withdrawn
+    }
+
+    /// Returns all BGP-LS NLRIs from MP_REACH_NLRI attributes.
+    pub fn ls_nlri_list(&self) -> Vec<LsNlri> {
+        let mut ls_nlri = Vec::new();
+        for attr in &self.path_attributes {
+            if let PathAttrValue::MpReachNlri(ref mp_reach) = attr.value {
+                if mp_reach.afi == Afi::LinkState {
+                    ls_nlri.extend(mp_reach.ls_nlri.clone());
+                }
+            }
+        }
+        ls_nlri
+    }
+
+    /// Returns all BGP-LS withdrawn NLRIs from MP_UNREACH_NLRI attributes.
+    pub fn ls_withdrawn_list(&self) -> Vec<LsNlri> {
+        let mut ls_withdrawn = Vec::new();
+        for attr in &self.path_attributes {
+            if let PathAttrValue::MpUnreachNlri(ref mp_unreach) = attr.value {
+                if mp_unreach.afi == Afi::LinkState {
+                    ls_withdrawn.extend(mp_unreach.ls_withdrawn.clone());
+                }
+            }
+        }
+        ls_withdrawn
     }
 
     pub fn origin(&self) -> Option<Origin> {
@@ -524,6 +623,16 @@ impl UpdateMessage {
         })
     }
 
+    /// RFC 9552: Get BGP-LS Attribute (type 29) if present
+    pub fn ls_attr(&self) -> Option<LsAttr> {
+        self.path_attributes
+            .iter()
+            .find_map(|attr| match &attr.value {
+                PathAttrValue::LsAttr(ls_attr) => Some(ls_attr.clone()),
+                _ => None,
+            })
+    }
+
     pub fn use_4byte_asn(&self) -> bool {
         self.format.use_4byte_asn
     }
@@ -651,7 +760,7 @@ impl UpdateMessage {
         // Other AFI/SAFI EoR: single MP_UNREACH_NLRI with empty withdrawn routes
         if self.path_attributes.len() == 1 {
             if let PathAttrValue::MpUnreachNlri(ref mp_unreach) = self.path_attributes[0].value {
-                if mp_unreach.withdrawn_routes.is_empty() {
+                if mp_unreach.withdrawn_routes.is_empty() && mp_unreach.ls_withdrawn.is_empty() {
                     return Some(AfiSafi::new(mp_unreach.afi, mp_unreach.safi));
                 }
             }
@@ -686,6 +795,7 @@ impl UpdateMessage {
                         afi,
                         safi,
                         withdrawn_routes: Vec::new(),
+                        ls_withdrawn: Vec::new(),
                     }),
                 }],
                 nlri_list: Vec::new(),
@@ -844,6 +954,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }
@@ -855,6 +966,7 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
             nlri: vec![nlri_v4(10, 0, 0, 0, 8, None)],
+            ls_nlri: vec![],
         }
     }
 
@@ -1165,15 +1277,20 @@ mod tests {
     #[test]
     fn test_new_withdraw() {
         // Create a withdraw message with multiple prefixes
+        let withdrawn_nlri: Vec<Nlri> = vec![
+            nlri_v4(10, 0, 0, 0, 24, None),
+            nlri_v4(192, 168, 1, 0, 24, None),
+        ];
+
         let withdrawn: Vec<Nlri> = vec![
             nlri_v4(10, 0, 0, 0, 24, None),
             nlri_v4(192, 168, 1, 0, 24, None),
         ];
 
-        let message = UpdateMessage::new_withdraw(withdrawn.clone(), DEFAULT_FORMAT);
+        let message = UpdateMessage::new_withdraw(withdrawn, DEFAULT_FORMAT);
 
         // Verify message structure
-        assert_eq!(message.withdrawn_routes, withdrawn);
+        assert_eq!(message.withdrawn_routes, withdrawn_nlri);
         assert_eq!(message.path_attributes, vec![]);
         assert_eq!(message.nlri_list, vec![]);
         assert_eq!(message.total_path_attributes_len, 0);
@@ -1188,7 +1305,7 @@ mod tests {
     #[test]
     fn test_new_withdraw_serialization() {
         // Create a withdraw message
-        let withdrawn = vec![nlri_v4(10, 0, 0, 0, 24, None)];
+        let withdrawn: Vec<Nlri> = vec![nlri_v4(10, 0, 0, 0, 24, None)];
 
         let message = UpdateMessage::new_withdraw(withdrawn, DEFAULT_FORMAT);
 
@@ -1267,10 +1384,8 @@ mod tests {
 
             assert_eq!(parsed.origin(), Some(origin));
             assert_eq!(parsed.as_path(), Some(vec![]));
-            assert_eq!(
-                parsed.next_hop(),
-                Some(NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)))
-            );
+            // No IPv4 NLRI -> no NEXT_HOP emitted (RFC 4760 Section 3)
+            assert_eq!(parsed.next_hop(), None);
             assert_eq!(parsed.local_pref(), local_pref);
             assert_eq!(parsed.med(), med);
             assert_eq!(parsed.atomic_aggregate(), atomic_aggregate);
@@ -1310,12 +1425,14 @@ mod tests {
                 safi: Safi::Unicast,
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
                 nlri: vec![nlri_v4(10, 0, 0, 0, 8, path_id)],
+                ls_nlri: vec![],
             };
 
             let mp_unreach = MpUnreachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 withdrawn_routes: vec![nlri_v4(20, 0, 0, 0, 8, path_id)],
+                ls_withdrawn: vec![],
             };
 
             let path_attributes = vec![
@@ -1399,8 +1516,9 @@ mod tests {
     }
 
     #[test]
-    fn test_update_message_reject_both_next_hop_and_mp_reach() {
-        // Create UPDATE with both traditional NEXT_HOP and MP_REACH_NLRI (invalid)
+    fn test_update_message_next_hop_with_mp_reach_ignored() {
+        // RFC 4760 Section 3: when MP_REACH_NLRI is present, NEXT_HOP is ignored.
+        // NEXT_HOP says 10.0.0.1, MP_REACH says 192.168.1.1 -- MP_REACH wins.
         let mp_reach = sample_mp_reach();
 
         let path_attributes = vec![
@@ -1434,18 +1552,12 @@ mod tests {
         };
 
         let bytes = msg.to_bytes();
-        let result = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT);
-
-        // Should fail with MalformedAttributeList
-        assert!(result.is_err());
-        if let Err(ParserError::BgpError { error, .. }) = result {
-            assert_eq!(
-                error,
-                BgpError::UpdateMessageError(UpdateMessageError::MalformedAttributeList)
-            );
-        } else {
-            panic!("Expected MalformedAttributeList error");
-        }
+        let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
+        // MP_REACH next-hop (192.168.1.1) is used, NEXT_HOP (10.0.0.1) ignored
+        assert_eq!(
+            decoded.next_hop(),
+            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
     }
 
     #[test]
@@ -1718,6 +1830,7 @@ mod tests {
                 safi: Safi::Unicast,
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                 nlri: vec![nlri_v4(10, 11, 12, 0, 24, None)],
+                ls_nlri: vec![],
             }),
         };
         let mp_reach_bytes = write_path_attribute(&mp_reach, false);
@@ -1964,7 +2077,7 @@ mod tests {
 
     #[test]
     fn test_update_message_ipv6_encode_decode() {
-        // Create an UPDATE message with only IPv6 routes
+        // Create an UPDATE message with IPv6 routes
         let ipv6_prefix = IpNetwork::V6(Ipv6Net {
             address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
             prefix_length: 32,
@@ -1982,11 +2095,9 @@ mod tests {
         path.attrs.local_pref = Some(100);
         let msg = UpdateMessage::new(&path, vec![ipv6_prefix], DEFAULT_FORMAT);
 
-        // Encode and decode
         let bytes = msg.to_bytes();
         let decoded = UpdateMessage::from_bytes(bytes, DEFAULT_FORMAT).unwrap();
 
-        // Verify
         assert_eq!(decoded.nlri_prefixes(), vec![ipv6_prefix]);
         assert_eq!(decoded.next_hop(), Some(next_hop));
         assert_eq!(decoded.origin(), Some(Origin::IGP));
@@ -2041,10 +2152,6 @@ mod tests {
         // Verify other attributes remain
         assert_eq!(msg.origin(), Some(Origin::IGP));
         assert!(msg.as_path().is_some());
-        assert_eq!(
-            msg.next_hop(),
-            Some(NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)))
-        );
     }
 
     #[test]
@@ -2104,6 +2211,7 @@ mod tests {
                             afi: Afi::Ipv6,
                             safi: Safi::Unicast,
                             withdrawn_routes: vec![],
+                            ls_withdrawn: vec![],
                         }),
                     }],
                     nlri_list: vec![],
@@ -2122,6 +2230,51 @@ mod tests {
                     format,
                 },
                 None,
+            ),
+            (
+                "MP_UNREACH_NLRI with LS withdrawn -> not EoR",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![PathAttribute {
+                        flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                        value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::LinkState,
+                            safi: Safi::LinkState,
+                            withdrawn_routes: vec![],
+                            ls_withdrawn: vec![LsNlri {
+                                nlri_type: 1,
+                                raw: vec![1, 2, 3],
+                                body: None,
+                                route_distinguisher: None,
+                            }],
+                        }),
+                    }],
+                    nlri_list: vec![],
+                    format,
+                },
+                None,
+            ),
+            (
+                "MP_UNREACH_NLRI LS empty -> LinkState EoR",
+                UpdateMessage {
+                    withdrawn_routes_len: 0,
+                    withdrawn_routes: vec![],
+                    total_path_attributes_len: 0,
+                    path_attributes: vec![PathAttribute {
+                        flags: PathAttrFlag(PathAttrFlag::OPTIONAL),
+                        value: PathAttrValue::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::LinkState,
+                            safi: Safi::LinkState,
+                            withdrawn_routes: vec![],
+                            ls_withdrawn: vec![],
+                        }),
+                    }],
+                    nlri_list: vec![],
+                    format,
+                },
+                Some(AfiSafi::new(Afi::LinkState, Safi::LinkState)),
             ),
         ];
 
@@ -2177,38 +2330,41 @@ mod tests {
 
     #[test]
     fn test_addpath_roundtrip() {
-        let cases = vec![
+        let ipv4_prefixes = vec![
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(10, 0, 0, 0),
+                prefix_length: 24,
+            }),
+            IpNetwork::V4(Ipv4Net {
+                address: Ipv4Addr::new(192, 168, 1, 0),
+                prefix_length: 24,
+            }),
+        ];
+        let ipv6_prefixes = vec![IpNetwork::V6(Ipv6Net {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            prefix_length: 32,
+        })];
+
+        let cases: Vec<(&str, Vec<IpNetwork>, NextHopAddr)> = vec![
             (
                 "ipv4",
-                vec![
-                    IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(10, 0, 0, 0),
-                        prefix_length: 24,
-                    }),
-                    IpNetwork::V4(Ipv4Net {
-                        address: Ipv4Addr::new(192, 168, 1, 0),
-                        prefix_length: 24,
-                    }),
-                ],
+                ipv4_prefixes,
                 NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             ),
             (
                 "ipv6",
-                vec![IpNetwork::V6(Ipv6Net {
-                    address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
-                    prefix_length: 32,
-                })],
+                ipv6_prefixes,
                 NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             ),
         ];
 
-        for (desc, nlri, next_hop) in cases {
+        for (desc, prefixes, next_hop) in cases {
             let mut path = test_path();
             path.local_path_id = Some(42);
             path.attrs.next_hop = next_hop;
 
-            let msg = UpdateMessage::new(&path, nlri.clone(), ADDPATH_FORMAT);
-            let expected_nlri: Vec<Nlri> = nlri
+            let msg = UpdateMessage::new(&path, prefixes.clone(), ADDPATH_FORMAT);
+            let expected_nlri: Vec<Nlri> = prefixes
                 .into_iter()
                 .map(|net| Nlri {
                     prefix: net,
@@ -2252,11 +2408,12 @@ mod tests {
                     path_id: Some(7),
                 })
                 .collect();
-            let msg = UpdateMessage::new_withdraw(withdrawn.clone(), ADDPATH_FORMAT);
+            let expected_nlri = withdrawn.clone();
+            let msg = UpdateMessage::new_withdraw(withdrawn, ADDPATH_FORMAT);
             let bytes = msg.to_bytes();
             let decoded = UpdateMessage::from_bytes(bytes, ADDPATH_FORMAT).unwrap();
 
-            assert_eq!(decoded.withdrawn_routes(), withdrawn, "{}", desc);
+            assert_eq!(decoded.withdrawn_routes(), expected_nlri, "{}", desc);
         }
     }
 
@@ -2285,6 +2442,7 @@ mod tests {
                         prefix: prefix_10,
                         path_id: None,
                     }],
+                    ls_nlri: vec![],
                 }),
             }],
             nlri_list: vec![Nlri {
@@ -2314,6 +2472,7 @@ mod tests {
                     safi: Safi::Unicast,
                     next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
                     nlri: vec![nlri_mp],
+                    ls_nlri: vec![],
                 }),
             }],
             nlri_list: vec![nlri_traditional],
@@ -2338,6 +2497,7 @@ mod tests {
                     afi: Afi::Ipv4,
                     safi: Safi::Unicast,
                     withdrawn_routes: vec![withdrawn_mp],
+                    ls_withdrawn: vec![],
                 }),
             }],
             nlri_list: vec![],
@@ -2358,5 +2518,101 @@ mod tests {
 
         let decoded = UpdateMessage::from_bytes(msg.to_bytes(), format).unwrap();
         assert!(decoded.nlri_list().is_empty());
+    }
+
+    #[test]
+    fn test_ls_update_roundtrip() {
+        use crate::bgp::bgpls_attr::{build_ls_attr, LsAttrTlv, NodeAttrTlv};
+        use crate::bgp::bgpls_nlri::{
+            build_ls_nlri, LsDescriptors, LsNlriType, LsProtocolId, NodeDescriptor,
+        };
+
+        struct Case {
+            name: &'static str,
+            has_ls_attr: bool,
+        }
+
+        let cases = vec![
+            Case {
+                name: "with type-29 attribute",
+                has_ls_attr: true,
+            },
+            Case {
+                name: "without type-29 attribute (valid per RFC 9552 Section 8.2.2)",
+                has_ls_attr: false,
+            },
+        ];
+
+        for tc in cases {
+            let ls_nlri = build_ls_nlri(
+                LsNlriType::Node,
+                LsProtocolId::IsIsL1,
+                42,
+                LsDescriptors::Node {
+                    local_node: NodeDescriptor {
+                        igp_router_id: Some(vec![1, 2, 3, 4]),
+                        ..NodeDescriptor::default()
+                    },
+                },
+                None,
+            );
+
+            let mut path = test_path();
+            if tc.has_ls_attr {
+                path.attrs.ls_attr = Some(build_ls_attr(vec![LsAttrTlv::Node(NodeAttrTlv::Name(
+                    "test-node".to_string(),
+                ))]));
+            }
+
+            let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+            let msg =
+                UpdateMessage::new_ls(&path, vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
+
+            assert_eq!(msg.ls_nlri_list().len(), 1, "case: {}", tc.name);
+            assert_eq!(msg.ls_attr().is_some(), tc.has_ls_attr, "case: {}", tc.name);
+
+            let decoded = UpdateMessage::from_bytes(msg.to_bytes(), DEFAULT_FORMAT).unwrap();
+            assert_eq!(decoded.ls_nlri_list().len(), 1, "case: {}", tc.name);
+            assert_eq!(
+                decoded.ls_nlri_list()[0].raw,
+                ls_nlri.raw,
+                "case: {}",
+                tc.name
+            );
+            assert_eq!(
+                decoded.ls_attr().is_some(),
+                tc.has_ls_attr,
+                "case: {}",
+                tc.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_ls_withdraw_roundtrip() {
+        use crate::bgp::bgpls_nlri::{
+            build_ls_nlri, LsDescriptors, LsNlriType, LsProtocolId, NodeDescriptor,
+        };
+
+        let ls_nlri = build_ls_nlri(
+            LsNlriType::Node,
+            LsProtocolId::IsIsL1,
+            0,
+            LsDescriptors::Node {
+                local_node: NodeDescriptor {
+                    igp_router_id: Some(vec![5]),
+                    ..NodeDescriptor::default()
+                },
+            },
+            None,
+        );
+
+        let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+        let msg = UpdateMessage::new_ls_withdraw(vec![ls_nlri.clone()], ls_family, DEFAULT_FORMAT);
+
+        let decoded = UpdateMessage::from_bytes(msg.to_bytes(), DEFAULT_FORMAT).unwrap();
+        let decoded_ls = decoded.ls_withdrawn_list();
+        assert_eq!(decoded_ls.len(), 1);
+        assert_eq!(decoded_ls[0].raw, ls_nlri.raw);
     }
 }

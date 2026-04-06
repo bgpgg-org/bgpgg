@@ -28,7 +28,7 @@ use crate::net::IpNetwork;
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
 use crate::policy::{Policy, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
-use crate::rib::{Path, PrefixPath};
+use crate::rib::{Path, RouteKey, RoutePath};
 use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
 use std::collections::{HashMap, HashSet};
@@ -603,9 +603,9 @@ impl BgpServer {
     /// AFI/SAFI is absent from GR cap, or no GR cap at all.
     fn sweep_gr_stale(&mut self, peer_ip: IpAddr, capabilities: &PeerCapabilities) -> RouteDelta {
         let stale = self.loc_rib.stale_afi_safis(peer_ip);
-        let to_clear = match &capabilities.graceful_restart {
+        let to_clear: Vec<AfiSafi> = match &capabilities.graceful_restart {
             Some(cap) => cap.filter_stale(stale),
-            None => stale,
+            None => stale.into_iter().collect(),
         };
         self.loc_rib.remove_peer_routes_stale(peer_ip, &to_clear)
     }
@@ -616,10 +616,10 @@ impl BgpServer {
         let Some(peer_info) = self.peers.get_mut(&peer_ip) else {
             return RouteDelta::new();
         };
-        let stale = peer_info.llgr_timers.keys();
-        let to_clear = match &capabilities.llgr {
+        let stale: HashSet<AfiSafi> = peer_info.llgr_timers.keys().into_iter().collect();
+        let to_clear: Vec<AfiSafi> = match &capabilities.llgr {
             Some(cap) => cap.filter_stale(stale),
-            None => stale,
+            None => stale.into_iter().collect(),
         };
         for afi_safi in &to_clear {
             peer_info.llgr_timers.cancel(afi_safi);
@@ -799,12 +799,12 @@ impl BgpServer {
         let (announced, withdrawn) = PendingRoute::split(&routes);
 
         // Store ALL routes in adj-rib-in first (RFC 4271 3.2: "unprocessed")
-        for (prefix, path_id) in &withdrawn {
-            peer.adj_rib_in.remove_route(*prefix, *path_id);
+        for (key, path_id) in &withdrawn {
+            peer.adj_rib_in.remove_route(key, *path_id);
         }
-        for prefix_path in &announced {
+        for route_path in &announced {
             peer.adj_rib_in
-                .add_route(prefix_path.prefix, Arc::clone(&prefix_path.path));
+                .add_route(route_path.key.clone(), Arc::clone(&route_path.path));
         }
 
         // AFI/SAFI validation (RFC 4760 Section 7)
@@ -829,28 +829,40 @@ impl BgpServer {
             scrub_ebgp_pending_routes(&mut routes);
         }
 
-        // Max-prefix check
-        if let Some(setting) = peer.config.max_prefix {
-            let current = peer.adj_rib_in.prefix_count();
-            if current > setting.limit as usize {
-                match setting.action {
-                    MaxPrefixAction::Terminate => {
-                        warn!(%peer_ip, limit = setting.limit, current,
-                              "max prefix limit exceeded");
-                        if peer.config.allow_automatic_stop {
-                            self.handle_max_prefix_terminate(peer_ip).await;
-                        } else {
-                            warn!(%peer_ip, "allow_automatic_stop=false, discarding update");
+        // Per-family max-prefix check: each family uses its own override or falls back
+        // to the peer-level max_prefix setting.
+        let families_in_update: HashSet<AfiSafi> =
+            routes.iter().map(|r| r.route_key().afi_safi()).collect();
+        let mut discard_families: HashSet<AfiSafi> = HashSet::new();
+        for family in &families_in_update {
+            if let Some(setting) = peer.config.effective_max_prefix(family) {
+                let current = peer.adj_rib_in.family_count(family);
+                if current > setting.limit as usize {
+                    match setting.action {
+                        MaxPrefixAction::Terminate => {
+                            warn!(%peer_ip, %family, limit = setting.limit, current,
+                                  "max prefix limit exceeded");
+                            if peer.config.allow_automatic_stop {
+                                self.handle_max_prefix_terminate(peer_ip).await;
+                            } else {
+                                warn!(%peer_ip, "allow_automatic_stop=false, discarding update");
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    MaxPrefixAction::Discard => {
-                        warn!(%peer_ip, limit = setting.limit, current,
-                              "max prefix limit reached, discarding new prefixes");
-                        reject_announcements(&mut routes);
+                        MaxPrefixAction::Discard => {
+                            warn!(%peer_ip, %family, limit = setting.limit, current,
+                                  "max prefix limit reached, discarding new prefixes");
+                            discard_families.insert(*family);
+                        }
                     }
                 }
             }
+        }
+        if !discard_families.is_empty() {
+            routes.retain(|r| match r {
+                PendingRoute::Announce(rp) => !discard_families.contains(&rp.key.afi_safi()),
+                PendingRoute::Withdraw(_) => true,
+            });
         }
 
         // Import policy + loc-rib update (routes processed in arrival order)
@@ -911,7 +923,7 @@ impl BgpServer {
     }
 
     /// Re-run import policy on routes already in adj-rib-in (e.g. after VRP change).
-    fn reevaluate_routes(&mut self, routes: Vec<(IpAddr, Vec<PrefixPath>)>) -> RouteDelta {
+    fn reevaluate_routes(&mut self, routes: Vec<(IpAddr, Vec<RoutePath>)>) -> RouteDelta {
         let local_asn = self.config.asn;
         let mut delta = RouteDelta::new();
         for (peer_ip, peer_routes) in routes {
@@ -926,8 +938,8 @@ impl BgpServer {
                 .collect();
             let peer_delta = self
                 .loc_rib
-                .apply_peer_update(peer_ip, &routes, |prefix, path| {
-                    apply_import(vrp_table, local_asn, &policies, prefix, path)
+                .apply_peer_update(peer_ip, &routes, |route_key, path| {
+                    apply_import(vrp_table, local_asn, &policies, route_key, path)
                 });
             delta.extend(peer_delta);
         }
@@ -937,15 +949,15 @@ impl BgpServer {
     /// Collect adj-rib-in routes for the given prefixes from all peers.
     /// Returns (peer_ip, routes) pairs. Collected upfront so loc_rib can be
     /// mutated separately (borrow splitting).
-    fn affected_routes(&self, prefixes: &HashSet<IpNetwork>) -> Vec<(IpAddr, Vec<PrefixPath>)> {
+    fn affected_routes(&self, prefixes: &HashSet<IpNetwork>) -> Vec<(IpAddr, Vec<RoutePath>)> {
         let mut result = Vec::new();
         for (&peer_ip, peer_info) in &self.peers {
             let mut routes = Vec::new();
             for &prefix in prefixes {
-                if let Some(route) = peer_info.adj_rib_in.get_route(&prefix) {
+                if let Some(route) = peer_info.adj_rib_in.get_route(&RouteKey::Prefix(prefix)) {
                     for path in &route.paths {
-                        routes.push(PrefixPath {
-                            prefix,
+                        routes.push(RoutePath {
+                            key: RouteKey::Prefix(prefix),
                             path: Arc::clone(path),
                         });
                     }
@@ -963,11 +975,11 @@ impl BgpServer {
 /// Returns false if UPDATE should be ignored entirely.
 fn validate_afi_safi(
     peer: &mut PeerInfo,
-    announced: &[PrefixPath],
+    announced: &[RoutePath],
     negotiated: &HashSet<AfiSafi>,
 ) -> bool {
     for pp in announced {
-        let afi_safi = pp.prefix.afi_safi();
+        let afi_safi = pp.key.afi_safi();
 
         if peer.disabled_afi_safi.contains(&afi_safi) {
             return false;
@@ -1018,8 +1030,9 @@ fn check_first_as(path: &Path, peer_asn: u32, peer_ip: IpAddr) -> bool {
 /// Convert all Announce entries to Withdraw in-place (treat-as-withdraw).
 fn reject_announcements(routes: &mut [PendingRoute]) {
     for route in routes.iter_mut() {
-        if let PendingRoute::Announce(prefix_path) = route {
-            *route = PendingRoute::Withdraw((prefix_path.prefix, prefix_path.path.remote_path_id));
+        if let PendingRoute::Announce(route_path) = route {
+            *route =
+                PendingRoute::Withdraw((route_path.key.clone(), route_path.path.remote_path_id));
         }
     }
 }
@@ -1027,8 +1040,8 @@ fn reject_announcements(routes: &mut [PendingRoute]) {
 /// RFC 4456/8097/8326: Scrub non-transitive attrs and apply GRACEFUL_SHUTDOWN.
 fn scrub_ebgp_pending_routes(routes: &mut [PendingRoute]) {
     for route in routes {
-        if let PendingRoute::Announce(prefix_path) = route {
-            let path = Arc::make_mut(&mut prefix_path.path);
+        if let PendingRoute::Announce(route_path) = route {
+            let path = Arc::make_mut(&mut route_path.path);
             path.attrs.originator_id = None;
             path.attrs.cluster_list.clear();
             path.attrs
@@ -1078,16 +1091,18 @@ fn apply_import(
     vrp_table: &VrpTable,
     local_asn: u32,
     policies: &[Arc<Policy>],
-    prefix: &IpNetwork,
+    route_key: &RouteKey,
     path: &mut Path,
 ) -> bool {
-    let origin = path.origin_as().unwrap_or(local_asn);
-    path.rpki_state = vrp_table.validate(*prefix, origin);
+    if let RouteKey::Prefix(prefix) = route_key {
+        let origin = path.origin_as().unwrap_or(local_asn);
+        path.rpki_state = vrp_table.validate(*prefix, origin);
+    }
     if path.attrs.local_pref.is_none() {
         path.attrs.local_pref = Some(100);
     }
     for policy in policies {
-        match policy.evaluate(prefix, path) {
+        match policy.evaluate(route_key, path) {
             PolicyResult::Accept => return true,
             PolicyResult::Reject => return false,
             PolicyResult::Continue => continue,

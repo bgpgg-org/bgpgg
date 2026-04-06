@@ -21,7 +21,9 @@ pub use utils::*;
 
 use bgpgg::bmp::msg_termination::TerminationReason;
 use bgpgg::config::BmpConfig;
-use bgpgg::grpc::proto::{BgpState, SessionConfig};
+use bgpgg::grpc::proto::{
+    remove_route_request, BgpState, ListRoutesRequest, RemoveRouteRequest, SessionConfig,
+};
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use std::net::Ipv4Addr;
 
@@ -51,29 +53,33 @@ async fn test_add_bmp_server_with_existing_peers() {
     // Announce routes from peer1
     announce_route(
         &peer1,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     // Announce routes from peer2
     announce_route(
         &peer2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.2".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server.client.get_routes().await.unwrap();
+            let routes = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",
@@ -249,28 +255,32 @@ async fn test_route_monitoring_on_updates() {
     // Announce routes from server2
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",
@@ -309,14 +319,20 @@ async fn test_route_monitoring_on_updates() {
     // Withdraw one route
     server2
         .client
-        .remove_route("10.0.0.0/24".to_string())
+        .remove_route(RemoveRouteRequest {
+            key: Some(remove_route_request::Key::Prefix("10.0.0.0/24".to_string())),
+        })
         .await
         .unwrap();
 
     // Wait for route to be withdrawn
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 1
         },
         "Timeout waiting for route withdrawal",
@@ -326,18 +342,22 @@ async fn test_route_monitoring_on_updates() {
     // Add a new route
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.2.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     // Wait for new route
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for new route",
@@ -451,28 +471,32 @@ async fn test_bmp_statistics() {
     // Add routes from server2
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.1.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        },
+        })),
     )
     .await;
 
     // Wait for routes to be received
     poll_until(
         || async {
-            let routes = server1.client.get_routes().await.unwrap();
+            let routes = server1
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
             routes.len() == 2
         },
         "Timeout waiting for routes",

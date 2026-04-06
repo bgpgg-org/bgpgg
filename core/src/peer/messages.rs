@@ -48,7 +48,8 @@ fn build_optional_params(
     config: &PeerConfig,
     llgr: &Option<LlgrConfig>,
 ) -> Vec<OptionalParam> {
-    let afi_safis = default_afi_safis();
+    let mut afi_safis = default_afi_safis();
+    afi_safis.extend(config.afi_safi_list());
     let mut optional_params = Vec::new();
 
     // Add multiprotocol capabilities (RFC 4760)
@@ -254,7 +255,8 @@ impl Peer {
         });
 
         // Negotiate multiprotocol capabilities (intersection of local and peer)
-        let local_afi_safis = default_afi_safis();
+        let mut local_afi_safis = default_afi_safis();
+        local_afi_safis.extend(self.config.afi_safi_list());
         let negotiated_multiprotocol =
             negotiate_multiprotocol(&local_afi_safis, &peer_capabilities.multiprotocol);
 
@@ -657,7 +659,7 @@ mod tests {
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
     use crate::bgp::DEFAULT_FORMAT;
-    use crate::config::LlgrConfig;
+    use crate::config::{AfiSafiConfig, LlgrConfig};
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
     use crate::rib::{Path, PathAttrs, RouteSource};
@@ -689,6 +691,7 @@ mod tests {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }
@@ -936,5 +939,34 @@ mod tests {
 
         let caps = extract_capabilities(&open_msg);
         assert!(caps.llgr.is_none(), "LLGR should be ignored without GR");
+    }
+
+    #[test]
+    fn test_extract_capabilities_afi_safis() {
+        let ls = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+
+        // No extra afi_safis: LS capability not present
+        let config = PeerConfig::default();
+        assert!(config.afi_safis.is_empty());
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);
+        let caps = extract_capabilities(&open_msg);
+        assert!(!caps.multiprotocol.contains(&ls));
+        assert_eq!(caps.multiprotocol.len(), 2);
+
+        // LS in afi_safis: LS capability present alongside IPv4/IPv6 unicast
+        let config = PeerConfig {
+            afi_safis: vec![AfiSafiConfig::new(Afi::LinkState, Safi::LinkState)],
+            ..PeerConfig::default()
+        };
+        let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);
+        let caps = extract_capabilities(&open_msg);
+        assert!(caps.multiprotocol.contains(&ls));
+        assert!(caps
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
+        assert!(caps
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)));
+        assert_eq!(caps.multiprotocol.len(), 3);
     }
 }

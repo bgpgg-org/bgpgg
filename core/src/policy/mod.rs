@@ -20,8 +20,7 @@ use statement::Action;
 pub use statement::{CommunityOp, RouteType, Statement};
 
 use crate::config::{Config, PolicyDefinitionConfig};
-use crate::net::IpNetwork;
-use crate::rib::Path;
+use crate::rib::{Path, RouteKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -107,10 +106,10 @@ impl Policy {
 
     /// Evaluate the policy against a route
     /// Returns PolicyResult indicating whether to Accept, Reject, or Continue
-    pub fn evaluate(&self, prefix: &IpNetwork, path: &mut Path) -> PolicyResult {
+    pub fn evaluate(&self, route_key: &RouteKey, path: &mut Path) -> PolicyResult {
         // Try each statement in order
         for statement in &self.statements {
-            if let Some(accept) = statement.apply(prefix, path) {
+            if let Some(accept) = statement.apply(route_key, path) {
                 return if accept {
                     PolicyResult::Accept
                 } else {
@@ -125,8 +124,8 @@ impl Policy {
     /// Evaluate the policy against a route (convenience wrapper)
     /// Returns true if the route is accepted, false if rejected
     /// If no statements match, rejects the route
-    pub fn accept(&self, prefix: &IpNetwork, path: &mut Path) -> bool {
-        matches!(self.evaluate(prefix, path), PolicyResult::Accept)
+    pub fn accept(&self, route_key: &RouteKey, path: &mut Path) -> bool {
+        matches!(self.evaluate(route_key, path), PolicyResult::Accept)
     }
 }
 
@@ -191,6 +190,7 @@ pub(crate) mod test_helpers {
                 unknown_attrs: vec![],
                 originator_id: None,
                 cluster_list: vec![],
+                ls_attr: None,
             },
         }
     }

@@ -31,4 +31,4 @@ mod types;
 pub use path::{Path, PathAttrs};
 pub use rib_loc::RouteDelta;
 pub use rib_out::AdjRibOut;
-pub use types::{PrefixPath, Route, RouteSource};
+pub use types::{split_withdrawals, Route, RouteKey, RoutePath, RouteSource, Withdrawal};

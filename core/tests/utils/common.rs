@@ -42,12 +42,14 @@ use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
-    defined_set_config, ActionsConfig, AddPathSendMode, AdminState, Aggregator, AsPathSegment,
-    AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig, ExtendedCommunity,
-    GracefulRestartConfig, LargeCommunity, LlgrConfig as ProtoLlgrConfig, Origin, Path, Peer,
-    PeerStatistics, PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig,
-    UnknownAttribute,
+    add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
+    AddLsRouteRequest, AddPathSendMode, AddRouteRequest, AdminState, AfiSafiConfig, Aggregator,
+    AsPathSegment, AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig,
+    ExtendedCommunity, GracefulRestartConfig, LargeCommunity, ListRoutesRequest,
+    LlgrConfig as ProtoLlgrConfig, LsAttribute, LsNlri, Origin, Path, Peer, PeerStatistics,
+    PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
 };
+use bgpgg::grpc::proto_community::{internal_to_proto_large_community, u64_to_proto_extcomm};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use bgpgg::net::apply_gtsm;
@@ -59,6 +61,28 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio::time::Duration;
 use tokio::time::{sleep, timeout};
+
+/// Extract the IP prefix string from a Route's key. Panics if not an IP route.
+pub fn route_prefix(route: &Route) -> &str {
+    match &route.key {
+        Some(route::Key::Prefix(p)) => p.as_str(),
+        _ => panic!("expected IP prefix key, got {:?}", route.key),
+    }
+}
+
+/// Returns a hashable string key for any route (IP prefix or LS NLRI debug repr).
+fn route_key_string(route: &Route) -> String {
+    match &route.key {
+        Some(route::Key::Prefix(p)) => p.clone(),
+        Some(route::Key::LsNlri(n)) => format!("ls:{:?}", n),
+        None => "none".to_string(),
+    }
+}
+
+/// Check if a Route has a given IP prefix.
+pub fn route_has_prefix(route: &Route, prefix: &str) -> bool {
+    matches!(&route.key, Some(route::Key::Prefix(p)) if p == prefix)
+}
 
 /// Test server handle that includes runtime for killing the server
 pub struct TestServer {
@@ -149,6 +173,7 @@ pub struct PeerConfig {
     pub add_path_send: Option<bool>,
     pub add_path_receive: Option<bool>,
     pub send_rpki_community: Option<bool>,
+    pub afi_safis: Vec<AfiSafiConfig>,
 }
 
 /// Helper to convert a flat AS list to AS_SEQUENCE segment
@@ -203,6 +228,8 @@ pub struct PathParams {
     pub aggregator: Option<Aggregator>,
     /// RFC 6811: RPKI origin validation state
     pub rpki_validation: i32,
+    /// RFC 9552: BGP-LS attribute (type 29)
+    pub ls_attribute: Option<LsAttribute>,
 }
 
 impl PathParams {
@@ -219,11 +246,45 @@ impl PathParams {
     }
 }
 
+pub enum ExpectedRouteKey {
+    Prefix(String),
+    Ls(Box<LsNlri>),
+}
+
+impl From<&str> for ExpectedRouteKey {
+    fn from(prefix: &str) -> Self {
+        ExpectedRouteKey::Prefix(prefix.to_string())
+    }
+}
+
+impl From<&String> for ExpectedRouteKey {
+    fn from(prefix: &String) -> Self {
+        ExpectedRouteKey::Prefix(prefix.clone())
+    }
+}
+
+impl From<&&str> for ExpectedRouteKey {
+    fn from(prefix: &&str) -> Self {
+        ExpectedRouteKey::Prefix((*prefix).to_string())
+    }
+}
+
+impl From<LsNlri> for ExpectedRouteKey {
+    fn from(nlri: LsNlri) -> Self {
+        ExpectedRouteKey::Ls(Box::new(nlri))
+    }
+}
+
 /// Build a single-path Route for test assertions.
-pub fn expected_route(prefix: &str, params: PathParams) -> Route {
+/// Accepts `&str` (IP prefix) or `LsNlri` (BGP-LS) as key.
+pub fn expected_route(key: impl Into<ExpectedRouteKey>, params: PathParams) -> Route {
+    let key = match key.into() {
+        ExpectedRouteKey::Prefix(p) => route::Key::Prefix(p),
+        ExpectedRouteKey::Ls(n) => route::Key::LsNlri(n),
+    };
     Route {
-        prefix: prefix.to_string(),
         paths: vec![build_path(params)],
+        key: Some(key),
     }
 }
 
@@ -247,6 +308,7 @@ pub fn build_path(params: PathParams) -> Path {
         remote_path_id: params.remote_path_id,
         aggregator: params.aggregator,
         rpki_validation: params.rpki_validation,
+        ls_attribute: params.ls_attribute,
     }
 }
 
@@ -261,8 +323,8 @@ fn strip_path_ids(path: &Path) -> Path {
 
 fn strip_route_path_ids(route: &Route) -> Route {
     Route {
-        prefix: route.prefix.clone(),
         paths: route.paths.iter().map(strip_path_ids).collect(),
+        key: route.key.clone(),
     }
 }
 
@@ -282,8 +344,8 @@ fn assert_path_ids_present(routes: &[Route]) {
         for path in &route.paths {
             assert!(
                 path.local_path_id.is_some(),
-                "path for prefix {} from peer {} missing local_path_id",
-                route.prefix,
+                "path for key {:?} from peer {} missing local_path_id",
+                route.key,
                 path.peer_address
             );
         }
@@ -297,8 +359,8 @@ fn assert_path_ids_distinct(routes: &[Route]) {
         assert_eq!(
             ids.len(),
             unique.len(),
-            "duplicate local_path_ids for prefix {}: {:?}",
-            route.prefix,
+            "duplicate local_path_ids for key {:?}: {:?}",
+            route.key,
             ids
         );
     }
@@ -325,19 +387,19 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
     if matches!(expect, ExpectPathId::Distinct) {
         let actual_map: HashMap<_, _> = actual
             .iter()
-            .map(|r| (r.prefix.clone(), &r.paths))
+            .map(|r| (route_key_string(r), &r.paths))
             .collect();
         let expected_map: HashMap<_, _> = expected
             .iter()
-            .map(|r| (r.prefix.clone(), &r.paths))
+            .map(|r| (route_key_string(r), &r.paths))
             .collect();
 
         if actual_map.len() != expected_map.len() {
             return false;
         }
 
-        for (prefix, expected_paths) in &expected_map {
-            let Some(actual_paths) = actual_map.get(prefix) else {
+        for (key, expected_paths) in &expected_map {
+            let Some(actual_paths) = actual_map.get(key) else {
                 return false;
             };
             if actual_paths.len() != expected_paths.len() {
@@ -357,7 +419,7 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
             .iter()
             .map(|r| {
                 (
-                    r.prefix.clone(),
+                    route_key_string(r),
                     strip_route_path_ids(r).paths.first().cloned(),
                 )
             })
@@ -366,7 +428,7 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
             .iter()
             .map(|r| {
                 (
-                    r.prefix.clone(),
+                    route_key_string(r),
                     strip_route_path_ids(r).paths.first().cloned(),
                 )
             })
@@ -751,7 +813,11 @@ pub async fn poll_rib_addpath(expectations: &[(&TestServer, Vec<Route>)]) {
     poll_until(
         || async {
             for (server, expected_routes) in expectations {
-                let Ok(routes) = server.client.get_routes().await else {
+                let Ok(routes) = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
                 if !routes_match(&routes, expected_routes, ExpectPathId::Distinct) {
@@ -770,7 +836,11 @@ pub async fn poll_rib_with_timeout(expectations: &[(&TestServer, Vec<Route>)], t
     poll_until_with_timeout(
         || async {
             for (server, expected_routes) in expectations {
-                let Ok(routes) = server.client.get_routes().await else {
+                let Ok(routes) = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
 
@@ -791,27 +861,36 @@ pub async fn poll_rib_with_timeout(expectations: &[(&TestServer, Vec<Route>)], t
 pub async fn has_route(server: &TestServer, prefix: &str) -> bool {
     server
         .client
-        .get_routes()
+        .list_routes(ListRoutesRequest::default())
         .await
-        .is_ok_and(|routes| routes.iter().any(|r| r.prefix == prefix))
+        .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, prefix)))
 }
 
 pub async fn poll_route_exists(server: &TestServer, expected: Route) {
+    let expected_key = expected.key.clone();
     poll_until(
         || async {
-            let Ok(routes) = server.client.get_routes().await else {
+            let Ok(routes) = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
-            routes.iter().any(|r| r.prefix == expected.prefix)
+            routes.iter().any(|r| r.key == expected_key)
         },
-        &format!("Timeout waiting for route {} to appear", expected.prefix),
+        &format!("Timeout waiting for route {:?} to appear", expected.key),
     )
     .await;
 
-    let routes = server.client.get_routes().await.unwrap();
+    let routes = server
+        .client
+        .list_routes(ListRoutesRequest::default())
+        .await
+        .unwrap();
     let actual: Vec<Route> = routes
         .into_iter()
-        .filter(|r| r.prefix == expected.prefix)
+        .filter(|r| r.key == expected.key)
         .collect();
     assert!(
         routes_match(&actual, &[expected], ExpectPathId::Present),
@@ -903,7 +982,11 @@ pub async fn wait_convergence(
     poll_until(
         || async {
             for (server, expected_routes) in route_expectations {
-                let Ok(routes) = server.client.get_routes().await else {
+                let Ok(routes) = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
                 if !routes_match(&routes, expected_routes, ExpectPathId::Present) {
@@ -936,7 +1019,11 @@ pub async fn poll_route_withdrawal(servers: &[&TestServer]) {
     poll_until(
         || async {
             for server in servers.iter() {
-                let Ok(routes) = server.client.get_routes().await else {
+                let Ok(routes) = server
+                    .client
+                    .list_routes(ListRoutesRequest::default())
+                    .await
+                else {
                     return false;
                 };
                 if !routes.is_empty() {
@@ -1047,9 +1134,30 @@ pub async fn verify_peer_statistics(
     );
 }
 
-/// Parameters for announcing a route
+/// Parameters for announcing a route.
+///
+/// ```
+/// // IP route
+/// announce_route(server, RouteParams::Ip(Box::new(IpRouteParams {
+///     prefix: "10.0.0.0/24".to_string(),
+///     next_hop: "192.168.1.1".to_string(),
+///     ..Default::default()
+/// }))).await;
+///
+/// // BGP-LS route
+/// announce_route(server, RouteParams::Ls(LsRouteParams {
+///     nlri: Some(nlri),
+///     attribute: Some(attr),
+///     ..Default::default()
+/// })).await;
+/// ```
+pub enum RouteParams {
+    Ip(Box<IpRouteParams>),
+    Ls(Box<LsRouteParams>),
+}
+
 #[derive(Default)]
-pub struct RouteParams {
+pub struct IpRouteParams {
     pub prefix: String,
     pub next_hop: String,
     pub origin: Option<Origin>,
@@ -1060,51 +1168,52 @@ pub struct RouteParams {
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<bgpgg::bgp::msg_update_types::LargeCommunity>,
-    /// RFC 4456: ORIGINATOR_ID (IPv4 address as string)
     pub originator_id: Option<String>,
-    /// RFC 4456: CLUSTER_LIST (list of IPv4 addresses as strings)
     pub cluster_list: Vec<String>,
 }
 
-/// Announce a route with customizable attributes
-///
-/// # Example
-/// ```
-/// // Simple announcement with defaults
-/// announce_route(server, RouteParams {
-///     prefix: "10.0.0.0/24".to_string(),
-///     next_hop: "192.168.1.1".to_string(),
-///     ..Default::default()
-/// }).await;
-///
-/// // With custom attributes
-/// announce_route(server, RouteParams {
-///     prefix: "10.0.0.0/24".to_string(),
-///     next_hop: "192.168.1.1".to_string(),
-///     med: Some(100),
-///     communities: vec![65000 << 16 | 100],
-///     ..Default::default()
-/// }).await;
-/// ```
+#[derive(Default)]
+pub struct LsRouteParams {
+    pub nlri: Option<LsNlri>,
+    pub attribute: Option<LsAttribute>,
+    pub next_hop: Option<String>,
+}
+
 pub async fn announce_route(server: &TestServer, params: RouteParams) {
-    server
-        .client
-        .add_route(
-            params.prefix,
-            params.next_hop,
-            params.origin.unwrap_or(Origin::Igp),
-            params.as_path,
-            params.local_pref,
-            params.med,
-            params.atomic_aggregate,
-            params.communities,
-            params.extended_communities,
-            params.large_communities,
-            params.originator_id,
-            params.cluster_list,
-        )
-        .await
-        .unwrap();
+    let request = match params {
+        RouteParams::Ip(ip) => AddRouteRequest {
+            route: Some(add_route_request::Route::Ip(Box::new(AddIpRouteRequest {
+                prefix: ip.prefix,
+                next_hop: ip.next_hop,
+                origin: ip.origin.unwrap_or(Origin::Igp) as i32,
+                as_path: ip.as_path,
+                local_pref: ip.local_pref,
+                med: ip.med,
+                atomic_aggregate: ip.atomic_aggregate,
+                communities: ip.communities,
+                extended_communities: ip
+                    .extended_communities
+                    .iter()
+                    .map(|ec| u64_to_proto_extcomm(*ec))
+                    .collect(),
+                large_communities: ip
+                    .large_communities
+                    .iter()
+                    .map(internal_to_proto_large_community)
+                    .collect(),
+                originator_id: ip.originator_id,
+                cluster_list: ip.cluster_list,
+            }))),
+        },
+        RouteParams::Ls(ls) => AddRouteRequest {
+            route: Some(add_route_request::Route::Ls(Box::new(AddLsRouteRequest {
+                nlri: ls.nlri,
+                attribute: ls.attribute,
+                next_hop: ls.next_hop,
+            }))),
+        },
+    };
+    server.client.add_route(request).await.unwrap();
 }
 
 /// Chains BGP servers together in a linear topology (active-active peering)
@@ -1143,6 +1252,7 @@ pub async fn chain_servers<const N: usize>(
         }),
         add_path_receive: config.add_path_receive,
         send_rpki_community: config.send_rpki_community,
+        afi_safis: config.afi_safis.clone(),
         ..Default::default()
     };
 
@@ -1257,7 +1367,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),
@@ -1272,7 +1382,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() },
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![],
 ///         next_hop: "192.168.1.1".to_string(),
@@ -1287,7 +1397,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2, &s3, &s4],
-///     RouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() },
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),
@@ -1304,7 +1414,12 @@ pub async fn announce_and_verify_route(
     announce_params: RouteParams,
     expected_path: PathParams,
 ) {
-    let prefix = announce_params.prefix.clone();
+    let key = match &announce_params {
+        RouteParams::Ip(ip) => route::Key::Prefix(ip.prefix.clone()),
+        RouteParams::Ls(ls) => {
+            route::Key::LsNlri(Box::new(ls.nlri.clone().expect("ls_nlri required")))
+        }
+    };
     announce_route(source, announce_params).await;
 
     let mut expectations = Vec::new();
@@ -1312,8 +1427,8 @@ pub async fn announce_and_verify_route(
         expectations.push((
             *dest,
             vec![Route {
-                prefix: prefix.clone(),
                 paths: vec![build_path(expected_path.clone())],
+                key: Some(key.clone()),
             }],
         ));
     }
@@ -1496,6 +1611,7 @@ pub async fn setup_rr(
     rrs: Vec<&TestServer>,
     clients_per_rr: Vec<Vec<&TestServer>>,
     non_clients: Vec<&TestServer>,
+    client_config: SessionConfig,
 ) {
     assert_eq!(
         rrs.len(),
@@ -1505,18 +1621,18 @@ pub async fn setup_rr(
 
     let rr_client_cfg = SessionConfig {
         rr_client: Some(true),
-        ..Default::default()
+        ..client_config.clone()
     };
 
     for (rr, rr_clients) in rrs.iter().zip(clients_per_rr.iter()) {
         for client in rr_clients {
             rr.add_peer_with_config(client, rr_client_cfg.clone()).await;
-            client.add_peer(rr).await;
+            client.add_peer_with_config(rr, client_config.clone()).await;
         }
 
         for nc in &non_clients {
-            rr.add_peer(nc).await;
-            nc.add_peer(rr).await;
+            rr.add_peer_with_config(nc, client_config.clone()).await;
+            nc.add_peer_with_config(rr, client_config.clone()).await;
         }
     }
 
@@ -2310,9 +2426,9 @@ pub async fn fake_announce_prefix(
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == prefix_owned))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, &prefix_owned)))
         },
         &format!("Timeout waiting for route {prefix_str}"),
     )

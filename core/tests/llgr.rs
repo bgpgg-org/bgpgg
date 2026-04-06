@@ -20,8 +20,8 @@ pub use utils::*;
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use bgpgg::config::LlgrConfig;
 use bgpgg::grpc::proto::{
-    AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig, LlgrConfig as ProtoLlgrConfig,
-    SessionConfig,
+    AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig, ListRoutesRequest,
+    LlgrConfig as ProtoLlgrConfig, SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -90,9 +90,9 @@ async fn announce_default_route(server: &TestServer, fake: &mut FakePeer, next_h
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         "Timeout waiting for route 10.0.0.0/24 to appear",
     )
@@ -104,11 +104,16 @@ async fn poll_llgr_stale(server: &TestServer, prefix: &str) {
     let prefix = prefix.to_string();
     poll_until(
         || async {
-            let Ok(routes) = server.client.get_routes().await else {
+            let Ok(routes) = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             routes.iter().any(|r| {
-                r.prefix == prefix && r.paths.iter().any(|p| p.communities.contains(&LLGR_STALE))
+                route_has_prefix(r, &prefix)
+                    && r.paths.iter().any(|p| p.communities.contains(&LLGR_STALE))
             })
         },
         &format!("Timeout waiting for {prefix} to have LLGR_STALE community"),
@@ -122,7 +127,7 @@ async fn poll_routes_swept(server: &TestServer, msg: &str, timeout: Duration) {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes.is_empty())
         },
@@ -226,7 +231,7 @@ async fn test_llgr_stale_community() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
                 .is_ok_and(|routes| routes.len() == 2)
         },
@@ -245,9 +250,9 @@ async fn test_llgr_stale_community() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| !routes.iter().any(|r| r.prefix == "10.1.0.0/24"))
+                .is_ok_and(|routes| !routes.iter().any(|r| route_has_prefix(r, "10.1.0.0/24")))
         },
         "NO_LLGR route 10.1.0.0/24 should be swept",
     )
@@ -319,9 +324,9 @@ async fn test_llgr_not_propagated_to_non_llgr_peer() {
         || async {
             server2
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         "Timeout waiting for route to propagate to S2",
     )
@@ -335,9 +340,9 @@ async fn test_llgr_not_propagated_to_non_llgr_peer() {
         || async {
             server2
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| !routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| !routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         "LLGR_STALE route should be withdrawn from non-LLGR peer S2",
     )
@@ -423,11 +428,15 @@ async fn test_llgr_peer_recovery() {
     // Route should be present WITHOUT LLGR_STALE community
     poll_until(
         || async {
-            let Ok(routes) = server.client.get_routes().await else {
+            let Ok(routes) = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             routes.iter().any(|r| {
-                r.prefix == "10.0.0.0/24"
+                route_has_prefix(r, "10.0.0.0/24")
                     && r.paths.iter().all(|p| !p.communities.contains(&LLGR_STALE))
             })
         },
@@ -440,9 +449,9 @@ async fn test_llgr_peer_recovery() {
         || async {
             server
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         Duration::from_secs(2),
         "Route should remain after recovery (timer cancelled)",
@@ -627,11 +636,15 @@ async fn test_llgr_stale_received_from_peer() {
     // S2 (LLGR-capable) should receive route with LLGR_STALE
     poll_until(
         || async {
-            let Ok(routes) = server2.client.get_routes().await else {
+            let Ok(routes) = server2
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             routes.iter().any(|r| {
-                r.prefix == "10.0.0.0/24"
+                route_has_prefix(r, "10.0.0.0/24")
                     && r.paths.iter().any(|p| p.communities.contains(&LLGR_STALE))
             })
         },
@@ -644,9 +657,9 @@ async fn test_llgr_stale_received_from_peer() {
         || async {
             server3
                 .client
-                .get_routes()
+                .list_routes(ListRoutesRequest::default())
                 .await
-                .is_ok_and(|routes| !routes.iter().any(|r| r.prefix == "10.0.0.0/24"))
+                .is_ok_and(|routes| !routes.iter().any(|r| route_has_prefix(r, "10.0.0.0/24")))
         },
         Duration::from_secs(2),
         "S3 (non-LLGR) should not receive LLGR_STALE route",
@@ -667,11 +680,15 @@ async fn test_llgr_restart_time_zero() {
     // Route should be tagged LLGR_STALE promptly (no GR wait)
     poll_until_with_timeout(
         || async {
-            let Ok(routes) = server.client.get_routes().await else {
+            let Ok(routes) = server
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+            else {
                 return false;
             };
             routes.iter().any(|r| {
-                r.prefix == "10.0.0.0/24"
+                route_has_prefix(r, "10.0.0.0/24")
                     && r.paths.iter().any(|p| p.communities.contains(&LLGR_STALE))
             })
         },
