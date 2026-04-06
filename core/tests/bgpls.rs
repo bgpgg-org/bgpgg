@@ -182,11 +182,11 @@ async fn test_ls_capability_negotiation_and_filtering() {
     let nlri = make_ls_node_nlri(65001, &[10, 0, 0, 1]);
     announce_route(
         &hub,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: Some(make_ls_node_attr("hub-router")),
             next_hop: Some(hub.address.to_string()),
-        }),
+        })),
     )
     .await;
 
@@ -215,11 +215,11 @@ async fn test_ls_route_withdrawal() {
 
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: Some(make_ls_node_attr("router2")),
             next_hop: Some(server2.address.to_string()),
-        }),
+        })),
     )
     .await;
 
@@ -267,31 +267,31 @@ async fn test_ls_multiple_nlri_types() {
 
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(node_nlri.clone()),
             attribute: Some(make_ls_node_attr("router2")),
             next_hop: next_hop.clone(),
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(link_nlri.clone()),
             attribute: Some(make_ls_link_attr(10)),
             next_hop: next_hop.clone(),
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(prefix_nlri.clone()),
             attribute: Some(make_ls_prefix_attr(100)),
             next_hop,
-        }),
+        })),
     )
     .await;
 
@@ -337,11 +337,11 @@ async fn test_ls_route_replace() {
 
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: Some(make_ls_node_attr("router2")),
             next_hop: next_hop.clone(),
-        }),
+        })),
     )
     .await;
 
@@ -357,11 +357,11 @@ async fn test_ls_route_replace() {
     // Re-inject same NLRI with different attribute
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: Some(make_ls_node_attr("router2-updated")),
             next_hop,
-        }),
+        })),
     )
     .await;
 
@@ -392,11 +392,11 @@ async fn test_ls_session_down_cleanup() {
     let nlri = make_ls_node_nlri(65002, &[10, 0, 0, 2]);
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: Some(make_ls_node_attr("router2")),
             next_hop: Some(server2.address.to_string()),
-        }),
+        })),
     )
     .await;
 
@@ -428,11 +428,11 @@ async fn test_ls_nlri_without_attribute_propagates() {
     // Inject LS route WITHOUT BGP-LS Attribute (type 29)
     announce_route(
         &server2,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(nlri.clone()),
             attribute: None,
             next_hop: Some(server2.address.to_string()),
-        }),
+        })),
     )
     .await;
 

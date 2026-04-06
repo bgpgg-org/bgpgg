@@ -106,11 +106,11 @@ async fn announce_and_verify_rpki(
 ) {
     announce_route(
         from,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: prefix.to_string(),
             next_hop: from.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
     poll_rib(&[(on, vec![rpki_v4_route(prefix, state, from)])]).await;
@@ -150,11 +150,11 @@ async fn verify_basic_validation<S: AsyncRead + AsyncWrite + Unpin>(
     ] {
         announce_route(
             server,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: server.address.to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -304,11 +304,11 @@ async fn test_rpki_state_community_send_and_strip() {
     // Validator announces its own route: 10.0.0.0/24 (Valid per VRP, origin AS matches)
     announce_route(
         &validator,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: validator.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -433,11 +433,11 @@ async fn test_rpki_vrp_update_reevaluation() {
     for prefix in ["10.0.0.0/8", "10.0.0.0/24", "10.1.0.0/24"] {
         announce_route(
             &server2,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: server2.address.to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -521,11 +521,11 @@ async fn test_rpki_multi_cache_merge() {
     for prefix in ["10.0.0.0/24", "192.168.1.0/24"] {
         announce_route(
             &server2,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: server2.address.to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -589,11 +589,11 @@ async fn test_rpki_cache_reset() {
     // Announce a route covered by the new VRPs
     announce_route(
         &server2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "192.168.1.0/24".to_string(),
             next_hop: server2.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -779,11 +779,11 @@ async fn test_rpki_session_id_mismatch() {
     // Old VRP gone (10.0.0.0/8), new VRP active (192.168.0.0/16)
     announce_route(
         &server2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "192.168.1.0/24".to_string(),
             next_hop: server2.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -824,11 +824,11 @@ async fn test_rpki_ipv6_validation() {
     for prefix in ["2001:db8:1::/48", "2001:db8:ff:1::/64", "2001:a00::/24"] {
         announce_route(
             &server2,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: next_hop_v6.clone(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }

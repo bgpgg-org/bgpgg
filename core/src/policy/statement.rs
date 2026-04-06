@@ -1083,7 +1083,7 @@ mod tests {
         as_number: Option<u32>,
         igp_router_id: Option<Vec<u8>>,
     ) -> RouteKey {
-        RouteKey::LinkState(LsNlri {
+        RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: nlri_type as u16,
             raw: vec![],
             body: Some(LsNlriBody {
@@ -1098,7 +1098,7 @@ mod tests {
                 },
             }),
             route_distinguisher: None,
-        })
+        }))
     }
 
     #[test]
@@ -1398,12 +1398,12 @@ mod tests {
         assert!(!Condition::LsNlriType(LsNlriTypeMatch::Node).matches(&test_prefix_key(), &path));
 
         // No body (opaque NLRI) — nlri_type is always available
-        let opaque_key = RouteKey::LinkState(LsNlri {
+        let opaque_key = RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: 1,
             raw: vec![],
             body: None,
             route_distinguisher: None,
-        });
+        }));
         assert!(Condition::LsNlriType(LsNlriTypeMatch::Node).matches(&opaque_key, &path));
     }
 
@@ -1435,12 +1435,12 @@ mod tests {
         }
 
         // No body -> false
-        let opaque = RouteKey::LinkState(LsNlri {
+        let opaque = RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: 1,
             raw: vec![],
             body: None,
             route_distinguisher: None,
-        });
+        }));
         assert!(!Condition::LsProtocolId(LsProtocolIdMatch::Direct).matches(&opaque, &path));
     }
 
@@ -1454,12 +1454,12 @@ mod tests {
         assert!(!Condition::LsInstanceId(42).matches(&test_prefix_key(), &path));
 
         // No body -> false
-        let opaque = RouteKey::LinkState(LsNlri {
+        let opaque = RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: 1,
             raw: vec![],
             body: None,
             route_distinguisher: None,
-        });
+        }));
         assert!(!Condition::LsInstanceId(42).matches(&opaque, &path));
     }
 
@@ -1479,12 +1479,12 @@ mod tests {
         assert!(!Condition::LsNodeAs(65001).matches(&test_prefix_key(), &path));
 
         // No body -> false
-        let opaque = RouteKey::LinkState(LsNlri {
+        let opaque = RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: 1,
             raw: vec![],
             body: None,
             route_distinguisher: None,
-        });
+        }));
         assert!(!Condition::LsNodeAs(65001).matches(&opaque, &path));
     }
 
@@ -1515,12 +1515,12 @@ mod tests {
         );
 
         // No body -> false
-        let opaque = RouteKey::LinkState(LsNlri {
+        let opaque = RouteKey::LinkState(Box::new(LsNlri {
             nlri_type: 1,
             raw: vec![],
             body: None,
             route_distinguisher: None,
-        });
+        }));
         assert!(!Condition::LsNodeRouterId(IpAddr::V4(router_id)).matches(&opaque, &path));
     }
 

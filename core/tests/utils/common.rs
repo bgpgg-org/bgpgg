@@ -246,10 +246,9 @@ impl PathParams {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 pub enum ExpectedRouteKey {
     Prefix(String),
-    Ls(LsNlri),
+    Ls(Box<LsNlri>),
 }
 
 impl From<&str> for ExpectedRouteKey {
@@ -272,7 +271,7 @@ impl From<&&str> for ExpectedRouteKey {
 
 impl From<LsNlri> for ExpectedRouteKey {
     fn from(nlri: LsNlri) -> Self {
-        ExpectedRouteKey::Ls(nlri)
+        ExpectedRouteKey::Ls(Box::new(nlri))
     }
 }
 
@@ -281,7 +280,7 @@ impl From<LsNlri> for ExpectedRouteKey {
 pub fn expected_route(key: impl Into<ExpectedRouteKey>, params: PathParams) -> Route {
     let key = match key.into() {
         ExpectedRouteKey::Prefix(p) => route::Key::Prefix(p),
-        ExpectedRouteKey::Ls(n) => route::Key::LsNlri(Box::new(n)),
+        ExpectedRouteKey::Ls(n) => route::Key::LsNlri(n),
     };
     Route {
         paths: vec![build_path(params)],
@@ -1139,11 +1138,11 @@ pub async fn verify_peer_statistics(
 ///
 /// ```
 /// // IP route
-/// announce_route(server, RouteParams::Ip(IpRouteParams {
+/// announce_route(server, RouteParams::Ip(Box::new(IpRouteParams {
 ///     prefix: "10.0.0.0/24".to_string(),
 ///     next_hop: "192.168.1.1".to_string(),
 ///     ..Default::default()
-/// })).await;
+/// }))).await;
 ///
 /// // BGP-LS route
 /// announce_route(server, RouteParams::Ls(LsRouteParams {
@@ -1152,10 +1151,9 @@ pub async fn verify_peer_statistics(
 ///     ..Default::default()
 /// })).await;
 /// ```
-#[allow(clippy::large_enum_variant)]
 pub enum RouteParams {
-    Ip(IpRouteParams),
-    Ls(LsRouteParams),
+    Ip(Box<IpRouteParams>),
+    Ls(Box<LsRouteParams>),
 }
 
 #[derive(Default)]
@@ -1369,7 +1367,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams::Ip(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() }),
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),
@@ -1384,7 +1382,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2],
-///     RouteParams::Ip(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() }),
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.0.0.0/24".to_string(), next_hop: "192.168.1.1".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![],
 ///         next_hop: "192.168.1.1".to_string(),
@@ -1399,7 +1397,7 @@ pub async fn create_asn_chain<const N: usize>(
 /// announce_and_verify_route(
 ///     &mut s1,
 ///     &[&s2, &s3, &s4],
-///     RouteParams::Ip(IpRouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() }),
+///     RouteParams::Ip(Box::new(IpRouteParams { prefix: "10.1.0.0/24".to_string(), ..Default::default() })),
 ///     PathParams {
 ///         as_path: vec![as_sequence(vec![65001])],
 ///         next_hop: s1.address.to_string(),

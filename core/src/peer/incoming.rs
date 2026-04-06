@@ -51,7 +51,7 @@ impl Peer {
         }
         for ls_nlri in update_msg.ls_withdrawn_list() {
             info!(nlri_type = ls_nlri.nlri_type, peer_ip = %self.addr, "withdrawing LS route");
-            withdrawn.push((RouteKey::LinkState(ls_nlri), None));
+            withdrawn.push((RouteKey::LinkState(Box::new(ls_nlri)), None));
         }
         withdrawn
     }
@@ -95,7 +95,7 @@ impl Peer {
             let path_arc = Arc::new(path.clone());
             info!(nlri_type = ls_nlri.nlri_type, peer_ip = %self.addr, "announcing LS route");
             announced.push(RoutePath {
-                key: RouteKey::LinkState(ls_nlri),
+                key: RouteKey::LinkState(Box::new(ls_nlri)),
                 path: path_arc,
             });
         }

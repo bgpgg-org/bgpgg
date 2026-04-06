@@ -35,11 +35,11 @@ async fn test_remove_peer() {
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -71,22 +71,22 @@ async fn test_remove_peer_withdraw_routes() {
     // Server2 announces a route
     announce_route(
         &server2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
             ..Default::default()
-        }),
+        })),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -118,11 +118,11 @@ async fn test_remove_peer_four_node_mesh() {
     announce_and_verify_route(
         &server4,
         &[&server1, &server2, &server3],
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.4.0.0/24".to_string(),
             next_hop: "192.168.4.1".to_string(),
             ..Default::default()
-        }),
+        })),
         PathParams::from_peer(&server4),
     )
     .await;

@@ -110,22 +110,22 @@ async fn test_rs_addpath_no_path_hiding() {
     // Client1 announces 10.0.0.0/24
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client1.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     // Client2 announces same prefix
     announce_route(
         &client2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client2.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -180,22 +180,22 @@ async fn test_rs_no_add_path_no_path_hiding() {
     // Client1 (IGP origin) is preferred over Client2 (Incomplete origin); policy blocks it for Client3.
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client1.address.to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &client2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: client2.address.to_string(),
             origin: Some(Origin::Incomplete),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -400,11 +400,11 @@ async fn test_rs_attribute_transparency() {
 
         announce_route(
             &client1,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: client1.address.to_string(),
                 ..case.route
-            }),
+            })),
         )
         .await;
 

@@ -234,11 +234,11 @@ async fn test_announce_withdraw_route() {
     // Announce route first
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -551,12 +551,12 @@ async fn test_list_routes_impl(use_stream: bool) {
     for i in 0..5 {
         announce_route(
             &server2,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: server2_addr.clone(),
                 as_path: vec![], // Empty AS_PATH - local route,
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -565,11 +565,11 @@ async fn test_list_routes_impl(use_stream: bool) {
     for i in 10..15 {
         announce_route(
             &server1,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -725,11 +725,11 @@ async fn test_get_server_info() {
     for i in 0..5 {
         announce_route(
             &server,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: format!("10.{}.0.0/24", i),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }

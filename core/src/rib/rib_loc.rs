@@ -212,9 +212,8 @@ impl<A: PathIdAllocator> LocRib<A> {
                 {
                     return false;
                 }
-                let nlri_clone = nlri.clone();
                 self.link_state
-                    .entry(nlri_clone)
+                    .entry((**nlri).clone())
                     .or_insert_with(|| Route { key, paths: vec![] })
             }
         };
@@ -238,7 +237,7 @@ impl<A: PathIdAllocator> LocRib<A> {
         }
         for (nlri, route) in self.link_state.iter() {
             if has_peer(route) {
-                keys.push(RouteKey::LinkState(nlri.clone()));
+                keys.push(RouteKey::LinkState(Box::new(nlri.clone())));
             }
         }
 
@@ -1037,7 +1036,7 @@ mod tests {
             address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
             prefix_length: 32,
         }));
-        let ls_key = RouteKey::LinkState(test_ls_nlri(1));
+        let ls_key = RouteKey::LinkState(Box::new(test_ls_nlri(1)));
 
         loc_rib.upsert_path(v4_key.clone(), Arc::clone(&path));
         loc_rib.upsert_path(v6_key.clone(), Arc::clone(&path));
@@ -1688,7 +1687,7 @@ mod tests {
     }
 
     fn ls_key(nlri: LsNlri) -> RouteKey {
-        RouteKey::LinkState(nlri)
+        RouteKey::LinkState(Box::new(nlri))
     }
 
     #[test]

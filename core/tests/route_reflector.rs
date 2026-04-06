@@ -49,23 +49,23 @@ async fn test_rr_originator_id_loop_detection() {
     // Announce a route with originator_id matching the RR's router-id (loop!)
     announce_route(
         &client,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             originator_id: Some("2.2.2.2".to_string()),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     // Also announce a clean route to prove the path works
     announce_route(
         &client,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -129,11 +129,11 @@ async fn test_rr_ebgp_route_reflected_to_clients() {
 
     announce_route(
         &ebgp_peer,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -181,11 +181,11 @@ async fn test_rr_locally_originated_route() {
     // RR itself originates a route
     announce_route(
         &rr,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -231,11 +231,11 @@ async fn test_route_reflector_basic() {
 
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -272,7 +272,7 @@ async fn test_route_reflector_basic() {
     };
     announce_route(
         &client1,
-        RouteParams::Ls(LsRouteParams {
+        RouteParams::Ls(Box::new(LsRouteParams {
             nlri: Some(ls_nlri.clone()),
             attribute: Some(LsAttribute {
                 node: Some(LsNodeAttribute {
@@ -282,7 +282,7 @@ async fn test_route_reflector_basic() {
                 ..Default::default()
             }),
             next_hop: None,
-        }),
+        })),
     )
     .await;
 
@@ -339,11 +339,11 @@ async fn test_route_reflector_mixed_topology() {
     // Phase 1: Client announces route -> reflected to everyone (clients + non-clients)
     announce_route(
         &c1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -366,11 +366,11 @@ async fn test_route_reflector_mixed_topology() {
     // Phase 2: Non-client announces route -> reflected to clients only
     announce_route(
         &nc1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -441,11 +441,11 @@ async fn test_rr_cluster_loop_detection() {
     // RR2 sees 9.9.9.9 (its own cluster_id) -> rejects
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -505,11 +505,11 @@ async fn test_rr_ebgp_attribute_stripping() {
 
     announce_route(
         &client,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -553,11 +553,11 @@ async fn test_rr_custom_cluster_id() {
 
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -601,11 +601,11 @@ async fn test_rr_multi_hop_cluster_list() {
 
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -648,11 +648,11 @@ async fn test_rr_withdrawal_reflection() {
 
     announce_route(
         &client1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -828,11 +828,11 @@ async fn test_rr_next_hop_self() {
 
     announce_route(
         &ebgp_peer,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 

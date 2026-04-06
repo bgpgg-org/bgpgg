@@ -75,7 +75,7 @@ impl AnnouncementBatch {
                     .keys
                     .iter()
                     .filter_map(|k| match k {
-                        RouteKey::LinkState(nlri) => Some(nlri.clone()),
+                        RouteKey::LinkState(nlri) => Some((**nlri).clone()),
                         _ => None,
                     })
                     .collect();

@@ -874,7 +874,7 @@ impl BgpService for BgpGrpcService {
                     NextHopAddr::Ipv4(std::net::Ipv4Addr::UNSPECIFIED)
                 };
                 let description = format!("LS {:?}", nlri.nlri_type);
-                let key = RouteKey::LinkState(nlri);
+                let key = RouteKey::LinkState(Box::new(nlri));
                 let attrs = PathAttrs {
                     origin: Origin::IGP,
                     as_path: vec![],
@@ -1082,7 +1082,7 @@ impl BgpService for BgpGrpcService {
                 let nlri = proto_ls::proto_to_ls_nlri(proto_nlri)
                     .map_err(|e| Status::invalid_argument(format!("invalid ls_nlri: {e}")))?;
                 let desc = format!("LS {:?}", nlri.nlri_type);
-                (RouteKey::LinkState(nlri), desc)
+                (RouteKey::LinkState(Box::new(nlri)), desc)
             }
             Some(proto::remove_route_request::Key::Prefix(ref prefix_str)) => {
                 let parts: Vec<&str> = prefix_str.split('/').collect();

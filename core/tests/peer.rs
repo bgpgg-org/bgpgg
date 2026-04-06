@@ -84,11 +84,11 @@ async fn test_peer_down() {
     announce_and_verify_route(
         &server2,
         &[&server1],
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
         PathParams::from_peer(&server2),
     )
     .await;
@@ -129,11 +129,11 @@ async fn test_peer_down_four_node_mesh() {
     announce_and_verify_route(
         &server1,
         &[&server2, &server3, &server4],
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
         PathParams::from_peer(&server1),
     )
     .await;
@@ -769,11 +769,11 @@ async fn test_mrai_rate_limiting() {
         for i in 0..num_routes {
             announce_route(
                 &server1,
-                RouteParams::Ip(IpRouteParams {
+                RouteParams::Ip(Box::new(IpRouteParams {
                     prefix: format!("10.{}.0.0/24", i),
                     next_hop: "192.168.1.1".to_string(),
                     ..Default::default()
-                }),
+                })),
             )
             .await;
         }
@@ -947,11 +947,11 @@ async fn test_reset_peer_soft() {
         // Server1 announces a route to server2
         announce_route(
             &server1,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
 
@@ -1038,11 +1038,11 @@ async fn test_hard_reset_established() {
     // Server1 announces a route to server2
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -1255,11 +1255,11 @@ async fn test_graceful_restart() {
         announce_and_verify_route(
             &server1,
             &[&server2],
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            }),
+            })),
             PathParams {
                 as_path: vec![as_sequence(vec![65001])],
                 next_hop: s1_addr.clone(),
@@ -1407,11 +1407,11 @@ async fn test_graceful_restart_reconnect() {
     // won't block it when re-sending to the restarting peer.
     announce_route(
         &server,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -1946,11 +1946,11 @@ async fn test_peer_without_capabilities() {
     // Add IPv4 route - should be propagated (default behavior)
     announce_route(
         &server,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -2038,11 +2038,11 @@ async fn test_graceful_session_shutdown_initiator() {
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -2090,11 +2090,11 @@ async fn test_dynamic_graceful_shutdown_toggle() {
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 

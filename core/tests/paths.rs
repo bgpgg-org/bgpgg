@@ -67,12 +67,12 @@ async fn test_origin_preservation() {
     for (prefix, next_hop, origin) in test_routes {
         announce_route(
             server1,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: prefix.to_string(),
                 next_hop: next_hop.to_string(),
                 origin: Some(origin),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
     }
@@ -136,11 +136,11 @@ async fn test_as_path_prepending_ebgp_vs_ibgp() {
     // S1 originates a route (starts with empty AS_PATH)
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -201,11 +201,11 @@ async fn test_originating_speaker_as_path() {
     // S1 originates a route
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -256,7 +256,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
     // S1 adds a route with AS_SET as the first segment
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             as_path: vec![
@@ -264,7 +264,7 @@ async fn test_ebgp_prepend_as_before_as_set() {
                 as_sequence(vec![65005]),   // AS_SEQUENCE after
             ],
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -310,11 +310,11 @@ async fn test_next_hop_locally_originated_to_ibgp() {
     // S1 originates a route with NEXT_HOP unspecified (0.0.0.0)
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "0.0.0.0".to_string(), // Unspecified NEXT_HOP,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -355,11 +355,11 @@ async fn test_next_hop_rewrite_to_ebgp() {
     // S1 originates a route with explicit NEXT_HOP
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.100".to_string(), // Arbitrary NEXT_HOP,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -413,11 +413,11 @@ async fn test_local_pref_send_to_ibgp() {
     // S1 originates a route
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -474,12 +474,12 @@ async fn test_local_pref_not_sent_to_ebgp() {
     // S1 originates a route with LOCAL_PREF=200
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             local_pref: Some(200), // Explicitly set LOCAL_PREF to 200,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -533,12 +533,12 @@ async fn test_med_propagation_over_ibgp() {
     // S1 originates a route with MED=50
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             med: Some(50), // Set MED=50,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -594,12 +594,12 @@ async fn test_med_not_propagated_to_other_as() {
     // S1 originates a route with MED=50
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             med: Some(50), // Set MED=50,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -659,12 +659,12 @@ async fn test_med_not_propagated_via_ibgp_to_other_as() {
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             med: Some(50),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -734,12 +734,12 @@ async fn test_atomic_aggregate_propagation() {
     // S1 originates a route with ATOMIC_AGGREGATE=true
     announce_route(
         server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             atomic_aggregate: true, // ATOMIC_AGGREGATE=true,
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -929,34 +929,34 @@ async fn test_med_comparison_restricted_to_same_as() {
     // All announce same prefix with different MEDs
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             med: Some(100),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server2,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.2.1".to_string(),
             med: Some(50),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server3,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.3.1".to_string(),
             med: Some(10),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -989,12 +989,12 @@ async fn test_normal_community_propagation() {
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             communities: communities.clone(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -1018,45 +1018,45 @@ async fn test_well_known_communities() {
     // Add routes with well-known communities (should be filtered)
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.1.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             communities: vec![community::NO_ADVERTISE],
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.2.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             communities: vec![community::NO_EXPORT],
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.3.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             communities: vec![community::NO_EXPORT_SUBCONFED],
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
     // Add normal route (should propagate)
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.4.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -1153,12 +1153,12 @@ async fn test_extended_communities_filtering() {
 
         announce_route(
             server1,
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: announced_next_hop.clone(),
                 extended_communities: vec![transitive, non_transitive],
                 ..Default::default()
-            }),
+            })),
         )
         .await;
 
@@ -1194,12 +1194,12 @@ async fn test_large_community_propagation() {
 
     announce_route(
         &server1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             large_communities: large_comms.clone(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 
@@ -1249,11 +1249,11 @@ async fn test_asn_route_propagation() {
         announce_and_verify_route(
             s1,
             &[s2],
-            RouteParams::Ip(IpRouteParams {
+            RouteParams::Ip(Box::new(IpRouteParams {
                 prefix: "10.0.0.0/24".to_string(),
                 next_hop: "192.168.1.1".to_string(),
                 ..Default::default()
-            }),
+            })),
             PathParams {
                 as_path: vec![as_sequence(vec![asns[0]])],
                 next_hop: s1.address.to_string(),
@@ -1281,11 +1281,11 @@ async fn test_mixed_asn_propagation() {
     // Announce route on s1
     announce_route(
         s1,
-        RouteParams::Ip(IpRouteParams {
+        RouteParams::Ip(Box::new(IpRouteParams {
             prefix: "10.0.0.0/24".to_string(),
             next_hop: "192.168.1.1".to_string(),
             ..Default::default()
-        }),
+        })),
     )
     .await;
 

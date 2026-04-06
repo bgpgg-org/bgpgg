@@ -23,10 +23,9 @@ use std::sync::Arc;
 
 /// Identifies a route across all address families.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(clippy::large_enum_variant)]
 pub enum RouteKey {
     Prefix(IpNetwork),
-    LinkState(LsNlri),
+    LinkState(Box<LsNlri>),
 }
 
 impl RouteKey {
@@ -57,9 +56,9 @@ pub fn split_withdrawals(withdrawn: &[Withdrawal]) -> (Vec<Nlri>, Vec<LsNlri>, V
             }
             RouteKey::LinkState(nlri) => {
                 if nlri.is_vpn() {
-                    ls_vpn_withdrawn.push(nlri.clone());
+                    ls_vpn_withdrawn.push((**nlri).clone());
                 } else {
-                    ls_withdrawn.push(nlri.clone());
+                    ls_withdrawn.push((**nlri).clone());
                 }
             }
         }

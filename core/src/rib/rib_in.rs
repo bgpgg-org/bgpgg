@@ -54,7 +54,7 @@ impl AdjRibIn {
                 IpNetwork::V6(net) => Self::upsert_path(&mut self.ipv6_unicast, *net, key, path),
             },
             RouteKey::LinkState(nlri) => {
-                Self::upsert_path(&mut self.link_state, nlri.clone(), key, path)
+                Self::upsert_path(&mut self.link_state, (**nlri).clone(), key, path)
             }
         }
     }
@@ -550,7 +550,7 @@ mod tests {
             None,
         );
         let ls_path = create_test_path(test_peer_ip(), test_bgp_id());
-        rib_in.add_route(RouteKey::LinkState(nlri), ls_path);
+        rib_in.add_route(RouteKey::LinkState(Box::new(nlri)), ls_path);
 
         let cases = vec![
             (Afi::Ipv4, Safi::Unicast, 1),

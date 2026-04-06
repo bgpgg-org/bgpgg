@@ -92,11 +92,11 @@ async fn test_max_prefix_limit() {
         for i in 0..3 {
             announce_route(
                 &server1,
-                RouteParams::Ip(IpRouteParams {
+                RouteParams::Ip(Box::new(IpRouteParams {
                     prefix: format!("10.{}.0.0/24", i),
                     next_hop: "1.1.1.1".to_string(),
                     ..Default::default()
-                }),
+                })),
             )
             .await;
         }
