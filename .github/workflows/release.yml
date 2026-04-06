@@ -1,41 +1,123 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  schedule:
+    - cron: '5 5 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.4.0). Leave empty for nightly.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      is_nightly: ${{ steps.resolve.outputs.is_nightly }}
+      should_run: ${{ steps.resolve.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=v${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "is_nightly=false" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=nightly" >> "$GITHUB_OUTPUT"
+            echo "is_nightly=true" >> "$GITHUB_OUTPUT"
+
+            # Skip nightly if no new commits
+            LAST_NIGHTLY=$(gh release view nightly --json targetCommitish -q .targetCommitish 2>/dev/null || echo "")
+            if [ "$LAST_NIGHTLY" = "$GITHUB_SHA" ]; then
+              echo "No new commits since last nightly"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.should_run == 'true'
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate version matches tag
+      - name: Bump Cargo.toml version
+        if: needs.setup.outputs.is_nightly == 'false'
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
-          TAG_VERSION="${{ github.ref_name }}"
-          CARGO_VERSION="v$(grep '^version' Cargo.toml | head -n1 | sed 's/.*"\(.*\)".*/\1/')"
-
-          echo "Git tag: $TAG_VERSION"
-          echo "Cargo.toml version: $CARGO_VERSION"
-
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "ERROR: Version mismatch!"
-            echo "Git tag is $TAG_VERSION but Cargo.toml has version $CARGO_VERSION"
-            echo "Please update Cargo.toml [workspace.package] version to match the tag"
-            exit 1
-          fi
-
-          echo "Versions match"
+          SEMVER="${VERSION#v}"
+          sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
+          cargo generate-lockfile
 
       - name: Setup dependencies
         run: make setup
 
       - name: Build release
-        run: make build version=${{ github.ref_name }}
+        run: make build version=${{ needs.setup.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: release/${{ needs.setup.outputs.version }}/*.tar.gz
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v4
+        if: needs.setup.outputs.is_nightly == 'false'
+        with:
+          name: version-bump
+          path: |
+            Cargo.toml
+            Cargo.lock
+          retention-days: 1
+
+  publish:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      IS_NIGHTLY: ${{ needs.setup.outputs.is_nightly }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release/${{ needs.setup.outputs.version }}/
+
+      - uses: actions/download-artifact@v4
+        if: needs.setup.outputs.is_nightly == 'false'
+        with:
+          name: version-bump
+          path: .
+
+      - name: Commit version bump
+        if: env.IS_NIGHTLY == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release $VERSION"
+          git tag "$VERSION"
+          git push origin master --tags
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -51,7 +133,6 @@ jobs:
 
       - name: Prepare Docker build context
         run: |
-          VERSION="${{ github.ref_name }}"
           mkdir -p /tmp/docker-build
           cp docker/Dockerfile /tmp/docker-build/
           cp release/$VERSION/bgpgg-$VERSION-x86_64-linux.tar.gz /tmp/docker-build/
@@ -65,27 +146,27 @@ jobs:
           context: /tmp/docker-build
           push: true
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/386
-          tags: |
-            bgpgg/bgpgg:${{ github.ref_name }}
-            bgpgg/bgpgg:latest
-          build-args: |
-            VERSION=${{ github.ref_name }}
+          tags: ${{ env.IS_NIGHTLY == 'true' && format('bgpgg/bgpgg:{0}', env.VERSION) || format('bgpgg/bgpgg:{0},bgpgg/bgpgg:latest', env.VERSION) }}
+          build-args: VERSION=${{ env.VERSION }}
+
+      - name: Delete previous nightly release
+        if: env.IS_NIGHTLY == 'true'
+        run: |
+          gh release delete nightly --yes || true
+          git push origin :nightly || true
 
       - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ github.ref_name }}"
-
-          # Determine if prerelease (version not matching vX.Y.Z)
-          FLAGS=""
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            FLAGS="--prerelease"
+          if [ "$IS_NIGHTLY" = "true" ]; then
+            gh release create nightly \
+              release/$VERSION/*.tar.gz \
+              --prerelease \
+              --title "Nightly build" \
+              --target ${{ github.sha }} \
+              --generate-notes
+          else
+            gh release create "$VERSION" \
+              release/$VERSION/*.tar.gz \
+              --title "$VERSION" \
+              --generate-notes
           fi
-
-          gh release create "$VERSION" \
-            release/$VERSION/*.tar.gz \
-            $FLAGS \
-            --title="$VERSION" \
-            --generate-notes \
-            --draft
