@@ -968,16 +968,32 @@ async fn test_tcp_md5_rejects_unsigned() {
     let server1 = start_test_server(test_config(65001, 1)).await;
     let server2 = start_test_server(test_config(65002, 2)).await;
 
-    // Server1 expects MD5 authentication
+    // Server1 expects MD5 authentication, passive so it only listens.
     server1
         .add_peer_with_config(
             &server2,
             SessionConfig {
                 md5_key_file: Some(key_a.clone()),
+                passive_mode: Some(true),
                 ..Default::default()
             },
         )
         .await;
+
+    // Wait for server1's peer to be configured (and SADB entry installed on BSD)
+    // before server2 starts connecting.
+    poll_until(
+        || async {
+            server1
+                .client
+                .get_peers()
+                .await
+                .is_ok_and(|peers| !peers.is_empty())
+        },
+        "server1 peer should be configured",
+    )
+    .await;
+
     // Server2 does NOT use MD5 - sends unsigned packets
     server2.add_peer(&server1).await;
 
