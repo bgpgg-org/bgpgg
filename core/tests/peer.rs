@@ -2204,3 +2204,34 @@ async fn test_gr_restart_time_zero_sweeps_immediately() {
     drop(peer.stream.take());
     poll_route_withdrawal(&[&server]).await;
 }
+
+/// RFC 5492: a BGP speaker MUST be prepared to receive an OPEN message that contains
+/// multiple Capabilities Optional Parameters.
+#[tokio::test]
+async fn test_split_capabilities_in_open() {
+    let server = setup_server_with_passive_peer().await;
+    let mut peer = FakePeer::connect(None, &server).await;
+
+    let _server_open = peer.read_open().await;
+
+    // Each capability is a separate entry -> build_raw_open wraps each in its
+    // own type-2 Optional Parameter (the legacy split form).
+    let mp_ipv4 = vec![1, 4, 0, 1, 0, 1]; // Multiprotocol IPv4 Unicast
+    let four_byte_asn = build_capability_4byte_asn(65002);
+    let open = build_raw_open(
+        65002,
+        300,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions {
+            capabilities: Some(vec![mp_ipv4, four_byte_asn]),
+            ..Default::default()
+        },
+    );
+    peer.send_raw(&open).await;
+    peer.asn = 65002;
+
+    let _keepalive = peer.read_keepalive().await;
+    peer.send_keepalive().await;
+
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+}

@@ -19,7 +19,7 @@ use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
 use crate::bgp::msg_open_types::{
-    AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam, ParamVal,
+    AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam,
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
@@ -42,7 +42,7 @@ fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSe
     local_set.intersection(peer).copied().collect()
 }
 
-/// Build complete list of optional parameters for OPEN message
+/// Build optional parameters for OPEN message.
 fn build_optional_params(
     asn: u32,
     config: &PeerConfig,
@@ -50,26 +50,20 @@ fn build_optional_params(
 ) -> Vec<OptionalParam> {
     let mut afi_safis = default_afi_safis();
     afi_safis.extend(config.afi_safi_list());
-    let mut optional_params = Vec::new();
+    let mut caps = Vec::new();
 
-    // Add multiprotocol capabilities (RFC 4760)
+    // Multiprotocol capabilities (RFC 4760)
     for afi_safi in &afi_safis {
-        optional_params.push(OptionalParam::new_capability(
-            Capability::new_multiprotocol(afi_safi),
-        ));
+        caps.push(Capability::new_multiprotocol(afi_safi));
     }
 
-    // Add Route Refresh capability (RFC 2918)
-    optional_params.push(OptionalParam::new_capability(
-        Capability::new_route_refresh(),
-    ));
+    // Route Refresh (RFC 2918)
+    caps.push(Capability::new_route_refresh());
 
-    // Add Enhanced Route Refresh capability (RFC 7313)
-    optional_params.push(OptionalParam::new_capability(
-        Capability::new_enhanced_route_refresh(),
-    ));
+    // Enhanced Route Refresh (RFC 7313)
+    caps.push(Capability::new_enhanced_route_refresh());
 
-    // Add Graceful Restart capability (RFC 4724) if enabled
+    // Graceful Restart (RFC 4724) if enabled
     if config.graceful_restart.enabled {
         // Receiving Speaker mode: R bit = false (we don't preserve forwarding state)
         // F bit = false for all AFI/SAFIs (no forwarding state preservation)
@@ -77,83 +71,79 @@ fn build_optional_params(
             .iter()
             .map(|afi_safi| (*afi_safi, false))
             .collect();
-        optional_params.push(OptionalParam::new_capability(
-            Capability::new_graceful_restart(
-                config.graceful_restart.restart_time,
-                false, // R bit: we don't preserve forwarding state across restarts
-                afi_safi_list,
-            ),
+        caps.push(Capability::new_graceful_restart(
+            config.graceful_restart.restart_time,
+            false,
+            afi_safi_list,
         ));
     }
 
-    // Always add Four-Octet ASN capability (RFC 6793)
-    optional_params.push(OptionalParam::new_capability(
-        Capability::new_four_octet_asn(asn),
-    ));
+    // Four-Octet ASN (RFC 6793) - always advertised
+    caps.push(Capability::new_four_octet_asn(asn));
 
-    // RFC 9494: Emit LLGR capability from resolved config
+    // RFC 9494: LLGR from resolved config
     let llgr_entries = llgr
         .as_ref()
         .map(|llgr| llgr.to_llgr_entries())
         .unwrap_or_default();
     if !llgr_entries.is_empty() {
-        optional_params.push(OptionalParam::new_capability(Capability::new_llgr(
-            &llgr_entries,
-        )));
+        caps.push(Capability::new_llgr(&llgr_entries));
     }
 
-    // Add ADD-PATH capability (RFC 7911) if configured
+    // ADD-PATH (RFC 7911) if configured
     let add_path_send = !matches!(config.add_path_send, AddPathSend::Disabled);
     if let Some(mode) = AddPathMode::from_flags(add_path_send, config.add_path_receive) {
         let entries: Vec<_> = afi_safis.iter().map(|afi_safi| (*afi_safi, mode)).collect();
-        optional_params.push(OptionalParam::new_capability(Capability::new_add_path(
-            &entries,
-        )));
+        caps.push(Capability::new_add_path(&entries));
     }
 
-    optional_params
+    vec![OptionalParam::from_capabilities(caps)]
 }
 
-/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793, RFC 4724)
+/// Extract capabilities from OPEN message (RFC 4271, RFC 2918, RFC 4760, RFC 6793, RFC 4724).
+///
+/// RFC 5492: capabilities may arrive packed in one Optional Parameter or
+/// split across multiple. Both forms must be processed identically.
 fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
     let mut capabilities = PeerCapabilities::default();
 
-    for param in &open_msg.optional_params {
-        if let ParamVal::Capability(cap) = &param.param_value {
-            match cap.code {
-                BgpCapabiltyCode::Multiprotocol => {
-                    if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
-                        capabilities.multiprotocol.insert(afi_safi);
-                    }
+    for cap in open_msg
+        .optional_params
+        .iter()
+        .flat_map(|p| p.capabilities())
+    {
+        match cap.code {
+            BgpCapabiltyCode::Multiprotocol => {
+                if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
+                    capabilities.multiprotocol.insert(afi_safi);
                 }
-                BgpCapabiltyCode::RouteRefresh => {
-                    capabilities.route_refresh = true;
-                }
-                BgpCapabiltyCode::FourOctetAsn => {
-                    // RFC 6793: Parse 4-byte ASN from capability value
-                    if cap.val.len() == 4 {
-                        let asn =
-                            u32::from_be_bytes([cap.val[0], cap.val[1], cap.val[2], cap.val[3]]);
-                        capabilities.four_octet_asn = Some(asn);
-                    }
-                }
-                BgpCapabiltyCode::GracefulRestart => {
-                    // RFC 4724: Parse Graceful Restart capability
-                    capabilities.graceful_restart = cap.as_graceful_restart();
-                }
-                BgpCapabiltyCode::AddPath => {
-                    // RFC 7911: Parse ADD-PATH capability
-                    capabilities.add_path = cap.as_add_path();
-                }
-                BgpCapabiltyCode::EnhancedRouteRefresh => {
-                    capabilities.enhanced_route_refresh = true;
-                }
-                BgpCapabiltyCode::Llgr => {
-                    // RFC 9494: Parse LLGR capability
-                    capabilities.llgr = cap.as_llgr();
-                }
-                _ => {}
             }
+            BgpCapabiltyCode::RouteRefresh => {
+                capabilities.route_refresh = true;
+            }
+            BgpCapabiltyCode::FourOctetAsn => {
+                // RFC 6793: Parse 4-byte ASN from capability value
+                if cap.val.len() == 4 {
+                    let asn = u32::from_be_bytes([cap.val[0], cap.val[1], cap.val[2], cap.val[3]]);
+                    capabilities.four_octet_asn = Some(asn);
+                }
+            }
+            BgpCapabiltyCode::GracefulRestart => {
+                // RFC 4724: Parse Graceful Restart capability
+                capabilities.graceful_restart = cap.as_graceful_restart();
+            }
+            BgpCapabiltyCode::AddPath => {
+                // RFC 7911: Parse ADD-PATH capability
+                capabilities.add_path = cap.as_add_path();
+            }
+            BgpCapabiltyCode::EnhancedRouteRefresh => {
+                capabilities.enhanced_route_refresh = true;
+            }
+            BgpCapabiltyCode::Llgr => {
+                // RFC 9494: Parse LLGR capability
+                capabilities.llgr = cap.as_llgr();
+            }
+            _ => {}
         }
     }
 
@@ -900,13 +890,11 @@ mod tests {
         let open_msg = create_open_message(65001, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &llgr);
 
         // Find LLGR capability (code 71) in OPEN
-        let has_llgr = open_msg.optional_params.iter().any(|param| {
-            if let ParamVal::Capability(cap) = &param.param_value {
-                matches!(cap.code, BgpCapabiltyCode::Llgr)
-            } else {
-                false
-            }
-        });
+        let has_llgr = open_msg
+            .optional_params
+            .iter()
+            .flat_map(|p| p.capabilities())
+            .any(|cap| matches!(cap.code, BgpCapabiltyCode::Llgr));
         assert!(has_llgr, "OPEN should contain LLGR capability (code 71)");
 
         // Verify it round-trips through extract_capabilities
@@ -916,6 +904,63 @@ mod tests {
         assert_eq!(llgr.entries[0].afi_safi, ipv4_unicast);
         assert!(!llgr.entries[0].forwarding_preserved);
         assert_eq!(llgr.entries[0].stale_time, 3600);
+    }
+
+    /// OPEN message roundtrip: encode -> decode -> extract_capabilities.
+    #[test]
+    fn test_open_message_roundtrip() {
+        let config = PeerConfig::default();
+        let open_msg =
+            create_open_message(4242423930, 180, Ipv4Addr::new(1, 1, 1, 1), &config, &None);
+
+        // Serialize and reparse.
+        let bytes = open_msg.to_bytes();
+        let parsed = OpenMessage::from_bytes(bytes).expect("encoded OPEN must reparse");
+
+        assert_eq!(parsed.asn, 4242423930, "AS4 must survive roundtrip");
+        assert_eq!(parsed.hold_time, open_msg.hold_time);
+        assert_eq!(parsed.bgp_identifier, open_msg.bgp_identifier);
+        assert_eq!(parsed.optional_params, open_msg.optional_params);
+
+        // Capabilities must survive the roundtrip.
+        let caps = extract_capabilities(&parsed);
+        assert!(caps
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
+        assert!(caps
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv6, Safi::Unicast)));
+        assert!(caps.route_refresh);
+        assert!(caps.enhanced_route_refresh);
+        assert!(caps.graceful_restart.is_some());
+        assert_eq!(caps.four_octet_asn, Some(4242423930));
+    }
+
+    /// RFC 5492: "a BGP speaker MUST be prepared to receive an OPEN message
+    /// that contains multiple Capabilities Optional Parameters"
+    #[test]
+    fn test_extract_capabilities_split_params() {
+        let open_msg = OpenMessage {
+            version: 4,
+            asn: 65001,
+            hold_time: 180,
+            bgp_identifier: u32::from(Ipv4Addr::new(1, 1, 1, 1)),
+            optional_params_len: 0,
+            optional_params: vec![
+                OptionalParam::from_capabilities(vec![Capability::new_multiprotocol(
+                    &AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+                )]),
+                OptionalParam::from_capabilities(vec![Capability::new_route_refresh()]),
+                OptionalParam::from_capabilities(vec![Capability::new_four_octet_asn(65001)]),
+            ],
+        };
+
+        let caps = extract_capabilities(&open_msg);
+        assert!(caps
+            .multiprotocol
+            .contains(&AfiSafi::new(Afi::Ipv4, Safi::Unicast)));
+        assert!(caps.route_refresh);
+        assert_eq!(caps.four_octet_asn, Some(65001));
     }
 
     #[test]
@@ -934,7 +979,7 @@ mod tests {
             hold_time: 180,
             bgp_identifier: u32::from(Ipv4Addr::new(2, 2, 2, 2)),
             optional_params_len: 0,
-            optional_params: vec![OptionalParam::new_capability(llgr_cap)],
+            optional_params: vec![OptionalParam::from_capabilities(vec![llgr_cap])],
         };
 
         let caps = extract_capabilities(&open_msg);

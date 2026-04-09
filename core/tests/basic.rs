@@ -885,12 +885,14 @@ async fn test_gtsm_rejects_low_ttl() {
     let server1 = start_test_server(test_config(65001, 1)).await;
     let server2 = start_test_server(test_config(65002, 2)).await;
 
-    // Server1 enforces GTSM; server2 sends with default OS TTL
+    // Passive so only server2 -> server1 TCP path exists; GTSM is applied
+    // on accept before any BGP messages.
     server1
         .add_peer_with_config(
             &server2,
             SessionConfig {
                 ttl_min: Some(255),
+                passive_mode: Some(true),
                 ..Default::default()
             },
         )
