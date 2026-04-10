@@ -2284,3 +2284,35 @@ async fn test_retry_open_without_capabilities() {
         "second OPEN should have no capabilities after Unsupported Optional Parameter"
     );
 }
+
+/// RFC 5492 Section 5: send NOTIFICATION Unsupported Capability (code 2,
+/// subcode 7) when peer's multiprotocol capabilities have no overlap with ours.
+#[tokio::test]
+async fn test_no_common_afi_safi_sends_unsupported_capability() {
+    let server = setup_server_with_passive_peer().await;
+    let mut peer = FakePeer::connect(None, &server).await;
+
+    let _server_open = peer.read_open().await;
+
+    // Send OPEN with only BGP-LS multiprotocol (AFI=16388 SAFI=71) — no overlap
+    // with server's default IPv4/IPv6 Unicast.
+    let mp_ls = vec![1, 4, 0x40, 0x04, 0x00, 0x47]; // Multiprotocol AFI=16388 SAFI=71
+    let four_byte_asn = build_capability_4byte_asn(65002);
+    let open = build_raw_open(
+        65002,
+        300,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions {
+            capabilities: Some(vec![mp_ls, four_byte_asn]),
+            ..Default::default()
+        },
+    );
+    peer.send_raw(&open).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::OpenMessageError(OpenMessageError::UnsupportedCapability),
+        "should send Unsupported Capability when no common AFI/SAFI"
+    );
+}

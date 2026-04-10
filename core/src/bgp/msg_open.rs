@@ -593,7 +593,6 @@ mod tests {
         assert!(matches!(caps[0].code, BgpCapabiltyCode::Multiprotocol));
         assert!(matches!(caps[1].code, BgpCapabiltyCode::FourOctetAsn));
 
-        // The fix is what makes find_four_octet_asn return Some here.
         assert_eq!(
             OptionalParam::find_four_octet_asn(&result),
             Some(4242423914)

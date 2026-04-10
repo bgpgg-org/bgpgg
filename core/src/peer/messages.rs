@@ -260,8 +260,28 @@ impl Peer {
         // Negotiate multiprotocol capabilities (intersection of local and peer)
         let mut local_afi_safis = default_afi_safis();
         local_afi_safis.extend(self.config.afi_safi_list());
-        let negotiated_multiprotocol =
+        let negotiated_afi_safis =
             negotiate_multiprotocol(&local_afi_safis, &peer_capabilities.multiprotocol);
+
+        // RFC 5492 Section 5: reject if peer advertised multiprotocol but
+        // none overlap with ours. Skip the check when peer sent no multiprotocol
+        // caps — base BGP-4 (RFC 4271) carries IPv4 Unicast without capabilities.
+        if negotiated_afi_safis.is_empty() && !peer_capabilities.multiprotocol.is_empty() {
+            warn!(peer_ip = %self.addr, "no common AFI/SAFI with peer");
+            let data: Vec<u8> = local_afi_safis
+                .iter()
+                .flat_map(|afi_safi| Capability::new_multiprotocol(afi_safi).to_bytes())
+                .collect();
+            let notif = NotificationMessage::new(
+                BgpError::OpenMessageError(OpenMessageError::UnsupportedCapability),
+                data,
+            );
+            self.send_notification(notif).await?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no common AFI/SAFI",
+            ));
+        }
 
         // Negotiate Four-Octet ASN capability (RFC 6793)
         // Both must advertise for it to be negotiated
@@ -273,7 +293,7 @@ impl Peer {
         let negotiated_add_path = self.negotiate_add_path(&peer_capabilities);
 
         self.capabilities = PeerCapabilities {
-            multiprotocol: negotiated_multiprotocol,
+            multiprotocol: negotiated_afi_safis,
             route_refresh: peer_capabilities.route_refresh,
             enhanced_route_refresh: peer_capabilities.enhanced_route_refresh,
             four_octet_asn: negotiated_four_octet_asn,
