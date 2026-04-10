@@ -183,23 +183,36 @@ fn create_open_message(
 }
 
 impl Peer {
+    fn build_open_message(&self) -> OpenMessage {
+        if self.capabilities_suppressed {
+            // RFC 5492: peer rejected capabilities, send bare OPEN.
+            OpenMessage::new(
+                self.local_config.asn,
+                self.local_config.hold_time,
+                u32::from(self.local_config.bgp_id),
+            )
+        } else {
+            create_open_message(
+                self.local_config.asn,
+                self.local_config.hold_time,
+                self.local_config.bgp_id,
+                &self.config,
+                &self.local_config.llgr,
+            )
+        }
+    }
+
     /// Send OPEN message to peer.
     pub(super) async fn send_open(&mut self) -> Result<(), io::Error> {
+        let open_msg = self.build_open_message();
         let conn = self
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no TCP connection"))?;
-        let open_msg = create_open_message(
-            self.local_config.asn,
-            self.local_config.hold_time,
-            self.local_config.bgp_id,
-            &self.config,
-            &self.local_config.llgr,
-        );
-        self.sent_open = Some(open_msg.clone());
         conn.tx.write_all(&open_msg.serialize()).await?;
+        self.sent_open = Some(open_msg);
         self.statistics.open_sent += 1;
-        info!(peer_ip = %self.addr, "sent OPEN message");
+        info!(peer_ip = %self.addr, capabilities_suppressed = self.capabilities_suppressed, "sent OPEN message");
         Ok(())
     }
 

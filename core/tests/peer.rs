@@ -2235,3 +2235,52 @@ async fn test_split_capabilities_in_open() {
 
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
 }
+
+/// RFC 5492: after receiving NOTIFICATION "Unsupported Optional Parameter"
+/// (code 2, subcode 4), retry OPEN without capabilities.
+#[tokio::test]
+async fn test_retry_open_without_capabilities() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
+
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                port: Some(port as u32),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Accept first connection, read OPEN (should have capabilities)
+    peer.accept().await;
+    let first_open = peer.read_open().await;
+    assert!(
+        first_open.optional_params_len > 0,
+        "first OPEN should have capabilities"
+    );
+
+    // Send NOTIFICATION: Unsupported Optional Parameter (code 2, subcode 4)
+    let notif = build_raw_notification(2, 4, &[], None);
+    peer.send_raw(&notif).await;
+    drop(peer.stream.take());
+
+    // Accept reconnection, read OPEN (should have no capabilities)
+    peer.accept().await;
+    let second_open = peer.read_open().await;
+    assert_eq!(
+        second_open.optional_params_len, 0,
+        "second OPEN should have no capabilities after Unsupported Optional Parameter"
+    );
+}

@@ -426,6 +426,9 @@ pub struct Peer {
     connect_retry_secs: u64,
     /// Consecutive disconnect count for DampPeerOscillations backoff (RFC 4271 8.1.1)
     consecutive_down_count: u32,
+    /// RFC 5492: peer rejected capabilities (NOTIFICATION code 2 subcode 4).
+    /// When true, OPEN messages are sent without capabilities.
+    capabilities_suppressed: bool,
     /// Connection type for collision detection
     conn_type: ConnectionType,
     /// True if ManualStop was received - disables auto-reconnect until ManualStart
@@ -484,6 +487,7 @@ impl Peer {
             local_config,
             connect_retry_secs,
             consecutive_down_count: 0,
+            capabilities_suppressed: false,
             conn_type,
             manually_stopped: false,
             established_at: None,
@@ -932,6 +936,7 @@ pub mod test_helpers {
             local_config,
             connect_retry_secs: 120,
             consecutive_down_count: 0,
+            capabilities_suppressed: false,
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
             established_at: None,
