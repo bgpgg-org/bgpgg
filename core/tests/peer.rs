@@ -2204,3 +2204,115 @@ async fn test_gr_restart_time_zero_sweeps_immediately() {
     drop(peer.stream.take());
     poll_route_withdrawal(&[&server]).await;
 }
+
+/// RFC 5492: a BGP speaker MUST be prepared to receive an OPEN message that contains
+/// multiple Capabilities Optional Parameters.
+#[tokio::test]
+async fn test_split_capabilities_in_open() {
+    let server = setup_server_with_passive_peer().await;
+    let mut peer = FakePeer::connect(None, &server).await;
+
+    let _server_open = peer.read_open().await;
+
+    // Each capability is a separate entry -> build_raw_open wraps each in its
+    // own type-2 Optional Parameter (the legacy split form).
+    let mp_ipv4 = vec![1, 4, 0, 1, 0, 1]; // Multiprotocol IPv4 Unicast
+    let four_byte_asn = build_capability_4byte_asn(65002);
+    let open = build_raw_open(
+        65002,
+        300,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions {
+            capabilities: Some(vec![mp_ipv4, four_byte_asn]),
+            ..Default::default()
+        },
+    );
+    peer.send_raw(&open).await;
+    peer.asn = 65002;
+
+    let _keepalive = peer.read_keepalive().await;
+    peer.send_keepalive().await;
+
+    poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+}
+
+/// RFC 5492: after receiving NOTIFICATION "Unsupported Optional Parameter"
+/// (code 2, subcode 4), retry OPEN without capabilities.
+#[tokio::test]
+async fn test_retry_open_without_capabilities() {
+    let server = start_test_server(Config::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+    let mut peer = FakePeer::new("127.0.0.2:0", 65002).await;
+    let port = peer.port();
+
+    server
+        .client
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                port: Some(port as u32),
+                idle_hold_time_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Accept first connection, read OPEN (should have capabilities)
+    peer.accept().await;
+    let first_open = peer.read_open().await;
+    assert!(
+        first_open.optional_params_len > 0,
+        "first OPEN should have capabilities"
+    );
+
+    // Send NOTIFICATION: Unsupported Optional Parameter (code 2, subcode 4)
+    let notif = build_raw_notification(2, 4, &[], None);
+    peer.send_raw(&notif).await;
+    drop(peer.stream.take());
+
+    // Accept reconnection, read OPEN (should have no capabilities)
+    peer.accept().await;
+    let second_open = peer.read_open().await;
+    assert_eq!(
+        second_open.optional_params_len, 0,
+        "second OPEN should have no capabilities after Unsupported Optional Parameter"
+    );
+}
+
+/// RFC 5492 Section 5: send NOTIFICATION Unsupported Capability (code 2,
+/// subcode 7) when peer's multiprotocol capabilities have no overlap with ours.
+#[tokio::test]
+async fn test_no_common_afi_safi_sends_unsupported_capability() {
+    let server = setup_server_with_passive_peer().await;
+    let mut peer = FakePeer::connect(None, &server).await;
+
+    let _server_open = peer.read_open().await;
+
+    // Send OPEN with only BGP-LS multiprotocol (AFI=16388 SAFI=71) — no overlap
+    // with server's default IPv4/IPv6 Unicast.
+    let mp_ls = vec![1, 4, 0x40, 0x04, 0x00, 0x47]; // Multiprotocol AFI=16388 SAFI=71
+    let four_byte_asn = build_capability_4byte_asn(65002);
+    let open = build_raw_open(
+        65002,
+        300,
+        u32::from(Ipv4Addr::new(2, 2, 2, 2)),
+        RawOpenOptions {
+            capabilities: Some(vec![mp_ls, four_byte_asn]),
+            ..Default::default()
+        },
+    );
+    peer.send_raw(&open).await;
+
+    let notif = peer.read_notification().await;
+    assert_eq!(
+        notif.error(),
+        &BgpError::OpenMessageError(OpenMessageError::UnsupportedCapability),
+        "should send Unsupported Capability when no common AFI/SAFI"
+    );
+}

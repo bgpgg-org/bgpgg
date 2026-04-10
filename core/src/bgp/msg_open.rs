@@ -19,54 +19,78 @@ use super::utils::{is_valid_unicast_ipv4, ParserError};
 // Re-export public types
 pub use super::msg_open_types::OptionalParam;
 
-use super::msg_open_types::{
-    BgpCapabiltyCode, Capability, OptionalParamTypes, ParamVal, BGP_VERSION,
-};
+use super::msg_open_types::{BgpCapabiltyCode, Capability, OptParamType, OptParamVal, BGP_VERSION};
 use super::msg_update_types::{AS_TRANS, MAX_2BYTE_ASN};
 
-fn read_optional_parameters(bytes: Vec<u8>) -> Vec<OptionalParam> {
+/// Parse the Optional Parameters area of a BGP OPEN message (RFC 5492).
+fn read_optional_parameters(bytes: Vec<u8>) -> Result<Vec<OptionalParam>, ParserError> {
     let mut cursor = 0;
     let mut params: Vec<OptionalParam> = Vec::new();
 
     while cursor < bytes.len() {
+        if cursor + 2 > bytes.len() {
+            return Err(open_msg_error());
+        }
         let param_type_val = bytes[cursor];
         let param_len = bytes[cursor + 1] as usize;
-
-        let param_type = OptionalParamTypes::from(param_type_val);
-
         cursor += 2;
 
-        let param_value: ParamVal = match param_type {
-            OptionalParamTypes::Capabilities => {
-                let code = bytes[cursor];
-                let len = bytes[cursor + 1] as usize;
-                cursor += 2;
+        if cursor + param_len > bytes.len() {
+            return Err(open_msg_error());
+        }
 
-                let val = &bytes[cursor..cursor + len];
-                cursor += len;
-
-                ParamVal::Capability(Capability {
-                    code: BgpCapabiltyCode::from(code),
-                    len: len as u8,
-                    val: val.to_vec(),
-                })
+        let param_type = OptParamType::from(param_type_val);
+        let param_value: OptParamVal = match param_type {
+            OptParamType::Capabilities => {
+                let caps = parse_capability_tlvs(&bytes[cursor..cursor + param_len])?;
+                OptParamVal::Capabilities(caps)
             }
-            _ => {
-                let val = &bytes[cursor..cursor + param_len];
-                cursor += param_len;
-
-                ParamVal::Unknown(val.to_vec())
-            }
+            _ => OptParamVal::Unknown(bytes[cursor..cursor + param_len].to_vec()),
         };
+        cursor += param_len;
 
         params.push(OptionalParam {
             param_type,
             param_len: param_len as u8,
             param_value,
-        })
+        });
     }
 
-    params
+    Ok(params)
+}
+
+/// Parse capability TLVs inside a single Capabilities Optional Parameter.
+fn parse_capability_tlvs(bytes: &[u8]) -> Result<Vec<Capability>, ParserError> {
+    let mut caps = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if cursor + 2 > bytes.len() {
+            return Err(open_msg_error());
+        }
+        let code = bytes[cursor];
+        let len = bytes[cursor + 1] as usize;
+        cursor += 2;
+
+        if cursor + len > bytes.len() {
+            return Err(open_msg_error());
+        }
+        let val = bytes[cursor..cursor + len].to_vec();
+        cursor += len;
+
+        caps.push(Capability {
+            code: BgpCapabiltyCode::from(code),
+            len: len as u8,
+            val,
+        });
+    }
+    Ok(caps)
+}
+
+fn open_msg_error() -> ParserError {
+    ParserError::BgpError {
+        error: BgpError::OpenMessageError(OpenMessageError::Unknown(0)),
+        data: Vec::new(),
+    }
 }
 
 /// Validate BGP version (RFC 4271 Section 6.2)
@@ -149,9 +173,13 @@ impl OpenMessage {
     /// # Returns
     /// A new OpenMessage with version 4 and Four-Octet ASN capability
     pub fn with_four_octet_asn_capability(asn: u32, hold_time: u16, bgp_identifier: u32) -> Self {
-        let capability = Capability::new_four_octet_asn(asn);
-        let optional_param = OptionalParam::new_capability(capability);
-        let optional_params_len = 2 + optional_param.param_len as usize; // type(1) + len(1) + value
+        let optional_params = vec![OptionalParam::from_capabilities(vec![
+            Capability::new_four_octet_asn(asn),
+        ])];
+        let optional_params_len: usize = optional_params
+            .iter()
+            .map(|param| 2 + param.param_len as usize)
+            .sum();
 
         OpenMessage {
             version: BGP_VERSION,
@@ -159,7 +187,7 @@ impl OpenMessage {
             hold_time,
             bgp_identifier,
             optional_params_len: optional_params_len as u8,
-            optional_params: vec![optional_param],
+            optional_params,
         }
     }
 
@@ -193,10 +221,8 @@ impl OpenMessage {
         validate_bgp_identifier(bgp_identifier)?;
 
         let optional_params = match optional_params_len {
-            0 => {
-                vec![]
-            }
-            _ => read_optional_parameters(bytes[10..10 + optional_params_len as usize].to_vec()),
+            0 => vec![],
+            _ => read_optional_parameters(bytes[10..10 + optional_params_len as usize].to_vec())?,
         };
 
         // RFC 6793: Extract real ASN from capability 65 if AS_TRANS is present
@@ -268,7 +294,7 @@ impl Message for OpenMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptionalParamTypes, ParamVal};
+    use crate::bgp::msg_open_types::{BgpCapabiltyCode, Capability, OptParamType, OptParamVal};
 
     // RFC2858
     const CAPABILITY_MP_EXTENSION_PARAM: &[u8] = &[
@@ -283,7 +309,7 @@ mod tests {
     ];
     const CAPABILITY_UNASSIGNED_PARAM: &[u8] = &[
         0x02, // OptionalParam type
-        0x0e, // OptionalParam length
+        0x07, // OptionalParam length (cap header 2 + cap value 5)
         10,   // Capability code (Unassigned)
         0x05, // Capability length
         0x01, 0x02, 0x03, 0x04, 0x05, // Capability value
@@ -335,13 +361,13 @@ mod tests {
         assert_eq!(
             open_message.optional_params,
             vec![OptionalParam {
-                param_type: OptionalParamTypes::Capabilities,
+                param_type: OptParamType::Capabilities,
                 param_len: 6,
-                param_value: ParamVal::Capability(Capability {
+                param_value: OptParamVal::Capabilities(vec![Capability {
                     code: BgpCapabiltyCode::Multiprotocol,
                     len: 4,
                     val: vec![0x00, 0x01, 0x00, 0x01],
-                }),
+                }]),
             }]
         );
     }
@@ -369,10 +395,10 @@ mod tests {
         assert_eq!(
             open_message.optional_params,
             vec![OptionalParam {
-                param_type: OptionalParamTypes::Unknown(200),
+                param_type: OptParamType::Unknown(200),
                 param_len: 7,
                 // Read the raw bytes for the optional param with an unknown type.
-                param_value: ParamVal::Unknown(vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,]),
+                param_value: OptParamVal::Unknown(vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,]),
             },]
         );
     }
@@ -385,7 +411,7 @@ mod tests {
                 0x27, 0x0f, // ASN
                 0x00, 0x10, // Hold time
                 0x0a, 0x0a, 0x0a, 0x0a, // BGP identififer
-                26,   // Optional parameters length
+                26,   // Optional parameters length (8 + 9 + 9)
             ],
             CAPABILITY_MP_EXTENSION_PARAM,
             UNKNOWN_TYPE_PARAM,
@@ -403,27 +429,29 @@ mod tests {
             open_message.optional_params,
             vec![
                 OptionalParam {
-                    param_type: OptionalParamTypes::Capabilities,
+                    param_type: OptParamType::Capabilities,
                     param_len: 6,
-                    param_value: ParamVal::Capability(Capability {
+                    param_value: OptParamVal::Capabilities(vec![Capability {
                         code: BgpCapabiltyCode::Multiprotocol,
                         len: 4,
                         val: vec![0x00, 0x01, 0x00, 0x01],
-                    }),
+                    }]),
                 },
                 OptionalParam {
-                    param_type: OptionalParamTypes::Unknown(200),
+                    param_type: OptParamType::Unknown(200),
                     param_len: 7,
-                    param_value: ParamVal::Unknown(vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,]),
+                    param_value: OptParamVal::Unknown(vec![
+                        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                    ]),
                 },
                 OptionalParam {
-                    param_type: OptionalParamTypes::Capabilities,
-                    param_len: 14,
-                    param_value: ParamVal::Capability(Capability {
+                    param_type: OptParamType::Capabilities,
+                    param_len: 7,
+                    param_value: OptParamVal::Capabilities(vec![Capability {
                         code: BgpCapabiltyCode::Unknown,
                         len: 5,
                         val: vec![0x01, 0x02, 0x03, 0x04, 0x05],
-                    }),
+                    }]),
                 },
             ]
         );
@@ -496,15 +524,15 @@ mod tests {
     fn test_read_optional_parameters_single() {
         let data: Vec<u8> = CAPABILITY_MP_EXTENSION_PARAM.to_vec();
 
-        let result = read_optional_parameters(data);
+        let result = read_optional_parameters(data).unwrap();
         let expected = vec![OptionalParam {
-            param_type: OptionalParamTypes::Capabilities,
+            param_type: OptParamType::Capabilities,
             param_len: 6,
-            param_value: ParamVal::Capability(Capability {
+            param_value: OptParamVal::Capabilities(vec![Capability {
                 code: BgpCapabiltyCode::Multiprotocol,
                 len: 4,
                 val: vec![0x00, 0x01, 0x00, 0x01],
-            }),
+            }]),
         }];
 
         assert_eq!(result, expected);
@@ -514,29 +542,69 @@ mod tests {
     fn test_read_optional_parameters_multiple() {
         let data: Vec<u8> = [CAPABILITY_MP_EXTENSION_PARAM, CAPABILITY_UNASSIGNED_PARAM].concat();
 
-        let result = read_optional_parameters(data);
+        let result = read_optional_parameters(data).unwrap();
         let expected = vec![
             OptionalParam {
-                param_type: OptionalParamTypes::Capabilities,
+                param_type: OptParamType::Capabilities,
                 param_len: 6,
-                param_value: ParamVal::Capability(Capability {
+                param_value: OptParamVal::Capabilities(vec![Capability {
                     code: BgpCapabiltyCode::Multiprotocol,
                     len: 4,
                     val: vec![0x00, 0x01, 0x00, 0x01],
-                }),
+                }]),
             },
             OptionalParam {
-                param_type: OptionalParamTypes::Capabilities,
-                param_len: 14,
-                param_value: ParamVal::Capability(Capability {
+                param_type: OptParamType::Capabilities,
+                param_len: 7,
+                param_value: OptParamVal::Capabilities(vec![Capability {
                     code: BgpCapabiltyCode::Unknown,
                     len: 5,
                     val: vec![0x01, 0x02, 0x03, 0x04, 0x05],
-                }),
+                }]),
             },
         ];
 
         assert_eq!(result, expected);
+    }
+
+    /// RFC 5492: multiple capability TLVs packed in one Optional Parameter.
+    #[test]
+    fn test_read_optional_parameters_multiple_caps_in_one_param() {
+        // One Capabilities Optional Parameter holding two TLVs:
+        //   - Multiprotocol IPv4-Unicast (cap code 1, value len 4)
+        //   - Four-Octet ASN 4242423914  (cap code 65, value len 4)
+        // Inner cap1: 2 + 4 = 6 bytes; cap2: 2 + 4 = 6 bytes -> param_len = 12.
+        let data: Vec<u8> = vec![
+            0x02, // OptionalParam type = Capabilities
+            12,   // OptionalParam length
+            // Capability 1: Multiprotocol
+            0x01, 0x04, 0x00, 0x01, 0x00, 0x01,
+            // Capability 2: Four-Octet ASN = 4242423914 = 0xFCDE_406A
+            0x41, 0x04, 0xfc, 0xde, 0x40, 0x6a,
+        ];
+
+        let result = read_optional_parameters(data).unwrap();
+        assert_eq!(result.len(), 1, "expected exactly one Optional Parameter");
+        let caps = match &result[0].param_value {
+            OptParamVal::Capabilities(caps) => caps,
+            _ => panic!("expected Capabilities param"),
+        };
+        assert_eq!(caps.len(), 2, "expected both TLVs to be parsed");
+        assert!(matches!(caps[0].code, BgpCapabiltyCode::Multiprotocol));
+        assert!(matches!(caps[1].code, BgpCapabiltyCode::FourOctetAsn));
+
+        assert_eq!(
+            OptionalParam::find_four_octet_asn(&result),
+            Some(4242423914)
+        );
+    }
+
+    #[test]
+    fn test_read_optional_parameters_truncated_cap() {
+        // Capabilities param claims 6 bytes but holds a TLV whose inner length
+        // (8) overruns the param.
+        let data: Vec<u8> = vec![0x02, 6, 0x01, 0x08, 0x00, 0x01, 0x00, 0x01];
+        assert!(read_optional_parameters(data).is_err());
     }
 
     const TEST_OPEN_MESSAGE_BODY: &[u8] = &[

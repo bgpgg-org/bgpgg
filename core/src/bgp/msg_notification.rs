@@ -43,6 +43,7 @@ pub enum OpenMessageError {
     BadBgpIdentifier = 3,
     UnsupportedOptionalParameter = 4,
     UnacceptedHoldTime = 6,
+    UnsupportedCapability = 7,
     Unknown(u8),
 }
 
@@ -54,6 +55,7 @@ impl From<u8> for OpenMessageError {
             3 => OpenMessageError::BadBgpIdentifier,
             4 => OpenMessageError::UnsupportedOptionalParameter,
             6 => OpenMessageError::UnacceptedHoldTime,
+            7 => OpenMessageError::UnsupportedCapability,
             val => OpenMessageError::Unknown(val),
         }
     }
@@ -257,6 +259,7 @@ impl BgpError {
                 OpenMessageError::BadBgpIdentifier => 3,
                 OpenMessageError::UnsupportedOptionalParameter => 4,
                 OpenMessageError::UnacceptedHoldTime => 6,
+                OpenMessageError::UnsupportedCapability => 7,
                 OpenMessageError::Unknown(val) => *val,
             },
             BgpError::UpdateMessageError(err) => match err {

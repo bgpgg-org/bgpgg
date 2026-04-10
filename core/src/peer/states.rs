@@ -16,7 +16,7 @@ use super::fsm::{BgpState, FsmEvent};
 use super::PeerCapabilities;
 use super::{Peer, PeerError, PeerOp, TcpConnection};
 use crate::bgp::msg::{BgpMessage, Message};
-use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
+use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage, OpenMessageError};
 use crate::log::{debug, error, info};
 use crate::server::ops::ServerOp;
 use crate::server::AdminState;
@@ -203,6 +203,15 @@ impl Peer {
 
     /// Handle received NOTIFICATION and generate appropriate event (Event 24 or 25).
     pub(super) async fn handle_notification_received(&mut self, notif: &NotificationMessage) {
+        // RFC 5492: if peer doesn't understand capabilities, suppress them on retry.
+        if matches!(
+            notif.error(),
+            BgpError::OpenMessageError(OpenMessageError::UnsupportedOptionalParameter)
+        ) {
+            info!(peer_ip = %self.addr, "peer does not support capabilities, suppressing on retry");
+            self.capabilities_suppressed = true;
+        }
+
         let event = if notif.is_version_error() {
             debug!(peer_ip = %self.addr, "NOTIFICATION with version error received");
             FsmEvent::NotifMsgVerErr(notif.clone())
@@ -425,6 +434,7 @@ pub(super) mod tests {
             local_config,
             connect_retry_secs: 120,
             consecutive_down_count: 0,
+            capabilities_suppressed: false,
             conn_type: ConnectionType::Outgoing,
             manually_stopped: false,
             established_at: None,

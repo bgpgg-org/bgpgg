@@ -180,40 +180,47 @@ impl BgpCapabiltyCode {
 // https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-11
 #[derive(Debug, PartialEq, Clone)]
 #[repr(u8)]
-pub(crate) enum OptionalParamTypes {
+pub(crate) enum OptParamType {
     Capabilities = 2, // RFC3392
     Unknown(u8),
 }
 
-impl From<u8> for OptionalParamTypes {
+impl From<u8> for OptParamType {
     fn from(value: u8) -> Self {
         match value {
-            2 => OptionalParamTypes::Capabilities,
-            val => OptionalParamTypes::Unknown(val),
+            2 => OptParamType::Capabilities,
+            val => OptParamType::Unknown(val),
         }
     }
 }
 
-impl OptionalParamTypes {
+impl OptParamType {
     pub(crate) fn as_u8(&self) -> u8 {
         match self {
-            OptionalParamTypes::Capabilities => 2,
-            OptionalParamTypes::Unknown(val) => *val,
+            OptParamType::Capabilities => 2,
+            OptParamType::Unknown(val) => *val,
         }
     }
 }
 
+/// Value of a BGP OPEN Optional Parameter (RFC 5492).
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ParamVal {
-    Capability(Capability),
+pub(crate) enum OptParamVal {
+    Capabilities(Vec<Capability>),
     Unknown(Vec<u8>),
 }
 
-impl ParamVal {
+impl OptParamVal {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         match self {
-            ParamVal::Capability(cap) => cap.to_bytes(),
-            ParamVal::Unknown(data) => data.clone(),
+            OptParamVal::Capabilities(caps) => {
+                let mut bytes = Vec::new();
+                for cap in caps {
+                    bytes.extend_from_slice(&cap.to_bytes());
+                }
+                bytes
+            }
+            OptParamVal::Unknown(data) => data.clone(),
         }
     }
 }
@@ -503,9 +510,9 @@ impl Capability {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct OptionalParam {
-    pub(crate) param_type: OptionalParamTypes,
+    pub(crate) param_type: OptParamType,
     pub(crate) param_len: u8,
-    pub(crate) param_value: ParamVal,
+    pub(crate) param_value: OptParamVal,
 }
 
 impl OptionalParam {
@@ -517,24 +524,29 @@ impl OptionalParam {
         bytes
     }
 
-    /// Create an OptionalParam from a Capability
-    pub(crate) fn new_capability(capability: Capability) -> Self {
+    /// Create a Capabilities Optional Parameter from a list of capabilities.
+    pub(crate) fn from_capabilities(capabilities: Vec<Capability>) -> Self {
+        let param_len: usize = capabilities.iter().map(|cap| 2 + cap.len as usize).sum();
         OptionalParam {
-            param_type: OptionalParamTypes::Capabilities,
-            param_len: 2 + capability.len, // code(1) + len(1) + val
-            param_value: ParamVal::Capability(capability),
+            param_type: OptParamType::Capabilities,
+            param_len: param_len as u8,
+            param_value: OptParamVal::Capabilities(capabilities),
         }
     }
 
-    /// Find and extract the four-octet ASN capability from a list of optional parameters
+    pub(crate) fn capabilities(&self) -> &[Capability] {
+        match &self.param_value {
+            OptParamVal::Capabilities(caps) => caps,
+            OptParamVal::Unknown(_) => &[],
+        }
+    }
+
+    /// Find and extract the four-octet ASN capability from optional parameters.
     pub(crate) fn find_four_octet_asn(params: &[OptionalParam]) -> Option<u32> {
-        params.iter().find_map(|param| {
-            if let ParamVal::Capability(cap) = &param.param_value {
-                cap.as_four_octet_asn()
-            } else {
-                None
-            }
-        })
+        params
+            .iter()
+            .flat_map(|p| p.capabilities())
+            .find_map(|cap| cap.as_four_octet_asn())
     }
 }
 
@@ -568,32 +580,52 @@ mod tests {
 
     #[test]
     fn test_find_four_octet_asn() {
-        // Test with four-octet ASN capability
-        let cap = Capability::new_four_octet_asn(65536);
-        let param = OptionalParam::new_capability(cap);
-        assert_eq!(OptionalParam::find_four_octet_asn(&[param]), Some(65536));
-
-        // Test with multiple capabilities including four-octet ASN
-        let cap1 = Capability::new_route_refresh();
-        let cap2 = Capability::new_four_octet_asn(4200000000);
-        let cap3 = Capability::new_multiprotocol(&AfiSafi::new(Afi::Ipv4, Safi::Unicast));
-        let params = vec![
-            OptionalParam::new_capability(cap1),
-            OptionalParam::new_capability(cap2),
-            OptionalParam::new_capability(cap3),
+        let ipv4 = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
+        let cases: Vec<(&str, Vec<OptionalParam>, Option<u32>)> = vec![
+            (
+                "single cap",
+                vec![OptionalParam::from_capabilities(vec![
+                    Capability::new_four_octet_asn(65536),
+                ])],
+                Some(65536),
+            ),
+            (
+                "split across params",
+                vec![
+                    OptionalParam::from_capabilities(vec![Capability::new_route_refresh()]),
+                    OptionalParam::from_capabilities(vec![Capability::new_four_octet_asn(
+                        4200000000,
+                    )]),
+                    OptionalParam::from_capabilities(vec![Capability::new_multiprotocol(&ipv4)]),
+                ],
+                Some(4200000000),
+            ),
+            (
+                "packed in one param",
+                vec![OptionalParam::from_capabilities(vec![
+                    Capability::new_route_refresh(),
+                    Capability::new_multiprotocol(&ipv4),
+                    Capability::new_four_octet_asn(4242423914),
+                ])],
+                Some(4242423914),
+            ),
+            (
+                "no four-octet cap",
+                vec![OptionalParam::from_capabilities(vec![
+                    Capability::new_route_refresh(),
+                ])],
+                None,
+            ),
+            ("empty", vec![], None),
         ];
-        assert_eq!(
-            OptionalParam::find_four_octet_asn(&params),
-            Some(4200000000)
-        );
 
-        // Test without four-octet ASN capability
-        let cap = Capability::new_route_refresh();
-        let param = OptionalParam::new_capability(cap);
-        assert_eq!(OptionalParam::find_four_octet_asn(&[param]), None);
-
-        // Test with empty list
-        assert_eq!(OptionalParam::find_four_octet_asn(&[]), None);
+        for (name, params, expected) in cases {
+            assert_eq!(
+                OptionalParam::find_four_octet_asn(&params),
+                expected,
+                "case: {name}"
+            );
+        }
     }
 
     #[test]
