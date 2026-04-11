@@ -298,7 +298,7 @@ mod tests {
 
         let path1 = create_test_path(peer_ip, test_bgp_id());
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.attrs.as_path = vec![AsPathSegment {
+            p.attrs_mut().as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
                 asn_list: vec![300, 400],
@@ -427,7 +427,7 @@ mod tests {
         });
         let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(2);
-            p.attrs.as_path = vec![AsPathSegment {
+            p.attrs_mut().as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 3,
                 asn_list: vec![100, 200, 300],
@@ -449,11 +449,11 @@ mod tests {
 
         let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(1);
-            p.attrs.med = Some(10);
+            p.attrs_mut().med = Some(10);
         });
         let path1_updated = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
             p.remote_path_id = Some(1);
-            p.attrs.med = Some(20);
+            p.attrs_mut().med = Some(20);
         });
 
         rib_in.add_route(prefix_key(prefix), path1);
@@ -509,7 +509,7 @@ mod tests {
 
         let path1 = create_test_path(test_peer_ip(), test_bgp_id());
         let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
-            p.attrs.med = Some(50);
+            p.attrs_mut().med = Some(50);
         });
 
         rib_in.add_route(prefix_key(prefix), path1);

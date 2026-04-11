@@ -405,11 +405,11 @@ impl<A: PathIdAllocator> LocRib<A> {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 source: RouteSource::Local,
                 local_pref: path_attrs.local_pref.or(Some(100)),
                 ..path_attrs
-            },
+            }),
         });
         if !self.upsert_path(key.clone(), path) {
             return Err(LocRibError::MaxLsEntriesReached {
@@ -830,7 +830,7 @@ mod tests {
 
         let path1 = create_test_path(peer_ip, test_bgp_id());
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.attrs.as_path = vec![AsPathSegment {
+            p.attrs_mut().as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 2,
                 asn_list: vec![300, 400],
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         let expected_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.local_path_id = Some(1);
-            p.attrs.as_path = path2.attrs.as_path.clone();
+            p.attrs_mut().as_path = path2.attrs.as_path.clone();
         });
         assert_eq!(
             *routes[0],
@@ -1163,7 +1163,7 @@ mod tests {
 
         // Replace with updated path (same source, same remote_path_id=None)
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.attrs.med = Some(50);
+            p.attrs_mut().med = Some(50);
         });
         loc_rib.upsert_path(RouteKey::Prefix(prefix), path2);
         let after = loc_rib.get_best_path(&RouteKey::Prefix(prefix)).unwrap();
@@ -1354,7 +1354,7 @@ mod tests {
 
         // Now announce from peer2 with a worse path (longer AS path)
         let worse_path = create_test_path_with(peer2, test_bgp_id2(), |p| {
-            p.attrs.as_path = vec![AsPathSegment {
+            p.attrs_mut().as_path = vec![AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: 3,
                 asn_list: vec![100, 200, 300],
@@ -1413,7 +1413,7 @@ mod tests {
 
         // Peer reconnects and re-sends the same route (new path has stale=false)
         let refreshed_path = create_test_path_with(peer_ip, test_bgp_id(), |p| {
-            p.attrs.med = Some(50);
+            p.attrs_mut().med = Some(50);
         });
         loc_rib.apply_peer_update(
             peer_ip,
@@ -1459,7 +1459,7 @@ mod tests {
         });
         let path2 = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.remote_path_id = Some(2);
-            p.attrs.med = Some(50);
+            p.attrs_mut().med = Some(50);
         });
         loc_rib.upsert_path(RouteKey::Prefix(prefix), path1);
         loc_rib.upsert_path(RouteKey::Prefix(prefix), path2);
@@ -1472,7 +1472,7 @@ mod tests {
         // Peer reconnects and only re-sends path_id=1
         let refreshed = create_test_path_with(peer_ip, test_bgp_id(), |p| {
             p.remote_path_id = Some(1);
-            p.attrs.med = Some(99);
+            p.attrs_mut().med = Some(99);
         });
         loc_rib.apply_peer_update(
             peer_ip,
@@ -1596,7 +1596,7 @@ mod tests {
         loc_rib.upsert_path(
             RouteKey::Prefix(prefix_no_llgr),
             create_test_path_with(peer_ip, test_bgp_id(), |p| {
-                p.attrs.communities.push(community::NO_LLGR);
+                p.attrs_mut().communities.push(community::NO_LLGR);
             }),
         );
         loc_rib.mark_peer_routes_stale(peer_ip, afi_safi);
@@ -1716,10 +1716,10 @@ mod tests {
         let key = ls_key(test_ls_nlri(1));
 
         let path_low = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
-            p.attrs.local_pref = Some(50);
+            p.attrs_mut().local_pref = Some(50);
         });
         let path_high = create_test_path_with(test_peer_ip2(), test_bgp_id2(), |p| {
-            p.attrs.local_pref = Some(200);
+            p.attrs_mut().local_pref = Some(200);
         });
 
         loc_rib.upsert_path(key.clone(), path_low);
@@ -1761,12 +1761,12 @@ mod tests {
         let key = ls_key(test_ls_nlri(1));
 
         let path1 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
-            p.attrs.med = Some(10);
+            p.attrs_mut().med = Some(10);
         });
         loc_rib.upsert_path(key.clone(), path1);
 
         let path2 = create_test_path_with(test_peer_ip(), test_bgp_id(), |p| {
-            p.attrs.med = Some(20);
+            p.attrs_mut().med = Some(20);
         });
         loc_rib.upsert_path(key.clone(), path2);
 
@@ -1966,9 +1966,7 @@ mod tests {
         let mut loc_rib = LocRib::new(LocRibConfig { max_ls_entries: 1 });
         let nlri1 = test_ls_nlri(1);
         let key1 = ls_key(nlri1);
-        let attrs = create_test_path(test_peer_ip(), test_bgp_id())
-            .attrs
-            .clone();
+        let attrs = PathAttrs::clone(&create_test_path(test_peer_ip(), test_bgp_id()).attrs);
         assert!(loc_rib.add_local_route(key1, attrs.clone()).is_ok());
 
         let nlri2 = test_ls_nlri(2);

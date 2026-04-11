@@ -430,12 +430,12 @@ impl Action {
             Action::Reject => false,
             Action::SetLocalPref { value, force } => {
                 if *force || path.local_pref().is_none() {
-                    path.attrs.local_pref = Some(*value);
+                    path.attrs_mut().local_pref = Some(*value);
                 }
                 true
             }
             Action::SetMed(value) => {
-                path.attrs.med = *value;
+                path.attrs_mut().med = *value;
                 true
             }
             Action::SetCommunity(op) => {
@@ -443,17 +443,17 @@ impl Action {
                     CommunityOp::Add(to_add) => {
                         for &comm in to_add {
                             if !path.communities().contains(&comm) {
-                                path.attrs.communities.push(comm);
+                                path.attrs_mut().communities.push(comm);
                             }
                         }
                     }
                     CommunityOp::Remove(to_remove) => {
-                        path.attrs
+                        path.attrs_mut()
                             .communities
                             .retain(|comm| !to_remove.contains(comm));
                     }
                     CommunityOp::Replace(new_communities) => {
-                        path.attrs.communities = new_communities.clone();
+                        path.attrs_mut().communities = new_communities.clone();
                     }
                 }
                 true
@@ -463,17 +463,17 @@ impl Action {
                     ExtCommunityOp::Add(to_add) => {
                         for &ec in to_add {
                             if !path.extended_communities().contains(&ec) {
-                                path.attrs.extended_communities.push(ec);
+                                path.attrs_mut().extended_communities.push(ec);
                             }
                         }
                     }
                     ExtCommunityOp::Remove(to_remove) => {
-                        path.attrs
+                        path.attrs_mut()
                             .extended_communities
                             .retain(|ec| !to_remove.contains(ec));
                     }
                     ExtCommunityOp::Replace(new_ext_communities) => {
-                        path.attrs.extended_communities = new_ext_communities.clone();
+                        path.attrs_mut().extended_communities = new_ext_communities.clone();
                     }
                 }
                 true
@@ -483,17 +483,17 @@ impl Action {
                     LargeCommunityOp::Add(to_add) => {
                         for &lc in to_add {
                             if !path.large_communities().contains(&lc) {
-                                path.attrs.large_communities.push(lc);
+                                path.attrs_mut().large_communities.push(lc);
                             }
                         }
                     }
                     LargeCommunityOp::Remove(to_remove) => {
-                        path.attrs
+                        path.attrs_mut()
                             .large_communities
                             .retain(|lc| !to_remove.contains(lc));
                     }
                     LargeCommunityOp::Replace(new_large_communities) => {
-                        path.attrs.large_communities = new_large_communities.clone();
+                        path.attrs_mut().large_communities = new_large_communities.clone();
                     }
                 }
                 true
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(statement.apply(&prefix_key(prefix), &mut path), Some(true));
         assert_eq!(path.local_pref(), Some(200));
 
-        path.attrs.local_pref = None;
+        path.attrs_mut().local_pref = None;
         assert_eq!(statement.apply(&prefix_key(other_prefix), &mut path), None);
         assert_eq!(path.local_pref(), None);
 
@@ -1184,7 +1184,7 @@ mod tests {
             peer_ip: test_ip(1),
             bgp_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
         });
-        path.attrs.med = Some(100);
+        path.attrs_mut().med = Some(100);
         assert_eq!(statement.apply(&test_prefix_key(), &mut path), Some(true));
         assert_eq!(path.local_pref(), Some(200));
         assert_eq!(path.med(), None);

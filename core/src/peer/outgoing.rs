@@ -422,7 +422,7 @@ fn send_withdrawals(ctx: &PeerExportContext, withdrawn: Vec<Withdrawal>, format:
 
 /// Batching key: AFI/SAFI + path attributes + local_path_id.
 /// AFI/SAFI ensures different families never share a batch (RFC 4271 Section 6.3).
-type BatchingKey = (AfiSafi, PathAttrs, Option<u32>);
+type BatchingKey = (AfiSafi, Arc<PathAttrs>, Option<u32>);
 
 /// Group announcements by path attributes to enable batching
 /// Returns a vector of batches, where each batch contains a path and all prefixes sharing those attributes
@@ -431,7 +431,7 @@ pub(crate) fn batch_announcements(to_announce: &[RoutePath]) -> Vec<Announcement
 
     for RoutePath { key, path } in to_announce {
         let afi_safi = key.afi_safi();
-        let batch_key = (afi_safi, path.attrs.clone(), path.local_path_id);
+        let batch_key = (afi_safi, Arc::clone(&path.attrs), path.local_path_id);
         let batch = batches
             .entry(batch_key)
             .or_insert_with(|| AnnouncementBatch {
@@ -547,7 +547,7 @@ fn build_export_attrs(
     path: &Path,
     ctx: &PeerExportContext,
     route_key: &RouteKey,
-) -> Option<PathAttrs> {
+) -> Option<Arc<PathAttrs>> {
     // RFC 4456: RR attributes (skip for RS clients)
     let (originator_id, cluster_list) = if ctx.rs_client {
         (None, Vec::new()) // RS doesn't add RR attributes
@@ -555,7 +555,7 @@ fn build_export_attrs(
         build_export_rr_attrs(path, ctx, ctx.is_ibgp())
     };
 
-    Some(PathAttrs {
+    Some(Arc::new(PathAttrs {
         origin: path.attrs.origin,
         as_path: build_export_as_path(path, ctx),
         next_hop: build_export_next_hop(path, ctx, route_key)?,
@@ -571,7 +571,7 @@ fn build_export_attrs(
         originator_id,
         cluster_list,
         ls_attr: path.attrs.ls_attr.clone(),
-    })
+    }))
 }
 
 /// Build RR attributes for export (originator_id, cluster_list).
@@ -857,7 +857,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path,
                 next_hop,
@@ -873,7 +873,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 
@@ -1406,7 +1406,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
@@ -1422,7 +1422,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         };
 
         // iBGP: include LOCAL_PREF
@@ -1619,7 +1619,7 @@ mod tests {
                 remote_path_id: None,
                 stale: false,
                 rpki_state: RpkiValidation::NotFound,
-                attrs: PathAttrs {
+                attrs: Arc::new(PathAttrs {
                     origin: Origin::IGP,
                     as_path: test_case.as_path,
                     next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1)),
@@ -1635,7 +1635,7 @@ mod tests {
                     originator_id: None,
                     cluster_list: vec![],
                     ls_attr: None,
-                },
+                }),
             };
 
             let ctx = make_peer_export_ctx(
@@ -1884,7 +1884,7 @@ mod tests {
                 remote_path_id: None,
                 stale: false,
                 rpki_state: test_case.rpki_state,
-                attrs: PathAttrs {
+                attrs: Arc::new(PathAttrs {
                     origin: Origin::IGP,
                     as_path: vec![],
                     next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -1900,7 +1900,7 @@ mod tests {
                     originator_id: None,
                     cluster_list: vec![],
                     ls_attr: None,
-                },
+                }),
             };
 
             let ctx = make_peer_export_ctx(
@@ -1979,7 +1979,8 @@ mod tests {
                 vec![],
                 NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             );
-            path.attrs.unknown_attrs = vec![transitive_attr.clone(), non_transitive_attr.clone()];
+            path.attrs_mut().unknown_attrs =
+                vec![transitive_attr.clone(), non_transitive_attr.clone()];
 
             let ctx = make_peer_export_ctx(
                 test_case.local_asn,
@@ -2050,8 +2051,9 @@ mod tests {
         // Preserves existing ORIGINATOR_ID, prepends to CLUSTER_LIST
         let existing_originator = Ipv4Addr::new(3, 3, 3, 3);
         let existing_cluster = Ipv4Addr::new(4, 4, 4, 4);
-        path.attrs.originator_id = Some(existing_originator);
-        path.attrs.cluster_list = vec![existing_cluster];
+        let attrs = path.attrs_mut();
+        attrs.originator_id = Some(existing_originator);
+        attrs.cluster_list = vec![existing_cluster];
         let (originator_id, cluster_list) = build_export_rr_attrs(&path, &ctx, true);
         assert_eq!(originator_id, Some(existing_originator));
         assert_eq!(cluster_list, vec![cluster_id, existing_cluster]);
@@ -2141,7 +2143,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -2157,7 +2159,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         };
 
         struct TestCase {

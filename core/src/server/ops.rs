@@ -1038,17 +1038,14 @@ fn scrub_ebgp_pending_routes(routes: &mut [PendingRoute]) {
     for route in routes {
         if let PendingRoute::Announce(route_path) = route {
             let path = Arc::make_mut(&mut route_path.path);
-            path.attrs.originator_id = None;
-            path.attrs.cluster_list.clear();
-            path.attrs
+            let attrs = path.attrs_mut();
+            attrs.originator_id = None;
+            attrs.cluster_list.clear();
+            attrs
                 .extended_communities
                 .retain(|ec| !is_rpki_state_community(*ec));
-            if path
-                .attrs
-                .communities
-                .contains(&community::GRACEFUL_SHUTDOWN)
-            {
-                path.attrs.local_pref = Some(0);
+            if attrs.communities.contains(&community::GRACEFUL_SHUTDOWN) {
+                attrs.local_pref = Some(0);
             }
         }
     }
@@ -1095,7 +1092,7 @@ fn apply_import(
         path.rpki_state = vrp_table.validate(*prefix, origin);
     }
     if path.attrs.local_pref.is_none() {
-        path.attrs.local_pref = Some(100);
+        path.attrs_mut().local_pref = Some(100);
     }
     for policy in policies {
         match policy.evaluate(route_key, path) {

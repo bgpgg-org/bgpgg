@@ -688,6 +688,7 @@ mod tests {
     use crate::rib::{Path, PathAttrs, RouteSource};
     use crate::rpki::vrp::RpkiValidation;
     use std::net::Ipv4Addr;
+    use std::sync::Arc;
 
     fn test_path() -> Path {
         Path {
@@ -695,7 +696,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -715,7 +716,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 

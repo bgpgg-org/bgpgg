@@ -37,7 +37,7 @@ impl StaleStrategy {
                 }
                 let mutable = Arc::make_mut(path);
                 if !mutable.attrs.communities.contains(&community::LLGR_STALE) {
-                    mutable.attrs.communities.push(community::LLGR_STALE);
+                    mutable.attrs_mut().communities.push(community::LLGR_STALE);
                 }
                 true
             }
@@ -202,7 +202,7 @@ mod tests {
         let mut route_no_llgr = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
             p.stale = true;
             p.local_path_id = Some(2);
-            p.attrs.communities.push(community::NO_LLGR);
+            p.attrs_mut().communities.push(community::NO_LLGR);
         })]);
         apply_stale_to_route(
             &mut route_no_llgr,
@@ -217,7 +217,7 @@ mod tests {
         let mut route_already = make_route(vec![create_test_path_with(peer_ip(), bgp_id(), |p| {
             p.stale = true;
             p.local_path_id = Some(3);
-            p.attrs.communities.push(community::LLGR_STALE);
+            p.attrs_mut().communities.push(community::LLGR_STALE);
         })]);
         apply_stale_to_route(
             &mut route_already,

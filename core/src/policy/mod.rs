@@ -174,6 +174,7 @@ pub(crate) mod test_helpers {
     use crate::rib::{Path, PathAttrs, RouteSource};
     use crate::rpki::vrp::RpkiValidation;
     use std::net::Ipv4Addr;
+    use std::sync::Arc;
 
     pub fn create_path(source: RouteSource) -> Path {
         Path {
@@ -181,7 +182,7 @@ pub(crate) mod test_helpers {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -197,7 +198,7 @@ pub(crate) mod test_helpers {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 
