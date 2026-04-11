@@ -66,6 +66,9 @@ pub enum PeerCommands {
         /// Rewrite NEXT_HOP to local address when advertising to this peer
         #[arg(long)]
         next_hop_self: bool,
+        /// Network interface for link-local IPv6 peers (e.g., "eth0")
+        #[arg(long)]
+        interface: Option<String>,
     },
 
     /// Remove a BGP peer
@@ -309,9 +312,7 @@ mod tests {
                 remote_as,
                 max_prefix_limit,
                 max_prefix_action,
-                port: _,
-                md5_key_file: _,
-                next_hop_self: _,
+                ..
             }) => {
                 assert_eq!(address, "10.0.0.1");
                 assert_eq!(remote_as, 65002);

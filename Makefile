@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt setup loadtest lint build-docker smoketest
+.PHONY: all build clean run test fmt setup loadtest lint build-docker systest systest-linux
 
 all: setup
 	cargo build --release
@@ -38,6 +38,10 @@ loadtest: setup
 	cargo build --bin bgpggd --release
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
 
-smoketest: setup
+systest: setup
 	cargo build --release --bin bgpggd --bin bgpgg
-	./smoketests/test.sh
+	./systests/basic.sh
+
+systest-linux: setup
+	cargo build --release --bin bgpggd --bin bgpgg
+	sudo ./systests/linux.sh
