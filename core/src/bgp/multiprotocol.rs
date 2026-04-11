@@ -142,7 +142,9 @@ impl AfiSafi {
     /// Returns None if either is absent or unrecognized.
     pub fn from_raw(afi: Option<u32>, safi: Option<u32>) -> Option<Self> {
         let afi = Afi::try_from(afi? as u16).ok()?;
-        let safi = Safi::try_from(safi? as u8).ok()?;
+        // Default to unicast when SAFI is not specified.
+        let safi_val = safi.unwrap_or(1);
+        let safi = Safi::try_from(safi_val as u8).ok()?;
         Some(AfiSafi { afi, safi })
     }
 

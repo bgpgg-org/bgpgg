@@ -3,6 +3,7 @@ members = [
     "core",
     "daemon",
     "cli",
+    "ggsh",
     "loadtests",
 ]
 resolver = "2"

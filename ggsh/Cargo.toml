@@ -1,0 +1,15 @@
+[package]
+name = "ggsh"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ggsh"
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+rustyline = { version = "15", features = ["derive"] }
