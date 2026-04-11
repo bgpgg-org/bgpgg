@@ -205,9 +205,18 @@ async fn test_peer_up_down() {
 
     setup_bmp_monitoring(&mut server1, &mut bmp_server).await;
 
-    // Add BGP peer (both directions for active-active peering)
+    // Server2 passive first, then server1 active. Avoids collision which can make
+    // message ordering non-deterministic.
+    server2
+        .add_peer_with_config(
+            &server1,
+            SessionConfig {
+                passive_mode: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
     server1.add_peer(&server2).await;
-    server2.add_peer(&server1).await;
 
     // Wait for peer to establish
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
@@ -226,7 +235,7 @@ async fn test_peer_up_down() {
                 peer_addr: server2.address,
                 peer_as: server2.asn,
                 peer_bgp_id: u32::from(server2.client.router_id),
-                peer_port: None, // Port is non-deterministic with active-active peering
+                peer_port: None, // Port is non-deterministic
             }),
             ExpectedBmpMessage::PeerDown(ExpectedPeerDown {
                 peer_addr: server2.address,
