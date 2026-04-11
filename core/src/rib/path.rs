@@ -25,6 +25,7 @@ use crate::rib::types::RouteSource;
 use crate::rpki::vrp::RpkiValidation;
 use std::cmp::Ordering;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 /// BGP path attributes - all BGP protocol attributes for a path.
 /// Compiler-checked equality (no manual PartialEq needed).
@@ -59,8 +60,9 @@ pub struct Path {
     pub local_path_id: Option<u32>,
     /// Path ID received from peer (None = no ADD-PATH negotiated)
     pub remote_path_id: Option<u32>,
-    /// BGP path attributes
-    pub attrs: PathAttrs,
+    /// BGP path attributes (Arc for copy-on-write: clone is ref-count bump,
+    /// deep copy only on mutation via attrs_mut()).
+    pub attrs: Arc<PathAttrs>,
     /// RFC 4724: Marked stale during Graceful Restart, cleared on replacement
     pub stale: bool,
     /// RFC 6811: RPKI origin validation state (local metadata, never serialized)
@@ -68,6 +70,12 @@ pub struct Path {
 }
 
 impl Path {
+    /// Mutable access to attrs with copy-on-write semantics.
+    /// If the Arc is shared, this clones the inner PathAttrs.
+    pub fn attrs_mut(&mut self) -> &mut PathAttrs {
+        Arc::make_mut(&mut self.attrs)
+    }
+
     // Accessor methods that delegate to attrs - keeps existing code working
     pub fn origin(&self) -> Origin {
         self.attrs.origin
@@ -165,7 +173,7 @@ impl Path {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin,
                 as_path,
                 next_hop,
@@ -181,7 +189,7 @@ impl Path {
                 originator_id: update_msg.originator_id(),
                 cluster_list: update_msg.cluster_list().unwrap_or_default(),
                 ls_attr: update_msg.ls_attr(),
-            },
+            }),
         })
     }
 
@@ -420,7 +428,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -443,7 +451,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 
@@ -480,10 +488,12 @@ mod tests {
         for (name, communities1, lp1, communities2, lp2, expected) in tests {
             let mut path1 = make_base_path();
             let mut path2 = make_base_path();
-            path1.attrs.communities = communities1;
-            path1.attrs.local_pref = Some(lp1);
-            path2.attrs.communities = communities2;
-            path2.attrs.local_pref = Some(lp2);
+            let attrs1 = path1.attrs_mut();
+            attrs1.communities = communities1;
+            attrs1.local_pref = Some(lp1);
+            let attrs2 = path2.attrs_mut();
+            attrs2.communities = communities2;
+            attrs2.local_pref = Some(lp2);
             assert_eq!(path1.best_path_cmp(&path2), expected, "test case: {}", name);
         }
     }
@@ -492,8 +502,8 @@ mod tests {
     fn test_local_pref_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.local_pref = Some(200);
-        path2.attrs.local_pref = Some(100);
+        path1.attrs_mut().local_pref = Some(200);
+        path2.attrs_mut().local_pref = Some(100);
 
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
     }
@@ -502,12 +512,12 @@ mod tests {
     fn test_as_path_length_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.as_path = vec![AsPathSegment {
+        path1.attrs_mut().as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
             asn_list: vec![65001],
         }];
-        path2.attrs.as_path = vec![AsPathSegment {
+        path2.attrs_mut().as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65001, 65002],
@@ -521,13 +531,13 @@ mod tests {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
         // path1: AS_SET with 3 ASNs (counts as length 1)
-        path1.attrs.as_path = vec![AsPathSegment {
+        path1.attrs_mut().as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSet,
             segment_len: 3,
             asn_list: vec![65001, 65002, 65003],
         }];
         // path2: AS_SEQUENCE with 2 ASNs (counts as length 2)
-        path2.attrs.as_path = vec![AsPathSegment {
+        path2.attrs_mut().as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65001, 65002],
@@ -541,8 +551,8 @@ mod tests {
     fn test_origin_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.origin = Origin::IGP;
-        path2.attrs.origin = Origin::INCOMPLETE;
+        path1.attrs_mut().origin = Origin::IGP;
+        path2.attrs_mut().origin = Origin::INCOMPLETE;
 
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
     }
@@ -551,8 +561,8 @@ mod tests {
     fn test_med_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.med = Some(50);
-        path2.attrs.med = Some(100);
+        path1.attrs_mut().med = Some(50);
+        path2.attrs_mut().med = Some(100);
 
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
     }
@@ -561,8 +571,8 @@ mod tests {
     fn test_med_missing_treated_as_zero() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.med = None; // treated as 0
-        path2.attrs.med = Some(100);
+        path1.attrs_mut().med = None; // treated as 0
+        path2.attrs_mut().med = Some(100);
 
         // path1 (MED=0) should be preferred over path2 (MED=100)
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
@@ -572,8 +582,8 @@ mod tests {
     fn test_local_vs_ebgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Local;
-        path2.attrs.source = RouteSource::Ebgp {
+        path1.attrs_mut().source = RouteSource::Local;
+        path2.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(1),
         };
@@ -585,8 +595,8 @@ mod tests {
     fn test_local_vs_ibgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Local;
-        path2.attrs.source = RouteSource::Ibgp {
+        path1.attrs_mut().source = RouteSource::Local;
+        path2.attrs_mut().source = RouteSource::Ibgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(1),
             rr_client: false,
@@ -599,11 +609,11 @@ mod tests {
     fn test_ebgp_vs_ibgp_ordering() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Ebgp {
+        path1.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(1),
         };
-        path2.attrs.source = RouteSource::Ibgp {
+        path2.attrs_mut().source = RouteSource::Ibgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(2),
             rr_client: false,
@@ -616,11 +626,11 @@ mod tests {
     fn test_peer_bgp_id_tiebreaker() {
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Ebgp {
+        path1.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(1),
         };
-        path2.attrs.source = RouteSource::Ebgp {
+        path2.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(2),
         };
@@ -634,19 +644,21 @@ mod tests {
         // RFC 4456: iBGP routes should use ORIGINATOR_ID for tie-breaking
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Ibgp {
+        let attrs1 = path1.attrs_mut();
+        attrs1.source = RouteSource::Ibgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(10), // Higher peer BGP ID
             rr_client: false,
         };
-        path2.attrs.source = RouteSource::Ibgp {
+        attrs1.originator_id = Some(test_bgp_id(1));
+        let attrs2 = path2.attrs_mut();
+        attrs2.source = RouteSource::Ibgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(1), // Lower peer BGP ID
             rr_client: false,
         };
         // path1 has lower ORIGINATOR_ID, should win despite higher peer BGP ID
-        path1.attrs.originator_id = Some(test_bgp_id(1));
-        path2.attrs.originator_id = Some(test_bgp_id(2));
+        attrs2.originator_id = Some(test_bgp_id(2));
 
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
     }
@@ -656,12 +668,12 @@ mod tests {
         // RFC 4456: If no ORIGINATOR_ID, fall back to peer's BGP ID
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.source = RouteSource::Ibgp {
+        path1.attrs_mut().source = RouteSource::Ibgp {
             peer_ip: test_ip(1),
             bgp_id: test_bgp_id(1),
             rr_client: false,
         };
-        path2.attrs.source = RouteSource::Ibgp {
+        path2.attrs_mut().source = RouteSource::Ibgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(2),
             rr_client: false,
@@ -675,8 +687,8 @@ mod tests {
         // RFC 4456: Prefer shorter CLUSTER_LIST
         let mut path1 = make_base_path();
         let mut path2 = make_base_path();
-        path1.attrs.cluster_list = vec![test_bgp_id(1)];
-        path2.attrs.cluster_list = vec![test_bgp_id(1), test_bgp_id(2)];
+        path1.attrs_mut().cluster_list = vec![test_bgp_id(1)];
+        path2.attrs_mut().cluster_list = vec![test_bgp_id(1), test_bgp_id(2)];
 
         assert_eq!(path1.best_path_cmp(&path2), Ordering::Greater);
     }
@@ -694,7 +706,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -714,7 +726,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         };
         let prefix: IpNetwork = "10.0.0.0/24".parse().unwrap();
         let update = UpdateMessage::new(&path, vec![prefix], DEFAULT_FORMAT);
@@ -768,7 +780,7 @@ mod tests {
 
         for (name, as_path, expected) in tests {
             let mut path = make_base_path();
-            path.attrs.as_path = as_path;
+            path.attrs_mut().as_path = as_path;
             assert_eq!(path.neighboring_as(), expected, "test case: {}", name);
         }
     }
@@ -855,14 +867,16 @@ mod tests {
 
         for (name, src1, as_path1, med1, src2, as_path2, med2, expected) in tests {
             let mut path1 = make_base_path();
-            path1.attrs.source = src1;
-            path1.attrs.as_path = as_path1;
-            path1.attrs.med = med1;
+            let attrs1 = path1.attrs_mut();
+            attrs1.source = src1;
+            attrs1.as_path = as_path1;
+            attrs1.med = med1;
 
             let mut path2 = make_base_path();
-            path2.attrs.source = src2;
-            path2.attrs.as_path = as_path2;
-            path2.attrs.med = med2;
+            let attrs2 = path2.attrs_mut();
+            attrs2.source = src2;
+            attrs2.as_path = as_path2;
+            attrs2.med = med2;
 
             assert_eq!(path1.best_path_cmp(&path2), expected, "test case: {}", name);
         }
@@ -877,14 +891,14 @@ mod tests {
         assert!(path1.matches_remote(&path2));
 
         // Different source -> no match
-        path2.attrs.source = RouteSource::Ebgp {
+        path2.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(2),
         };
         assert!(!path1.matches_remote(&path2));
 
         // Same source, different remote_path_id -> no match
-        path2.attrs.source = path1.attrs.source;
+        path2.attrs_mut().source = path1.attrs.source;
         path2.remote_path_id = Some(1);
         assert!(!path1.matches_remote(&path2));
 
@@ -896,7 +910,7 @@ mod tests {
         assert!(path3.matches_remote(&path4));
 
         // Same remote_path_id, different source -> no match
-        path4.attrs.source = RouteSource::Ebgp {
+        path4.attrs_mut().source = RouteSource::Ebgp {
             peer_ip: test_ip(2),
             bgp_id: test_bgp_id(2),
         };
@@ -979,7 +993,7 @@ mod tests {
 
         for (name, as_path, expected) in tests {
             let mut path = make_base_path();
-            path.attrs.as_path = as_path;
+            path.attrs_mut().as_path = as_path;
             assert_eq!(path.origin_as(), expected, "test case: {}", name);
         }
     }

@@ -68,6 +68,7 @@ async fn setup_llgr(gr_restart_time: u16, llgr_stale_time: u32) -> (TestServer, 
     )
     .await;
     poll_peer_established(&server, "127.0.0.2").await;
+    apply_import_accept_all(&server, "127.0.0.2").await;
     (server, fake)
 }
 
@@ -162,6 +163,7 @@ async fn test_llgr_ignored_without_gr() {
     .await;
 
     poll_peers(&server, vec![fake.to_peer(BgpState::Established)]).await;
+    apply_import_accept_all(&server, "127.0.0.2").await;
 
     announce_default_route(&server, &mut fake, Ipv4Addr::new(127, 0, 0, 2)).await;
 
@@ -317,6 +319,7 @@ async fn test_llgr_not_propagated_to_non_llgr_peer() {
     )
     .await;
     poll_peer_established(&server1, "127.0.0.3").await;
+    apply_import_accept_all(&server1, "127.0.0.3").await;
     announce_default_route(&server1, &mut fake, Ipv4Addr::new(127, 0, 0, 3)).await;
 
     // S2 should receive the route from S1
@@ -615,6 +618,7 @@ async fn test_llgr_stale_received_from_peer() {
     )
     .await;
     poll_peer_established(&server1, "127.0.0.4").await;
+    apply_import_accept_all(&server1, "127.0.0.4").await;
 
     let update = build_raw_update(
         &[],

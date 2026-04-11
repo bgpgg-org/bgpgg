@@ -405,19 +405,30 @@ async fn test_add_policy() {
     assert!(result.is_ok());
 
     // Verify the policy was added
-    let policies = server.client.list_policies().await.unwrap();
-
-    let expected = vec![PolicyInfo {
-        name: "customer-import".to_string(),
-        statements: vec![expected_statement_with_prefix_set(
-            "customer-prefixes",
-            "any",
-            true,
-            Some(200),
-        )],
-    }];
-
-    assert_eq!(policies, expected);
+    let mut policies = server.client.list_policies().await.unwrap();
+    policies.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        policies,
+        vec![
+            PolicyInfo {
+                name: "customer-import".to_string(),
+                statements: vec![expected_statement_with_prefix_set(
+                    "customer-prefixes",
+                    "any",
+                    true,
+                    Some(200),
+                )],
+            },
+            PolicyInfo {
+                name: "default-deny-all".to_string(),
+                statements: vec![expected_simple_statement_info(None, false, None)],
+            },
+            PolicyInfo {
+                name: "default-permit-all".to_string(),
+                statements: vec![expected_simple_statement_info(None, true, None)],
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -492,36 +503,39 @@ async fn test_list_policies() {
         .await
         .unwrap();
 
-    // List and verify
-    let policies = server.client.list_policies().await.unwrap();
-
-    let expected = vec![
-        PolicyInfo {
-            name: "policy1".to_string(),
-            statements: vec![expected_statement_with_prefix_set(
-                "test-prefixes",
-                "any",
-                true,
-                None,
-            )],
-        },
-        PolicyInfo {
-            name: "policy2".to_string(),
-            statements: vec![expected_simple_statement_info(
-                Some("192.168.0.0/16"),
-                false,
-                None,
-            )],
-        },
-    ];
-
-    // Sort for consistent comparison
-    let mut policies_sorted = policies.clone();
-    policies_sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut expected_sorted = expected.clone();
-    expected_sorted.sort_by(|a, b| a.name.cmp(&b.name));
-
-    assert_eq!(policies_sorted, expected_sorted);
+    // List and verify all policies present (user + built-in)
+    let mut policies = server.client.list_policies().await.unwrap();
+    policies.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        policies,
+        vec![
+            PolicyInfo {
+                name: "default-deny-all".to_string(),
+                statements: vec![expected_simple_statement_info(None, false, None)],
+            },
+            PolicyInfo {
+                name: "default-permit-all".to_string(),
+                statements: vec![expected_simple_statement_info(None, true, None)],
+            },
+            PolicyInfo {
+                name: "policy1".to_string(),
+                statements: vec![expected_statement_with_prefix_set(
+                    "test-prefixes",
+                    "any",
+                    true,
+                    None,
+                )],
+            },
+            PolicyInfo {
+                name: "policy2".to_string(),
+                statements: vec![expected_simple_statement_info(
+                    Some("192.168.0.0/16"),
+                    false,
+                    None,
+                )],
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -553,22 +567,32 @@ async fn test_remove_policy() {
         .await
         .unwrap();
 
-    let expected_after_removal = vec![PolicyInfo {
-        name: "policy2".to_string(),
-        statements: vec![expected_simple_statement_info(
-            Some("192.168.0.0/16"),
-            false,
-            None,
-        )],
-    }];
+    let expected_after_removal = vec![
+        PolicyInfo {
+            name: "default-deny-all".to_string(),
+            statements: vec![expected_simple_statement_info(None, false, None)],
+        },
+        PolicyInfo {
+            name: "default-permit-all".to_string(),
+            statements: vec![expected_simple_statement_info(None, true, None)],
+        },
+        PolicyInfo {
+            name: "policy2".to_string(),
+            statements: vec![expected_simple_statement_info(
+                Some("192.168.0.0/16"),
+                false,
+                None,
+            )],
+        },
+    ];
 
     // Remove twice to test idempotency
     for i in 1..=2 {
         let result = server.client.remove_policy("policy1".to_string()).await;
         assert!(result.is_ok(), "remove {} should succeed", i);
 
-        // Verify state after each removal
-        let policies = server.client.list_policies().await.unwrap();
+        let mut policies = server.client.list_policies().await.unwrap();
+        policies.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(policies, expected_after_removal, "after remove {}", i);
     }
 }
@@ -612,11 +636,11 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    // Assert: import policy is set, export is empty
+    // Assert: import policy replaced, export unchanged from helper setup
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);
-    assert_eq!(peers[0].export_policies, Vec::<String>::new());
+    assert_eq!(peers[0].export_policies, vec!["permit-all"]);
 
     // Set export policy
     server1
@@ -630,7 +654,7 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    // Assert: both import and export policies are set
+    // Assert: both user policies set
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);

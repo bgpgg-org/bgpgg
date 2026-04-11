@@ -72,7 +72,7 @@ pub(crate) mod test_helpers {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -92,7 +92,7 @@ pub(crate) mod test_helpers {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         })
     }
 
@@ -106,7 +106,7 @@ pub(crate) mod test_helpers {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![AsPathSegment {
                     segment_type: AsPathSegmentType::AsSequence,
@@ -126,7 +126,7 @@ pub(crate) mod test_helpers {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         };
         f(&mut path);
         Arc::new(path)

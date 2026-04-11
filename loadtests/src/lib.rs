@@ -32,6 +32,7 @@ use bgpgg::rib::{Path, PathAttrs, RouteSource};
 use bgpgg::rpki::vrp::RpkiValidation;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -166,7 +167,7 @@ pub fn create_update_message(
         remote_path_id: None,
         stale: false,
         rpki_state: RpkiValidation::NotFound,
-        attrs: PathAttrs {
+        attrs: Arc::new(PathAttrs {
             origin,
             as_path: as_path_segments,
             next_hop: NextHopAddr::Ipv4(next_hop),
@@ -182,7 +183,7 @@ pub fn create_update_message(
             originator_id: None,
             cluster_list: vec![],
             ls_attr: None,
-        },
+        }),
     };
 
     let update = UpdateMessage::new(
@@ -206,15 +207,16 @@ pub fn transform_path_for_ebgp_export(
     local_router_id: Ipv4Addr,
 ) -> Path {
     let mut exported = path.clone();
+    let attrs = exported.attrs_mut();
 
     // Prepend local ASN to AS_PATH
-    if !exported.attrs.as_path.is_empty() {
-        let first_segment = &exported.attrs.as_path[0];
+    if !attrs.as_path.is_empty() {
+        let first_segment = &attrs.as_path[0];
         if first_segment.segment_type == AsPathSegmentType::AsSequence {
             // Prepend to existing AS_SEQUENCE
             let mut new_asn_list = vec![local_asn as u32];
             new_asn_list.extend_from_slice(&first_segment.asn_list);
-            exported.attrs.as_path[0] = AsPathSegment {
+            attrs.as_path[0] = AsPathSegment {
                 segment_type: AsPathSegmentType::AsSequence,
                 segment_len: new_asn_list.len() as u8,
                 asn_list: new_asn_list,
@@ -226,12 +228,12 @@ pub fn transform_path_for_ebgp_export(
                 segment_len: 1,
                 asn_list: vec![local_asn as u32],
             }];
-            new_segments.extend_from_slice(&exported.attrs.as_path);
-            exported.attrs.as_path = new_segments;
+            new_segments.extend_from_slice(&attrs.as_path);
+            attrs.as_path = new_segments;
         }
     } else {
         // Empty AS_PATH, create new segment
-        exported.attrs.as_path = vec![AsPathSegment {
+        attrs.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
             asn_list: vec![local_asn as u32],
@@ -239,13 +241,13 @@ pub fn transform_path_for_ebgp_export(
     }
 
     // Rewrite next_hop to local router ID
-    exported.attrs.next_hop = NextHopAddr::Ipv4(local_router_id);
+    attrs.next_hop = NextHopAddr::Ipv4(local_router_id);
 
     // Remove local_pref (not used in eBGP)
-    exported.attrs.local_pref = None;
+    attrs.local_pref = None;
 
     // Remove MED (typically not propagated across AS boundaries)
-    exported.attrs.med = None;
+    attrs.med = None;
 
     exported
 }
@@ -303,7 +305,7 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
         remote_path_id: None,
         stale: false,
         rpki_state: RpkiValidation::NotFound,
-        attrs: PathAttrs {
+        attrs: Arc::new(PathAttrs {
             origin,
             as_path,
             next_hop: NextHopAddr::Ipv4(next_hop),
@@ -319,6 +321,6 @@ pub fn proto_path_to_rib_path(proto_path: &bgpgg::grpc::proto::Path) -> Result<P
             originator_id: None,
             cluster_list: vec![],
             ls_attr: None,
-        },
+        }),
     })
 }

@@ -909,6 +909,11 @@ async fn test_med_comparison_restricted_to_same_as() {
     server3.add_peer(&server4).await;
     server4.add_peer(&server3).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&server1, &server4).await;
+    apply_permit_all_routes(&server2, &server4).await;
+    apply_permit_all_routes(&server3, &server4).await;
+
     // Wait for all peers to establish
     poll_until(
         || async {
@@ -1324,6 +1329,11 @@ async fn test_four_octet_asn_propagation() {
     }
     let server = start_test_server(config).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    for addr in ["127.0.0.1", "127.0.0.2", "127.0.0.3"] {
+        apply_permit_all(&server, addr).await;
+    }
+
     let mut old_speaker = FakePeer::connect_and_handshake(
         None,
         &server,
@@ -1433,6 +1443,11 @@ async fn test_four_octet_asn_malformed_as4_path() {
     }
     let server = start_test_server(config).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    for addr in ["127.0.0.1", "127.0.0.2"] {
+        apply_permit_all(&server, addr).await;
+    }
+
     let mut fake_peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
             .await;
@@ -1512,6 +1527,11 @@ async fn test_four_octet_asn_malformed_as4_aggregator() {
         });
     }
     let server = start_test_server(config).await;
+
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    for addr in ["127.0.0.1", "127.0.0.2"] {
+        apply_permit_all(&server, addr).await;
+    }
 
     let mut fake_peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)

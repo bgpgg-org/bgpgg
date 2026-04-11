@@ -75,6 +75,11 @@ async fn setup_rs(
                 },
             )
             .await;
+
+        // RFC 8212: eBGP peers need explicit accept-all policies
+        if rs.asn != client.asn {
+            apply_permit_all_routes(rs, client).await;
+        }
     }
 
     let expected: Vec<_> = clients
@@ -452,6 +457,9 @@ async fn test_rs_unknown_attr_transparency() {
         .await
         .unwrap();
 
+    // RFC 8212: eBGP FakePeer needs explicit accept-all policies
+    apply_permit_all(&rs, "127.0.0.5").await;
+
     let mut fake = FakePeer::connect_and_handshake(
         Some("127.0.0.5"),
         &rs,
@@ -565,6 +573,10 @@ async fn test_rs_well_known_communities_block_propagation() {
             )
             .await
             .unwrap();
+
+        // RFC 8212: eBGP FakePeer needs explicit accept-all policies
+        apply_import_accept_all(&rs, "127.0.0.5").await;
+        apply_export_accept_all(&rs, "127.0.0.5").await;
 
         let mut fake = FakePeer::connect_and_handshake(
             Some("127.0.0.5"),

@@ -546,37 +546,29 @@ impl BgpServer {
         })
     }
 
-    /// Resolve import policies for a peer from config
-    pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
+    /// Resolve policies for a peer: user-configured first, then session-type fallback.
+    /// RFC 8212: eBGP peers get reject-all fallback, iBGP peers get accept-all.
+    pub(crate) fn resolve_policies(
+        &self,
+        policy_names: &[String],
+        is_ebgp: bool,
+    ) -> Vec<Arc<Policy>> {
         let mut policies = Vec::new();
 
-        // User policies run first
-        for name in &peer_config.import_policy {
+        for name in policy_names {
             if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
             } else {
-                error!(policy = name, "import policy not found");
+                error!(policy = name, "policy not found");
             }
         }
 
-        // Unconditional accept as fallback
-        policies.push(Arc::new(Policy::default_in()));
-
-        policies
-    }
-
-    /// Resolve export policies for a peer from config
-    pub(crate) fn resolve_export_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        let mut policies = vec![Arc::new(Policy::default_out())];
-
-        // Append user-configured policies
-        for name in &peer_config.export_policy {
-            if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
-                policies.push(policy);
-            } else {
-                error!(policy = name, "export policy not found");
-            }
-        }
+        let fallback = if is_ebgp {
+            Policy::deny_all()
+        } else {
+            Policy::permit_all()
+        };
+        policies.push(Arc::new(fallback));
 
         policies
     }
@@ -985,6 +977,7 @@ impl BgpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::{Policy, DEFAULT_DENY_ALL, DEFAULT_PERMIT_ALL};
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
@@ -1008,6 +1001,60 @@ mod tests {
         let mut server = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
+    }
+
+    #[test]
+    fn test_resolve_policies() {
+        struct TestCase {
+            desc: &'static str,
+            user_policies: Vec<&'static str>,
+            is_ebgp: bool,
+            expected_names: Vec<&'static str>,
+        }
+
+        let cases = vec![
+            TestCase {
+                desc: "eBGP with user policy -> user first, reject-all fallback",
+                user_policies: vec!["my-export"],
+                is_ebgp: true,
+                expected_names: vec!["my-export", DEFAULT_DENY_ALL],
+            },
+            TestCase {
+                desc: "eBGP no user policy -> reject-all only (RFC 8212)",
+                user_policies: vec![],
+                is_ebgp: true,
+                expected_names: vec![DEFAULT_DENY_ALL],
+            },
+            TestCase {
+                desc: "iBGP with user policy -> user first, accept-all fallback",
+                user_policies: vec!["my-import"],
+                is_ebgp: false,
+                expected_names: vec!["my-import", DEFAULT_PERMIT_ALL],
+            },
+            TestCase {
+                desc: "iBGP no user policy -> accept-all only",
+                user_policies: vec![],
+                is_ebgp: false,
+                expected_names: vec![DEFAULT_PERMIT_ALL],
+            },
+        ];
+
+        for tc in cases {
+            let mut server = make_server();
+
+            for name in &tc.user_policies {
+                server
+                    .policy_ctx
+                    .policies
+                    .insert(name.to_string(), Arc::new(Policy::new(name.to_string())));
+            }
+
+            let policy_names: Vec<String> =
+                tc.user_policies.iter().map(|n| n.to_string()).collect();
+            let resolved = server.resolve_policies(&policy_names, tc.is_ebgp);
+            let names: Vec<&str> = resolved.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, tc.expected_names, "failed: {}", tc.desc);
+        }
     }
 
     #[test]

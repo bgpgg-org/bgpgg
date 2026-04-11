@@ -21,6 +21,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 /// Configuration for route generation
 #[derive(Debug, Clone)]
@@ -143,7 +144,7 @@ impl PeerRoute {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: self.origin,
                 as_path: as_path_segments,
                 next_hop: NextHopAddr::Ipv4(next_hop),
@@ -159,7 +160,7 @@ impl PeerRoute {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 }

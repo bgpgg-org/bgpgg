@@ -931,6 +931,7 @@ mod tests {
     use crate::rib::{PathAttrs, RouteSource};
     use crate::rpki::vrp::RpkiValidation;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
 
     /// Test helper to create a base Path with sensible defaults
     fn test_path() -> Path {
@@ -939,7 +940,7 @@ mod tests {
             remote_path_id: None,
             stale: false,
             rpki_state: RpkiValidation::NotFound,
-            attrs: PathAttrs {
+            attrs: Arc::new(PathAttrs {
                 origin: Origin::IGP,
                 as_path: vec![],
                 next_hop: NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -955,7 +956,7 @@ mod tests {
                 originator_id: None,
                 cluster_list: vec![],
                 ls_attr: None,
-            },
+            }),
         }
     }
 
@@ -1340,7 +1341,7 @@ mod tests {
     #[test]
     fn test_get_local_pref() {
         let mut path = test_path();
-        path.attrs.local_pref = Some(200);
+        path.attrs_mut().local_pref = Some(200);
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         assert_eq!(msg.local_pref(), Some(200));
 
@@ -1352,7 +1353,7 @@ mod tests {
     #[test]
     fn test_get_med() {
         let mut path = test_path();
-        path.attrs.med = Some(50);
+        path.attrs_mut().med = Some(50);
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
         assert_eq!(msg.med(), Some(50));
 
@@ -1373,10 +1374,11 @@ mod tests {
 
         for (origin, local_pref, med, atomic_aggregate) in test_cases {
             let mut path = test_path();
-            path.attrs.origin = origin;
-            path.attrs.local_pref = local_pref;
-            path.attrs.med = med;
-            path.attrs.atomic_aggregate = atomic_aggregate;
+            let attrs = path.attrs_mut();
+            attrs.origin = origin;
+            attrs.local_pref = local_pref;
+            attrs.med = med;
+            attrs.atomic_aggregate = atomic_aggregate;
             let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
             let bytes = msg.to_bytes();
@@ -1398,9 +1400,10 @@ mod tests {
         let cluster_list = vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)];
 
         let mut path = test_path();
-        path.attrs.local_pref = Some(100);
-        path.attrs.originator_id = Some(originator_id);
-        path.attrs.cluster_list = cluster_list.clone();
+        let attrs = path.attrs_mut();
+        attrs.local_pref = Some(100);
+        attrs.originator_id = Some(originator_id);
+        attrs.cluster_list = cluster_list.clone();
         let msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let bytes = msg.to_bytes();
@@ -1974,7 +1977,7 @@ mod tests {
     #[test]
     fn test_update_message_get_leftmost_as() {
         let mut path = test_path();
-        path.attrs.as_path = vec![AsPathSegment {
+        path.attrs_mut().as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65001, 65002],
@@ -2086,13 +2089,14 @@ mod tests {
         let next_hop = NextHopAddr::Ipv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
 
         let mut path = test_path();
-        path.attrs.as_path = vec![AsPathSegment {
+        let attrs = path.attrs_mut();
+        attrs.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
             asn_list: vec![65002],
         }];
-        path.attrs.next_hop = next_hop;
-        path.attrs.local_pref = Some(100);
+        attrs.next_hop = next_hop;
+        attrs.local_pref = Some(100);
         let msg = UpdateMessage::new(&path, vec![ipv6_prefix], DEFAULT_FORMAT);
 
         let bytes = msg.to_bytes();
@@ -2110,12 +2114,13 @@ mod tests {
 
         // Create an UPDATE with AS4_PATH and AS4_AGGREGATOR (protocol violation from NEW speaker)
         let mut path = test_path();
-        path.attrs.as_path = vec![AsPathSegment {
+        let attrs = path.attrs_mut();
+        attrs.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 1,
             asn_list: vec![65001],
         }];
-        path.attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
+        attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
         let mut msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         // Manually add AS4_PATH and AS4_AGGREGATOR to simulate receiving from NEW speaker
@@ -2158,15 +2163,16 @@ mod tests {
     fn test_strip_as4_attributes_preserves_other_attributes() {
         // Create UPDATE with various attributes but no AS4 attributes
         let mut path = test_path();
-        path.attrs.as_path = vec![AsPathSegment {
+        let attrs = path.attrs_mut();
+        attrs.as_path = vec![AsPathSegment {
             segment_type: AsPathSegmentType::AsSequence,
             segment_len: 2,
             asn_list: vec![65001, 65002],
         }];
-        path.attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
-        path.attrs.local_pref = Some(100);
-        path.attrs.med = Some(50);
-        path.attrs.communities = vec![65001u32];
+        attrs.next_hop = NextHopAddr::Ipv4(Ipv4Addr::new(192, 168, 1, 1));
+        attrs.local_pref = Some(100);
+        attrs.med = Some(50);
+        attrs.communities = vec![65001u32];
         let mut msg = UpdateMessage::new(&path, vec![], DEFAULT_FORMAT);
 
         let attr_count_before = msg.path_attributes.len();
@@ -2361,7 +2367,7 @@ mod tests {
         for (desc, prefixes, next_hop) in cases {
             let mut path = test_path();
             path.local_path_id = Some(42);
-            path.attrs.next_hop = next_hop;
+            path.attrs_mut().next_hop = next_hop;
 
             let msg = UpdateMessage::new(&path, prefixes.clone(), ADDPATH_FORMAT);
             let expected_nlri: Vec<Nlri> = prefixes
@@ -2559,9 +2565,9 @@ mod tests {
 
             let mut path = test_path();
             if tc.has_ls_attr {
-                path.attrs.ls_attr = Some(build_ls_attr(vec![LsAttrTlv::Node(NodeAttrTlv::Name(
-                    "test-node".to_string(),
-                ))]));
+                path.attrs_mut().ls_attr = Some(build_ls_attr(vec![LsAttrTlv::Node(
+                    NodeAttrTlv::Name("test-node".to_string()),
+                )]));
             }
 
             let ls_family = AfiSafi::new(Afi::LinkState, Safi::LinkState);

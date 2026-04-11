@@ -53,27 +53,36 @@ const ROUTE_GEN_SEED: u64 = 12345; // Reproducible route generation
 
 // === Helper Functions ===
 
-/// Create reject-all export policy to prevent route redistribution
-async fn create_reject_all_policy(client: &mut BgpClient) {
-    tracing::info!("Creating reject-all export policy...");
+/// Create policies for eBGP load testing (RFC 8212 requires explicit policies).
+async fn create_load_test_policies(client: &mut BgpClient) {
+    tracing::info!("Creating load test policies...");
     client
         .add_policy(bgpgg::grpc::proto::AddPolicyRequest {
             name: "reject-all".to_string(),
             statements: vec![bgpgg::grpc::proto::StatementConfig {
                 conditions: None,
                 actions: Some(bgpgg::grpc::proto::ActionsConfig {
-                    accept: None,
                     reject: Some(true),
-                    local_pref: None,
-                    med: None,
-                    add_communities: vec![],
-                    remove_communities: vec![],
-                    set_rpki_state: None,
+                    ..Default::default()
                 }),
             }],
         })
         .await
         .expect("Failed to create reject-all policy");
+
+    client
+        .add_policy(bgpgg::grpc::proto::AddPolicyRequest {
+            name: "accept-all".to_string(),
+            statements: vec![bgpgg::grpc::proto::StatementConfig {
+                conditions: None,
+                actions: Some(bgpgg::grpc::proto::ActionsConfig {
+                    accept: Some(true),
+                    ..Default::default()
+                }),
+            }],
+        })
+        .await
+        .expect("Failed to create accept-all policy");
 }
 
 /// Generate routes and calculate expected best paths
@@ -200,7 +209,16 @@ async fn establish_upstream_peers(
             Ok(conn) => {
                 tracing::info!("Upstream peer {} connected", i);
 
-                // Apply reject-all export policy
+                // Upstream: accept all imports, reject all exports
+                client
+                    .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
+                        peer_address: bind_addr.ip().to_string(),
+                        direction: "import".to_string(),
+                        policy_names: vec!["accept-all".to_string()],
+                        default_action: None,
+                    })
+                    .await
+                    .expect("Failed to set import policy");
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
@@ -522,7 +540,7 @@ async fn test_route_ingestion_load() {
     tracing::info!("bgpggd listening on BGP port {}", bgpgg.bgp_port);
 
     // Create reject-all export policy
-    create_reject_all_policy(&mut client).await;
+    create_load_test_policies(&mut client).await;
 
     // Generate routes and calculate expected best paths
     let (peer_route_sets, expected_best_paths) =
@@ -628,7 +646,7 @@ async fn test_route_convergence() {
     tracing::info!("bgpggd listening on BGP port {}", bgpgg.bgp_port);
 
     // Create reject-all export policy
-    create_reject_all_policy(&mut client).await;
+    create_load_test_policies(&mut client).await;
 
     // Generate routes and calculate expected best paths
     let (peer_route_sets, expected_best_paths) =
@@ -671,7 +689,16 @@ async fn test_route_convergence() {
         {
             Ok(conn) => {
                 tracing::info!("Downstream peer {} connected from {}", i, bind_addr.ip());
-                // NO reject-all export policy for downstream - they should receive routes
+                // Downstream: accept-all export so routes propagate
+                client
+                    .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
+                        peer_address: bind_addr.ip().to_string(),
+                        direction: "export".to_string(),
+                        policy_names: vec!["accept-all".to_string()],
+                        default_action: None,
+                    })
+                    .await
+                    .expect("Failed to set downstream export policy");
                 downstream_connections.push(conn);
             }
             Err(e) => {

@@ -632,6 +632,7 @@ async fn test_update_optional_attribute_error() {
     // MED is now treat-as-withdraw (RFC 7606 Section 7.4), so only
     // AGGREGATOR remains as a true attribute-discard case here.
     let (server, mut peer) = setup_server_and_fake_peer().await;
+    apply_import_accept_all(&server, &peer.address).await;
 
     let invalid_attr = build_attr_bytes(
         attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
@@ -689,6 +690,7 @@ async fn test_update_optional_attribute_error() {
 #[tokio::test]
 async fn test_update_duplicate_attribute() {
     let (server, mut peer) = setup_server_and_fake_peer().await;
+    apply_import_accept_all(&server, &peer.address).await;
 
     // Send UPDATE with two ORIGIN attributes (duplicate) - silently keep first
     let nlri = &[24, 10, 11, 12];
@@ -817,6 +819,7 @@ async fn test_update_multicast_nlri_ignored() {
 async fn test_update_ebgp_local_pref_stripped() {
     // setup_server_and_fake_peer: server=AS65001, peer=AS65002 -> eBGP
     let (server, mut peer) = setup_server_and_fake_peer().await;
+    apply_import_accept_all(&server, &peer.address).await;
 
     // Send UPDATE with LOCAL_PREF=200 (should be stripped for eBGP)
     let nlri = &[24, 10, 11, 12]; // 10.11.12.0/24
@@ -1576,6 +1579,7 @@ async fn test_malformed_attribute_actions() {
             case.capabilities,
         )
         .await;
+        apply_import_accept_all(&server, &peer.address).await;
 
         // First install the route with a valid UPDATE
         peer.send_raw(&build_raw_update(
@@ -1695,6 +1699,7 @@ async fn test_malformed_withdrawn_routes_nlri() {
     let mut peer =
         FakePeer::connect_and_handshake(None, &server, 65002, Ipv4Addr::new(2, 2, 2, 2), None)
             .await;
+    apply_import_accept_all(&server, &peer.address).await;
 
     // First install a route via valid UPDATE
     peer.send_raw(&build_raw_update(
