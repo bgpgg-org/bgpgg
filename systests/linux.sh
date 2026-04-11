@@ -83,7 +83,7 @@ test_link_local_peering() {
     PEER1_PID=$!
 
     echo "Starting peer2 in $NS2..."
-    ip netns exec "$NS2" "$BGPGGD" --asn 65002 --router-id 2.2.2.2 \
+    ip netns exec "$NS2" "$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
         --listen-addr "[::]:13179" \
         --grpc-listen-addr "127.0.0.2:50072" &
     PEER2_PID=$!
@@ -93,7 +93,7 @@ test_link_local_peering() {
     poll_until "peer2 gRPC not ready" 10 "ip netns exec $NS2 $BGPGG --addr $p2_grpc peer list"
 
     echo "Adding peers with link-local addresses..."
-    ip netns exec "$NS1" "$BGPGG" --addr "$p1_grpc" peer add "$ll2" 65002 --port 13179 --interface "$VETH1"
+    ip netns exec "$NS1" "$BGPGG" --addr "$p1_grpc" peer add "$ll2" 65001 --port 13179 --interface "$VETH1"
     ip netns exec "$NS2" "$BGPGG" --addr "$p2_grpc" peer add "$ll1" 65001 --port 13179 --interface "$VETH2"
 
     echo "Waiting for BGP session to establish..."

@@ -81,6 +81,9 @@ async fn test_max_prefix_limit() {
             .await
             .expect("Failed to add peer");
 
+        // RFC 8212: eBGP peers need explicit accept-all policies
+        apply_permit_all_routes(&server1, &server2).await;
+
         // Wait for peering to establish
         poll_until(
             || async { verify_peers(&server2, vec![server1.to_peer(BgpState::Established)]).await },

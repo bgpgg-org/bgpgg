@@ -546,40 +546,29 @@ impl BgpServer {
         })
     }
 
-    /// Resolve import policies for a peer from config
-    pub(crate) fn resolve_import_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
+    /// Resolve policies for a peer: user-configured first, then session-type fallback.
+    /// RFC 8212: eBGP peers get reject-all fallback, iBGP peers get accept-all.
+    pub(crate) fn resolve_policies(
+        &self,
+        policy_names: &[String],
+        is_ebgp: bool,
+    ) -> Vec<Arc<Policy>> {
         let mut policies = Vec::new();
 
-        // User policies run first
-        for name in &peer_config.import_policy {
+        for name in policy_names {
             if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
             } else {
-                error!(policy = name, "import policy not found");
+                error!(policy = name, "policy not found");
             }
         }
 
-        // Unconditional accept as fallback
-        policies.push(Arc::new(Policy::default_in()));
-
-        policies
-    }
-
-    /// Resolve export policies for a peer from config
-    pub(crate) fn resolve_export_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        let mut policies = Vec::new();
-
-        // User-configured policies first so they can accept/reject before the default
-        for name in &peer_config.export_policy {
-            if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
-                policies.push(policy);
-            } else {
-                error!(policy = name, "export policy not found");
-            }
-        }
-
-        // Built-in default (accept-all) as fallback for routes not matched by user policies
-        policies.push(Arc::new(Policy::default_out()));
+        let fallback = if is_ebgp {
+            Policy::deny_all()
+        } else {
+            Policy::permit_all()
+        };
+        policies.push(Arc::new(fallback));
 
         policies
     }
@@ -988,7 +977,7 @@ impl BgpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{Policy, BUILTIN_POLICY_DEFAULT_OUT};
+    use crate::policy::{Policy, DEFAULT_DENY_ALL, DEFAULT_PERMIT_ALL};
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
@@ -1015,23 +1004,38 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_export_policies_ordering() {
+    fn test_resolve_policies() {
         struct TestCase {
             desc: &'static str,
             user_policies: Vec<&'static str>,
+            is_ebgp: bool,
             expected_names: Vec<&'static str>,
         }
 
         let cases = vec![
             TestCase {
-                desc: "multiple user policies before default",
-                user_policies: vec!["policy-a", "policy-b"],
-                expected_names: vec!["policy-a", "policy-b", BUILTIN_POLICY_DEFAULT_OUT],
+                desc: "eBGP with user policy -> user first, reject-all fallback",
+                user_policies: vec!["my-export"],
+                is_ebgp: true,
+                expected_names: vec!["my-export", DEFAULT_DENY_ALL],
             },
             TestCase {
-                desc: "no user policies, default only",
+                desc: "eBGP no user policy -> reject-all only (RFC 8212)",
                 user_policies: vec![],
-                expected_names: vec![BUILTIN_POLICY_DEFAULT_OUT],
+                is_ebgp: true,
+                expected_names: vec![DEFAULT_DENY_ALL],
+            },
+            TestCase {
+                desc: "iBGP with user policy -> user first, accept-all fallback",
+                user_policies: vec!["my-import"],
+                is_ebgp: false,
+                expected_names: vec!["my-import", DEFAULT_PERMIT_ALL],
+            },
+            TestCase {
+                desc: "iBGP no user policy -> accept-all only",
+                user_policies: vec![],
+                is_ebgp: false,
+                expected_names: vec![DEFAULT_PERMIT_ALL],
             },
         ];
 
@@ -1045,12 +1049,9 @@ mod tests {
                     .insert(name.to_string(), Arc::new(Policy::new(name.to_string())));
             }
 
-            let peer_config = PeerConfig {
-                export_policy: tc.user_policies.iter().map(|n| n.to_string()).collect(),
-                ..PeerConfig::default()
-            };
-
-            let resolved = server.resolve_export_policies(&peer_config);
+            let policy_names: Vec<String> =
+                tc.user_policies.iter().map(|n| n.to_string()).collect();
+            let resolved = server.resolve_policies(&policy_names, tc.is_ebgp);
             let names: Vec<&str> = resolved.iter().map(|p| p.name.as_str()).collect();
             assert_eq!(names, tc.expected_names, "failed: {}", tc.desc);
         }

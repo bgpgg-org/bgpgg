@@ -43,6 +43,7 @@ async fn setup_basic_rr_peers() -> (TestServer, FakePeer) {
     )
     .await;
     poll_peer_established(&server, "127.0.0.2").await;
+    apply_permit_all(&server, "127.0.0.2").await;
 
     (server, fake)
 }
@@ -64,6 +65,7 @@ async fn setup_enhanced_rr_peers() -> (TestServer, FakePeer) {
     )
     .await;
     poll_peer_established(&server, "127.0.0.2").await;
+    apply_permit_all(&server, "127.0.0.2").await;
     (server, fake)
 }
 
@@ -283,6 +285,7 @@ async fn test_enhanced_rr_stale_ttl_expiry() {
     )
     .await;
     poll_peer_established(&server, "127.0.0.2").await;
+    apply_import_accept_all(&server, "127.0.0.2").await;
 
     fake_announce_prefix(&server, &mut fake, &[24, 10, 0, 1], "10.0.1.0/24").await;
 

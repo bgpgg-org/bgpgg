@@ -260,8 +260,9 @@ impl BgpServer {
         let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) else {
             return;
         };
-        let import_policies = self.resolve_import_policies(&peer_config);
-        let export_policies = self.resolve_export_policies(&peer_config);
+        let is_ebgp = asn != self.config.asn;
+        let import_policies = self.resolve_policies(&peer_config.import_policy, is_ebgp);
+        let export_policies = self.resolve_policies(&peer_config.export_policy, is_ebgp);
 
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
@@ -769,11 +770,6 @@ impl BgpServer {
         let Some(peer) = self.peers.get_mut(&peer_ip) else {
             return;
         };
-
-        let import_policies = peer.policy_in();
-        if import_policies.is_empty() {
-            return;
-        }
 
         // Extract connection info needed for validation
         let Some(conn) = peer.established_conn() else {

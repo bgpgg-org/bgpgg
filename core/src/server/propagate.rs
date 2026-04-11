@@ -16,7 +16,7 @@ use super::{BgpServer, BmpOp};
 use crate::bgp::msg::{AddPathMask, MessageFormat};
 use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::log::{error, info, warn};
+use crate::log::{info, warn};
 use crate::peer::outgoing::{
     batch_announcements, propagate_routes_to_peer, should_propagate_to_peer, PeerExportContext,
 };
@@ -82,10 +82,6 @@ impl BgpServer {
             let negotiated_afi_safis = conn.negotiated_afi_safis();
 
             let export_policies = entry.policy_out().to_vec();
-            if export_policies.is_empty() {
-                error!(peer_ip = %peer_addr, "export policies not set for established peer");
-                continue;
-            }
 
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
@@ -125,10 +121,6 @@ impl BgpServer {
             warn!(?afi, ?safi, "unsupported AFI/SAFI");
             return;
         }
-        if peer_info.export_policies.is_empty() {
-            return;
-        }
-
         // Extract values from conn before dropping the immutable borrow on peer_info,
         // since propagate_routes_to_peer needs &mut peer_info.adj_rib_out.
         let (peer_asn, peer_tx, capabilities, send_format, local_next_hop, negotiated_afi_safis) = {

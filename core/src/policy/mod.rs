@@ -24,11 +24,11 @@ use crate::rib::{Path, RouteKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Built-in policy name for default import policy
-pub const BUILTIN_POLICY_DEFAULT_IN: &str = "_default_in";
+/// Built-in policy that permits all routes. Fallback for iBGP import and export.
+pub const DEFAULT_PERMIT_ALL: &str = "default-permit-all";
 
-/// Built-in policy name for default export policy
-pub const BUILTIN_POLICY_DEFAULT_OUT: &str = "_default_out";
+/// Built-in policy that denies all routes. Fallback for eBGP import and export (RFC 8212).
+pub const DEFAULT_DENY_ALL: &str = "default-deny-all";
 
 /// Result of policy evaluation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,6 @@ pub enum PolicyResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
     pub name: String,
-    pub built_in: bool,
     statements: Vec<Statement>,
 }
 
@@ -53,15 +52,6 @@ impl Policy {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            built_in: false,
-            statements: Vec::new(),
-        }
-    }
-
-    fn new_built_in(name: String) -> Self {
-        Self {
-            name,
-            built_in: true,
             statements: Vec::new(),
         }
     }
@@ -71,16 +61,19 @@ impl Policy {
         &self.statements
     }
 
-    /// Create a default inbound policy (unconditional accept)
-    pub fn default_in() -> Self {
-        Self::new_built_in(BUILTIN_POLICY_DEFAULT_IN.to_string())
-            .with(Statement::new().then(Action::Accept))
+    /// Permit all routes. Fallback for iBGP import and export when no user policy is configured.
+    pub fn permit_all() -> Self {
+        Self::new(DEFAULT_PERMIT_ALL.to_string()).with(Statement::new().then(Action::Accept))
     }
 
-    /// Create a default outbound policy
-    pub fn default_out() -> Self {
-        Self::new_built_in(BUILTIN_POLICY_DEFAULT_OUT.to_string())
-            .with(Statement::new().then(Action::Accept))
+    /// Deny all routes. Fallback for eBGP import and export when no user policy is configured (RFC 8212).
+    pub fn deny_all() -> Self {
+        Self::new(DEFAULT_DENY_ALL.to_string()).with(Statement::new().then(Action::Reject))
+    }
+
+    /// Returns true if this is a reserved policy name
+    pub fn is_reserved_name(name: &str) -> bool {
+        name == DEFAULT_PERMIT_ALL || name == DEFAULT_DENY_ALL
     }
 
     /// Create a policy from YAML config
@@ -88,6 +81,9 @@ impl Policy {
         def: &PolicyDefinitionConfig,
         defined_sets: &DefinedSets,
     ) -> Result<Self, String> {
+        if Self::is_reserved_name(&def.name) {
+            return Err(format!("policy name '{}' is reserved", def.name));
+        }
         let mut policy = Policy::new(def.name.clone());
 
         for stmt_def in &def.statements {
@@ -135,6 +131,9 @@ impl Default for Policy {
     }
 }
 
+/// Reserved policy names that users cannot use in config
+pub const RESERVED_POLICY_NAMES: &[&str] = &[DEFAULT_PERMIT_ALL, DEFAULT_DENY_ALL];
+
 /// Policy context containing compiled policies and defined sets
 pub struct PolicyContext {
     pub policies: HashMap<String, Arc<Policy>>,
@@ -153,6 +152,13 @@ impl PolicyContext {
             let policy = Policy::from_config(policy_def, &defined_sets)?;
             policies.insert(policy_def.name.clone(), Arc::new(policy));
         }
+
+        // Register built-in policies
+        policies.insert(
+            DEFAULT_PERMIT_ALL.to_string(),
+            Arc::new(Policy::permit_all()),
+        );
+        policies.insert(DEFAULT_DENY_ALL.to_string(), Arc::new(Policy::deny_all()));
 
         Ok(PolicyContext {
             policies,

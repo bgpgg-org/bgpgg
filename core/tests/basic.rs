@@ -563,6 +563,9 @@ async fn test_route_advertised_when_peer_becomes_established() {
         .await
         .unwrap();
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_export_accept_all(&server, "127.0.0.1").await;
+
     // FakePeer connects and completes OPEN handshake (reaches OpenConfirm)
     let mut fake_peer = FakePeer::connect(None, &server).await;
     fake_peer
@@ -674,6 +677,10 @@ async fn test_adj_rib_out_no_stale_on_best_change() {
     let downstream = start_test_server(test_config(65020, 4)).await;
     hub.add_peer(&downstream).await;
     downstream.add_peer(&hub).await;
+
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&hub, &downstream).await;
+
     poll_until(
         || async { verify_peers(&downstream, vec![hub.to_peer(BgpState::Established)]).await },
         "downstream not established",
@@ -791,6 +798,9 @@ async fn test_next_hop_self() {
         // A <-> B: standard eBGP
         server_a.add_peer(&server_b).await;
         server_b.add_peer(&server_a).await;
+
+        // RFC 8212: eBGP peers need explicit accept-all policies
+        apply_permit_all_routes(&server_a, &server_b).await;
 
         // B -> C: iBGP with optional next_hop_self
         server_b

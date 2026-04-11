@@ -37,14 +37,14 @@ start_peers() {
     local p1_grpc=$1 p2_grpc=$2 p1_port=$3 p2_port=$4
     local p1_ip=127.0.0.1 p2_ip=127.0.0.2
 
-    echo "Starting peer1 (ASN 65001, $p1_ip:$p1_port)..."
+    echo "Starting peer1 (ASN 65001, $p1_ip:$p1_port, router-id 1.1.1.1)..."
     "$BGPGGD" --asn 65001 --router-id 1.1.1.1 \
         --listen-addr "$p1_ip:$p1_port" \
         --grpc-listen-addr "${p1_grpc#http://}" &
     PEER1_PID=$!
 
-    echo "Starting peer2 (ASN 65002, $p2_ip:$p2_port)..."
-    "$BGPGGD" --asn 65002 --router-id 2.2.2.2 \
+    echo "Starting peer2 (ASN 65001, $p2_ip:$p2_port, router-id 2.2.2.2)..."
+    "$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
         --listen-addr "$p2_ip:$p2_port" \
         --grpc-listen-addr "${p2_grpc#http://}" &
     PEER2_PID=$!
@@ -61,7 +61,7 @@ test_basic_peering() {
     start_peers "$p1_grpc" "$p2_grpc" 11179 11179
 
     echo "Adding peers..."
-    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65002 --port 11179
+    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65001 --port 11179
     "$BGPGG" --addr "$p2_grpc" peer add 127.0.0.1 65001 --port 11179
 
     echo "Waiting for BGP session to establish..."
@@ -97,7 +97,7 @@ test_tcp_md5() {
     start_peers "$p1_grpc" "$p2_grpc" 12179 12179
 
     echo "Adding peers with MD5 key..."
-    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65002 --port 12179 --md5-key-file "$key_file"
+    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65001 --port 12179 --md5-key-file "$key_file"
     "$BGPGG" --addr "$p2_grpc" peer add 127.0.0.1 65001 --port 12179 --md5-key-file "$key_file"
 
     echo "Waiting for BGP session to establish..."

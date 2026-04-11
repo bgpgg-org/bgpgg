@@ -715,6 +715,10 @@ async fn test_rr_strips_nontransitive_attrs_from_ebgp() {
         )
         .await
         .unwrap();
+
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all(&rr, "127.0.0.3").await;
+
     fake.accept().await;
     fake.accept_handshake_open(65002, Ipv4Addr::new(3, 3, 3, 3), 300)
         .await;
@@ -809,6 +813,9 @@ async fn test_rr_next_hop_self() {
     // eBGP peer
     rr.add_peer(&ebgp_peer).await;
     ebgp_peer.add_peer(&rr).await;
+
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&rr, &ebgp_peer).await;
 
     poll_until(
         || async {

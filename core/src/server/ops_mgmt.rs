@@ -798,13 +798,11 @@ impl BgpServer {
                     import_policies: entry
                         .import_policies
                         .iter()
-                        .filter(|p| !p.built_in)
                         .map(|p| p.name.clone())
                         .collect(),
                     export_policies: entry
                         .export_policies
                         .iter()
-                        .filter(|p| !p.built_in)
                         .map(|p| p.name.clone())
                         .collect(),
                 }
@@ -928,13 +926,11 @@ impl BgpServer {
                 import_policies: entry
                     .import_policies
                     .iter()
-                    .filter(|p| !p.built_in)
                     .map(|p| p.name.clone())
                     .collect(),
                 export_policies: entry
                     .export_policies
                     .iter()
-                    .filter(|p| !p.built_in)
                     .map(|p| p.name.clone())
                     .collect(),
             };
@@ -1463,12 +1459,15 @@ impl BgpServer {
             }
         }
 
-        // Update peer's policy list
+        // Update peer's policy list and persist names in config so policies
+        // survive session reconnections.
         match direction {
             PolicyDirection::Import => {
+                peer.config.import_policy = policy_names;
                 peer.import_policies = resolved_policies;
             }
             PolicyDirection::Export => {
+                peer.config.export_policy = policy_names;
                 peer.export_policies = resolved_policies;
             }
         }

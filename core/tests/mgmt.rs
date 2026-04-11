@@ -702,10 +702,7 @@ async fn test_list_peers_stream() {
 
     let peers = server1.client.get_peers_stream().await.unwrap();
     assert_eq!(peers.len(), 1);
-
-    // Verify peer matches expected
-    let expected_peer = server2.to_peer(BgpState::Established);
-    assert_eq!(peers[0], expected_peer);
+    assert!(verify_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await);
 }
 
 #[tokio::test]

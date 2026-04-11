@@ -80,6 +80,9 @@ async fn test_peer_down() {
     // Wait for peering to establish
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&server1, &server2).await;
+
     // Server2 announces a route to Server1
     announce_and_verify_route(
         &server2,
@@ -1250,6 +1253,12 @@ async fn test_graceful_restart() {
 
         poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 
+        // RFC 8212: eBGP peers need explicit accept-all policies
+        apply_import_accept_all(&server1, &server2.address.to_string()).await;
+        apply_export_accept_all(&server1, &server2.address.to_string()).await;
+        apply_import_accept_all(&server2, &server1.address.to_string()).await;
+        apply_export_accept_all(&server2, &server1.address.to_string()).await;
+
         // Announce route from server1 and verify it propagates to server2
         let s1_addr = server1.address.to_string();
         announce_and_verify_route(
@@ -1402,6 +1411,9 @@ async fn test_graceful_restart_reconnect() {
     peer.read_keepalive().await;
 
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // RFC 8212: eBGP peer needs explicit accept-all policies
+    apply_export_accept_all(&server, "127.0.0.1").await;
 
     // Server injects route locally (source=Local) so the source-peer filter
     // won't block it when re-sending to the restarting peer.
@@ -1574,6 +1586,9 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     peer.send_keepalive().await;
     peer.read_keepalive().await;
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // RFC 8212: eBGP peer needs explicit import policy
+    apply_import_accept_all(&server, "127.0.0.1").await;
 
     // FakePeer announces route 10.0.0.0/24
     let update = build_raw_update(
@@ -1943,6 +1958,9 @@ async fn test_peer_without_capabilities() {
     )
     .await;
 
+    // RFC 8212: eBGP peer needs explicit export policy
+    apply_export_accept_all(&server, "127.0.0.1").await;
+
     // Add IPv4 route - should be propagated (default behavior)
     announce_route(
         &server,
@@ -1967,6 +1985,7 @@ async fn test_peer_without_capabilities() {
 #[tokio::test]
 async fn test_graceful_session_shutdown_receiver() {
     let (server, mut peer) = setup_server_and_fake_peer().await;
+    apply_import_accept_all(&server, &peer.address).await;
 
     let next_hop = Ipv4Addr::new(127, 0, 0, 2);
 
@@ -2029,6 +2048,9 @@ async fn test_graceful_session_shutdown_receiver() {
 async fn test_graceful_session_shutdown_initiator() {
     let (server1, [server2, server3, server4]) =
         setup_hub_spoke_servers(65001, [65002, 65003, 65001], PeerConfig::default()).await;
+    // RFC 8212: eBGP spokes need accept-all policies
+    apply_permit_all_routes(&server1, &server2).await;
+    apply_permit_all_routes(&server1, &server3).await;
 
     server1
         .client
@@ -2173,6 +2195,9 @@ async fn test_gr_restart_time_zero_sweeps_immediately() {
     peer.send_keepalive().await;
     peer.read_keepalive().await;
     poll_peers(&server, vec![peer.to_peer(BgpState::Established)]).await;
+
+    // RFC 8212: eBGP peer needs explicit import policy
+    apply_import_accept_all(&server, "127.0.0.1").await;
 
     // Announce route
     let update = build_raw_update(

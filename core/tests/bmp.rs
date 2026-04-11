@@ -446,6 +446,9 @@ async fn test_bmp_statistics() {
         .await;
     server2.add_peer(&server1).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&server1, &server2).await;
+
     // Wait for peer to establish
     poll_peers(&server1, vec![server2.to_peer(BgpState::Established)]).await;
 

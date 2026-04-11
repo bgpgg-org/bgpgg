@@ -47,7 +47,7 @@ use bgpgg::grpc::proto::{
     AsPathSegment, AsPathSegmentType, BgpState, ConditionsConfig, DefinedSetConfig,
     ExtendedCommunity, GracefulRestartConfig, LargeCommunity, ListRoutesRequest,
     LlgrConfig as ProtoLlgrConfig, LsAttribute, LsNlri, Origin, Path, Peer, PeerStatistics,
-    PrefixMatch, PrefixSetData, Route, SessionConfig, StatementConfig, UnknownAttribute,
+    PrefixMatch, PrefixSetData, RibType, Route, SessionConfig, StatementConfig, UnknownAttribute,
 };
 use bgpgg::grpc::proto_community::{internal_to_proto_large_community, u64_to_proto_extcomm};
 use bgpgg::grpc::{BgpClient, BgpGrpcService};
@@ -233,8 +233,8 @@ pub struct PathParams {
 }
 
 impl PathParams {
-    /// Build PathParams with defaults derived from a TestServer peer:
-    /// next_hop, peer_address, as_path (single AS_SEQUENCE), local_pref 100.
+    /// Build PathParams for a route received from an eBGP peer:
+    /// next_hop rewritten to peer address, AS prepended, local_pref 100.
     pub fn from_peer(peer: &TestServer) -> Self {
         PathParams {
             next_hop: peer.address.to_string(),
@@ -569,7 +569,11 @@ pub async fn setup_server_with_passive_peer() -> TestServer {
         passive_mode: true,
         ..Default::default()
     });
-    start_test_server(config).await
+    let server = start_test_server(config).await;
+    // FakePeer will be eBGP (ASN 65002): apply accept-all policies
+    apply_import_accept_all(&server, "127.0.0.1").await;
+    apply_export_accept_all(&server, "127.0.0.1").await;
+    server
 }
 
 /// Setup a test server with a FakePeer already connected and in Established state.
@@ -605,6 +609,11 @@ pub async fn peer_servers_with_config(
 ) {
     server1.add_peer_with_config(server2, config.clone()).await;
     server2.add_peer_with_config(server1, config).await;
+
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    if server1.asn != server2.asn {
+        apply_permit_all_routes(server1, server2).await;
+    }
 
     let peer_addr = server2.address.to_string();
     poll_until(
@@ -866,8 +875,20 @@ pub async fn has_route(server: &TestServer, prefix: &str) -> bool {
         .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, prefix)))
 }
 
+/// Check if a server's adj-rib-out toward a peer contains a specific prefix.
+pub async fn has_adj_out_route(server: &TestServer, peer: &TestServer, prefix: &str) -> bool {
+    server
+        .client
+        .list_routes(ListRoutesRequest {
+            rib_type: Some(RibType::AdjOut as i32),
+            peer_address: Some(peer.address.to_string()),
+            ..Default::default()
+        })
+        .await
+        .is_ok_and(|routes| routes.iter().any(|r| route_has_prefix(r, prefix)))
+}
+
 pub async fn poll_route_exists(server: &TestServer, expected: Route) {
-    let expected_key = expected.key.clone();
     poll_until(
         || async {
             let Ok(routes) = server
@@ -877,26 +898,22 @@ pub async fn poll_route_exists(server: &TestServer, expected: Route) {
             else {
                 return false;
             };
-            routes.iter().any(|r| r.key == expected_key)
+            let actual: Vec<Route> = routes
+                .into_iter()
+                .filter(|r| r.key == expected.key)
+                .collect();
+            routes_match(
+                &actual,
+                std::slice::from_ref(&expected),
+                ExpectPathId::Present,
+            )
         },
-        &format!("Timeout waiting for route {:?} to appear", expected.key),
+        &format!(
+            "Timeout waiting for route {:?} on server {}",
+            expected.key, server.address
+        ),
     )
     .await;
-
-    let routes = server
-        .client
-        .list_routes(ListRoutesRequest::default())
-        .await
-        .unwrap();
-    let actual: Vec<Route> = routes
-        .into_iter()
-        .filter(|r| r.key == expected.key)
-        .collect();
-    assert!(
-        routes_match(&actual, &[expected], ExpectPathId::Present),
-        "Route mismatch on server {}",
-        server.address
-    );
 }
 
 /// Expected peer statistics for polling. None means don't check that field.
@@ -1281,6 +1298,11 @@ pub async fn chain_servers<const N: usize>(
             .add_peer(curr_address, Some(cfg))
             .await
             .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, i + 1));
+
+        // RFC 8212: eBGP peers need explicit accept-all policies
+        if servers[i].asn != servers[i + 1].asn {
+            apply_permit_all_routes(&servers[i], &servers[i + 1]).await;
+        }
     }
 
     // Wait for all peers to reach Established
@@ -1503,6 +1525,11 @@ pub async fn mesh_servers<const N: usize>(
                 .add_peer(i_address, Some(cfg))
                 .await
                 .unwrap_or_else(|_| panic!("Failed to add peer {} to server {}", i, j));
+
+            // RFC 8212: eBGP peers need explicit accept-all policies
+            if servers[i].asn != servers[j].asn {
+                apply_permit_all_routes(&servers[i], &servers[j]).await;
+            }
         }
     }
 
@@ -1628,11 +1655,17 @@ pub async fn setup_rr(
         for client in rr_clients {
             rr.add_peer_with_config(client, rr_client_cfg.clone()).await;
             client.add_peer_with_config(rr, client_config.clone()).await;
+            if rr.asn != client.asn {
+                apply_permit_all_routes(rr, client).await;
+            }
         }
 
         for nc in &non_clients {
             rr.add_peer_with_config(nc, client_config.clone()).await;
             nc.add_peer_with_config(rr, client_config.clone()).await;
+            if rr.asn != nc.asn {
+                apply_permit_all_routes(rr, nc).await;
+            }
         }
     }
 
@@ -1641,6 +1674,9 @@ pub async fn setup_rr(
         for j in (i + 1)..rrs.len() {
             rrs[i].add_peer(rrs[j]).await;
             rrs[j].add_peer(rrs[i]).await;
+            if rrs[i].asn != rrs[j].asn {
+                apply_permit_all_routes(rrs[i], rrs[j]).await;
+            }
         }
     }
 
@@ -1678,14 +1714,28 @@ pub async fn verify_peers(server: &TestServer, mut expected_peers: Vec<Peer>) ->
     peers.sort_by(|a, b| a.address.cmp(&b.address));
     expected_peers.sort_by(|a, b| a.address.cmp(&b.address));
 
-    if peers != expected_peers {
-        eprintln!("verify_peers mismatch:");
-        for (i, (actual, expected)) in peers.iter().zip(expected_peers.iter()).enumerate() {
-            if actual != expected {
-                eprintln!("  peer {}: actual={:?} expected={:?}", i, actual, expected);
-            }
-        }
+    if peers.len() != expected_peers.len() {
+        eprintln!(
+            "verify_peers: count mismatch: actual={} expected={}",
+            peers.len(),
+            expected_peers.len()
+        );
         return false;
+    }
+
+    for (i, (actual, expected)) in peers.iter().zip(expected_peers.iter()).enumerate() {
+        if actual.address != expected.address
+            || actual.asn != expected.asn
+            || actual.state != expected.state
+            || actual.admin_state != expected.admin_state
+        {
+            eprintln!(
+                "verify_peers mismatch at peer {}:\n  actual:   addr={} asn={} state={} admin={}\n  expected: addr={} asn={} state={} admin={}",
+                i, actual.address, actual.asn, actual.state, actual.admin_state,
+                expected.address, expected.asn, expected.state, expected.admin_state,
+            );
+            return false;
+        }
     }
 
     true
@@ -2929,73 +2979,70 @@ pub fn write_key_file(suffix: &str, key: &[u8]) -> String {
     path
 }
 
-/// Create an export policy that accepts only prefixes in the given set and rejects everything
-/// else, then assign it to the given peer.
-pub async fn apply_export_prefix_accept_policy(
-    server: &TestServer,
-    peer_addr: &str,
-    policy_name: &str,
-    prefixes: Vec<(&str, Option<&str>)>,
-) {
-    server
-        .client
-        .add_defined_set(
-            DefinedSetConfig {
-                set_type: "prefix-set".to_string(),
-                name: policy_name.to_string(),
-                config: Some(defined_set_config::Config::PrefixSet(PrefixSetData {
-                    prefixes: prefixes
-                        .into_iter()
-                        .map(|(prefix, range)| PrefixMatch {
-                            prefix: prefix.to_string(),
-                            masklength_range: range.map(|s| s.to_string()),
-                        })
-                        .collect(),
-                })),
-            },
-            false,
-        )
-        .await
-        .unwrap();
-
-    server
+/// Apply accept-all import policy on a server for a specific peer.
+/// Needed for eBGP peers since RFC 8212 defaults to reject-all.
+pub async fn apply_import_accept_all(server: &TestServer, peer_addr: &str) {
+    let _ = server
         .client
         .add_policy(
-            policy_name.to_string(),
-            vec![
-                StatementConfig {
-                    conditions: Some(ConditionsConfig {
-                        match_prefix_set: Some(bgpgg::grpc::proto::MatchSetRef {
-                            set_name: policy_name.to_string(),
-                            match_option: "any".to_string(),
-                        }),
-                        ..Default::default()
-                    }),
-                    actions: Some(ActionsConfig {
-                        accept: Some(true),
-                        ..Default::default()
-                    }),
-                },
-                StatementConfig {
-                    conditions: None,
-                    actions: Some(ActionsConfig {
-                        reject: Some(true),
-                        ..Default::default()
-                    }),
-                },
-            ],
+            "permit-all".to_string(),
+            vec![StatementConfig {
+                conditions: None,
+                actions: Some(ActionsConfig {
+                    accept: Some(true),
+                    ..Default::default()
+                }),
+            }],
+        )
+        .await;
+    server
+        .client
+        .set_policy_assignment(
+            peer_addr.to_string(),
+            "import".to_string(),
+            vec!["permit-all".to_string()],
+            None,
         )
         .await
         .unwrap();
+}
 
+/// Apply accept-all export policy on a server for a specific peer.
+/// Needed for eBGP peers since RFC 8212 defaults to reject-all.
+pub async fn apply_export_accept_all(server: &TestServer, peer_addr: &str) {
+    let _ = server
+        .client
+        .add_policy(
+            "permit-all".to_string(),
+            vec![StatementConfig {
+                conditions: None,
+                actions: Some(ActionsConfig {
+                    accept: Some(true),
+                    ..Default::default()
+                }),
+            }],
+        )
+        .await;
     server
         .client
         .set_policy_assignment(
             peer_addr.to_string(),
             "export".to_string(),
-            vec![policy_name.to_string()],
+            vec!["permit-all".to_string()],
             None,
         )
         .await
         .unwrap();
+}
+
+/// Apply accept-all import and export on a server for a specific peer address.
+pub async fn apply_permit_all(server: &TestServer, peer_addr: &str) {
+    apply_import_accept_all(server, peer_addr).await;
+    apply_export_accept_all(server, peer_addr).await;
+}
+
+/// Apply accept-all import and export policies on both sides of a peering.
+pub async fn apply_permit_all_routes(server1: &TestServer, server2: &TestServer) {
+    apply_permit_all(server1, &server2.address.to_string()).await;
+    apply_permit_all(server2, &server1.address.to_string()).await;
 }

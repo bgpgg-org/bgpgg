@@ -176,6 +176,10 @@ async fn test_ls_capability_negotiation_and_filtering() {
     hub.add_peer(&spoke_b).await;
     spoke_b.add_peer(&hub).await;
 
+    // RFC 8212: eBGP peers need explicit accept-all policies
+    apply_permit_all_routes(&hub, &spoke_a).await;
+    apply_permit_all_routes(&hub, &spoke_b).await;
+
     poll_peers(&spoke_a, vec![hub.to_peer(BgpState::Established)]).await;
     poll_peers(&spoke_b, vec![hub.to_peer(BgpState::Established)]).await;
 
