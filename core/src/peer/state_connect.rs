@@ -61,8 +61,18 @@ impl Peer {
 
             let md5_key = self.config.read_md5_key();
             let ttl_min = self.config.ttl_min;
+            let if_index = match self.config.resolve_interface_index() {
+                Some(Ok(idx)) => Some(idx),
+                Some(Err(err)) => {
+                    error!(peer_ip = %self.addr, error = %err,
+                        "failed to resolve interface index");
+                    self.try_process_event(&FsmEvent::TcpConnectionFails).await;
+                    return;
+                }
+                None => None,
+            };
             tokio::select! {
-                result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr, md5_key.as_deref(), ttl_min) => {
+                result = create_and_bind_tcp_socket(self.local_config.addr, peer_addr, md5_key.as_deref(), ttl_min, if_index) => {
                     match result {
                         Ok(stream) => {
                             info!(peer_ip = %self.addr, "TCP connection established");

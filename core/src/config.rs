@@ -14,11 +14,12 @@
 
 use crate::bgp::msg_open_types::LlgrEntry;
 use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
-use crate::net::bind_addr_from_ip;
+use crate::net::{bind_addr_from_ip, resolve_interface_index};
 use crate::rpki::vrp::RpkiValidation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tracing::error;
@@ -265,6 +266,10 @@ pub struct PeerConfig {
     /// 255 = directly connected peer, 254 = 1 hop away, etc.
     #[serde(default)]
     pub ttl_min: Option<u8>,
+    /// Network interface for link-local IPv6 peers (e.g., "eth0").
+    /// Required when address is a link-local IPv6 address (fe80::/10).
+    #[serde(default)]
+    pub interface: Option<String>,
     /// RFC 9494: Long-Lived Graceful Restart configuration
     #[serde(default)]
     pub llgr: Option<LlgrConfig>,
@@ -320,6 +325,14 @@ impl PeerConfig {
     /// RFC 4271 8.1.2: AllowAutomaticStart is true if IdleHoldTimer is configured.
     pub fn allow_automatic_start(&self) -> bool {
         self.idle_hold_time_secs.is_some()
+    }
+
+    /// Resolve the configured interface name to a kernel interface index.
+    /// Returns None if no interface is configured.
+    pub fn resolve_interface_index(&self) -> Option<io::Result<u32>> {
+        self.interface
+            .as_ref()
+            .map(|iface| resolve_interface_index(iface))
     }
 
     /// Read MD5 key bytes from file, trimming whitespace/newlines.
@@ -416,6 +429,7 @@ impl Default for PeerConfig {
             next_hop_self: false,
             graceful_shutdown: false,
             ttl_min: None,
+            interface: None,
             llgr: None,
             send_rpki_community: false,
             afi_safis: Vec::new(),

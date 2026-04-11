@@ -119,6 +119,7 @@ message SessionConfig {
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
     optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
     repeated AfiSafiConfig afi_safis = 23;  // additional AFI/SAFIs beyond default IPv4/IPv6 unicast
+    optional string interface = 24;  // Network interface for link-local IPv6 peers (e.g., "eth0")
 }
 
 // Add peer request/response

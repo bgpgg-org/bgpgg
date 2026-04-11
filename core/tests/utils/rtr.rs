@@ -95,9 +95,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FakeCache<S> {
         self.send_sync(self.session_id, vrps, 0).await;
     }
 
-    /// Send VRPs using a specific session_id (for session ID mismatch testing).
-    pub async fn send_vrps_with_session_id(&mut self, session_id: u16, vrps: &[Vrp]) {
-        self.send_sync(session_id, vrps, 1).await;
+    /// Send a CacheResponse with the given session_id. Used to trigger a
+    /// session ID mismatch — the session will disconnect after reading this
+    /// PDU, so no VRPs or EndOfData are sent.
+    pub async fn send_cache_response(&mut self, session_id: u16) {
+        let stream = self.stream.as_mut().expect("not connected");
+        let msg = Message::CacheResponse(CacheResponse { session_id });
+        stream.write_all(&msg.serialize()).await.unwrap();
     }
 
     async fn send_sync(&mut self, session_id: u16, vrps: &[Vrp], flags: u8) {
@@ -227,8 +231,8 @@ impl FakeTcpCache {
         self.cache.send_error(code).await;
     }
 
-    pub async fn send_vrps_with_session_id(&mut self, session_id: u16, vrps: &[Vrp]) {
-        self.cache.send_vrps_with_session_id(session_id, vrps).await;
+    pub async fn send_cache_response(&mut self, session_id: u16) {
+        self.cache.send_cache_response(session_id).await;
     }
 
     pub fn disconnect(&mut self) {

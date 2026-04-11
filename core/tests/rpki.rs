@@ -763,9 +763,7 @@ async fn test_rpki_session_id_mismatch() {
     // Router should detect mismatch, flush data, and reconnect.
     cache.send_notify().await;
     cache.read_serial_query().await;
-    cache
-        .send_vrps_with_session_id(999, &[vrp4(10, 0, 0, 0, 8, 24, 65002)])
-        .await;
+    cache.send_cache_response(999).await;
 
     // Session will reconnect with Reset Query after detecting mismatch
     cache.accept().await;

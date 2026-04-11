@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ffi::CString;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use tokio::net::{TcpSocket, TcpStream};
 
 use std::os::unix::io::AsRawFd;
@@ -182,6 +183,23 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
     }
 }
 
+/// Resolve a network interface name to its kernel interface index.
+/// Used for link-local IPv6 addresses which require an if_index to route.
+pub fn resolve_interface_index(interface: &str) -> io::Result<u32> {
+    let c_name = CString::new(interface).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "interface name contains null byte",
+        )
+    })?;
+    let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if idx == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(idx)
+    }
+}
+
 /// Create and bind a TCP socket for outgoing BGP connections
 ///
 /// This helper creates an appropriate socket (IPv4 or IPv6) based on the remote address,
@@ -192,6 +210,7 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
 /// * `remote_addr` - Remote address to connect to (IP:179 for BGP)
 /// * `md5_key` - Optional TCP MD5 key bytes (RFC 2385, Linux and FreeBSD)
 /// * `ttl_min` - Optional GTSM minimum inbound TTL (RFC 5082, Linux and FreeBSD)
+/// * `if_index` - Optional kernel interface index for link-local IPv6 addresses
 ///
 /// # Returns
 /// `TcpStream` on success, or an `io::Error` on failure
@@ -200,7 +219,16 @@ pub async fn create_and_bind_tcp_socket(
     remote_addr: SocketAddr,
     md5_key: Option<&[u8]>,
     ttl_min: Option<u8>,
+    if_index: Option<u32>,
 ) -> io::Result<TcpStream> {
+    // For link-local IPv6, set the if_index so the kernel knows which interface to use
+    let remote_addr = match (remote_addr, if_index) {
+        (SocketAddr::V6(v6), Some(idx)) => {
+            SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), v6.flowinfo(), idx))
+        }
+        _ => remote_addr,
+    };
+
     // Create appropriate socket based on remote address type
     let socket = if remote_addr.is_ipv4() {
         TcpSocket::new_v4()?
@@ -472,5 +500,25 @@ mod tests {
             prefix_length: 48,
         });
         assert_eq!(v6.prefix_len(), 48);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_resolve_interface_index_loopback_linux() {
+        let idx = resolve_interface_index("lo").unwrap();
+        assert!(idx > 0);
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn test_resolve_interface_index_loopback_bsd() {
+        let idx = resolve_interface_index("lo0").unwrap();
+        assert!(idx > 0);
+    }
+
+    #[test]
+    fn test_resolve_interface_index_nonexistent() {
+        let result = resolve_interface_index("nonexistent_iface_xyz");
+        assert!(result.is_err());
     }
 }

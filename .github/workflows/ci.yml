@@ -22,8 +22,11 @@ jobs:
     - name: Run tests
       run: make test
 
-    - name: Run smoke tests
-      run: make smoketest
+    - name: Run system tests
+      run: make systest
+
+    - name: Run Linux system tests
+      run: make systest-linux
 
   loadtest:
     runs-on: ubuntu-latest
@@ -52,4 +55,4 @@ jobs:
           ./script/setup-freebsd.sh
         run: |
           gmake test
-          gmake smoketest
+          gmake systest

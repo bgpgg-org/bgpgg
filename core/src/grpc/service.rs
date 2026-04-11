@@ -393,6 +393,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
             .send_rpki_community
             .unwrap_or(defaults.send_rpki_community),
         afi_safis: proto_to_afi_safis(&cfg.afi_safis)?,
+        interface: cfg.interface.or(defaults.interface.clone()),
     })
 }
 
@@ -517,6 +518,7 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
         ttl_min: config.ttl_min.map(|v| v as u32),
         llgr,
         send_rpki_community: Some(config.send_rpki_community),
+        interface: config.interface.clone(),
         afi_safis: config
             .afi_safis
             .iter()
