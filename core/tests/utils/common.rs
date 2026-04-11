@@ -2928,3 +2928,74 @@ pub fn write_key_file(suffix: &str, key: &[u8]) -> String {
     file.write_all(key).unwrap();
     path
 }
+
+/// Create an export policy that accepts only prefixes in the given set and rejects everything
+/// else, then assign it to the given peer.
+pub async fn apply_export_prefix_accept_policy(
+    server: &TestServer,
+    peer_addr: &str,
+    policy_name: &str,
+    prefixes: Vec<(&str, Option<&str>)>,
+) {
+    server
+        .client
+        .add_defined_set(
+            DefinedSetConfig {
+                set_type: "prefix-set".to_string(),
+                name: policy_name.to_string(),
+                config: Some(defined_set_config::Config::PrefixSet(PrefixSetData {
+                    prefixes: prefixes
+                        .into_iter()
+                        .map(|(prefix, range)| PrefixMatch {
+                            prefix: prefix.to_string(),
+                            masklength_range: range.map(|s| s.to_string()),
+                        })
+                        .collect(),
+                })),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .add_policy(
+            policy_name.to_string(),
+            vec![
+                StatementConfig {
+                    conditions: Some(ConditionsConfig {
+                        match_prefix_set: Some(bgpgg::grpc::proto::MatchSetRef {
+                            set_name: policy_name.to_string(),
+                            match_option: "any".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    actions: Some(ActionsConfig {
+                        accept: Some(true),
+                        ..Default::default()
+                    }),
+                },
+                StatementConfig {
+                    conditions: None,
+                    actions: Some(ActionsConfig {
+                        reject: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .set_policy_assignment(
+            peer_addr.to_string(),
+            "export".to_string(),
+            vec![policy_name.to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+}

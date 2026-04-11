@@ -921,3 +921,97 @@ async fn test_export_policy_deny_bgp_ls() {
         ls_routes.len()
     );
 }
+
+/// Export policy must block transit: server2 should not re-export server1's routes to server3.
+/// Regression test for bug where built-in default-out (accept-all) was evaluated before user
+/// policies, making export policies ineffective.
+#[tokio::test]
+async fn test_export_policy_blocks_transit() {
+    use bgpgg::config::Config;
+
+    let servers = chain_servers(
+        [
+            start_test_server(Config::new(
+                65001,
+                "127.0.0.1:0",
+                Ipv4Addr::new(1, 1, 1, 1),
+                90,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65002,
+                "127.0.0.2:0",
+                Ipv4Addr::new(2, 2, 2, 2),
+                90,
+            ))
+            .await,
+            start_test_server(Config::new(
+                65003,
+                "127.0.0.3:0",
+                Ipv4Addr::new(3, 3, 3, 3),
+                90,
+            ))
+            .await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    let [server1, server2, server3] = &servers;
+
+    // server2 export policy toward server3: only accept 10.99.0.0/24, reject rest
+    apply_export_prefix_accept_policy(
+        server2,
+        &server3.address.to_string(),
+        "mine-only",
+        vec![("10.99.0.0/24", None)],
+    )
+    .await;
+
+    // server2 announces its own prefix (should pass policy)
+    announce_route(
+        server2,
+        RouteParams::Ip(Box::new(IpRouteParams {
+            prefix: "10.99.0.0/24".to_string(),
+            next_hop: "192.168.99.1".to_string(),
+            ..Default::default()
+        })),
+    )
+    .await;
+
+    // server1 announces a route (should be blocked by server2's export policy toward server3)
+    announce_route(
+        server1,
+        RouteParams::Ip(Box::new(IpRouteParams {
+            prefix: "10.1.0.0/24".to_string(),
+            next_hop: "192.168.1.1".to_string(),
+            ..Default::default()
+        })),
+    )
+    .await;
+
+    // server3 should only see 10.99.0.0/24 from server2, not 10.1.0.0/24
+    let peers = server3.client.get_peers().await.unwrap();
+    let peer_addr = &peers[0].address;
+    let expected = vec![expected_route(
+        "10.99.0.0/24",
+        PathParams {
+            peer_address: peer_addr.clone(),
+            ..PathParams::from_peer(server2)
+        },
+    )];
+
+    poll_until_stable(
+        || async {
+            let routes = server3
+                .client
+                .list_routes(ListRoutesRequest::default())
+                .await
+                .unwrap();
+            routes_match(&routes, &expected, ExpectPathId::Present)
+        },
+        Duration::from_millis(500),
+        "server3 should only see server2's own prefix, not transit from server1",
+    )
+    .await;
+}

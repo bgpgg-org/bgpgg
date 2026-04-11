@@ -2226,4 +2226,67 @@ mod tests {
         assert!(!ibgp_ctx.is_ebgp());
         assert!(ibgp_ctx.is_ibgp());
     }
+
+    #[test]
+    fn test_evaluate_export_policy_user_before_default() {
+        use crate::policy::Policy;
+
+        let prefix_allowed = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 0, 0, 0),
+            prefix_length: 24,
+        });
+        let prefix_blocked = IpNetwork::V4(Ipv4Net {
+            address: Ipv4Addr::new(10, 1, 0, 0),
+            prefix_length: 24,
+        });
+
+        // User policy: accept 10.0.0.0/24, reject everything else
+        let user_policy = Arc::new(
+            Policy::new("accept-mine".to_string())
+                .with(
+                    Statement::new()
+                        .when(Condition::Prefix(prefix_allowed))
+                        .then(Action::Accept),
+                )
+                .with(Statement::new().then(Action::Reject)),
+        );
+
+        // Built-in default: accept all
+        let default_policy = Arc::new(Policy::default_out());
+
+        // Correct order: user first, default last
+        let correct_order: Vec<Arc<Policy>> =
+            vec![Arc::clone(&user_policy), Arc::clone(&default_policy)];
+
+        let mut path = make_path(
+            RouteSource::Ebgp {
+                peer_ip: test_ip(2),
+                bgp_id: test_bgp_id(2),
+            },
+            vec![as_seq(vec![65002])],
+            NextHopAddr::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+
+        // Allowed prefix should be accepted
+        assert!(evaluate_export_policy(
+            &correct_order,
+            &RouteKey::Prefix(prefix_allowed),
+            &mut path,
+        ));
+
+        // Blocked prefix should be rejected by user policy
+        assert!(!evaluate_export_policy(
+            &correct_order,
+            &RouteKey::Prefix(prefix_blocked),
+            &mut path,
+        ));
+
+        // Wrong order (old bug): default first accepts everything
+        let wrong_order: Vec<Arc<Policy>> = vec![default_policy, user_policy];
+        assert!(evaluate_export_policy(
+            &wrong_order,
+            &RouteKey::Prefix(prefix_blocked),
+            &mut path,
+        ));
+    }
 }

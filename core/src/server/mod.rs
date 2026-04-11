@@ -567,9 +567,9 @@ impl BgpServer {
 
     /// Resolve export policies for a peer from config
     pub(crate) fn resolve_export_policies(&self, peer_config: &PeerConfig) -> Vec<Arc<Policy>> {
-        let mut policies = vec![Arc::new(Policy::default_out())];
+        let mut policies = Vec::new();
 
-        // Append user-configured policies
+        // User-configured policies first so they can accept/reject before the default
         for name in &peer_config.export_policy {
             if let Some(policy) = self.policy_ctx.policies.get(name).cloned() {
                 policies.push(policy);
@@ -577,6 +577,9 @@ impl BgpServer {
                 error!(policy = name, "export policy not found");
             }
         }
+
+        // Built-in default (accept-all) as fallback for routes not matched by user policies
+        policies.push(Arc::new(Policy::default_out()));
 
         policies
     }
@@ -985,6 +988,7 @@ impl BgpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::{Policy, BUILTIN_POLICY_DEFAULT_OUT};
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
@@ -1008,6 +1012,48 @@ mod tests {
         let mut server = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
+    }
+
+    #[test]
+    fn test_resolve_export_policies_ordering() {
+        struct TestCase {
+            desc: &'static str,
+            user_policies: Vec<&'static str>,
+            expected_names: Vec<&'static str>,
+        }
+
+        let cases = vec![
+            TestCase {
+                desc: "multiple user policies before default",
+                user_policies: vec!["policy-a", "policy-b"],
+                expected_names: vec!["policy-a", "policy-b", BUILTIN_POLICY_DEFAULT_OUT],
+            },
+            TestCase {
+                desc: "no user policies, default only",
+                user_policies: vec![],
+                expected_names: vec![BUILTIN_POLICY_DEFAULT_OUT],
+            },
+        ];
+
+        for tc in cases {
+            let mut server = make_server();
+
+            for name in &tc.user_policies {
+                server
+                    .policy_ctx
+                    .policies
+                    .insert(name.to_string(), Arc::new(Policy::new(name.to_string())));
+            }
+
+            let peer_config = PeerConfig {
+                export_policy: tc.user_policies.iter().map(|n| n.to_string()).collect(),
+                ..PeerConfig::default()
+            };
+
+            let resolved = server.resolve_export_policies(&peer_config);
+            let names: Vec<&str> = resolved.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, tc.expected_names, "failed: {}", tc.desc);
+        }
     }
 
     #[test]
