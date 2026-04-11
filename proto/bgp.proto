@@ -39,6 +39,12 @@ service BgpService {
     rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
     rpc SetPolicyAssignment(SetPolicyAssignmentRequest) returns (SetPolicyAssignmentResponse);
     rpc SetPeerGracefulShutdown(SetPeerGracefulShutdownRequest) returns (SetPeerGracefulShutdownResponse);
+
+    // Config-mode management (ggsh configure/commit flow)
+    rpc GetRunningConfig(GetRunningConfigRequest) returns (GetRunningConfigResponse);
+    rpc CommitConfig(CommitConfigRequest) returns (CommitConfigResponse);
+    rpc RollbackConfig(RollbackConfigRequest) returns (RollbackConfigResponse);
+    rpc ListConfigSnapshots(ListConfigSnapshotsRequest) returns (ListConfigSnapshotsResponse);
 }
 
 message GetServerInfoRequest {}
@@ -47,6 +53,47 @@ message GetServerInfoResponse {
     string listen_addr = 1;
     uint32 listen_port = 2;
     uint64 num_routes = 3;  // Total number of routes in RIB
+}
+
+message GetRunningConfigRequest {}
+
+message GetRunningConfigResponse {
+    // Current running config as rogg.conf brace-format text.
+    string text = 1;
+}
+
+// CommitConfig applies the candidate carried in `text`. Daemon parses,
+// validates, reconfigures, persists rogg.conf (rotating prior into .1).
+message CommitConfigRequest {
+    string text = 1;
+}
+
+message CommitConfigResponse {
+    bool ok = 1;
+    string error = 2;
+}
+
+// RollbackConfig loads rogg.<index>.conf, parses, and runs CommitConfig
+// against it. Indices are 1-based; 1 is the most recent previous version.
+message RollbackConfigRequest {
+    uint32 index = 1;
+}
+
+message RollbackConfigResponse {
+    bool ok = 1;
+    string error = 2;
+}
+
+message ListConfigSnapshotsRequest {}
+
+message ConfigSnapshot {
+    uint32 index = 1;
+    uint64 mtime_unix = 2;
+    uint64 size_bytes = 3;
+}
+
+message ListConfigSnapshotsResponse {
+    repeated ConfigSnapshot snapshots = 1;
 }
 
 // Action when max prefix limit is reached
@@ -375,6 +422,8 @@ message Path {
     RpkiValidation rpki_validation = 17;
     // RFC 9552: BGP-LS attribute on this path
     optional LsAttribute ls_attribute = 18;
+    // RFC 2545: link-local IPv6 next-hop from 32-byte MP_REACH_NLRI
+    optional string link_local_next_hop = 19;
 }
 
 message Aggregator {

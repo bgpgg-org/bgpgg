@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use clap::Parser;
-use std::env;
-use std::path::Path;
+use conf::bgp::BgpConfig;
+use std::path::PathBuf;
+use std::process;
 use tracing::info;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -27,105 +27,28 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[command(name = "bgpggd")]
 #[command(about = "BGP daemon server", version)]
 struct Args {
-    /// Path to configuration file
+    /// Path to rogg.conf configuration file
     #[arg(short, long)]
-    config: Option<String>,
-
-    /// Autonomous System Number
-    #[arg(long)]
-    asn: Option<u32>,
-
-    /// Router ID (IPv4 address)
-    #[arg(long)]
-    router_id: Option<String>,
-
-    /// BGP listen address
-    #[arg(long)]
-    listen_addr: Option<String>,
-
-    /// gRPC listen address
-    #[arg(long)]
-    grpc_listen_addr: Option<String>,
-}
-
-fn get_env_or<T: std::str::FromStr>(name: &str) -> Option<T> {
-    env::var(name).ok()?.parse().ok()
-}
-
-fn apply_overrides(config: &mut Config, args: &Args) {
-    // CLI args override config, env vars override everything
-    if let Some(asn) = args.asn.or_else(|| get_env_or("BGPGG_ASN")) {
-        config.asn = asn;
-    }
-
-    if let Some(ref router_id) = args.router_id {
-        config.router_id = router_id.parse().expect("invalid router-id");
-    } else if let Some(router_id) = get_env_or("BGPGG_ROUTER_ID") {
-        config.router_id = router_id;
-    }
-
-    if let Some(ref addr) = args.listen_addr {
-        config.listen_addr = addr.clone();
-    } else if let Ok(addr) = env::var("BGPGG_LISTEN_ADDR") {
-        config.listen_addr = addr;
-    }
-
-    if let Some(ref addr) = args.grpc_listen_addr {
-        config.grpc_listen_addr = addr.clone();
-    } else if let Ok(addr) = env::var("BGPGG_GRPC_LISTEN_ADDR") {
-        config.grpc_listen_addr = addr;
-    }
-
-    if let Ok(val) = env::var("BGPGG_LOG_LEVEL") {
-        config.log_level = val;
-    }
-
-    if let Some(secs) = get_env_or("BGPGG_HOLD_TIME_SECS") {
-        config.hold_time_secs = secs;
-    }
-
-    if let Some(secs) = get_env_or("BGPGG_CONNECT_RETRY_SECS") {
-        config.connect_retry_secs = secs;
-    }
+    config: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Determine config file path: --config flag > BGPGG_CONFIG_PATH env > /etc/bgpgg/config.yaml
-    let config_path = args.config.clone().or_else(|| {
-        env::var("BGPGG_CONFIG_PATH").ok().or_else(|| {
-            let default_path = "/etc/bgpgg/config.yaml";
-            if Path::new(default_path).exists() {
-                Some(default_path.to_string())
-            } else {
-                None
-            }
-        })
+    let config = BgpConfig::from_conf_file(&args.config).unwrap_or_else(|err| {
+        eprintln!("Error: failed to load config from {}: {}", args.config, err);
+        process::exit(1);
     });
-
-    // Load configuration from file or use default
-    let mut config = if let Some(path) = config_path {
-        Config::from_file(&path).unwrap_or_else(|e| {
-            eprintln!("Error: failed to load config from {}: {}", path, e);
-            eprintln!("Info: using default configuration");
-            Config::default()
-        })
-    } else {
-        Config::default()
-    };
-
-    apply_overrides(&mut config, &args);
 
     // Validate peer configurations
     for peer_config in &config.peers {
-        if let Err(e) = peer_config.validate() {
+        if let Err(err) = peer_config.validate() {
             eprintln!(
                 "Error: invalid peer configuration ({}): {}",
-                peer_config.address, e
+                peer_config.address, err
             );
-            std::process::exit(1);
+            process::exit(1);
         }
     }
 
@@ -157,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create BGP server
-    let server = BgpServer::new(config)?;
+    let server = BgpServer::new(config, PathBuf::from(&args.config))?;
 
     // Create gRPC service with cloned components
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());

@@ -14,6 +14,7 @@ regex.workspace = true
 tracing.workspace = true
 tokio-stream = "0.1"
 libc = "0.2"
+conf = { path = "../conf" }
 russh = "0.58"
 
 [dev-dependencies]

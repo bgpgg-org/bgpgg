@@ -39,13 +39,13 @@ use bgpgg::bgp::ext_community::*;
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::bgp::msg_update_types::LargeCommunity;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     self, add_route_request,
     extended_community::{Community, TwoOctetAsSpecific},
     AddIpRouteRequest, AddRouteRequest, AsPathSegment, BgpState, ExtendedCommunity,
     ListRoutesRequest, Origin, SessionConfig, UnknownAttribute,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -871,28 +871,28 @@ async fn test_med_comparison_restricted_to_same_as() {
     // Expected winner: S2 (AS65001, MED=50)
     // - S1 vs S2: same AS, MED compared -> S2 wins (50 < 100)
     // - S2 vs S3: different AS, MED NOT compared -> falls to peer address -> S2 wins (127.0.0.2 < 127.0.0.3)
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
     ))
     .await;
-    let server3 = start_test_server(Config::new(
+    let server3 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
         90,
     ))
     .await;
-    let server4 = start_test_server(Config::new(
+    let server4 = start_test_server(BgpConfig::new(
         65004,
         "127.0.0.4:0",
         Ipv4Addr::new(4, 4, 4, 4),
@@ -1318,10 +1318,10 @@ async fn test_mixed_asn_propagation() {
 /// - To NEW speakers: native 4-byte encoding, no AS4_* attributes
 #[tokio::test]
 async fn test_four_octet_asn_propagation() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     // Add passive peers for all FakePeer connections
     for addr in ["127.0.0.1", "127.0.0.2", "127.0.0.3"] {
-        config.peers.push(bgpgg::config::PeerConfig {
+        config.peers.push(conf::bgp::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,
             ..Default::default()
@@ -1433,9 +1433,9 @@ async fn test_four_octet_asn_propagation() {
 /// RFC 6793: Test server ignores malformed AS4_PATH (longer than AS_PATH)
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_path() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     for addr in ["127.0.0.1", "127.0.0.2"] {
-        config.peers.push(bgpgg::config::PeerConfig {
+        config.peers.push(conf::bgp::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,
             ..Default::default()
@@ -1518,9 +1518,9 @@ async fn test_four_octet_asn_malformed_as4_path() {
 /// RFC 6793: Test server ignores malformed AS4_AGGREGATOR (invalid length)
 #[tokio::test]
 async fn test_four_octet_asn_malformed_as4_aggregator() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     for addr in ["127.0.0.1", "127.0.0.2"] {
-        config.peers.push(bgpgg::config::PeerConfig {
+        config.peers.push(conf::bgp::PeerConfig {
             address: addr.to_string(),
             passive_mode: true,
             ..Default::default()

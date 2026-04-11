@@ -39,7 +39,6 @@ use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
@@ -54,9 +53,13 @@ use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use bgpgg::net::apply_gtsm;
 use bgpgg::server::BgpServer;
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fs, io, process};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio::time::Duration;
@@ -90,11 +93,67 @@ pub struct TestServer {
     pub bgp_port: u16,
     pub asn: u32,
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
-    pub config: Config,
+    pub config: BgpConfig,
     runtime: Option<tokio::runtime::Runtime>,
+    /// Tempdir backing `rogg.conf`. Held so it isn't deleted mid-test.
+    config_dir: TempDir,
+}
+
+/// Tempdir for tests. Deletes itself when dropped.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new() -> io::Result<Self> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!("bgpgg-test-{}-{}", process::id(), n));
+        fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &FsPath {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 impl TestServer {
+    /// Parse the on-disk rogg.conf this server commits to. Panics if missing
+    /// or unparseable -- both are bugs in commit_config.
+    pub fn read_conf(&self) -> BgpConfig {
+        let path = self.config_dir.path().join("rogg.conf");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
+    /// Path to snapshot file at `index` (e.g. `rogg.1.conf`).
+    pub fn snapshot_path(&self, index: u32) -> PathBuf {
+        self.config_dir.path().join(format!("rogg.{}.conf", index))
+    }
+
+    /// True if snapshot `index` exists on disk.
+    pub fn snapshot_exists(&self, index: u32) -> bool {
+        self.snapshot_path(index).exists()
+    }
+
+    /// Parse the snapshot at `index`. Panics if missing or unparseable.
+    pub fn read_snapshot(&self, index: u32) -> BgpConfig {
+        let path = self.snapshot_path(index);
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
     /// Kill the BGP server by shutting down its runtime (simulates process death)
     pub fn kill(&mut self) {
         // Shutdown the runtime - this kills ALL tasks in it (simulates process death)
@@ -230,6 +289,8 @@ pub struct PathParams {
     pub rpki_validation: i32,
     /// RFC 9552: BGP-LS attribute (type 29)
     pub ls_attribute: Option<LsAttribute>,
+    /// RFC 2545: link-local IPv6 next-hop
+    pub link_local_next_hop: Option<String>,
 }
 
 impl PathParams {
@@ -309,6 +370,7 @@ pub fn build_path(params: PathParams) -> Path {
         aggregator: params.aggregator,
         rpki_validation: params.rpki_validation,
         ls_attribute: params.ls_attribute,
+        link_local_next_hop: params.link_local_next_hop,
     }
 }
 
@@ -439,9 +501,9 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
 }
 
 /// Helper to create a standard test config with sane defaults
-pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
+pub fn test_config(asn: u32, ip_last_octet: u8) -> BgpConfig {
     let ip = format!("127.0.0.{}", ip_last_octet);
-    let mut config = Config::new(
+    let mut config = BgpConfig::new(
         asn,
         &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
@@ -453,14 +515,14 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-pub async fn start_test_server(mut config: Config) -> TestServer {
+pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     use tokio::net::TcpListener;
 
     init_test_logging();
 
     // Use fast connect retry for tests (default 30s is too slow).
     // If the caller explicitly set a value, preserve it.
-    if config.connect_retry_secs == Config::default().connect_retry_secs {
+    if config.connect_retry_secs == BgpConfig::default().connect_retry_secs {
         config.connect_retry_secs = 1;
     }
 
@@ -492,7 +554,9 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
     let grpc_listener = grpc_listener.into_std().unwrap();
 
     let config_clone = config.clone();
-    let server = BgpServer::new(config).expect("valid server config");
+    let config_dir = TempDir::new().expect("create config tempdir");
+    let config_path = config_dir.path().join("rogg.conf");
+    let server = BgpServer::new(config, config_path).expect("valid server config");
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -556,6 +620,7 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
         address: bind_ip,
         config: config_clone,
         runtime: Some(runtime),
+        config_dir,
     }
 }
 
@@ -563,8 +628,8 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
 ///
 /// Use when you need custom handshake behavior (e.g., partial handshake for OpenConfirm tests).
 pub async fn setup_server_with_passive_peer() -> TestServer {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(bgpgg::config::PeerConfig {
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
@@ -638,14 +703,14 @@ pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestSe
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
@@ -679,21 +744,21 @@ pub async fn setup_three_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -730,28 +795,28 @@ pub async fn setup_four_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3, server4] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65004,
                 "127.0.0.4:0",
                 Ipv4Addr::new(4, 4, 4, 4),
@@ -784,7 +849,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     config: PeerConfig,
 ) -> (TestServer, [TestServer; N]) {
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
-    let hub = start_test_server(Config::new(
+    let hub = start_test_server(BgpConfig::new(
         hub_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -795,7 +860,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     for (i, &asn) in spoke_asns.iter().enumerate() {
         let octet = (i + 2) as u8;
         spokes.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
@@ -1356,7 +1421,7 @@ pub async fn create_asn_chain<const N: usize>(
     for (i, asn) in asns.iter().enumerate() {
         let octet = (i + 1) as u8;
         servers.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 *asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),

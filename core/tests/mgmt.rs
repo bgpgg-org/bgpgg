@@ -17,7 +17,6 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     add_route_request, remove_route_request, route, AddIpRouteRequest, AddLsRouteRequest,
     AddRouteRequest, AddRpkiCacheRequest, AdminState, AfiSafi as ProtoAfiSafi, BgpState,
@@ -25,12 +24,13 @@ use bgpgg::grpc::proto::{
     LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest,
     RibType, Route, SessionConfig,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     // Active state exits instantly.
     config.connect_retry_secs = 0;
     let server1 = start_test_server(config).await;
@@ -82,14 +82,14 @@ async fn test_add_peer_failure() {
 
 #[tokio::test]
 async fn test_add_peer_success() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.1:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -110,11 +110,21 @@ async fn test_add_peer_success() {
         "Timeout waiting for peers to establish",
     )
     .await;
+
+    // AddPeer routes through commit_config -- rogg.conf must reflect the new peer.
+    let conf = server1.read_conf();
+    let peer_addr = server2.address.to_string();
+    assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should include {}; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
 async fn test_remove_peer_not_found() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -130,22 +140,37 @@ async fn test_remove_peer_not_found() {
 #[tokio::test]
 async fn test_remove_peer_success() {
     let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let peer_addr = server2.address.to_string();
 
-    // Verify peer exists
+    // Verify peer exists -- in memory and on disk.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
+    let conf = server1.read_conf();
+    assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should include {} before RemovePeer; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 
     // Remove peer
     server1.remove_peer(&server2).await;
 
-    // Verify peer is gone
+    // Verify peer is gone -- in memory and on disk.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
+    let conf = server1.read_conf();
+    assert!(
+        !conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should not include {} after RemovePeer; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
 async fn test_get_peers_empty() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -170,7 +195,7 @@ async fn test_get_peers_with_peers() {
 
 #[tokio::test]
 async fn test_get_peer_not_found() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -205,7 +230,7 @@ async fn test_get_peer_success() {
 
 #[tokio::test]
 async fn test_get_routes_empty() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -223,7 +248,7 @@ async fn test_get_routes_empty() {
 
 #[tokio::test]
 async fn test_announce_withdraw_route() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -270,7 +295,7 @@ async fn test_announce_withdraw_route() {
 
 #[tokio::test]
 async fn test_withdraw_nonexistent_route() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -357,13 +382,7 @@ async fn test_disable_enable_peer() {
 
 #[tokio::test]
 async fn test_add_bmp_server() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     let servers = server.client.get_bmp_servers().await.unwrap();
     assert_eq!(servers.len(), 0);
@@ -388,13 +407,7 @@ async fn test_add_bmp_server() {
 
 #[tokio::test]
 async fn test_remove_bmp_server() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     server
         .client
@@ -417,13 +430,7 @@ async fn test_remove_bmp_server() {
 
 #[tokio::test]
 async fn test_get_bmp_servers_empty() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     let servers = server.client.get_bmp_servers().await.unwrap();
     assert_eq!(servers.len(), 0);
@@ -431,13 +438,7 @@ async fn test_get_bmp_servers_empty() {
 
 #[tokio::test]
 async fn test_add_route_stream() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // Initially no routes
     let routes = server
@@ -492,13 +493,7 @@ async fn test_add_route_stream() {
 
 #[tokio::test]
 async fn test_add_route_stream_with_invalid_route() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // Create routes with one invalid prefix
     let routes_to_add = vec![
@@ -706,14 +701,66 @@ async fn test_list_peers_stream() {
 }
 
 #[tokio::test]
-async fn test_get_server_info() {
-    let server = start_test_server(Config::new(
-        65001,
+async fn test_get_running_config() {
+    // Verifies the GetRunningConfig RPC renders the daemon's current state
+    // (server-level settings + live peers from self.peers) as parseable
+    // rogg.conf text.
+    let server = start_test_server(BgpConfig::new(
+        65042,
         "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
+        Ipv4Addr::new(10, 0, 0, 1),
         90,
     ))
     .await;
+
+    server
+        .client
+        .add_peer(
+            "10.0.0.5".to_string(),
+            Some(SessionConfig {
+                asn: Some(65099),
+                port: Some(179),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let text = server.client.get_running_config().await.unwrap();
+
+    // Server-level fields + peer block (address is the block header).
+    assert!(text.contains("service bgp {"), "missing service: {}", text);
+    assert!(text.contains("asn 65042"), "missing asn: {}", text);
+    assert!(
+        text.contains("router-id 10.0.0.1"),
+        "missing router-id: {}",
+        text
+    );
+    assert!(text.contains("hold-time 90"), "missing hold-time: {}", text);
+    assert!(
+        text.contains("peer 10.0.0.5 {"),
+        "missing peer block: {}",
+        text
+    );
+    assert!(
+        text.contains("remote-as 65099"),
+        "missing remote-as: {}",
+        text
+    );
+
+    // Round-trip: output must reparse into an equivalent BgpConfig.
+    let reparsed = BgpConfig::from_conf_str(&text).unwrap();
+    assert_eq!(reparsed.asn, 65042);
+    assert_eq!(reparsed.router_id, Ipv4Addr::new(10, 0, 0, 1));
+    assert_eq!(reparsed.hold_time_secs, 90);
+    assert_eq!(reparsed.peers.len(), 1);
+    assert_eq!(reparsed.peers[0].address, "10.0.0.5");
+    assert_eq!(reparsed.peers[0].asn, Some(65099));
+}
+
+#[tokio::test]
+async fn test_get_server_info() {
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // Initially should have 0 routes
     verify_server_info(&server, Ipv4Addr::new(127, 0, 0, 1), server.bgp_port, 0).await;
@@ -760,7 +807,7 @@ async fn test_extended_community_roundtrip() {
     use bgpgg::grpc::proto::extended_community::Community;
     use bgpgg::grpc::proto_community::u64_to_proto_extcomm;
 
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -844,13 +891,7 @@ async fn test_extended_community_roundtrip() {
 
 #[tokio::test]
 async fn test_add_route_with_invalid_prefix_length() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // Test IPv4 with prefix length > 32
     let result = server
@@ -915,13 +956,7 @@ async fn test_add_route_with_invalid_prefix_length() {
 /// API reports configured peer ASN when session is down.
 #[tokio::test]
 async fn test_peer_asn_api_fallback() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // Add peer with asn but don't start the other side
     server
@@ -1019,13 +1054,7 @@ async fn test_add_peer_with_llgr() {
 /// gRPC: Add, list, and remove RPKI caches.
 #[tokio::test]
 async fn test_rpki_add_list_remove() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // No caches initially
     let resp = server.client.list_rpki_caches().await.unwrap();
@@ -1068,13 +1097,7 @@ async fn test_rpki_add_list_remove() {
 /// gRPC: AddRpkiCache with SSH transport validates required fields.
 #[tokio::test]
 async fn test_rpki_add_ssh_missing_fields() {
-    let server = start_test_server(Config::new(
-        65001,
-        "127.0.0.1:0",
-        Ipv4Addr::new(1, 1, 1, 1),
-        90,
-    ))
-    .await;
+    let server = start_test_server(test_config(65001, 1)).await;
 
     // SSH transport without username -> error
     let result = server
@@ -1126,7 +1149,7 @@ fn make_ls_attr(name: &str) -> LsAttribute {
 
 #[tokio::test]
 async fn test_add_ls_route() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -1180,7 +1203,7 @@ async fn test_add_ls_route() {
 
 #[tokio::test]
 async fn test_remove_ls_route() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -1244,7 +1267,7 @@ async fn test_remove_ls_route() {
 /// RFC 9552 Section 8.2.3: configured Instance-ID is applied to locally originated LS routes.
 #[tokio::test]
 async fn test_ls_instance_id_config() {
-    let mut config = Config::new(64512, "127.0.0.1:0", Ipv4Addr::new(127, 0, 0, 1), 90);
+    let mut config = BgpConfig::new(64512, "127.0.0.1:0", Ipv4Addr::new(127, 0, 0, 1), 90);
     config.bgp_ls.instance_id = 99;
     let server = start_test_server(config).await;
 
@@ -1287,7 +1310,7 @@ async fn test_ls_instance_id_config() {
 
 #[tokio::test]
 async fn test_list_routes_family_filter() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -1359,4 +1382,162 @@ async fn test_list_routes_family_filter() {
         .unwrap();
     assert_eq!(ls_only.len(), 1, "should have 1 LS route");
     assert!(matches!(&ls_only[0].key, Some(route::Key::LsNlri(_))));
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot rotation / rollback / fail-hard
+// ---------------------------------------------------------------------------
+
+/// Number of snapshots kept on disk; mirrors `core::server::config::SNAPSHOT_COUNT`.
+const SNAPSHOT_COUNT: u32 = 10;
+
+/// Drive a fresh commit by adding one more BMP server; each call produces a
+/// distinct config diff so snapshot rotation can be observed.
+async fn commit_once(server: &TestServer, port: u16) {
+    server
+        .client
+        .add_bmp_server(format!("127.0.0.1:{}", port), None)
+        .await
+        .expect("commit via add_bmp_server");
+}
+
+#[tokio::test]
+async fn test_no_snapshot_on_first_commit() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    assert!(!server.snapshot_exists(1), "no snapshot before any commit");
+
+    commit_once(&server, 11100).await;
+    assert!(
+        !server.snapshot_exists(1),
+        "first commit should not create a snapshot (no previous state)"
+    );
+
+    commit_once(&server, 11101).await;
+    assert!(
+        server.snapshot_exists(1),
+        "second commit should create rogg.1.conf"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_rotates_snapshots() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    // Do N+2 commits. First commit doesn't snapshot (no prior state);
+    // each subsequent commit rotates.
+    let total = SNAPSHOT_COUNT + 2;
+    for i in 0..total {
+        commit_once(&server, 11200 + i as u16).await;
+    }
+
+    for i in 1..=SNAPSHOT_COUNT {
+        assert!(
+            server.snapshot_exists(i),
+            "snapshot {} should exist after {} commits",
+            i,
+            total
+        );
+    }
+    assert!(
+        !server.snapshot_exists(SNAPSHOT_COUNT + 1),
+        "snapshot {} should not exist (oldest dropped)",
+        SNAPSHOT_COUNT + 1
+    );
+
+    // .1 reflects the state just before the most recent commit: total-1 BMP
+    // servers (the most recent commit added the Nth).
+    let snap1 = server.read_snapshot(1);
+    assert_eq!(
+        snap1.bmp_servers.len(),
+        (total - 1) as usize,
+        ".1 should reflect the prior state"
+    );
+    let current = server.read_conf();
+    assert_eq!(current.bmp_servers.len(), total as usize);
+}
+
+#[tokio::test]
+async fn test_list_snapshots() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    // First commit: no snapshot produced.
+    commit_once(&server, 11300).await;
+    let snapshots = server.client.list_config_snapshots().await.unwrap();
+    assert_eq!(snapshots.len(), 0);
+
+    // Three more commits -> three snapshots.
+    for i in 1..=3 {
+        commit_once(&server, 11300 + i as u16).await;
+    }
+    let snapshots = server.client.list_config_snapshots().await.unwrap();
+    assert_eq!(snapshots.len(), 3);
+    let indices: Vec<u32> = snapshots.iter().map(|s| s.index).collect();
+    assert_eq!(indices, vec![1, 2, 3]);
+    for snap in &snapshots {
+        assert!(snap.size_bytes > 0, "snapshot {} has size", snap.index);
+        assert!(snap.mtime_unix > 0, "snapshot {} has mtime", snap.index);
+    }
+}
+
+#[tokio::test]
+async fn test_rollback_restores_previous() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    // Commit A: 1 BMP server.
+    commit_once(&server, 11400).await;
+    let conf_a = server.read_conf();
+
+    // Commit B: 2 BMP servers. `rogg.1.conf` now holds A.
+    commit_once(&server, 11401).await;
+    let conf_b = server.read_conf();
+    assert_eq!(conf_b.bmp_servers.len(), 2);
+
+    // Roll back to A.
+    server.client.rollback_config(1).await.unwrap();
+
+    // Running config matches A.
+    let after = server.read_conf();
+    assert_eq!(after.bmp_servers.len(), 1);
+    assert_eq!(after.bmp_servers[0].address, conf_a.bmp_servers[0].address);
+
+    // New `.1` preserves forward history: it's the state we just left (B).
+    let new_snap = server.read_snapshot(1);
+    assert_eq!(new_snap.bmp_servers.len(), 2);
+    assert_eq!(
+        new_snap.bmp_servers[1].address,
+        conf_b.bmp_servers[1].address
+    );
+}
+
+#[tokio::test]
+async fn test_apply_failure_no_revert() {
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    // Establish a known-good state with one BMP server.
+    commit_once(&server, 11500).await;
+    let before = server.read_conf();
+    assert_eq!(before.bmp_servers.len(), 1);
+    assert!(!server.snapshot_exists(1), "first commit: no snapshot");
+
+    // Bad BMP address: peer validator and `reject_unsupported_changes` pass;
+    // apply fails inside `reconfigure_bmp_servers` when it parses the address.
+    let bad_candidate = format!(
+        "router-id {}\nasn 65001\nlisten-addr \"{}\"\nbmp-server \"not-a-valid-address\" {{}}\n",
+        before.router_id, before.listen_addr
+    );
+    let result = server.client.commit_config(bad_candidate).await;
+    assert!(result.is_err(), "commit with bad BMP address must fail");
+
+    // rogg.conf unchanged; no snapshot rotation triggered by the failure.
+    let after = server.read_conf();
+    assert_eq!(after.bmp_servers.len(), 1);
+    assert_eq!(
+        after.bmp_servers[0].address, before.bmp_servers[0].address,
+        "failed commit must not mutate rogg.conf"
+    );
+    assert!(
+        !server.snapshot_exists(1),
+        "failed commit must not rotate snapshots"
+    );
 }

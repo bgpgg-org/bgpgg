@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "conf",
     "core",
     "daemon",
     "cli",
+    "ggsh",
     "loadtests",
 ]
 resolver = "2"

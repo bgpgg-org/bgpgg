@@ -42,6 +42,10 @@ systest: setup
 	cargo build --release --bin bgpggd --bin bgpgg
 	./systests/basic.sh
 
+systest-ggsh: setup
+	cargo build --release --bin bgpggd --bin bgpgg --bin ggsh
+	./systests/ggsh.sh
+
 systest-linux: setup
 	cargo build --release --bin bgpggd --bin bgpgg
 	sudo ./systests/linux.sh

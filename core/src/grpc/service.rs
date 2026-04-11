@@ -16,16 +16,16 @@ use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{
-    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
-};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
-use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
 use crate::server::AdminState;
+use conf::bgp::{
+    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
+    RpkiCacheConfig, TransportType,
+};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -50,6 +50,9 @@ use super::proto::{
     AddRpkiCacheResponse,
     AdminState as ProtoAdminState,
     BgpState as ProtoBgpState,
+    CommitConfigRequest,
+    CommitConfigResponse,
+    ConfigSnapshot as ProtoConfigSnapshot,
     DisablePeerRequest,
     DisablePeerResponse,
     EnablePeerRequest,
@@ -58,10 +61,14 @@ use super::proto::{
     GetPeerResponse,
     GetRpkiValidationRequest,
     GetRpkiValidationResponse,
+    GetRunningConfigRequest,
+    GetRunningConfigResponse,
     GetServerInfoRequest,
     GetServerInfoResponse,
     ListBmpServersRequest,
     ListBmpServersResponse,
+    ListConfigSnapshotsRequest,
+    ListConfigSnapshotsResponse,
     ListDefinedSetsRequest,
     ListDefinedSetsResponse,
     ListPeersRequest,
@@ -89,6 +96,8 @@ use super::proto::{
     RemoveRpkiCacheResponse,
     ResetPeerRequest,
     ResetPeerResponse,
+    RollbackConfigRequest,
+    RollbackConfigResponse,
     Route as ProtoRoute,
     RpkiCacheInfo,
     RpkiVrp,
@@ -162,7 +171,8 @@ fn route_to_proto(route: Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            next_hop: path.next_hop().to_string(),
+            next_hop: path.next_hop().global_addr().to_string(),
+            link_local_next_hop: path.next_hop().link_local().map(|addr| addr.to_string()),
             peer_address: path
                 .source()
                 .peer_ip()
@@ -343,7 +353,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
     });
 
     let graceful_restart = if let Some(gr) = cfg.graceful_restart {
-        crate::config::GracefulRestartConfig {
+        conf::bgp::GracefulRestartConfig {
             enabled: gr.enabled.unwrap_or(defaults.graceful_restart.enabled),
             restart_time: gr
                 .restart_time_secs
@@ -1231,6 +1241,114 @@ impl BgpService for BgpGrpcService {
         }))
     }
 
+    async fn get_running_config(
+        &self,
+        _request: Request<GetRunningConfigRequest>,
+    ) -> Result<Response<GetRunningConfigResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetRunningConfig { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let text = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(GetRunningConfigResponse { text }))
+    }
+
+    async fn commit_config(
+        &self,
+        request: Request<CommitConfigRequest>,
+    ) -> Result<Response<CommitConfigResponse>, Status> {
+        let text = request.into_inner().text;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::CommitConfig { text, response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(CommitConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(CommitConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn rollback_config(
+        &self,
+        request: Request<RollbackConfigRequest>,
+    ) -> Result<Response<RollbackConfigResponse>, Status> {
+        let index = request.into_inner().index;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RollbackConfig {
+            index,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(RollbackConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(RollbackConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn list_config_snapshots(
+        &self,
+        _request: Request<ListConfigSnapshotsRequest>,
+    ) -> Result<Response<ListConfigSnapshotsResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::ListConfigSnapshots { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let snapshots = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        let proto_snapshots = snapshots
+            .into_iter()
+            .map(|s| ProtoConfigSnapshot {
+                index: s.index,
+                mtime_unix: s.mtime_unix,
+                size_bytes: s.size_bytes,
+            })
+            .collect();
+
+        Ok(Response::new(ListConfigSnapshotsResponse {
+            snapshots: proto_snapshots,
+        }))
+    }
+
     async fn add_bmp_server(
         &self,
         request: Request<AddBmpServerRequest>,
@@ -1325,27 +1443,33 @@ impl BgpService for BgpGrpcService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {}", e)))?;
 
-        let transport = match inner.transport.as_deref() {
-            Some("ssh") => {
-                let username = inner.ssh_username.ok_or_else(|| {
-                    Status::invalid_argument("ssh_username required for SSH transport")
-                })?;
-                let private_key_file = inner.ssh_private_key_file.ok_or_else(|| {
-                    Status::invalid_argument("ssh_private_key_file required for SSH transport")
-                })?;
-                RtrTransport::Ssh(SshTransport {
-                    username,
-                    private_key_file,
-                    known_hosts_file: inner.ssh_known_hosts_file,
-                })
+        let transport = inner
+            .transport
+            .as_deref()
+            .map(str::parse::<TransportType>)
+            .transpose()
+            .map_err(|e| Status::invalid_argument(format!("invalid transport: {}", e)))?
+            .unwrap_or_default();
+        if matches!(transport, TransportType::Ssh) {
+            if inner.ssh_username.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_username required for SSH transport",
+                ));
             }
-            _ => RtrTransport::Tcp,
-        };
+            if inner.ssh_private_key_file.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_private_key_file required for SSH transport",
+                ));
+            }
+        }
 
-        let config = RtrCacheConfig {
-            address: addr,
+        let config = RpkiCacheConfig {
+            address: addr.to_string(),
             preference: inner.preference.map(|p| p as u8).unwrap_or(0),
             transport,
+            ssh_username: inner.ssh_username,
+            ssh_private_key_file: inner.ssh_private_key_file,
+            ssh_known_hosts_file: inner.ssh_known_hosts_file,
             retry_interval: inner.retry_interval,
             refresh_interval: inner.refresh_interval,
             expire_interval: inner.expire_interval,

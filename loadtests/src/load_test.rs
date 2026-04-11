@@ -19,11 +19,11 @@ use crate::route_generator::{
 use crate::{
     calculate_expected_best_paths, proto_path_to_rib_path, transform_path_for_ebgp_export,
 };
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_client::BgpServiceClient;
 use bgpgg::grpc::proto::route;
 use bgpgg::net::IpNetwork;
 use bgpgg::rib::Path;
+use conf::bgp::BgpConfig;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::process::{Child, Command};
@@ -441,7 +441,7 @@ impl BgpggProcess {
         let grpc_port = 50051 + (asn - 65000); // Offset by ASN to avoid conflicts
         let grpc_addr = format!("127.0.0.1:{}", grpc_port);
 
-        let config = Config {
+        let config = BgpConfig {
             asn: asn as u32,
             listen_addr: "127.0.0.1:0".to_string(),
             router_id,
@@ -462,8 +462,7 @@ impl BgpggProcess {
             bgp_ls: Default::default(),
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        config_file.write_all(yaml.as_bytes())?;
+        config_file.write_all(config.to_conf_str().as_bytes())?;
         config_file.flush()?;
 
         let process = Command::new("../target/release/bgpggd")

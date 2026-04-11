@@ -15,12 +15,14 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
+use bgpgg::bgp::msg_update::PathAttrValue;
+use bgpgg::bgp::msg_update_types::{attr_flags, attr_type_code, NextHopAddr};
 use bgpgg::grpc::proto::{
     remove_route_request, route, BgpState, ListRoutesRequest, Origin, RemoveRouteRequest, RibType,
     Route, SessionConfig,
 };
-use std::net::Ipv4Addr;
+use conf::bgp::BgpConfig;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[tokio::test]
 async fn test_announce_withdraw() {
@@ -257,21 +259,21 @@ async fn test_ibgp_split_horizon() {
     // iBGP: all same ASN
     let [server1, server2, server3] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -340,21 +342,21 @@ async fn test_as_loop_prevention() {
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
     let [server1_a, server2, server1_b] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -494,7 +496,7 @@ async fn test_ipv6_route_exchange() {
 
 #[tokio::test]
 async fn test_ipv6_nexthop_rewrite() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "[::ffff:127.0.0.1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -502,7 +504,7 @@ async fn test_ipv6_nexthop_rewrite() {
     ))
     .await;
 
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "[::ffff:127.0.0.2]:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -542,7 +544,7 @@ async fn test_ipv6_nexthop_rewrite() {
 }
 #[tokio::test]
 async fn test_route_advertised_when_peer_becomes_established() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1079,4 +1081,143 @@ async fn test_tcp_md5_mismatching_keys() {
 
     std::fs::remove_file(&key_a).ok();
     std::fs::remove_file(&key_b).ok();
+}
+
+/// Build raw MP_REACH_NLRI attribute with 32-byte IPv6 next-hop (global + link-local).
+fn attr_mp_reach_ipv6_with_link_local(
+    global: Ipv6Addr,
+    link_local: Ipv6Addr,
+    prefix_len: u8,
+    prefix_bytes: &[u8],
+) -> Vec<u8> {
+    let mut value = Vec::new();
+    value.extend_from_slice(&2u16.to_be_bytes()); // AFI = IPv6
+    value.push(1); // SAFI = Unicast
+    value.push(32); // Next hop length = 32 (global + link-local)
+    value.extend_from_slice(&global.octets());
+    value.extend_from_slice(&link_local.octets());
+    value.push(0); // Reserved
+    value.push(prefix_len);
+    value.extend_from_slice(prefix_bytes);
+
+    // Flags: Optional, non-transitive, extended-length not needed for small payloads
+    let mut attr = vec![
+        attr_flags::OPTIONAL,
+        attr_type_code::MP_REACH_NLRI,
+        value.len() as u8,
+    ];
+    attr.extend_from_slice(&value);
+    attr
+}
+
+/// RFC 2545: 32-byte IPv6 next-hop (global + link-local) end-to-end.
+/// FakePeer1 (eBGP) sends UPDATE with 32-byte next-hop -> server stores link_local_next_hop
+/// in RIB -> server propagates to FakePeer2 (iBGP) -> verify 32-byte encoding on wire.
+#[tokio::test]
+async fn test_ipv6_link_local_nexthop() {
+    let server = start_test_server(BgpConfig::new(
+        65001,
+        "127.0.0.1:0",
+        Ipv4Addr::new(1, 1, 1, 1),
+        90,
+    ))
+    .await;
+
+    // Add eBGP peer (FakePeer1) that will inject the 32-byte next-hop
+    server
+        .client
+        .add_peer("127.0.0.2".to_string(), Some(SessionConfig::default()))
+        .await
+        .unwrap();
+    apply_permit_all(&server, "127.0.0.2").await;
+
+    // Add iBGP peer (FakePeer2) that will receive the propagated route
+    server
+        .client
+        .add_peer(
+            "127.0.0.3".to_string(),
+            Some(SessionConfig {
+                asn: Some(65001),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // FakePeer1 (eBGP) connects
+    let mut fake1 = FakePeer::connect_and_handshake(
+        Some("127.0.0.2"),
+        &server,
+        65002,
+        Ipv4Addr::new(2, 2, 2, 2),
+        Some(vec![
+            build_multiprotocol_capability_ipv6_unicast(),
+            build_capability_4byte_asn(65002),
+        ]),
+    )
+    .await;
+
+    // FakePeer2 (iBGP) connects
+    let mut fake2 = FakePeer::connect_and_handshake(
+        Some("127.0.0.3"),
+        &server,
+        65001,
+        Ipv4Addr::new(3, 3, 3, 3),
+        Some(vec![
+            build_multiprotocol_capability_ipv6_unicast(),
+            build_capability_4byte_asn(65001),
+        ]),
+    )
+    .await;
+
+    // FakePeer1 sends UPDATE with 32-byte IPv6 next-hop: global 2001:db8::1 + link-local fe80::1
+    let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    let mp_reach =
+        attr_mp_reach_ipv6_with_link_local(global, link_local, 32, &[0x20, 0x01, 0x0d, 0xb8]);
+    let update = build_raw_update(
+        &[],
+        &[
+            &attr_origin_igp(),
+            &attr_as_path_4byte(vec![65002]),
+            &mp_reach,
+        ],
+        &[],
+        None,
+    );
+    fake1.send_raw(&update).await;
+
+    // Receive: verify server's RIB has the route with link-local next-hop
+    poll_rib(&[(
+        &server,
+        vec![expected_route(
+            "2001:db8::/32",
+            PathParams {
+                next_hop: "2001:db8::1".to_string(),
+                link_local_next_hop: Some("fe80::1".to_string()),
+                peer_address: "127.0.0.2".to_string(),
+                as_path: vec![as_sequence(vec![65002])],
+                local_pref: Some(100),
+                ..Default::default()
+            },
+        )],
+    )])
+    .await;
+
+    // Send: verify FakePeer2 receives 32-byte next-hop on the wire
+    let received = fake2.read_update().await;
+    let mp_reach_attr = received
+        .path_attributes()
+        .iter()
+        .find_map(|attr| match &attr.value {
+            PathAttrValue::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("expected MP_REACH_NLRI in propagated UPDATE");
+
+    assert_eq!(
+        mp_reach_attr.next_hop,
+        NextHopAddr::Ipv6WithLinkLocal(global, link_local),
+        "iBGP propagation should preserve 32-byte next-hop with link-local"
+    );
 }

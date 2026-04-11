@@ -19,12 +19,12 @@ pub use utils::*;
 
 use bgpgg::bgp::msg::AddPathMask;
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
-use bgpgg::config::Config;
-#[allow(hidden_glob_reexports)]
-use bgpgg::config::PeerConfig;
 use bgpgg::grpc::proto::{
     AdminState, BgpState, ListRoutesRequest, MaxPrefixAction, MaxPrefixSetting, Peer, SessionConfig,
 };
+use conf::bgp::BgpConfig;
+#[allow(hidden_glob_reexports)]
+use conf::bgp::PeerConfig;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -46,7 +46,7 @@ async fn test_max_prefix_limit() {
 
     for (name, action, allow_automatic_stop, expect_disconnect) in test_cases {
         // Server1: will inject routes
-        let server1 = start_test_server(Config::new(
+        let server1 = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -55,7 +55,7 @@ async fn test_max_prefix_limit() {
         .await;
 
         // Server2: will receive routes with max_prefix limit
-        let server2 = start_test_server(Config::new(
+        let server2 = start_test_server(BgpConfig::new(
             65002,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
@@ -164,7 +164,7 @@ async fn test_max_prefix_limit() {
 
 #[tokio::test]
 async fn test_remove_peer_sends_cease_notification() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -207,7 +207,7 @@ async fn test_remove_peer_sends_cease_notification() {
 
 #[tokio::test]
 async fn test_disable_peer_sends_admin_shutdown() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -262,7 +262,7 @@ async fn test_collision_immediate() {
         // FakePeer listens, server will connect to it
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
-        let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300);
+        let mut config = BgpConfig::new(65001, "127.0.0.1:0", server_bgp_id, 300);
         config.peers.push(PeerConfig {
             address: "127.0.0.3".to_string(),
             port: peer.port(),
@@ -360,7 +360,7 @@ async fn test_collision_connect_state() {
     // Peer listens, server connects with DelayOpen configured
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: "127.0.0.3".to_string(),
         port: peer.port(),
@@ -428,7 +428,7 @@ async fn test_collision_deferred() {
         // Peer listens at 127.0.0.3, server will connect to it
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
-        let mut config = Config::new(65001, "127.0.0.1:0", server_bgp_id, 300);
+        let mut config = BgpConfig::new(65001, "127.0.0.1:0", server_bgp_id, 300);
         config.peers.push(PeerConfig {
             address: "127.0.0.3".to_string(),
             port: peer.port(),
@@ -513,7 +513,7 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
     // FakePeer listens, server will connect outgoing
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: "127.0.0.3".to_string(),
         port: peer.port(),
@@ -569,7 +569,7 @@ async fn test_collision_candidate_asn_preserved_on_promotion() {
     // FakePeer listens, server will connect outgoing
     let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
 
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     config.peers.push(PeerConfig {
         address: "127.0.0.4".to_string(),
         port: peer.port(),
