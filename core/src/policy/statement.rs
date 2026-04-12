@@ -14,17 +14,19 @@
 
 use crate::bgp::bgpls_nlri::LsProtocolId;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{
-    ActionsConfig, ConditionsConfig, LocalPrefActionConfig, MatchOptionConfig, MedActionConfig,
-    StatementConfig,
-};
 use crate::net::IpNetwork;
 use crate::policy::sets::{
     AsPathSet, CommunitySet, DefinedSets, ExtCommunitySet, LargeCommunitySet, NeighborSet,
     PrefixSet,
 };
 use crate::rib::{Path, RouteKey, RouteSource};
+use crate::rpki::vrp::rpki_validation_to_config;
 use crate::rpki::vrp::RpkiValidation;
+use conf::bgp::{
+    ActionsConfig, CommunityActionConfig, ConditionsConfig, ExtCommunityActionConfig,
+    LargeCommunityActionConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig,
+    MedActionConfig, StatementConfig,
+};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -126,8 +128,6 @@ impl Statement {
 
     /// Convert statement back to config format (for API responses)
     pub fn to_config(&self) -> StatementConfig {
-        use crate::config::{CommunityActionConfig, MatchSetRefConfig};
-
         let mut conditions = ConditionsConfig::default();
 
         // Extract conditions
@@ -191,7 +191,7 @@ impl Statement {
                     });
                 }
                 Condition::RpkiValidation(state) => {
-                    conditions.rpki_validation = Some((*state).into());
+                    conditions.rpki_validation = Some(rpki_validation_to_config(*state));
                 }
                 Condition::AfiSafi(afi_safi_match) => {
                     conditions.afi_safi = Some(
@@ -308,8 +308,6 @@ impl Statement {
                 },
                 Action::SetExtCommunity(op) => {
                     use crate::bgp::ext_community::format_extended_community;
-                    use crate::config::ExtCommunityActionConfig;
-
                     match op {
                         ExtCommunityOp::Add(ecs) => {
                             actions.ext_community = Some(ExtCommunityActionConfig {
@@ -340,32 +338,28 @@ impl Statement {
                         }
                     }
                 }
-                Action::SetLargeCommunity(op) => {
-                    use crate::config::LargeCommunityActionConfig;
-
-                    match op {
-                        LargeCommunityOp::Add(lcs) => {
-                            actions.large_community = Some(LargeCommunityActionConfig {
-                                operation: "add".to_string(),
-                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
-                            });
-                        }
-                        LargeCommunityOp::Remove(lcs) => {
-                            actions.large_community = Some(LargeCommunityActionConfig {
-                                operation: "remove".to_string(),
-                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
-                            });
-                        }
-                        LargeCommunityOp::Replace(lcs) => {
-                            actions.large_community = Some(LargeCommunityActionConfig {
-                                operation: "replace".to_string(),
-                                large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
-                            });
-                        }
+                Action::SetLargeCommunity(op) => match op {
+                    LargeCommunityOp::Add(lcs) => {
+                        actions.large_community = Some(LargeCommunityActionConfig {
+                            operation: "add".to_string(),
+                            large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                        });
                     }
-                }
+                    LargeCommunityOp::Remove(lcs) => {
+                        actions.large_community = Some(LargeCommunityActionConfig {
+                            operation: "remove".to_string(),
+                            large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                        });
+                    }
+                    LargeCommunityOp::Replace(lcs) => {
+                        actions.large_community = Some(LargeCommunityActionConfig {
+                            operation: "replace".to_string(),
+                            large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+                        });
+                    }
+                },
                 Action::SetRpkiState(state) => {
-                    actions.set_rpki_state = Some((*state).into());
+                    actions.set_rpki_state = Some(rpki_validation_to_config(*state));
                 }
             }
         }
@@ -1056,11 +1050,11 @@ fn parse_community_value(s: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
     use crate::bgp::bgpls_nlri::{LsDescriptors, LsNlri, LsNlriBody, LsNlriType, NodeDescriptor};
-    use crate::config::PolicyDefinitionConfig;
     use crate::net::Ipv4Net;
     use crate::policy::test_helpers::{create_path, test_prefix};
     use crate::policy::Policy;
     use crate::rib::RouteSource;
+    use conf::bgp::PolicyDefinitionConfig;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_ip(last: u8) -> IpAddr {
@@ -1275,7 +1269,7 @@ mod tests {
 
     #[test]
     fn test_policy_from_config() {
-        use crate::config::ConditionsConfig;
+        use conf::bgp::ConditionsConfig;
 
         let defined_sets = DefinedSets::default();
 

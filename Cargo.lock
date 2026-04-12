@@ -498,6 +498,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
+name = "conf"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -513,10 +522,10 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 name = "core"
 version = "0.3.0"
 dependencies = [
+ "conf",
  "libc",
  "prost",
  "regex",
- "rogg-config",
  "russh",
  "serde",
  "serde_json",
@@ -667,6 +676,7 @@ name = "daemon"
 version = "0.3.0"
 dependencies = [
  "clap",
+ "conf",
  "core",
  "serde_json",
  "tokio",
@@ -1459,6 +1469,7 @@ checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 name = "loadtests"
 version = "0.3.0"
 dependencies = [
+ "conf",
  "core",
  "prost",
  "rand 0.8.5",
@@ -2125,10 +2136,6 @@ dependencies = [
  "hmac",
  "subtle",
 ]
-
-[[package]]
-name = "rogg-config"
-version = "0.3.0"
 
 [[package]]
 name = "rsa"

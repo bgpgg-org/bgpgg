@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use clap::Parser;
+use conf::bgp::BgpConfig;
 use tracing::info;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -34,7 +34,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let config = Config::from_rogg_conf(&args.config).unwrap_or_else(|err| {
+    let config = BgpConfig::from_conf_file(&args.config).unwrap_or_else(|err| {
         eprintln!("Error: failed to load config from {}: {}", args.config, err);
         std::process::exit(1);
     });

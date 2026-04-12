@@ -18,20 +18,20 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_notification::BgpError;
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::BgpState;
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
 async fn test_hold_timer_expiry() {
     let hold_timer_secs: u16 = 3;
-    let mut config = Config::new(
+    let mut config = BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
     );
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()

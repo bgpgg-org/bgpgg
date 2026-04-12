@@ -39,7 +39,6 @@ use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
@@ -54,6 +53,7 @@ use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use bgpgg::net::apply_gtsm;
 use bgpgg::server::BgpServer;
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
@@ -90,7 +90,7 @@ pub struct TestServer {
     pub bgp_port: u16,
     pub asn: u32,
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
-    pub config: Config,
+    pub config: BgpConfig,
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -442,9 +442,9 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
 }
 
 /// Helper to create a standard test config with sane defaults
-pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
+pub fn test_config(asn: u32, ip_last_octet: u8) -> BgpConfig {
     let ip = format!("127.0.0.{}", ip_last_octet);
-    let mut config = Config::new(
+    let mut config = BgpConfig::new(
         asn,
         &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
@@ -456,14 +456,14 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-pub async fn start_test_server(mut config: Config) -> TestServer {
+pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     use tokio::net::TcpListener;
 
     init_test_logging();
 
     // Use fast connect retry for tests (default 30s is too slow).
     // If the caller explicitly set a value, preserve it.
-    if config.connect_retry_secs == Config::default().connect_retry_secs {
+    if config.connect_retry_secs == BgpConfig::default().connect_retry_secs {
         config.connect_retry_secs = 1;
     }
 
@@ -566,8 +566,8 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
 ///
 /// Use when you need custom handshake behavior (e.g., partial handshake for OpenConfirm tests).
 pub async fn setup_server_with_passive_peer() -> TestServer {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(bgpgg::config::PeerConfig {
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.1".to_string(),
         passive_mode: true,
         ..Default::default()
@@ -641,14 +641,14 @@ pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestSe
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
@@ -682,21 +682,21 @@ pub async fn setup_three_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -733,28 +733,28 @@ pub async fn setup_four_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3, server4] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65004,
                 "127.0.0.4:0",
                 Ipv4Addr::new(4, 4, 4, 4),
@@ -787,7 +787,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     config: PeerConfig,
 ) -> (TestServer, [TestServer; N]) {
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
-    let hub = start_test_server(Config::new(
+    let hub = start_test_server(BgpConfig::new(
         hub_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -798,7 +798,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     for (i, &asn) in spoke_asns.iter().enumerate() {
         let octet = (i + 2) as u8;
         spokes.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
@@ -1359,7 +1359,7 @@ pub async fn create_asn_chain<const N: usize>(
     for (i, asn) in asns.iter().enumerate() {
         let octet = (i + 1) as u8;
         servers.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 *asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),

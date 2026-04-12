@@ -61,7 +61,12 @@ impl Peer {
 
             let md5_key = self.config.read_md5_key();
             let ttl_min = self.config.ttl_min;
-            let if_index = match self.config.resolve_interface_index() {
+            let if_index = match self
+                .config
+                .interface
+                .as_ref()
+                .map(|iface| crate::net::resolve_interface_index(iface))
+            {
                 Some(Ok(idx)) => Some(idx),
                 Some(Err(err)) => {
                     error!(peer_ip = %self.addr, error = %err,

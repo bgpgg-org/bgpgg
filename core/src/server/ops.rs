@@ -22,7 +22,6 @@ use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::NextHopAddr;
 use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::MaxPrefixAction;
 use crate::log::{debug, info, warn};
 use crate::net::{get_interface_link_local, IpNetwork};
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
@@ -31,6 +30,7 @@ use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{Path, RouteKey, RoutePath};
 use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
+use conf::bgp::{AddPathSend, MaxPrefixAction};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -514,12 +514,7 @@ impl BgpServer {
         let peer_tx = conn.peer_tx.clone();
 
         // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
-        if peer.config.rs_client
-            && matches!(
-                peer.config.add_path_send,
-                crate::config::AddPathSend::Disabled
-            )
-        {
+        if peer.config.rs_client && matches!(peer.config.add_path_send, AddPathSend::Disabled) {
             warn!(
                 %peer_ip,
                 "Route server could hide paths without add-path. Enable add-path send."

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "config",
+    "conf",
     "core",
     "daemon",
     "cli",

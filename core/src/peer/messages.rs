@@ -18,23 +18,38 @@ use crate::bgp::msg::{BgpMessage, Message};
 use crate::bgp::msg_keepalive::KeepaliveMessage;
 use crate::bgp::msg_notification::{BgpError, NotificationMessage, OpenMessageError};
 use crate::bgp::msg_open::OpenMessage;
+use crate::bgp::msg_open_types::LlgrEntry;
 use crate::bgp::msg_open_types::{
     AddPathCapability, AddPathMode, BgpCapabiltyCode, Capability, OptionalParam,
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update_types::MAX_2BYTE_ASN;
 use crate::bgp::multiprotocol::{default_afi_safis, Afi, AfiSafi, Safi};
-use crate::config::LlgrConfig;
 use crate::log::{debug, info, warn};
 use crate::server::ops::ServerOp;
+use conf::bgp::LlgrConfig;
 use std::collections::HashSet;
 use std::io;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 
-use crate::config::{AddPathSend, PeerConfig};
+use conf::bgp::{AddPathSend, PeerConfig};
 
 use super::{Peer, RouteChanges, SessionType};
+
+/// Convert LLGR config to capability entries for OPEN message building.
+fn llgr_to_entries(config: &LlgrConfig) -> Vec<LlgrEntry> {
+    let stale_time = config.stale_time.unwrap_or(0);
+    let afi_safis = config.afi_safis.as_deref().unwrap_or(&[]);
+    afi_safis
+        .iter()
+        .map(|afi_safi| LlgrEntry {
+            afi_safi: *afi_safi,
+            forwarding_preserved: false,
+            stale_time,
+        })
+        .collect()
+}
 
 /// Negotiate multiprotocol capabilities (intersection of local and peer)
 fn negotiate_multiprotocol(local: &[AfiSafi], peer: &HashSet<AfiSafi>) -> HashSet<AfiSafi> {
@@ -82,10 +97,7 @@ fn build_optional_params(
     caps.push(Capability::new_four_octet_asn(asn));
 
     // RFC 9494: LLGR from resolved config
-    let llgr_entries = llgr
-        .as_ref()
-        .map(|llgr| llgr.to_llgr_entries())
-        .unwrap_or_default();
+    let llgr_entries = llgr.as_ref().map(llgr_to_entries).unwrap_or_default();
     if !llgr_entries.is_empty() {
         caps.push(Capability::new_llgr(&llgr_entries));
     }
@@ -114,7 +126,9 @@ fn extract_capabilities(open_msg: &OpenMessage) -> PeerCapabilities {
     {
         match cap.code {
             BgpCapabiltyCode::Multiprotocol => {
-                if let Ok(afi_safi) = AfiSafi::from_capability_bytes(&cap.val) {
+                if let Ok(afi_safi) =
+                    crate::bgp::multiprotocol::afi_safi_from_capability_bytes(&cap.val)
+                {
                     capabilities.multiprotocol.insert(afi_safi);
                 }
             }
@@ -682,11 +696,11 @@ mod tests {
         AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, UpdateMessage,
     };
     use crate::bgp::DEFAULT_FORMAT;
-    use crate::config::{AfiSafiConfig, LlgrConfig};
     use crate::peer::fsm::BgpState;
     use crate::peer::states::tests::create_test_peer_with_state;
     use crate::rib::{Path, PathAttrs, RouteSource};
     use crate::rpki::vrp::RpkiValidation;
+    use conf::bgp::{AfiSafiConfig, LlgrConfig};
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 

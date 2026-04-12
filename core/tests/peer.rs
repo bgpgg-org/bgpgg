@@ -19,11 +19,11 @@ pub use utils::*;
 
 use bgpgg::bgp::community;
 use bgpgg::bgp::msg_notification::{BgpError, OpenMessageError};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     AdminState, Afi, BgpState, GracefulRestartConfig, ListRoutesRequest, Origin, Peer, ResetType,
     Safi, SessionConfig,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncWriteExt;
 
@@ -34,14 +34,14 @@ async fn test_peer_down() {
 
     // Set up servers
     let [server1, mut server2] = [
-        start_test_server(Config::new(
+        start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             hold_timer_secs as u64,
         ))
         .await,
-        start_test_server(Config::new(
+        start_test_server(BgpConfig::new(
             65002,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
@@ -307,7 +307,7 @@ async fn test_peer_crash_and_recover() {
 
     // Server2 is stable (passive, won't crash) - its port never changes
     // Server1 is active, will crash and recover
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -315,7 +315,7 @@ async fn test_peer_crash_and_recover() {
     ))
     .await;
 
-    let mut server1 = start_test_server(Config::new(
+    let mut server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -376,7 +376,7 @@ async fn test_peer_crash_and_recover() {
     .await;
 
     // Restart server1 - it gets a new port, but that's fine since it initiates
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -411,7 +411,7 @@ async fn test_peer_crash_and_recover() {
 
 #[tokio::test]
 async fn test_auto_reconnect() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -474,7 +474,7 @@ async fn test_auto_reconnect() {
 /// Test that idle_hold_time delays reconnection attempts
 #[tokio::test]
 async fn test_idle_hold_time_delay() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -544,7 +544,7 @@ async fn test_idle_hold_time_delay() {
 /// Test that allow_automatic_start=false prevents auto-reconnect
 #[tokio::test]
 async fn test_allow_automatic_start_false() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -593,7 +593,7 @@ async fn test_allow_automatic_start_false() {
 /// Test that manually stopped peer doesn't auto-reconnect even with idle_hold_time configured
 #[tokio::test]
 async fn test_damp_peer_oscillations() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -648,7 +648,7 @@ async fn test_damp_peer_oscillations() {
 /// Test PassiveTcpEstablishment - server waits for remote to connect (RFC 4271 8.1.1)
 #[tokio::test]
 async fn test_passive_mode() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -698,7 +698,7 @@ async fn test_passive_mode() {
 
 #[tokio::test]
 async fn test_delay_open() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -822,7 +822,7 @@ async fn test_mrai_rate_limiting() {
 async fn test_ipv6_peering() {
     let hold_timer_secs = 3;
 
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "[::1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -830,7 +830,7 @@ async fn test_ipv6_peering() {
     ))
     .await;
 
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "[::1]:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -1087,9 +1087,9 @@ async fn test_hard_reset_established() {
 
 #[tokio::test]
 async fn test_hard_reset_non_established_error() {
-    use bgpgg::config::Config;
+    use conf::bgp::BgpConfig;
 
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
@@ -1135,9 +1135,9 @@ async fn test_hard_reset_non_established_error() {
 
 #[tokio::test]
 async fn test_hard_reset_peer_not_found() {
-    use bgpgg::config::Config;
+    use conf::bgp::BgpConfig;
 
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         "127.0.0.1".parse().unwrap(),
@@ -1189,7 +1189,7 @@ async fn test_graceful_restart() {
         let gr_restart_time_secs = 3;
 
         // Create two servers with short hold timer for faster disconnect detection
-        let mut server1 = start_test_server(Config::new(
+        let mut server1 = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -1197,7 +1197,7 @@ async fn test_graceful_restart() {
         ))
         .await;
 
-        let mut server2 = start_test_server(Config::new(
+        let mut server2 = start_test_server(BgpConfig::new(
             65002,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
@@ -1362,7 +1362,7 @@ async fn test_graceful_restart_reconnect() {
     let peer_port = peer.port();
 
     // Start server
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1540,7 +1540,7 @@ async fn test_graceful_restart_fbit_zero_clears_stale() {
     let peer_port = peer.port();
 
     // Start server
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1685,11 +1685,11 @@ async fn test_gr_reconnection_accepts_new_connection() {
     let peer_port = peer.port();
 
     // Start server with GR enabled
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(bgpgg::config::PeerConfig {
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         port: peer_port,
-        graceful_restart: bgpgg::config::GracefulRestartConfig {
+        graceful_restart: conf::bgp::GracefulRestartConfig {
             enabled: true,
             restart_time: 120,
         },
@@ -1745,11 +1745,11 @@ async fn test_reject_incoming_when_established_no_gr() {
     let peer_port = peer.port();
 
     // Start server with GR disabled
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(bgpgg::config::PeerConfig {
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         port: peer_port,
-        graceful_restart: bgpgg::config::GracefulRestartConfig {
+        graceful_restart: conf::bgp::GracefulRestartConfig {
             enabled: false,
             restart_time: 0,
         },
@@ -1815,7 +1815,7 @@ async fn test_large_asn_peering() {
 async fn test_large_asn_requires_4byte_capability() {
     // Create server with large ASN (> 65535)
     let large_asn = 4200000001;
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         large_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1877,14 +1877,14 @@ async fn test_peer_asn_validation() {
     ];
 
     for (name, configured_asn, peer_asn, should_establish) in cases {
-        let server1 = start_test_server(Config::new(
+        let server1 = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
             90,
         ))
         .await;
-        let server2 = start_test_server(Config::new(
+        let server2 = start_test_server(BgpConfig::new(
             peer_asn,
             "127.0.0.2:0",
             Ipv4Addr::new(2, 2, 2, 2),
@@ -2160,7 +2160,7 @@ async fn test_gr_restart_time_zero_sweeps_immediately() {
     let mut peer = FakePeer::new("127.0.0.1:0", 65002).await;
     let peer_port = peer.port();
 
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -2265,7 +2265,7 @@ async fn test_split_capabilities_in_open() {
 /// (code 2, subcode 4), retry OPEN without capabilities.
 #[tokio::test]
 async fn test_retry_open_without_capabilities() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

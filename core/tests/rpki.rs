@@ -16,7 +16,6 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::ext_community::from_rpki_state_community;
-use bgpgg::config::{Config, RpkiCacheConfig, TransportType};
 use bgpgg::grpc::proto::{
     extended_community::{Community, Opaque},
     ExtendedCommunity, Route, RpkiValidation, SessionConfig,
@@ -24,6 +23,7 @@ use bgpgg::grpc::proto::{
 use bgpgg::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use bgpgg::rpki::rtr::ErrorCode;
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
+use conf::bgp::{BgpConfig, RpkiCacheConfig, TransportType};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::rtr::{FakeCache, FakeSshCache, FakeTcpCache};
@@ -78,7 +78,7 @@ async fn setup_rpki_peer(
     rpki_caches: Vec<RpkiCacheConfig>,
     peer_asn: u32,
 ) -> (TestServer, TestServer) {
-    let server1 = start_test_server(Config {
+    let server1 = start_test_server(BgpConfig {
         asn: 65001,
         listen_addr: "127.0.0.1:0".to_string(),
         router_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -86,7 +86,7 @@ async fn setup_rpki_peer(
         ..Default::default()
     })
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         peer_asn,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -176,14 +176,14 @@ async fn test_rpki_basic_validation_tcp() {
     let mut cache = FakeTcpCache::listen().await;
     let [server2, server1, server3] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config {
+            start_test_server(BgpConfig {
                 asn: 65001,
                 listen_addr: "127.0.0.1:0".to_string(),
                 router_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -194,7 +194,7 @@ async fn test_rpki_basic_validation_tcp() {
                 ..Default::default()
             })
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65099,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -215,14 +215,14 @@ async fn test_rpki_basic_validation_ssh() {
     let mut cache = FakeSshCache::listen().await;
     let [server2, server1, server3] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config {
+            start_test_server(BgpConfig {
                 asn: 65001,
                 listen_addr: "127.0.0.1:0".to_string(),
                 router_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -236,7 +236,7 @@ async fn test_rpki_basic_validation_ssh() {
                 ..Default::default()
             })
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65099,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -256,7 +256,7 @@ async fn test_rpki_basic_validation_ssh() {
 async fn test_rpki_state_community_send_and_strip() {
     let mut cache = FakeTcpCache::listen().await;
 
-    let validator = start_test_server(Config {
+    let validator = start_test_server(BgpConfig {
         asn: 65001,
         listen_addr: "127.0.0.1:0".to_string(),
         router_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -267,14 +267,14 @@ async fn test_rpki_state_community_send_and_strip() {
         ..Default::default()
     })
     .await;
-    let receiver = start_test_server(Config::new(
+    let receiver = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
     ))
     .await;
-    let downstream = start_test_server(Config::new(
+    let downstream = start_test_server(BgpConfig::new(
         65003,
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
@@ -348,7 +348,7 @@ async fn test_rpki_state_community_send_and_strip() {
 #[tokio::test]
 async fn test_rpki_grpc_get_validation() {
     let mut cache = FakeTcpCache::listen().await;
-    let server = start_test_server(Config {
+    let server = start_test_server(BgpConfig {
         asn: 65001,
         listen_addr: "127.0.0.1:0".to_string(),
         router_id: Ipv4Addr::new(1, 1, 1, 1),

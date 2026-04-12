@@ -24,7 +24,7 @@ use std::net::Ipv4Addr;
 /// Create server with a passive peer and connect FakePeer with basic route refresh.
 async fn setup_basic_rr_peers() -> (TestServer, FakePeer) {
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()
@@ -51,7 +51,7 @@ async fn setup_basic_rr_peers() -> (TestServer, FakePeer) {
 /// Create server with a passive peer and connect FakePeer with enhanced RR.
 async fn setup_enhanced_rr_peers() -> (TestServer, FakePeer) {
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()
@@ -271,7 +271,7 @@ async fn test_sender_wraps_with_borr_eorr() {
 async fn test_enhanced_rr_stale_ttl_expiry() {
     let mut config = test_config(65001, 1);
     config.enhanced_rr_stale_ttl = Some(1);
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()

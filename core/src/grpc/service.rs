@@ -16,9 +16,6 @@ use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{
-    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
-};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
@@ -26,6 +23,9 @@ use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
 use crate::server::AdminState;
+use conf::bgp::{
+    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
+};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -344,7 +344,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
     });
 
     let graceful_restart = if let Some(gr) = cfg.graceful_restart {
-        crate::config::GracefulRestartConfig {
+        conf::bgp::GracefulRestartConfig {
             enabled: gr.enabled.unwrap_or(defaults.graceful_restart.enabled),
             restart_time: gr
                 .restart_time_secs

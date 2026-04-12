@@ -18,11 +18,11 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::LlgrConfig;
 use bgpgg::grpc::proto::{
     AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig, ListRoutesRequest,
     LlgrConfig as ProtoLlgrConfig, SessionConfig,
 };
+use conf::bgp::LlgrConfig;
 use std::net::Ipv4Addr;
 
 const LLGR_STALE: u32 = 0xFFFF0006;
@@ -37,11 +37,11 @@ async fn setup_llgr_server(
 ) -> TestServer {
     let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: peer_ip.to_string(),
         passive_mode: true,
         idle_hold_time_secs: Some(0),
-        graceful_restart: bgpgg::config::GracefulRestartConfig {
+        graceful_restart: conf::bgp::GracefulRestartConfig {
             enabled: true,
             restart_time: gr_restart_time,
         },
@@ -144,7 +144,7 @@ async fn poll_routes_swept(server: &TestServer, msg: &str, timeout: Duration) {
 #[tokio::test]
 async fn test_llgr_ignored_without_gr() {
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
+    config.peers.push(conf::bgp::PeerConfig {
         address: "127.0.0.2".to_string(),
         passive_mode: true,
         ..Default::default()

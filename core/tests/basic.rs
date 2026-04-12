@@ -17,11 +17,11 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_update::PathAttrValue;
 use bgpgg::bgp::msg_update_types::{attr_flags, attr_type_code, NextHopAddr};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     remove_route_request, route, BgpState, ListRoutesRequest, Origin, RemoveRouteRequest, RibType,
     Route, SessionConfig,
 };
+use conf::bgp::BgpConfig;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[tokio::test]
@@ -259,21 +259,21 @@ async fn test_ibgp_split_horizon() {
     // iBGP: all same ASN
     let [server1, server2, server3] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -342,21 +342,21 @@ async fn test_as_loop_prevention() {
     // but when AS2 tries to send it to AS1_B, AS1_B rejects it due to AS loop detection
     let [server1_a, server2, server1_b] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 90,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -496,7 +496,7 @@ async fn test_ipv6_route_exchange() {
 
 #[tokio::test]
 async fn test_ipv6_nexthop_rewrite() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "[::ffff:127.0.0.1]:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -504,7 +504,7 @@ async fn test_ipv6_nexthop_rewrite() {
     ))
     .await;
 
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "[::ffff:127.0.0.2]:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -544,7 +544,7 @@ async fn test_ipv6_nexthop_rewrite() {
 }
 #[tokio::test]
 async fn test_route_advertised_when_peer_becomes_established() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1115,7 +1115,7 @@ fn attr_mp_reach_ipv6_with_link_local(
 /// in RIB -> server propagates to FakePeer2 (iBGP) -> verify 32-byte encoding on wire.
 #[tokio::test]
 async fn test_ipv6_link_local_nexthop() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

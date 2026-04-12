@@ -19,8 +19,8 @@ pub use sets::{DefinedSetType, DefinedSets};
 use statement::Action;
 pub use statement::{CommunityOp, RouteType, Statement};
 
-use crate::config::{Config, PolicyDefinitionConfig};
 use crate::rib::{Path, RouteKey};
+use conf::bgp::{BgpConfig, PolicyDefinitionConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -142,7 +142,7 @@ pub struct PolicyContext {
 
 impl PolicyContext {
     /// Build policy context from config
-    pub fn from_config(config: &Config) -> Result<Self, String> {
+    pub fn from_config(config: &BgpConfig) -> Result<Self, String> {
         // Compile defined sets
         let defined_sets = Arc::new(DefinedSets::new(&config.defined_sets)?);
 

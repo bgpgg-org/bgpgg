@@ -12,53 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Lexer and parser for the rogg config language.
+//! BGP-specific AST types and parsing for the rogg config language.
 //!
-//! ## Syntax
-//!
-//! ```text
-//! config    = statement*
-//! statement = WORD+ ( '{' statement* '}' | NEWLINE )
-//! WORD      = non-whitespace chars excluding '{' and '}'
-//! ```
-//!
-//! `#` starts a line comment, stripped before tokenization.
-//!
-//! The parser is context-sensitive: it recognizes rogg keywords and produces
-//! a typed AST. Each scope (root, BGP body, peer body, etc.) has its own
-//! parse function with a keyword dispatch table.
-//!
-//! ## Pipeline
+//! ## Grammar (BGP scope)
 //!
 //! ```text
-//! source text -> tokenize() -> Vec<Token> -> parse() -> Root (typed AST)
-//! ```
-//!
-//! ## Example
-//!
-//! ```text
-//! service bgp {
-//!   asn 65001
-//!   peer myPeer {
-//!     address fe80::ade0
-//!     remote-as 4242423914
-//!   }
-//! }
+//! bgp_body     = (setting | peer | policy | prefix_list | announce)*
+//! peer         = "peer" NAME '{' (setting | family)* '}'
+//! family       = "family" AFI SAFI '{' family_dir* '}'
+//! family_dir   = ("export" | "import") "policy" NAME
+//! policy       = "policy" NAME '{' policy_rule* '}'
+//! policy_rule  = "match" NAME "->" ACTION | "default" "->" ACTION
+//! prefix_list  = "prefix-list" NAME '{' PREFIX* '}'
+//! announce     = "announce" PREFIX
+//! setting      = KEY VALUE? NEWLINE
 //! ```
 
-use std::fmt;
-
-/// Root of the parsed config file.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Root {
-    pub services: Vec<Service>,
-}
-
-/// A `service <kind> { ... }` block.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Service {
-    Bgp(BgpServiceBody),
-}
+use crate::language::{current_line, parse_err, ParseError, Token, TokenKind};
 
 /// Body of `service bgp { ... }`.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -67,39 +37,32 @@ pub struct BgpServiceBody {
     pub peers: Vec<PeerBlock>,
     pub policies: Vec<PolicyBlock>,
     pub prefix_lists: Vec<PrefixListBlock>,
-    pub announces: Vec<Announce>,
 }
 
-/// Leaf config statement. Value is None for boolean flags like `next-hop-self`.
+/// Typed config setting. Values are parsed at parse time.
+/// Flags (next-hop-self, passive, etc.) are unit variants — presence means enabled.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Setting {
-    pub key: SettingKey,
-    pub value: Option<String>,
-}
-
-/// Known config keywords for leaf statements.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SettingKey {
-    Asn,
-    RouterId,
-    ListenAddr,
-    GrpcListenAddr,
-    LogLevel,
-    HoldTime,
-    ConnectRetry,
-    ClusterId,
-    Address,
-    RemoteAs,
-    Port,
-    Interface,
-    Md5KeyFile,
-    TtlMin,
-    NextHopSelf,
-    Passive,
-    RrClient,
-    RsClient,
-    GracefulShutdown,
-    Unknown(String),
+pub enum Setting {
+    Asn(u32),
+    RouterId(std::net::Ipv4Addr),
+    ListenAddr(String),
+    GrpcListenAddr(String),
+    LogLevel(String),
+    HoldTime(u64),
+    ConnectRetry(u64),
+    ClusterId(std::net::Ipv4Addr),
+    Address(String),
+    RemoteAs(u32),
+    Port(u16),
+    Interface(String),
+    Md5KeyFile(String),
+    TtlMin(u8),
+    NextHopSelf(bool),
+    Passive(bool),
+    RrClient(bool),
+    RsClient(bool),
+    GracefulShutdown(bool),
+    Announce(String),
 }
 
 /// `peer <name> { ... }` block.
@@ -123,12 +86,6 @@ pub struct FamilyBlock {
 pub enum FamilyDirective {
     ExportPolicy(String),
     ImportPolicy(String),
-}
-
-/// `announce <prefix>` declaration.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Announce {
-    pub prefix: String,
 }
 
 /// `policy <name> { ... }` block.
@@ -159,245 +116,147 @@ pub struct UnknownBlock {
     pub children: Vec<UnknownBlock>,
 }
 
-impl Setting {
-    /// Get the value as a string slice, if present.
-    pub fn value_str(&self) -> Option<&str> {
-        self.value.as_deref()
+fn parse_bool(keyword: &str, value: Option<&str>, line: usize) -> Result<bool, ParseError> {
+    let val =
+        value.ok_or_else(|| parse_err(line, format!("{} requires 'true' or 'false'", keyword)))?;
+    match val {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(parse_err(
+            line,
+            format!("{}: expected 'true' or 'false', got '{}'", keyword, val),
+        )),
     }
 }
 
-impl BgpServiceBody {
-    pub fn setting(&self, key: SettingKey) -> Option<&Setting> {
-        self.settings.iter().find(|s| s.key == key)
-    }
-}
-
-impl PeerBlock {
-    pub fn setting(&self, key: SettingKey) -> Option<&Setting> {
-        self.settings.iter().find(|s| s.key == key)
-    }
-}
-
-fn classify_keyword(word: &str) -> SettingKey {
-    match word {
-        "asn" => SettingKey::Asn,
-        "router-id" => SettingKey::RouterId,
-        "listen-addr" => SettingKey::ListenAddr,
-        "grpc-listen-addr" => SettingKey::GrpcListenAddr,
-        "log-level" => SettingKey::LogLevel,
-        "hold-time" => SettingKey::HoldTime,
-        "connect-retry" => SettingKey::ConnectRetry,
-        "cluster-id" => SettingKey::ClusterId,
-        "address" => SettingKey::Address,
-        "remote-as" => SettingKey::RemoteAs,
-        "port" => SettingKey::Port,
-        "interface" => SettingKey::Interface,
-        "md5-key-file" => SettingKey::Md5KeyFile,
-        "ttl-min" => SettingKey::TtlMin,
-        "next-hop-self" => SettingKey::NextHopSelf,
-        "passive" => SettingKey::Passive,
-        "rr-client" => SettingKey::RrClient,
-        "rs-client" => SettingKey::RsClient,
-        "graceful-shutdown" => SettingKey::GracefulShutdown,
-        other => SettingKey::Unknown(other.to_string()),
-    }
-}
-
-/// Parse error with line number and description.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParseError {
-    pub line: usize,
-    pub message: String,
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.message)
-    }
-}
-
-impl std::error::Error for ParseError {}
-
-fn parse_err(line: usize, message: impl Into<String>) -> ParseError {
-    ParseError {
-        line,
-        message: message.into(),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Token {
-    kind: TokenKind,
+/// Parse a keyword + optional value into a typed Setting.
+/// Returns None for unknown keywords.
+fn parse_setting(
+    keyword: &str,
+    value: Option<&str>,
     line: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum TokenKind {
-    Word(String),
-    OpenBrace,
-    CloseBrace,
-    Newline,
-}
-
-const CHAR_OPENING_BRACE: char = '{';
-const CHAR_CLOSING_BRACE: char = '}';
-const CHAR_COMMENT: char = '#';
-
-/// Lexer. Produces a token stream from source text.
-fn tokenize(input: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
-
-    for (line_idx, line) in input.lines().enumerate() {
-        let line_num = line_idx + 1;
-
-        let line = match line.find(CHAR_COMMENT) {
-            Some(pos) => &line[..pos],
-            None => line,
-        };
-
-        let mut chars = line.chars().peekable();
-        while let Some(&ch) = chars.peek() {
-            if ch.is_whitespace() {
-                chars.next();
-                continue;
-            }
-            if ch == CHAR_OPENING_BRACE {
-                tokens.push(Token {
-                    kind: TokenKind::OpenBrace,
-                    line: line_num,
-                });
-                chars.next();
-            } else if ch == CHAR_CLOSING_BRACE {
-                tokens.push(Token {
-                    kind: TokenKind::CloseBrace,
-                    line: line_num,
-                });
-                chars.next();
-            } else {
-                let mut word = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || c == CHAR_OPENING_BRACE || c == CHAR_CLOSING_BRACE {
-                        break;
-                    }
-                    word.push(c);
-                    chars.next();
-                }
-                tokens.push(Token {
-                    kind: TokenKind::Word(word),
-                    line: line_num,
-                });
-            }
+) -> Result<Option<Setting>, ParseError> {
+    match keyword {
+        "asn" => {
+            let val = value.ok_or_else(|| parse_err(line, "asn requires a value"))?;
+            let asn = val
+                .parse::<u32>()
+                .map_err(|err| parse_err(line, format!("invalid asn '{}': {}", val, err)))?;
+            Ok(Some(Setting::Asn(asn)))
         }
-
-        tokens.push(Token {
-            kind: TokenKind::Newline,
-            line: line_num,
-        });
+        "router-id" => {
+            let val = value.ok_or_else(|| parse_err(line, "router-id requires a value"))?;
+            let rid = val
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|err| parse_err(line, format!("invalid router-id '{}': {}", val, err)))?;
+            Ok(Some(Setting::RouterId(rid)))
+        }
+        "listen-addr" => {
+            let val = value.ok_or_else(|| parse_err(line, "listen-addr requires a value"))?;
+            Ok(Some(Setting::ListenAddr(val.to_string())))
+        }
+        "grpc-listen-addr" => {
+            let val = value.ok_or_else(|| parse_err(line, "grpc-listen-addr requires a value"))?;
+            Ok(Some(Setting::GrpcListenAddr(val.to_string())))
+        }
+        "log-level" => {
+            let val = value.ok_or_else(|| parse_err(line, "log-level requires a value"))?;
+            Ok(Some(Setting::LogLevel(val.to_string())))
+        }
+        "hold-time" => {
+            let val = value.ok_or_else(|| parse_err(line, "hold-time requires a value"))?;
+            let secs = val
+                .parse::<u64>()
+                .map_err(|err| parse_err(line, format!("invalid hold-time '{}': {}", val, err)))?;
+            Ok(Some(Setting::HoldTime(secs)))
+        }
+        "connect-retry" => {
+            let val = value.ok_or_else(|| parse_err(line, "connect-retry requires a value"))?;
+            let secs = val.parse::<u64>().map_err(|err| {
+                parse_err(line, format!("invalid connect-retry '{}': {}", val, err))
+            })?;
+            Ok(Some(Setting::ConnectRetry(secs)))
+        }
+        "cluster-id" => {
+            let val = value.ok_or_else(|| parse_err(line, "cluster-id requires a value"))?;
+            let cid = val
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|err| parse_err(line, format!("invalid cluster-id '{}': {}", val, err)))?;
+            Ok(Some(Setting::ClusterId(cid)))
+        }
+        "address" => {
+            let val = value.ok_or_else(|| parse_err(line, "address requires a value"))?;
+            Ok(Some(Setting::Address(val.to_string())))
+        }
+        "remote-as" => {
+            let val = value.ok_or_else(|| parse_err(line, "remote-as requires a value"))?;
+            let asn = val
+                .parse::<u32>()
+                .map_err(|err| parse_err(line, format!("invalid remote-as '{}': {}", val, err)))?;
+            Ok(Some(Setting::RemoteAs(asn)))
+        }
+        "port" => {
+            let val = value.ok_or_else(|| parse_err(line, "port requires a value"))?;
+            let port = val
+                .parse::<u16>()
+                .map_err(|err| parse_err(line, format!("invalid port '{}': {}", val, err)))?;
+            Ok(Some(Setting::Port(port)))
+        }
+        "interface" => {
+            let val = value.ok_or_else(|| parse_err(line, "interface requires a value"))?;
+            Ok(Some(Setting::Interface(val.to_string())))
+        }
+        "md5-key-file" => {
+            let val = value.ok_or_else(|| parse_err(line, "md5-key-file requires a value"))?;
+            Ok(Some(Setting::Md5KeyFile(val.to_string())))
+        }
+        "ttl-min" => {
+            let val = value.ok_or_else(|| parse_err(line, "ttl-min requires a value"))?;
+            let ttl = val
+                .parse::<u8>()
+                .map_err(|err| parse_err(line, format!("invalid ttl-min '{}': {}", val, err)))?;
+            Ok(Some(Setting::TtlMin(ttl)))
+        }
+        "next-hop-self" => Ok(Some(Setting::NextHopSelf(parse_bool(
+            keyword, value, line,
+        )?))),
+        "passive" => Ok(Some(Setting::Passive(parse_bool(keyword, value, line)?))),
+        "rr-client" => Ok(Some(Setting::RrClient(parse_bool(keyword, value, line)?))),
+        "rs-client" => Ok(Some(Setting::RsClient(parse_bool(keyword, value, line)?))),
+        "graceful-shutdown" => Ok(Some(Setting::GracefulShutdown(parse_bool(
+            keyword, value, line,
+        )?))),
+        "announce" => {
+            let val = value.ok_or_else(|| parse_err(line, "announce requires a prefix"))?;
+            Ok(Some(Setting::Announce(val.to_string())))
+        }
+        _ => Ok(None),
     }
-
-    tokens
 }
 
-fn current_line(tokens: &[Token], pos: usize) -> usize {
-    if pos < tokens.len() {
-        tokens[pos].line
-    } else {
-        tokens.last().map(|t| t.line).unwrap_or(0)
+/// Parse a leaf statement (1-2 words) into a typed Setting.
+fn parse_leaf_setting(
+    words: &[String],
+    line: usize,
+    settings: &mut Vec<Setting>,
+) -> Result<(), ParseError> {
+    if words.is_empty() {
+        return Ok(());
     }
-}
-
-/// Classify a leaf statement into a setting.
-/// 1 word -> flag (value=None), 2 words -> key-value, 3+ words -> unknown block.
-fn flush_leaf(words: &[String], settings: &mut Vec<Setting>, unknown: &mut Vec<UnknownBlock>) {
-    match words.len() {
-        0 => {}
-        1 => settings.push(Setting {
-            key: classify_keyword(&words[0]),
-            value: None,
-        }),
-        2 => settings.push(Setting {
-            key: classify_keyword(&words[0]),
-            value: Some(words[1].clone()),
-        }),
-        _ => unknown.push(UnknownBlock {
-            words: words.to_vec(),
-            children: vec![],
-        }),
-    }
-}
-
-/// Parse rogg config text into a typed AST.
-pub fn parse(input: &str) -> Result<Root, ParseError> {
-    let tokens = tokenize(input);
-    let mut pos = 0;
-    parse_root(&tokens, &mut pos)
-}
-
-fn parse_root(tokens: &[Token], pos: &mut usize) -> Result<Root, ParseError> {
-    let mut root = Root::default();
-    let mut words: Vec<String> = Vec::new();
-    let mut start_line = 0;
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                if words.is_empty() {
-                    start_line = token.line;
-                }
-                words.push(word.clone());
-                *pos += 1;
-            }
-            TokenKind::OpenBrace => {
-                if words.is_empty() {
-                    return Err(parse_err(token.line, "unexpected '{'"));
-                }
-                if words[0] != "service" {
-                    return Err(parse_err(
-                        start_line,
-                        format!("unknown top-level block '{}'", words[0]),
-                    ));
-                }
-                if words.len() < 2 {
-                    return Err(parse_err(start_line, "service requires a name"));
-                }
-                if words[1] != "bgp" {
-                    return Err(parse_err(
-                        start_line,
-                        format!("unknown service '{}'", words[1]),
-                    ));
-                }
-                *pos += 1;
-                let body = parse_bgp_body(tokens, pos)?;
-                root.services.push(Service::Bgp(body));
-                words.clear();
-            }
-            TokenKind::CloseBrace => {
-                return Err(parse_err(token.line, "unexpected '}'"));
-            }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    return Err(parse_err(
-                        start_line,
-                        format!("unexpected statement '{}' at root level", words.join(" ")),
-                    ));
-                }
-                *pos += 1;
-            }
+    let value = words.get(1).map(|s| s.as_str());
+    match parse_setting(&words[0], value, line)? {
+        Some(setting) => settings.push(setting),
+        None => {
+            return Err(parse_err(line, format!("unknown setting '{}'", words[0])));
         }
     }
-
-    if !words.is_empty() {
-        return Err(parse_err(
-            start_line,
-            format!("unexpected statement '{}' at root level", words.join(" ")),
-        ));
-    }
-
-    Ok(root)
+    Ok(())
 }
 
-fn parse_bgp_body(tokens: &[Token], pos: &mut usize) -> Result<BgpServiceBody, ParseError> {
+pub(crate) fn parse_bgp_body(
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<BgpServiceBody, ParseError> {
     let mut body = BgpServiceBody::default();
     let mut words: Vec<String> = Vec::new();
     let mut start_line = 0;
@@ -453,7 +312,7 @@ fn parse_bgp_body(tokens: &[Token], pos: &mut usize) -> Result<BgpServiceBody, P
             }
             TokenKind::CloseBrace => {
                 if !words.is_empty() {
-                    flush_bgp_leaf(&mut body, &words);
+                    parse_leaf_setting(&words, start_line, &mut body.settings)?;
                     words.clear();
                 }
                 *pos += 1;
@@ -461,7 +320,7 @@ fn parse_bgp_body(tokens: &[Token], pos: &mut usize) -> Result<BgpServiceBody, P
             }
             TokenKind::Newline => {
                 if !words.is_empty() {
-                    flush_bgp_leaf(&mut body, &words);
+                    parse_leaf_setting(&words, start_line, &mut body.settings)?;
                     words.clear();
                 }
                 *pos += 1;
@@ -473,16 +332,6 @@ fn parse_bgp_body(tokens: &[Token], pos: &mut usize) -> Result<BgpServiceBody, P
         current_line(tokens, *pos),
         "unexpected end of input, expected '}'",
     ))
-}
-
-fn flush_bgp_leaf(body: &mut BgpServiceBody, words: &[String]) {
-    if words.len() >= 2 && words[0] == "announce" {
-        body.announces.push(Announce {
-            prefix: words[1].clone(),
-        });
-        return;
-    }
-    flush_leaf(words, &mut body.settings, &mut Vec::new());
 }
 
 fn parse_peer_block(
@@ -534,7 +383,7 @@ fn parse_peer_block(
             }
             TokenKind::CloseBrace => {
                 if !words.is_empty() {
-                    flush_leaf(&words, &mut settings, &mut Vec::new());
+                    parse_leaf_setting(&words, start_line, &mut settings)?;
                     words.clear();
                 }
                 *pos += 1;
@@ -546,7 +395,7 @@ fn parse_peer_block(
             }
             TokenKind::Newline => {
                 if !words.is_empty() {
-                    flush_leaf(&words, &mut settings, &mut Vec::new());
+                    parse_leaf_setting(&words, start_line, &mut settings)?;
                     words.clear();
                 }
                 *pos += 1;
@@ -672,15 +521,15 @@ fn parse_policy_block(
 }
 
 fn parse_policy_rule(words: &[String], line: usize) -> Result<PolicyRule, ParseError> {
-    if words.len() == 4 && words[0] == "match" && words[2] == "->" {
+    if words.len() == 3 && words[0] == "match" {
         return Ok(PolicyRule::Match {
             set_name: words[1].clone(),
-            action: words[3].clone(),
+            action: words[2].clone(),
         });
     }
-    if words.len() == 3 && words[0] == "default" && words[1] == "->" {
+    if words.len() == 2 && words[0] == "default" {
         return Ok(PolicyRule::Default {
-            action: words[2].clone(),
+            action: words[1].clone(),
         });
     }
     Err(parse_err(
@@ -734,18 +583,7 @@ fn parse_prefix_list_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_empty() {
-        let root = parse("").unwrap();
-        assert!(root.services.is_empty());
-
-        let root = parse("  \n\n  ").unwrap();
-        assert!(root.services.is_empty());
-
-        let root = parse("# just comments\n# nothing else").unwrap();
-        assert!(root.services.is_empty());
-    }
+    use crate::language::{parse, Service};
 
     #[test]
     fn test_parse_bgp_basic() {
@@ -763,30 +601,18 @@ service bgp {
         assert_eq!(root.services.len(), 1);
 
         let Service::Bgp(body) = &root.services[0];
-        assert_eq!(
-            body.setting(SettingKey::Asn).unwrap().value_str(),
-            Some("65001")
-        );
-        assert_eq!(
-            body.setting(SettingKey::RouterId).unwrap().value_str(),
-            Some("1.1.1.1")
-        );
-        assert_eq!(
-            body.setting(SettingKey::ListenAddr).unwrap().value_str(),
-            Some("127.0.0.1:179")
-        );
-        assert_eq!(
-            body.setting(SettingKey::LogLevel).unwrap().value_str(),
-            Some("debug")
-        );
-        assert_eq!(
-            body.setting(SettingKey::HoldTime).unwrap().value_str(),
-            Some("90")
-        );
-        assert_eq!(
-            body.setting(SettingKey::ConnectRetry).unwrap().value_str(),
-            Some("10")
-        );
+        assert!(body.settings.contains(&Setting::Asn(65001)));
+        assert!(body
+            .settings
+            .contains(&Setting::RouterId("1.1.1.1".parse().unwrap())));
+        assert!(body
+            .settings
+            .contains(&Setting::ListenAddr("127.0.0.1:179".to_string())));
+        assert!(body
+            .settings
+            .contains(&Setting::LogLevel("debug".to_string())));
+        assert!(body.settings.contains(&Setting::HoldTime(90)));
+        assert!(body.settings.contains(&Setting::ConnectRetry(10)));
     }
 
     #[test]
@@ -801,7 +627,7 @@ service bgp {
     remote-as 4242423914
     interface kioubit-us3
     md5-key-file /etc/bgp/kioubit.key
-    next-hop-self
+    next-hop-self true
     port 1179
     ttl-min 254
   }
@@ -809,8 +635,8 @@ service bgp {
   peer upstream {
     address 10.0.0.1
     remote-as 65000
-    passive
-    rr-client
+    passive true
+    rr-client true
   }
 }";
         let root = parse(input).unwrap();
@@ -819,24 +645,17 @@ service bgp {
 
         let kioubit = &body.peers[0];
         assert_eq!(kioubit.name, "kioubit");
-        assert_eq!(
-            kioubit.setting(SettingKey::Address).unwrap().value_str(),
-            Some("fe80::ade0")
-        );
-        assert_eq!(
-            kioubit.setting(SettingKey::RemoteAs).unwrap().value_str(),
-            Some("4242423914")
-        );
-        assert!(kioubit.setting(SettingKey::NextHopSelf).is_some());
-        assert_eq!(
-            kioubit.setting(SettingKey::Port).unwrap().value_str(),
-            Some("1179")
-        );
+        assert!(kioubit
+            .settings
+            .contains(&Setting::Address("fe80::ade0".to_string())));
+        assert!(kioubit.settings.contains(&Setting::RemoteAs(4242423914)));
+        assert!(kioubit.settings.contains(&Setting::NextHopSelf(true)));
+        assert!(kioubit.settings.contains(&Setting::Port(1179)));
 
         let upstream = &body.peers[1];
         assert_eq!(upstream.name, "upstream");
-        assert!(upstream.setting(SettingKey::Passive).is_some());
-        assert!(upstream.setting(SettingKey::RrClient).is_some());
+        assert!(upstream.settings.contains(&Setting::Passive(true)));
+        assert!(upstream.settings.contains(&Setting::RrClient(true)));
     }
 
     #[test]
@@ -879,8 +698,8 @@ service bgp {
   router-id 1.1.1.1
 
   policy mine-only {
-    match my-prefixes -> accept
-    default -> reject
+    match my-prefixes accept
+    default reject
   }
 
   prefix-list my-prefixes {
@@ -921,69 +740,12 @@ service bgp {
 }";
         let root = parse(input).unwrap();
         let Service::Bgp(body) = &root.services[0];
-        assert_eq!(body.announces.len(), 2);
-        assert_eq!(body.announces[0].prefix, "172.23.211.0/27");
-        assert_eq!(body.announces[1].prefix, "fd0d:fbde:bca5::/48");
-    }
-
-    #[test]
-    fn test_parse_unknown_service_errors() {
-        let err = parse("service ospf { router-id 1.1.1.1 }").unwrap_err();
-        assert!(err.message.contains("unknown service 'ospf'"));
-    }
-
-    #[test]
-    fn test_parse_comments() {
-        let input = "\
-# Top-level comment
-service bgp {
-  asn 65001  # inline comment
-  # full line comment
-  router-id 1.1.1.1
-}";
-        let root = parse(input).unwrap();
-        let Service::Bgp(body) = &root.services[0];
-        assert_eq!(
-            body.setting(SettingKey::Asn).unwrap().value_str(),
-            Some("65001")
-        );
-        assert_eq!(
-            body.setting(SettingKey::RouterId).unwrap().value_str(),
-            Some("1.1.1.1")
-        );
-    }
-
-    #[test]
-    fn test_parse_inline_block() {
-        let input = "service bgp { asn 65001\nrouter-id 1.1.1.1 }";
-        let root = parse(input).unwrap();
-        let Service::Bgp(body) = &root.services[0];
-        assert_eq!(
-            body.setting(SettingKey::Asn).unwrap().value_str(),
-            Some("65001")
-        );
-    }
-
-    #[test]
-    fn test_parse_errors() {
-        let cases = vec![
-            ("service bgp {", "unexpected end of input"),
-            ("}", "unexpected '}'"),
-            ("{", "unexpected '{'"),
-            ("service {", "service requires a name"),
-            ("hostname router01", "unexpected statement"),
-        ];
-
-        for (input, expected_msg) in cases {
-            let err = parse(input).unwrap_err();
-            assert!(
-                err.message.contains(expected_msg),
-                "for {:?}: expected {:?} in {:?}",
-                input,
-                expected_msg,
-                err.message
-            );
-        }
+        assert!(body
+            .settings
+            .contains(&Setting::Announce("172.23.211.0/27".to_string())));
+        assert!(body
+            .settings
+            .contains(&Setting::Announce("fd0d:fbde:bca5::/48".to_string())));
     }
 
     #[test]
@@ -1001,7 +763,7 @@ service bgp {
     address fe80::ade0
     interface kioubit-us3
     remote-as 4242423914
-    next-hop-self
+    next-hop-self true
     md5-key-file /etc/bgp/kioubit.key
 
     family ipv4 unicast {
@@ -1017,8 +779,8 @@ service bgp {
   announce fd0d:fbde:bca5::/48
 
   policy mine-only {
-    match my-prefixes -> accept
-    default -> reject
+    match my-prefixes accept
+    default reject
   }
 
   prefix-list my-prefixes {
@@ -1031,14 +793,13 @@ service bgp {
 
         let Service::Bgp(body) = &root.services[0];
 
-        assert_eq!(
-            body.setting(SettingKey::Asn).unwrap().value_str(),
-            Some("4242423930")
-        );
+        assert!(body.settings.contains(&Setting::Asn(4242423930)));
         assert_eq!(body.peers.len(), 1);
-        assert_eq!(body.announces.len(), 2);
+        assert!(body
+            .settings
+            .contains(&Setting::Announce("172.23.211.0/27".to_string())));
         assert_eq!(body.policies.len(), 1);
         assert_eq!(body.prefix_lists.len(), 1);
-        assert!(body.peers[0].setting(SettingKey::NextHopSelf).is_some());
+        assert!(body.peers[0].settings.contains(&Setting::NextHopSelf(true)));
     }
 }

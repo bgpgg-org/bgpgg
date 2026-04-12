@@ -17,12 +17,12 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     defined_set_config, defined_set_info, ActionsConfig, AsPathSetData, CommunitySetData,
     ConditionsConfig, DefinedSetConfig, DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo,
     PrefixMatch, PrefixSetData, StatementConfig, StatementInfo,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 
 // Test fixtures
@@ -235,7 +235,7 @@ async fn test_add_defined_sets() {
     ];
 
     for (desc, input, expected) in test_cases {
-        let server = start_test_server(Config::new(
+        let server = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -259,7 +259,7 @@ async fn test_add_defined_sets() {
 
 #[tokio::test]
 async fn test_add_duplicate_set_fails() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -287,7 +287,7 @@ async fn test_add_duplicate_set_fails() {
 
 #[tokio::test]
 async fn test_list_defined_sets() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -331,7 +331,7 @@ async fn test_list_defined_sets() {
 
 #[tokio::test]
 async fn test_remove_defined_set() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -370,7 +370,7 @@ async fn test_remove_defined_set() {
 
 #[tokio::test]
 async fn test_add_policy() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -433,7 +433,7 @@ async fn test_add_policy() {
 
 #[tokio::test]
 async fn test_add_policy_missing_defined_set() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -461,7 +461,7 @@ async fn test_add_policy_missing_defined_set() {
 
 #[tokio::test]
 async fn test_list_policies() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -540,7 +540,7 @@ async fn test_list_policies() {
 
 #[tokio::test]
 async fn test_remove_policy() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -694,7 +694,7 @@ async fn test_set_policy_assignment() {
 
 #[tokio::test]
 async fn test_reject_policy_name_starting_with_underscore() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

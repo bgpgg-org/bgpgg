@@ -18,7 +18,6 @@ use super::{
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{DefinedSetConfig, PeerConfig};
 use crate::log::{error, info};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
@@ -33,6 +32,7 @@ use crate::policy::sets::{
 use crate::policy::DefinedSetType;
 use crate::rib::{PathAttrs, Route, RouteKey};
 use crate::types::PeerDownReason;
+use conf::bgp::{DefinedSetConfig, PeerConfig, StatementConfig};
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -43,6 +43,18 @@ use crate::bgp::msg_notification::CeaseSubcode;
 use crate::grpc::proto::RibType;
 use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
 use crate::rpki::vrp::{RpkiValidation, Vrp};
+
+/// Map a DefinedSetConfig to its DefinedSetType.
+fn defined_set_type(set: &DefinedSetConfig) -> DefinedSetType {
+    match set {
+        DefinedSetConfig::PrefixSet(_) => DefinedSetType::PrefixSet,
+        DefinedSetConfig::NeighborSet(_) => DefinedSetType::NeighborSet,
+        DefinedSetConfig::AsPathSet(_) => DefinedSetType::AsPathSet,
+        DefinedSetConfig::CommunitySet(_) => DefinedSetType::CommunitySet,
+        DefinedSetConfig::ExtCommunitySet(_) => DefinedSetType::ExtCommunitySet,
+        DefinedSetConfig::LargeCommunitySet(_) => DefinedSetType::LargeCommunitySet,
+    }
+}
 
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
@@ -135,7 +147,7 @@ pub enum MgmtOp {
     },
     AddPolicy {
         name: String,
-        statements: Vec<crate::config::StatementConfig>,
+        statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePolicy {
@@ -180,7 +192,7 @@ pub enum MgmtOp {
 #[derive(Debug, Clone)]
 pub struct PolicyInfoResponse {
     pub name: String,
-    pub statements: Vec<crate::config::StatementConfig>,
+    pub statements: Vec<StatementConfig>,
 }
 
 impl BgpServer {
@@ -1093,7 +1105,7 @@ impl BgpServer {
         let mut new_sets = (*self.policy_ctx.defined_sets).clone();
 
         // Fail if set already exists
-        if new_sets.contains(set.set_type(), set.name()) {
+        if new_sets.contains(defined_set_type(&set), set.name()) {
             let _ = response.send(Err(format!("defined set '{}' already exists", set.name())));
             return;
         }
@@ -1259,7 +1271,7 @@ impl BgpServer {
         name: Option<String>,
         response: oneshot::Sender<Vec<DefinedSetConfig>>,
     ) {
-        use crate::config::{
+        use conf::bgp::{
             AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixMatchConfig,
             PrefixSetConfig,
         };
@@ -1359,11 +1371,11 @@ impl BgpServer {
     fn handle_add_policy(
         &mut self,
         name: String,
-        statements: Vec<crate::config::StatementConfig>,
+        statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        use crate::config::PolicyDefinitionConfig;
         use crate::policy::Policy;
+        use conf::bgp::PolicyDefinitionConfig;
 
         // Reject policy names starting with underscore (reserved for built-in policies)
         if name.starts_with('_') {

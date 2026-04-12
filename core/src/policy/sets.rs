@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use crate::bgp::msg_update_types::LargeCommunity;
-use crate::config::{DefinedSetsConfig, PrefixMatchConfig};
 use crate::net::IpNetwork;
+use conf::bgp::{DefinedSetsConfig, PrefixMatchConfig};
 use regex::Regex;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
 #[cfg(test)]
-use crate::config::{AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixSetConfig};
+use conf::bgp::{AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixSetConfig};
 
 /// Type of defined set
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

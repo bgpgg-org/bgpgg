@@ -23,7 +23,6 @@ use crate::bgp::msg_update::UpdateMessage;
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
-use crate::config::{get_peer_llgr, Config, PeerConfig};
 use crate::log::{error, info, warn};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_gtsm;
@@ -38,9 +37,10 @@ use crate::policy::{Policy, PolicyContext};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::{LocRib, LocRibConfig};
 use crate::rib::AdjRibOut;
-use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
+use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager, RtrTransport, SshTransport};
 use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
+use conf::bgp::{get_peer_llgr, BgpConfig, PeerConfig, RpkiCacheConfig, TransportType};
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,28 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// Convert RPKI cache transport config to runtime RtrTransport.
+fn rpki_cache_to_transport(config: &RpkiCacheConfig) -> Result<RtrTransport, String> {
+    match config.transport {
+        TransportType::Tcp => Ok(RtrTransport::Tcp),
+        TransportType::Ssh => {
+            let username = config
+                .ssh_username
+                .as_ref()
+                .ok_or("SSH transport requires ssh-username")?;
+            let private_key_file = config
+                .ssh_private_key_file
+                .as_ref()
+                .ok_or("SSH transport requires ssh-private-key-file")?;
+            Ok(RtrTransport::Ssh(SshTransport {
+                username: username.clone(),
+                private_key_file: private_key_file.clone(),
+                known_hosts_file: config.ssh_known_hosts_file.clone(),
+            }))
+        }
+    }
+}
 
 /// Errors that can occur during server initialization or operation.
 #[derive(Debug)]
@@ -494,7 +516,7 @@ impl PeerInfo {
 pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
-    pub(crate) config: Config,
+    pub(crate) config: BgpConfig,
     pub(crate) policy_ctx: PolicyContext,
     local_bgp_id: u32,
     pub(crate) local_addr: IpAddr,
@@ -513,7 +535,7 @@ pub struct BgpServer {
 }
 
 impl BgpServer {
-    pub fn new(config: Config) -> Result<Self, ServerError> {
+    pub fn new(config: BgpConfig) -> Result<Self, ServerError> {
         let local_bgp_id = u32::from(config.router_id);
         let sock_addr: SocketAddr = config
             .listen_addr
@@ -710,7 +732,7 @@ impl BgpServer {
                 continue;
             };
 
-            let transport = match rpki_cfg.to_rtr_transport() {
+            let transport = match rpki_cache_to_transport(rpki_cfg) {
                 Ok(transport) => transport,
                 Err(err) => {
                     error!(%addr, %err, "invalid RPKI cache transport config");
@@ -987,7 +1009,7 @@ mod tests {
     }
 
     fn make_server() -> BgpServer {
-        let config = Config::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
+        let config = BgpConfig::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
         BgpServer::new(config).expect("valid config")
     }
 

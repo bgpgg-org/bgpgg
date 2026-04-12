@@ -23,12 +23,12 @@ use super::proto::{
     DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo, PrefixMatch, PrefixSetData,
     RpkiValidation as ProtoRpkiValidation, StatementInfo,
 };
-use crate::config::{
+use crate::server::ops_mgmt::PolicyInfoResponse;
+use conf::bgp::{
     ActionsConfig, AsPathSetConfig, CommunityActionConfig, CommunitySetConfig, ConditionsConfig,
     DefinedSetConfig, LocalPrefActionConfig, MatchOptionConfig, MatchSetRefConfig, MedActionConfig,
     NeighborSetConfig, PrefixMatchConfig, PrefixSetConfig, RpkiValidationConfig, StatementConfig,
 };
-use crate::server::ops_mgmt::PolicyInfoResponse;
 
 pub(super) fn proto_to_defined_set_config(
     proto: &ProtoDefinedSetConfig,
@@ -66,13 +66,13 @@ pub(super) fn proto_to_defined_set_config(
             })
         }
         Some(super::proto::defined_set_config::Config::ExtCommunitySet(ecs)) => {
-            DefinedSetConfig::ExtCommunitySet(crate::config::ExtCommunitySetConfig {
+            DefinedSetConfig::ExtCommunitySet(conf::bgp::ExtCommunitySetConfig {
                 name,
                 ext_communities: ecs.ext_communities.clone(),
             })
         }
         Some(super::proto::defined_set_config::Config::LargeCommunitySet(lcs)) => {
-            DefinedSetConfig::LargeCommunitySet(crate::config::LargeCommunitySetConfig {
+            DefinedSetConfig::LargeCommunitySet(conf::bgp::LargeCommunitySetConfig {
                 name,
                 large_communities: lcs.large_communities.clone(),
             })

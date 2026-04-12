@@ -17,7 +17,6 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     add_route_request, remove_route_request, route, AddIpRouteRequest, AddLsRouteRequest,
     AddRouteRequest, AddRpkiCacheRequest, AdminState, AfiSafi as ProtoAfiSafi, BgpState,
@@ -25,12 +24,13 @@ use bgpgg::grpc::proto::{
     LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest,
     RibType, Route, SessionConfig,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn test_add_peer_failure() {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
     // Active state exits instantly.
     config.connect_retry_secs = 0;
     let server1 = start_test_server(config).await;
@@ -82,14 +82,14 @@ async fn test_add_peer_failure() {
 
 #[tokio::test]
 async fn test_add_peer_success() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.1:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -114,7 +114,7 @@ async fn test_add_peer_success() {
 
 #[tokio::test]
 async fn test_remove_peer_not_found() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -145,7 +145,7 @@ async fn test_remove_peer_success() {
 
 #[tokio::test]
 async fn test_get_peers_empty() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -170,7 +170,7 @@ async fn test_get_peers_with_peers() {
 
 #[tokio::test]
 async fn test_get_peer_not_found() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -205,7 +205,7 @@ async fn test_get_peer_success() {
 
 #[tokio::test]
 async fn test_get_routes_empty() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -223,7 +223,7 @@ async fn test_get_routes_empty() {
 
 #[tokio::test]
 async fn test_announce_withdraw_route() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -270,7 +270,7 @@ async fn test_announce_withdraw_route() {
 
 #[tokio::test]
 async fn test_withdraw_nonexistent_route() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -357,7 +357,7 @@ async fn test_disable_enable_peer() {
 
 #[tokio::test]
 async fn test_add_bmp_server() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -388,7 +388,7 @@ async fn test_add_bmp_server() {
 
 #[tokio::test]
 async fn test_remove_bmp_server() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -417,7 +417,7 @@ async fn test_remove_bmp_server() {
 
 #[tokio::test]
 async fn test_get_bmp_servers_empty() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -431,7 +431,7 @@ async fn test_get_bmp_servers_empty() {
 
 #[tokio::test]
 async fn test_add_route_stream() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -492,7 +492,7 @@ async fn test_add_route_stream() {
 
 #[tokio::test]
 async fn test_add_route_stream_with_invalid_route() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -707,7 +707,7 @@ async fn test_list_peers_stream() {
 
 #[tokio::test]
 async fn test_get_server_info() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -760,7 +760,7 @@ async fn test_extended_community_roundtrip() {
     use bgpgg::grpc::proto::extended_community::Community;
     use bgpgg::grpc::proto_community::u64_to_proto_extcomm;
 
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -844,7 +844,7 @@ async fn test_extended_community_roundtrip() {
 
 #[tokio::test]
 async fn test_add_route_with_invalid_prefix_length() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -915,7 +915,7 @@ async fn test_add_route_with_invalid_prefix_length() {
 /// API reports configured peer ASN when session is down.
 #[tokio::test]
 async fn test_peer_asn_api_fallback() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1019,7 +1019,7 @@ async fn test_add_peer_with_llgr() {
 /// gRPC: Add, list, and remove RPKI caches.
 #[tokio::test]
 async fn test_rpki_add_list_remove() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1068,7 +1068,7 @@ async fn test_rpki_add_list_remove() {
 /// gRPC: AddRpkiCache with SSH transport validates required fields.
 #[tokio::test]
 async fn test_rpki_add_ssh_missing_fields() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -1126,7 +1126,7 @@ fn make_ls_attr(name: &str) -> LsAttribute {
 
 #[tokio::test]
 async fn test_add_ls_route() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -1180,7 +1180,7 @@ async fn test_add_ls_route() {
 
 #[tokio::test]
 async fn test_remove_ls_route() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),
@@ -1244,7 +1244,7 @@ async fn test_remove_ls_route() {
 /// RFC 9552 Section 8.2.3: configured Instance-ID is applied to locally originated LS routes.
 #[tokio::test]
 async fn test_ls_instance_id_config() {
-    let mut config = Config::new(64512, "127.0.0.1:0", Ipv4Addr::new(127, 0, 0, 1), 90);
+    let mut config = BgpConfig::new(64512, "127.0.0.1:0", Ipv4Addr::new(127, 0, 0, 1), 90);
     config.bgp_ls.instance_id = 99;
     let server = start_test_server(config).await;
 
@@ -1287,7 +1287,7 @@ async fn test_ls_instance_id_config() {
 
 #[tokio::test]
 async fn test_list_routes_family_filter() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         64512,
         "127.0.0.1:0",
         Ipv4Addr::new(127, 0, 0, 1),

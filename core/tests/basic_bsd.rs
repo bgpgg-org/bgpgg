@@ -19,8 +19,8 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{BgpState, SessionConfig};
+use conf::bgp::BgpConfig;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -62,14 +62,14 @@ async fn test_tcp_md5_cleanup_on_peer_removal() {
         .join(" ");
 
     // Use unique IPs (127.0.0.11/12) to avoid SADB conflicts with other tests
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.11:0",
         Ipv4Addr::new(11, 11, 11, 11),
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.12:0",
         Ipv4Addr::new(12, 12, 12, 12),
