@@ -940,6 +940,64 @@ impl Config {
         Ok(serde_yaml::from_str(&contents)?)
     }
 
+    /// Load configuration from a rogg.conf file (brace-delimited format).
+    /// Extracts the `service bgp { ... }` block and maps it to Config fields.
+    pub fn from_rogg_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = fs::read_to_string(path)?;
+        Self::from_rogg_conf_str(&contents)
+    }
+
+    /// Parse a rogg.conf string into a Config.
+    pub fn from_rogg_conf_str(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        use rogg_config::language::{self, Service, SettingKey};
+
+        let root = language::parse(input)?;
+        let Service::Bgp(bgp) = root
+            .services
+            .first()
+            .ok_or("missing 'service bgp' block")?;
+
+        let asn = parse_setting(&bgp.settings, SettingKey::Asn, "asn")?;
+        let router_id = parse_setting(&bgp.settings, SettingKey::RouterId, "router-id")?;
+
+        let listen_addr = optional_setting(&bgp.settings, SettingKey::ListenAddr)
+            .unwrap_or_else(default_listen_addr);
+        let grpc_listen_addr = optional_setting(&bgp.settings, SettingKey::GrpcListenAddr)
+            .unwrap_or_else(default_grpc_listen_addr);
+        let log_level =
+            optional_setting(&bgp.settings, SettingKey::LogLevel).unwrap_or_else(default_log_level);
+        let hold_time_secs = match bgp.setting(SettingKey::HoldTime) {
+            Some(setting) => parse_value_str(&setting.value, "hold-time")?,
+            None => default_hold_time(),
+        };
+        let connect_retry_secs = match bgp.setting(SettingKey::ConnectRetry) {
+            Some(setting) => parse_value_str(&setting.value, "connect-retry")?,
+            None => default_connect_retry_time(),
+        };
+        let cluster_id = match bgp.setting(SettingKey::ClusterId) {
+            Some(setting) => Some(parse_value_str(&setting.value, "cluster-id")?),
+            None => None,
+        };
+
+        let mut peers = Vec::new();
+        for peer_block in &bgp.peers {
+            peers.push(peer_config_from_block(peer_block)?);
+        }
+
+        Ok(Config {
+            asn,
+            router_id,
+            listen_addr,
+            grpc_listen_addr,
+            log_level,
+            hold_time_secs,
+            connect_retry_secs,
+            cluster_id,
+            peers,
+            ..Default::default()
+        })
+    }
+
     /// Get the local bind address for outgoing connections (IP with port 0)
     pub fn local_addr(&self) -> Result<SocketAddr, String> {
         let local_ip = self
@@ -954,6 +1012,84 @@ impl Config {
 
         Ok(bind_addr_from_ip(ip))
     }
+}
+
+/// Parse a required setting from a settings list.
+fn parse_setting<T: std::str::FromStr>(
+    settings: &[rogg_config::language::Setting],
+    key: rogg_config::language::SettingKey,
+    name: &str,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    T::Err: std::fmt::Display,
+{
+    let setting = settings
+        .iter()
+        .find(|s| s.key == key)
+        .ok_or_else(|| format!("missing required field '{}'", name))?;
+    setting
+        .value
+        .parse::<T>()
+        .map_err(|err| format!("invalid '{}' value '{}': {}", name, setting.value, err).into())
+}
+
+/// Get an optional setting value as a String.
+fn optional_setting(
+    settings: &[rogg_config::language::Setting],
+    key: rogg_config::language::SettingKey,
+) -> Option<String> {
+    settings
+        .iter()
+        .find(|s| s.key == key)
+        .map(|s| s.value.clone())
+}
+
+/// Parse a string value into a typed value.
+fn parse_value_str<T: std::str::FromStr>(
+    raw: &str,
+    name: &str,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    T::Err: std::fmt::Display,
+{
+    raw.parse::<T>()
+        .map_err(|err| format!("invalid '{}' value '{}': {}", name, raw, err).into())
+}
+
+/// Build a PeerConfig from a typed PeerBlock.
+fn peer_config_from_block(
+    peer: &rogg_config::language::PeerBlock,
+) -> Result<PeerConfig, Box<dyn std::error::Error>> {
+    use rogg_config::language::{FlagKey, SettingKey};
+
+    let mut config = PeerConfig::default();
+
+    if let Some(setting) = peer.setting(SettingKey::Address) {
+        config.address = setting.value.clone();
+    }
+    if let Some(setting) = peer.setting(SettingKey::RemoteAs) {
+        config.asn = Some(parse_value_str(&setting.value, "remote-as")?);
+    }
+    if let Some(setting) = peer.setting(SettingKey::Port) {
+        config.port = parse_value_str(&setting.value, "port")?;
+    }
+    if let Some(setting) = peer.setting(SettingKey::Interface) {
+        config.interface = Some(setting.value.clone());
+    }
+    if let Some(setting) = peer.setting(SettingKey::Md5KeyFile) {
+        config.md5_key_file = Some(setting.value.clone());
+    }
+    if let Some(setting) = peer.setting(SettingKey::TtlMin) {
+        config.ttl_min = Some(parse_value_str(&setting.value, "ttl-min")?);
+    }
+
+    config.next_hop_self = peer.has_flag(FlagKey::NextHopSelf);
+    config.passive_mode = peer.has_flag(FlagKey::Passive);
+    config.rr_client = peer.has_flag(FlagKey::RrClient);
+    config.rs_client = peer.has_flag(FlagKey::RsClient);
+    config.graceful_shutdown = peer.has_flag(FlagKey::GracefulShutdown);
+
+    Ok(config)
 }
 
 impl Default for Config {
@@ -1518,5 +1654,134 @@ bgp-ls:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.bgp_ls.max_ls_entries, 50000);
+    }
+
+    #[test]
+    fn test_from_rogg_conf_basic() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr 127.0.0.1:179
+  grpc-listen-addr 127.0.0.1:50051
+  log-level debug
+  hold-time 90
+  connect-retry 10
+}";
+        let config = Config::from_rogg_conf_str(input).unwrap();
+        assert_eq!(config.asn, 65001);
+        assert_eq!(config.router_id, Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(config.listen_addr, "127.0.0.1:179");
+        assert_eq!(config.grpc_listen_addr, "127.0.0.1:50051");
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.hold_time_secs, 90);
+        assert_eq!(config.connect_retry_secs, 10);
+    }
+
+    #[test]
+    fn test_from_rogg_conf_defaults() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 2.2.2.2
+}";
+        let config = Config::from_rogg_conf_str(input).unwrap();
+        assert_eq!(config.asn, 65001);
+        assert_eq!(config.router_id, Ipv4Addr::new(2, 2, 2, 2));
+        assert_eq!(config.listen_addr, "0.0.0.0:179");
+        assert_eq!(config.grpc_listen_addr, "127.0.0.1:50051");
+        assert_eq!(config.hold_time_secs, 180);
+    }
+
+    #[test]
+    fn test_from_rogg_conf_with_peers() {
+        let input = "\
+service bgp {
+  asn 4242423930
+  router-id 172.23.211.1
+
+  peer kioubit {
+    address fe80::ade0
+    remote-as 4242423914
+    interface kioubit-us3
+    md5-key-file /etc/bgp/kioubit.key
+    next-hop-self
+    port 1179
+    ttl-min 254
+  }
+
+  peer upstream {
+    address 10.0.0.1
+    remote-as 65000
+    passive
+    rr-client
+  }
+}";
+        let config = Config::from_rogg_conf_str(input).unwrap();
+        assert_eq!(config.asn, 4242423930);
+        assert_eq!(config.peers.len(), 2);
+
+        let kioubit = &config.peers[0];
+        assert_eq!(kioubit.address, "fe80::ade0");
+        assert_eq!(kioubit.asn, Some(4242423914));
+        assert_eq!(kioubit.interface.as_deref(), Some("kioubit-us3"));
+        assert_eq!(
+            kioubit.md5_key_file.as_deref(),
+            Some("/etc/bgp/kioubit.key")
+        );
+        assert!(kioubit.next_hop_self);
+        assert_eq!(kioubit.port, 1179);
+        assert_eq!(kioubit.ttl_min, Some(254));
+
+        let upstream = &config.peers[1];
+        assert_eq!(upstream.address, "10.0.0.1");
+        assert_eq!(upstream.asn, Some(65000));
+        assert!(upstream.passive_mode);
+        assert!(upstream.rr_client);
+    }
+
+    #[test]
+    fn test_from_rogg_conf_missing_service_bgp() {
+        let result = Config::from_rogg_conf_str("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("service bgp"));
+    }
+
+    #[test]
+    fn test_from_rogg_conf_unknown_service() {
+        let input = "service ospf { router-id 1.1.1.1 }";
+        let result = Config::from_rogg_conf_str(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown service"));
+    }
+
+    #[test]
+    fn test_from_rogg_conf_missing_required() {
+        // Missing asn
+        let input = "service bgp { router-id 1.1.1.1 }";
+        let result = Config::from_rogg_conf_str(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("asn"));
+
+        // Missing router-id
+        let input = "service bgp { asn 65001 }";
+        let result = Config::from_rogg_conf_str(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("router-id"));
+    }
+
+    #[test]
+    fn test_from_rogg_conf_rejects_other_services() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+}
+
+service ospf {
+  router-id 1.1.1.1
+}";
+        let result = Config::from_rogg_conf_str(input);
+        assert!(result.is_err());
     }
 }

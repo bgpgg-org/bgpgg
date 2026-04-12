@@ -11,6 +11,7 @@ GGSH="${GGSH:-$PROJECT_DIR/target/release/ggsh}"
 
 PEER1_PID=
 PEER2_PID=
+TMPDIR=$(mktemp -d)
 
 cleanup() {
     [ -n "$PEER1_PID" ] && kill "$PEER1_PID" 2>/dev/null || true
@@ -18,6 +19,7 @@ cleanup() {
     wait 2>/dev/null || true
     PEER1_PID=
     PEER2_PID=
+    rm -rf "$TMPDIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -37,16 +39,30 @@ poll_until() {
 P1_GRPC=http://127.0.0.1:50081
 P2_GRPC=http://127.0.0.2:50082
 
+cat > "$TMPDIR/peer1.conf" <<'EOF'
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr 127.0.0.1:14179
+  grpc-listen-addr 127.0.0.1:50081
+}
+EOF
+
+cat > "$TMPDIR/peer2.conf" <<'EOF'
+service bgp {
+  asn 65001
+  router-id 2.2.2.2
+  listen-addr 127.0.0.2:14179
+  grpc-listen-addr 127.0.0.2:50082
+}
+EOF
+
 echo "Starting peer1 (ASN 65001, 127.0.0.1:14179, router-id 1.1.1.1)..."
-"$BGPGGD" --asn 65001 --router-id 1.1.1.1 \
-    --listen-addr 127.0.0.1:14179 \
-    --grpc-listen-addr 127.0.0.1:50081 &
+"$BGPGGD" --config "$TMPDIR/peer1.conf" &
 PEER1_PID=$!
 
 echo "Starting peer2 (ASN 65001, 127.0.0.2:14179, router-id 2.2.2.2)..."
-"$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
-    --listen-addr 127.0.0.2:14179 \
-    --grpc-listen-addr 127.0.0.2:50082 &
+"$BGPGGD" --config "$TMPDIR/peer2.conf" &
 PEER2_PID=$!
 
 echo "Waiting for gRPC..."
@@ -126,6 +142,17 @@ echo "$OUTPUT"
 echo "$OUTPUT" | grep -q "summary" || { echo "FAIL: expected summary in subcommands"; exit 1; }
 echo "$OUTPUT" | grep -q "peers" || { echo "FAIL: expected peers in subcommands"; exit 1; }
 echo "$OUTPUT" | grep -q "routes" || { echo "FAIL: expected routes in subcommands"; exit 1; }
+echo "  ok"
+
+echo "=== ggsh interactive: error does not exit ==="
+OUTPUT=$("$GGSH" --bgpgg-addr "$P1_GRPC" <<'EOF'
+show bogus
+show bgp summary
+exit
+EOF
+)
+echo "$OUTPUT"
+echo "$OUTPUT" | grep -q "Established" || { echo "FAIL: expected Established after error"; exit 1; }
 echo "  ok"
 
 echo "=== ggsh error: unknown command ==="

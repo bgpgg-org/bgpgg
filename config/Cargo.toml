@@ -1,0 +1,4 @@
+[package]
+name = "rogg-config"
+version.workspace = true
+edition.workspace = true

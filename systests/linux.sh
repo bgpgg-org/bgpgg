@@ -24,6 +24,7 @@ NS1=bgpgg-test-ns1
 NS2=bgpgg-test-ns2
 VETH1=bgpgg-v1
 VETH2=bgpgg-v2
+TMPDIR=$(mktemp -d)
 
 cleanup() {
     [ -n "$PEER1_PID" ] && kill "$PEER1_PID" 2>/dev/null || true
@@ -34,6 +35,7 @@ cleanup() {
     ip netns del "$NS1" 2>/dev/null || true
     ip netns del "$NS2" 2>/dev/null || true
     ip link del "$VETH1" 2>/dev/null || true
+    rm -rf "$TMPDIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -75,17 +77,31 @@ test_link_local_peering() {
     echo "  NS1 link-local: $ll1 on $VETH1"
     echo "  NS2 link-local: $ll2 on $VETH2"
 
+    cat > "$TMPDIR/peer1.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr [::]:13179
+  grpc-listen-addr 127.0.0.1:50071
+}
+CONF
+
+    cat > "$TMPDIR/peer2.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 2.2.2.2
+  listen-addr [::]:13179
+  grpc-listen-addr 127.0.0.2:50072
+}
+CONF
+
     # Start bgpggd in each namespace
     echo "Starting peer1 in $NS1..."
-    ip netns exec "$NS1" "$BGPGGD" --asn 65001 --router-id 1.1.1.1 \
-        --listen-addr "[::]:13179" \
-        --grpc-listen-addr "127.0.0.1:50071" &
+    ip netns exec "$NS1" "$BGPGGD" --config "$TMPDIR/peer1.conf" &
     PEER1_PID=$!
 
     echo "Starting peer2 in $NS2..."
-    ip netns exec "$NS2" "$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
-        --listen-addr "[::]:13179" \
-        --grpc-listen-addr "127.0.0.2:50072" &
+    ip netns exec "$NS2" "$BGPGGD" --config "$TMPDIR/peer2.conf" &
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."

@@ -152,7 +152,7 @@ impl Shell {
 
                     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
                     let result = parse(&self.tree, &tokens);
-                    if self.handle_result(result).await.is_some() {
+                    if self.handle_result(result).await == Some(0) {
                         break;
                     }
                 }

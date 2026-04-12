@@ -516,6 +516,7 @@ dependencies = [
  "libc",
  "prost",
  "regex",
+ "rogg-config",
  "russh",
  "serde",
  "serde_json",
@@ -2124,6 +2125,10 @@ dependencies = [
  "hmac",
  "subtle",
 ]
+
+[[package]]
+name = "rogg-config"
+version = "0.3.0"
 
 [[package]]
 name = "rsa"

@@ -10,6 +10,7 @@ BGPGG="${BGPGG:-$PROJECT_DIR/target/release/bgpgg}"
 
 PEER1_PID=
 PEER2_PID=
+TMPDIR=$(mktemp -d)
 
 cleanup() {
     [ -n "$PEER1_PID" ] && kill "$PEER1_PID" 2>/dev/null || true
@@ -18,7 +19,7 @@ cleanup() {
     PEER1_PID=
     PEER2_PID=
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup; rm -rf "$TMPDIR"' EXIT INT TERM
 
 poll_until() {
     local desc=$1 timeout=$2
@@ -37,16 +38,30 @@ start_peers() {
     local p1_grpc=$1 p2_grpc=$2 p1_port=$3 p2_port=$4
     local p1_ip=127.0.0.1 p2_ip=127.0.0.2
 
+    cat > "$TMPDIR/peer1.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr ${p1_ip}:${p1_port}
+  grpc-listen-addr ${p1_grpc#http://}
+}
+CONF
+
+    cat > "$TMPDIR/peer2.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 2.2.2.2
+  listen-addr ${p2_ip}:${p2_port}
+  grpc-listen-addr ${p2_grpc#http://}
+}
+CONF
+
     echo "Starting peer1 (ASN 65001, $p1_ip:$p1_port, router-id 1.1.1.1)..."
-    "$BGPGGD" --asn 65001 --router-id 1.1.1.1 \
-        --listen-addr "$p1_ip:$p1_port" \
-        --grpc-listen-addr "${p1_grpc#http://}" &
+    "$BGPGGD" --config "$TMPDIR/peer1.conf" &
     PEER1_PID=$!
 
     echo "Starting peer2 (ASN 65001, $p2_ip:$p2_port, router-id 2.2.2.2)..."
-    "$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
-        --listen-addr "$p2_ip:$p2_port" \
-        --grpc-listen-addr "${p2_grpc#http://}" &
+    "$BGPGGD" --config "$TMPDIR/peer2.conf" &
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."
