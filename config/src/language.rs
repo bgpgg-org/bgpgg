@@ -64,21 +64,20 @@ pub enum Service {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BgpServiceBody {
     pub settings: Vec<Setting>,
-    pub flags: Vec<Flag>,
     pub peers: Vec<PeerBlock>,
     pub policies: Vec<PolicyBlock>,
     pub prefix_lists: Vec<PrefixListBlock>,
     pub announces: Vec<Announce>,
 }
 
-/// `key value` leaf.
+/// Leaf config statement. Value is None for boolean flags like `next-hop-self`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Setting {
     pub key: SettingKey,
-    pub value: String,
+    pub value: Option<String>,
 }
 
-/// Known setting keywords.
+/// Known config keywords for leaf statements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingKey {
     Asn,
@@ -95,18 +94,6 @@ pub enum SettingKey {
     Interface,
     Md5KeyFile,
     TtlMin,
-    Unknown(String),
-}
-
-/// Boolean flag (keyword only, no value).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Flag {
-    pub key: FlagKey,
-}
-
-/// Known flag keywords.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FlagKey {
     NextHopSelf,
     Passive,
     RrClient,
@@ -120,7 +107,6 @@ pub enum FlagKey {
 pub struct PeerBlock {
     pub name: String,
     pub settings: Vec<Setting>,
-    pub flags: Vec<Flag>,
     pub families: Vec<FamilyBlock>,
 }
 
@@ -173,13 +159,16 @@ pub struct UnknownBlock {
     pub children: Vec<UnknownBlock>,
 }
 
+impl Setting {
+    /// Get the value as a string slice, if present.
+    pub fn value_str(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+}
+
 impl BgpServiceBody {
     pub fn setting(&self, key: SettingKey) -> Option<&Setting> {
         self.settings.iter().find(|s| s.key == key)
-    }
-
-    pub fn has_flag(&self, key: FlagKey) -> bool {
-        self.flags.iter().any(|f| f.key == key)
     }
 }
 
@@ -187,13 +176,9 @@ impl PeerBlock {
     pub fn setting(&self, key: SettingKey) -> Option<&Setting> {
         self.settings.iter().find(|s| s.key == key)
     }
-
-    pub fn has_flag(&self, key: FlagKey) -> bool {
-        self.flags.iter().any(|f| f.key == key)
-    }
 }
 
-fn classify_setting(word: &str) -> SettingKey {
+fn classify_keyword(word: &str) -> SettingKey {
     match word {
         "asn" => SettingKey::Asn,
         "router-id" => SettingKey::RouterId,
@@ -209,18 +194,12 @@ fn classify_setting(word: &str) -> SettingKey {
         "interface" => SettingKey::Interface,
         "md5-key-file" => SettingKey::Md5KeyFile,
         "ttl-min" => SettingKey::TtlMin,
+        "next-hop-self" => SettingKey::NextHopSelf,
+        "passive" => SettingKey::Passive,
+        "rr-client" => SettingKey::RrClient,
+        "rs-client" => SettingKey::RsClient,
+        "graceful-shutdown" => SettingKey::GracefulShutdown,
         other => SettingKey::Unknown(other.to_string()),
-    }
-}
-
-fn classify_flag(word: &str) -> FlagKey {
-    match word {
-        "next-hop-self" => FlagKey::NextHopSelf,
-        "passive" => FlagKey::Passive,
-        "rr-client" => FlagKey::RrClient,
-        "rs-client" => FlagKey::RsClient,
-        "graceful-shutdown" => FlagKey::GracefulShutdown,
-        other => FlagKey::Unknown(other.to_string()),
     }
 }
 
@@ -327,22 +306,18 @@ fn current_line(tokens: &[Token], pos: usize) -> usize {
     }
 }
 
-/// Classify a leaf statement (no block) into settings or flags.
-/// 1 word -> flag, 2 words -> setting, 3+ words -> unknown block.
-fn flush_leaf(
-    words: &[String],
-    settings: &mut Vec<Setting>,
-    flags: &mut Vec<Flag>,
-    unknown: &mut Vec<UnknownBlock>,
-) {
+/// Classify a leaf statement into a setting.
+/// 1 word -> flag (value=None), 2 words -> key-value, 3+ words -> unknown block.
+fn flush_leaf(words: &[String], settings: &mut Vec<Setting>, unknown: &mut Vec<UnknownBlock>) {
     match words.len() {
         0 => {}
-        1 => flags.push(Flag {
-            key: classify_flag(&words[0]),
+        1 => settings.push(Setting {
+            key: classify_keyword(&words[0]),
+            value: None,
         }),
         2 => settings.push(Setting {
-            key: classify_setting(&words[0]),
-            value: words[1].clone(),
+            key: classify_keyword(&words[0]),
+            value: Some(words[1].clone()),
         }),
         _ => unknown.push(UnknownBlock {
             words: words.to_vec(),
@@ -507,7 +482,7 @@ fn flush_bgp_leaf(body: &mut BgpServiceBody, words: &[String]) {
         });
         return;
     }
-    flush_leaf(words, &mut body.settings, &mut body.flags, &mut Vec::new());
+    flush_leaf(words, &mut body.settings, &mut Vec::new());
 }
 
 fn parse_peer_block(
@@ -516,7 +491,6 @@ fn parse_peer_block(
     pos: &mut usize,
 ) -> Result<PeerBlock, ParseError> {
     let mut settings = Vec::new();
-    let mut flags = Vec::new();
     let mut families = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut start_line = 0;
@@ -560,20 +534,19 @@ fn parse_peer_block(
             }
             TokenKind::CloseBrace => {
                 if !words.is_empty() {
-                    flush_leaf(&words, &mut settings, &mut flags, &mut Vec::new());
+                    flush_leaf(&words, &mut settings, &mut Vec::new());
                     words.clear();
                 }
                 *pos += 1;
                 return Ok(PeerBlock {
                     name,
                     settings,
-                    flags,
                     families,
                 });
             }
             TokenKind::Newline => {
                 if !words.is_empty() {
-                    flush_leaf(&words, &mut settings, &mut flags, &mut Vec::new());
+                    flush_leaf(&words, &mut settings, &mut Vec::new());
                     words.clear();
                 }
                 *pos += 1;
@@ -790,15 +763,30 @@ service bgp {
         assert_eq!(root.services.len(), 1);
 
         let Service::Bgp(body) = &root.services[0];
-        assert_eq!(body.setting(SettingKey::Asn).unwrap().value, "65001");
-        assert_eq!(body.setting(SettingKey::RouterId).unwrap().value, "1.1.1.1");
         assert_eq!(
-            body.setting(SettingKey::ListenAddr).unwrap().value,
-            "127.0.0.1:179"
+            body.setting(SettingKey::Asn).unwrap().value_str(),
+            Some("65001")
         );
-        assert_eq!(body.setting(SettingKey::LogLevel).unwrap().value, "debug");
-        assert_eq!(body.setting(SettingKey::HoldTime).unwrap().value, "90");
-        assert_eq!(body.setting(SettingKey::ConnectRetry).unwrap().value, "10");
+        assert_eq!(
+            body.setting(SettingKey::RouterId).unwrap().value_str(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            body.setting(SettingKey::ListenAddr).unwrap().value_str(),
+            Some("127.0.0.1:179")
+        );
+        assert_eq!(
+            body.setting(SettingKey::LogLevel).unwrap().value_str(),
+            Some("debug")
+        );
+        assert_eq!(
+            body.setting(SettingKey::HoldTime).unwrap().value_str(),
+            Some("90")
+        );
+        assert_eq!(
+            body.setting(SettingKey::ConnectRetry).unwrap().value_str(),
+            Some("10")
+        );
     }
 
     #[test]
@@ -832,20 +820,23 @@ service bgp {
         let kioubit = &body.peers[0];
         assert_eq!(kioubit.name, "kioubit");
         assert_eq!(
-            kioubit.setting(SettingKey::Address).unwrap().value,
-            "fe80::ade0"
+            kioubit.setting(SettingKey::Address).unwrap().value_str(),
+            Some("fe80::ade0")
         );
         assert_eq!(
-            kioubit.setting(SettingKey::RemoteAs).unwrap().value,
-            "4242423914"
+            kioubit.setting(SettingKey::RemoteAs).unwrap().value_str(),
+            Some("4242423914")
         );
-        assert!(kioubit.has_flag(FlagKey::NextHopSelf));
-        assert_eq!(kioubit.setting(SettingKey::Port).unwrap().value, "1179");
+        assert!(kioubit.setting(SettingKey::NextHopSelf).is_some());
+        assert_eq!(
+            kioubit.setting(SettingKey::Port).unwrap().value_str(),
+            Some("1179")
+        );
 
         let upstream = &body.peers[1];
         assert_eq!(upstream.name, "upstream");
-        assert!(upstream.has_flag(FlagKey::Passive));
-        assert!(upstream.has_flag(FlagKey::RrClient));
+        assert!(upstream.setting(SettingKey::Passive).is_some());
+        assert!(upstream.setting(SettingKey::RrClient).is_some());
     }
 
     #[test]
@@ -952,8 +943,14 @@ service bgp {
 }";
         let root = parse(input).unwrap();
         let Service::Bgp(body) = &root.services[0];
-        assert_eq!(body.setting(SettingKey::Asn).unwrap().value, "65001");
-        assert_eq!(body.setting(SettingKey::RouterId).unwrap().value, "1.1.1.1");
+        assert_eq!(
+            body.setting(SettingKey::Asn).unwrap().value_str(),
+            Some("65001")
+        );
+        assert_eq!(
+            body.setting(SettingKey::RouterId).unwrap().value_str(),
+            Some("1.1.1.1")
+        );
     }
 
     #[test]
@@ -961,7 +958,10 @@ service bgp {
         let input = "service bgp { asn 65001\nrouter-id 1.1.1.1 }";
         let root = parse(input).unwrap();
         let Service::Bgp(body) = &root.services[0];
-        assert_eq!(body.setting(SettingKey::Asn).unwrap().value, "65001");
+        assert_eq!(
+            body.setting(SettingKey::Asn).unwrap().value_str(),
+            Some("65001")
+        );
     }
 
     #[test]
@@ -1031,11 +1031,14 @@ service bgp {
 
         let Service::Bgp(body) = &root.services[0];
 
-        assert_eq!(body.setting(SettingKey::Asn).unwrap().value, "4242423930");
+        assert_eq!(
+            body.setting(SettingKey::Asn).unwrap().value_str(),
+            Some("4242423930")
+        );
         assert_eq!(body.peers.len(), 1);
         assert_eq!(body.announces.len(), 2);
         assert_eq!(body.policies.len(), 1);
         assert_eq!(body.prefix_lists.len(), 1);
-        assert!(body.peers[0].has_flag(FlagKey::NextHopSelf));
+        assert!(body.peers[0].setting(SettingKey::NextHopSelf).is_some());
     }
 }

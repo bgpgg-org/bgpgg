@@ -952,10 +952,7 @@ impl Config {
         use rogg_config::language::{self, Service, SettingKey};
 
         let root = language::parse(input)?;
-        let Service::Bgp(bgp) = root
-            .services
-            .first()
-            .ok_or("missing 'service bgp' block")?;
+        let Service::Bgp(bgp) = root.services.first().ok_or("missing 'service bgp' block")?;
 
         let asn = parse_setting(&bgp.settings, SettingKey::Asn, "asn")?;
         let router_id = parse_setting(&bgp.settings, SettingKey::RouterId, "router-id")?;
@@ -967,15 +964,33 @@ impl Config {
         let log_level =
             optional_setting(&bgp.settings, SettingKey::LogLevel).unwrap_or_else(default_log_level);
         let hold_time_secs = match bgp.setting(SettingKey::HoldTime) {
-            Some(setting) => parse_value_str(&setting.value, "hold-time")?,
+            Some(setting) => {
+                let val = setting
+                    .value
+                    .as_deref()
+                    .ok_or("hold-time requires a value")?;
+                parse_value_str(val, "hold-time")?
+            }
             None => default_hold_time(),
         };
         let connect_retry_secs = match bgp.setting(SettingKey::ConnectRetry) {
-            Some(setting) => parse_value_str(&setting.value, "connect-retry")?,
+            Some(setting) => {
+                let val = setting
+                    .value
+                    .as_deref()
+                    .ok_or("connect-retry requires a value")?;
+                parse_value_str(val, "connect-retry")?
+            }
             None => default_connect_retry_time(),
         };
         let cluster_id = match bgp.setting(SettingKey::ClusterId) {
-            Some(setting) => Some(parse_value_str(&setting.value, "cluster-id")?),
+            Some(setting) => {
+                let val = setting
+                    .value
+                    .as_deref()
+                    .ok_or("cluster-id requires a value")?;
+                Some(parse_value_str(val, "cluster-id")?)
+            }
             None => None,
         };
 
@@ -1027,10 +1042,12 @@ where
         .iter()
         .find(|s| s.key == key)
         .ok_or_else(|| format!("missing required field '{}'", name))?;
-    setting
+    let raw = setting
         .value
-        .parse::<T>()
-        .map_err(|err| format!("invalid '{}' value '{}': {}", name, setting.value, err).into())
+        .as_deref()
+        .ok_or_else(|| format!("'{}' requires a value", name))?;
+    raw.parse::<T>()
+        .map_err(|err| format!("invalid '{}' value '{}': {}", name, raw, err).into())
 }
 
 /// Get an optional setting value as a String.
@@ -1041,7 +1058,7 @@ fn optional_setting(
     settings
         .iter()
         .find(|s| s.key == key)
-        .map(|s| s.value.clone())
+        .and_then(|s| s.value.clone())
 }
 
 /// Parse a string value into a typed value.
@@ -1060,34 +1077,40 @@ where
 fn peer_config_from_block(
     peer: &rogg_config::language::PeerBlock,
 ) -> Result<PeerConfig, Box<dyn std::error::Error>> {
-    use rogg_config::language::{FlagKey, SettingKey};
+    use rogg_config::language::SettingKey;
 
     let mut config = PeerConfig::default();
 
     if let Some(setting) = peer.setting(SettingKey::Address) {
-        config.address = setting.value.clone();
+        config.address = setting.value.clone().unwrap_or_default();
     }
     if let Some(setting) = peer.setting(SettingKey::RemoteAs) {
-        config.asn = Some(parse_value_str(&setting.value, "remote-as")?);
+        let val = setting
+            .value
+            .as_deref()
+            .ok_or("remote-as requires a value")?;
+        config.asn = Some(parse_value_str(val, "remote-as")?);
     }
     if let Some(setting) = peer.setting(SettingKey::Port) {
-        config.port = parse_value_str(&setting.value, "port")?;
+        let val = setting.value.as_deref().ok_or("port requires a value")?;
+        config.port = parse_value_str(val, "port")?;
     }
     if let Some(setting) = peer.setting(SettingKey::Interface) {
-        config.interface = Some(setting.value.clone());
+        config.interface = setting.value.clone();
     }
     if let Some(setting) = peer.setting(SettingKey::Md5KeyFile) {
-        config.md5_key_file = Some(setting.value.clone());
+        config.md5_key_file = setting.value.clone();
     }
     if let Some(setting) = peer.setting(SettingKey::TtlMin) {
-        config.ttl_min = Some(parse_value_str(&setting.value, "ttl-min")?);
+        let val = setting.value.as_deref().ok_or("ttl-min requires a value")?;
+        config.ttl_min = Some(parse_value_str(val, "ttl-min")?);
     }
 
-    config.next_hop_self = peer.has_flag(FlagKey::NextHopSelf);
-    config.passive_mode = peer.has_flag(FlagKey::Passive);
-    config.rr_client = peer.has_flag(FlagKey::RrClient);
-    config.rs_client = peer.has_flag(FlagKey::RsClient);
-    config.graceful_shutdown = peer.has_flag(FlagKey::GracefulShutdown);
+    config.next_hop_self = peer.setting(SettingKey::NextHopSelf).is_some();
+    config.passive_mode = peer.setting(SettingKey::Passive).is_some();
+    config.rr_client = peer.setting(SettingKey::RrClient).is_some();
+    config.rs_client = peer.setting(SettingKey::RsClient).is_some();
+    config.graceful_shutdown = peer.setting(SettingKey::GracefulShutdown).is_some();
 
     Ok(config)
 }
