@@ -201,6 +201,8 @@ pub struct ConnectionInfo {
     pub local_address: IpAddr,
     pub local_port: u16,
     pub remote_port: u16,
+    /// Link-local IPv6 address of the local interface (for 32-byte next-hop encoding)
+    pub local_link_local: Option<std::net::Ipv6Addr>,
 }
 
 /// Connection-specific state.

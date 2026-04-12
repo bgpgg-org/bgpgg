@@ -375,6 +375,8 @@ message Path {
     RpkiValidation rpki_validation = 17;
     // RFC 9552: BGP-LS attribute on this path
     optional LsAttribute ls_attribute = 18;
+    // RFC 2545: link-local IPv6 next-hop from 32-byte MP_REACH_NLRI
+    optional string link_local_next_hop = 19;
 }
 
 message Aggregator {

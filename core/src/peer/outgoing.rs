@@ -92,6 +92,8 @@ pub struct PeerExportContext<'a> {
     pub local_asn: u32,
     pub peer_asn: u32,
     pub local_next_hop: IpAddr,
+    /// RFC 2545: local link-local IPv6 for 32-byte next-hop in MP_REACH_NLRI
+    pub local_link_local: Option<std::net::Ipv6Addr>,
     pub export_policies: &'a [Arc<crate::policy::Policy>],
     pub rr_client: bool,
     pub rs_client: bool,
@@ -448,7 +450,9 @@ pub(crate) fn batch_announcements(to_announce: &[RoutePath]) -> Vec<Announcement
 fn address_families_match(next_hop: &NextHopAddr, ip_addr: IpAddr) -> bool {
     matches!(
         (next_hop, ip_addr),
-        (NextHopAddr::Ipv4(_), IpAddr::V4(_)) | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+        (NextHopAddr::Ipv4(_), IpAddr::V4(_))
+            | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+            | (NextHopAddr::Ipv6WithLinkLocal(_, _), IpAddr::V6(_))
     )
 }
 
@@ -532,12 +536,20 @@ fn build_export_next_hop(
         return Some(*path.next_hop());
     }
 
-    if ctx.is_ebgp() {
+    let next_hop = if ctx.is_ebgp() {
         build_ebgp_next_hop(path, ctx.local_next_hop, prefix)
     } else if ctx.next_hop_self {
         Some(ctx.local_next_hop.into())
     } else {
         build_ibgp_next_hop(path, ctx.local_next_hop, prefix)
+    };
+
+    // RFC 2545: for eBGP IPv6, include link-local in 32-byte next-hop
+    match (next_hop, ctx.local_link_local) {
+        (Some(NextHopAddr::Ipv6(global)), Some(link_local)) if ctx.is_ebgp() => {
+            Some(NextHopAddr::Ipv6WithLinkLocal(global, link_local))
+        }
+        _ => next_hop,
     }
 }
 
@@ -915,6 +927,7 @@ mod tests {
             local_asn,
             peer_asn,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            local_link_local: None,
             export_policies: &[],
             rr_client: false,
             rs_client,
@@ -1710,6 +1723,7 @@ mod tests {
             local_asn: 65000,
             peer_asn: 65001,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            local_link_local: None,
             export_policies: &policies,
             rr_client: false,
             rs_client: false,
@@ -2028,6 +2042,7 @@ mod tests {
             local_asn: 65000,
             peer_asn: 65000,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            local_link_local: None,
             export_policies: &[],
             rr_client: false,
             rs_client: false,

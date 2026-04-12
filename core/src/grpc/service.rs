@@ -162,7 +162,8 @@ fn route_to_proto(route: Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            next_hop: path.next_hop().to_string(),
+            next_hop: path.next_hop().global_addr().to_string(),
+            link_local_next_hop: path.next_hop().link_local().map(|addr| addr.to_string()),
             peer_address: path
                 .source()
                 .peer_ip()

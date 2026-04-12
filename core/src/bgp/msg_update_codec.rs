@@ -274,15 +274,15 @@ fn parse_mp_next_hop(
             }
             Ok(NextHopAddr::Ipv4(addr))
         }
-        Afi::Ipv6 => Ok(parse_ipv6_next_hop(bytes, offset)),
+        Afi::Ipv6 => Ok(parse_ipv6_next_hop(bytes, offset, next_hop_len)),
         // RFC 9552 Section 5.5: BGP-LS next-hop has no forwarding semantic,
         // so skip unicast validation (e.g. 0.0.0.0 is valid).
         // VPN (SAFI 72) prepends 8-byte all-zero RD: skip it to reach the address.
         Afi::LinkState => match next_hop_len {
             4 => Ok(parse_ipv4_next_hop(bytes, offset)),
             n if n == RD_LEN + 4 => Ok(parse_ipv4_next_hop(bytes, offset + RD_LEN)),
-            16 | 32 => Ok(parse_ipv6_next_hop(bytes, offset)),
-            n if n == RD_LEN + 16 => Ok(parse_ipv6_next_hop(bytes, offset + RD_LEN)),
+            16 | 32 => Ok(parse_ipv6_next_hop(bytes, offset, next_hop_len)),
+            n if n == RD_LEN + 16 => Ok(parse_ipv6_next_hop(bytes, offset + RD_LEN, 16)),
             _ => Err(ParserError::BgpError {
                 error: BgpError::UpdateMessageError(UpdateMessageError::InvalidNextHopAttribute),
                 data: Vec::new(),
@@ -301,11 +301,17 @@ fn parse_ipv4_next_hop(bytes: &[u8], offset: usize) -> NextHopAddr {
     NextHopAddr::Ipv4(parse_ipv4_addr(bytes, offset))
 }
 
-fn parse_ipv6_next_hop(bytes: &[u8], offset: usize) -> NextHopAddr {
-    // Use first 16 bytes (global address), ignore link-local if present (32-byte form)
-    let mut octets = [0u8; 16];
-    octets.copy_from_slice(&bytes[offset..offset + 16]);
-    NextHopAddr::Ipv6(Ipv6Addr::from(octets))
+fn parse_ipv6_next_hop(bytes: &[u8], offset: usize, len: usize) -> NextHopAddr {
+    let mut global = [0u8; 16];
+    global.copy_from_slice(&bytes[offset..offset + 16]);
+    if len == 32 {
+        // RFC 2545: 32-byte form carries global + link-local
+        let mut link_local = [0u8; 16];
+        link_local.copy_from_slice(&bytes[offset + 16..offset + 32]);
+        NextHopAddr::Ipv6WithLinkLocal(Ipv6Addr::from(global), Ipv6Addr::from(link_local))
+    } else {
+        NextHopAddr::Ipv6(Ipv6Addr::from(global))
+    }
 }
 
 pub(super) fn parse_attr_type(
@@ -739,6 +745,16 @@ pub(super) fn write_attr_mp_reach_nlri(mp_reach: &MpReachNlri) -> Vec<u8> {
                 bytes.push(16);
             }
             bytes.extend_from_slice(&addr.octets());
+        }
+        NextHopAddr::Ipv6WithLinkLocal(global, link_local) => {
+            if vpn {
+                bytes.push((RD_LEN + 32) as u8);
+                bytes.extend_from_slice(&[0u8; RD_LEN]);
+            } else {
+                bytes.push(32);
+            }
+            bytes.extend_from_slice(&global.octets());
+            bytes.extend_from_slice(&link_local.octets());
         }
     }
 
@@ -1194,6 +1210,9 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
         PathAttrValue::NextHop(next_hop) => match next_hop {
             NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
             NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
+            // NEXT_HOP attr is IPv4-only (RFC 4271). IPv6 uses MP_REACH_NLRI.
+            // Write the global address if we somehow end up here.
+            NextHopAddr::Ipv6WithLinkLocal(global, _) => global.octets().to_vec(),
         },
         PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
         PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),

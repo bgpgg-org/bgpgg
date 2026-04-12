@@ -210,7 +210,12 @@ fn print_routes(routes: &[bgpgg::grpc::proto::Route]) {
                 ""
             };
 
-            let mut via_parts = vec![format!("via {}", path.next_hop)];
+            // Prefer link-local next-hop when available (IPv6 link-local peering)
+            let next_hop_display = path
+                .link_local_next_hop
+                .as_deref()
+                .unwrap_or(&path.next_hop);
+            let mut via_parts = vec![format!("via {}", next_hop_display)];
 
             if let Some(locpref) = path.local_pref {
                 via_parts.push(format!("lp {}", locpref));
@@ -403,5 +408,8 @@ fn ext_subtype_label(sub_type: u32) -> &'static str {
 }
 
 fn format_large_community(lc: &LargeCommunity) -> String {
-    format!("{}:{}:{}", lc.global_admin, lc.local_data_1, lc.local_data_2)
+    format!(
+        "{}:{}:{}",
+        lc.global_admin, lc.local_data_1, lc.local_data_2
+    )
 }

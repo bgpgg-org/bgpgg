@@ -100,7 +100,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
                 let _ = editor.add_history_entry(trimmed);
 
-                match parser::parse(trimmed, &parse_tree) {
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                match parser::parse(&tokens, &parse_tree) {
                     Ok(Command::Exit) => break,
                     Ok(Command::Help) => {
                         let help_items = parser::help_at(trimmed, &parse_tree);

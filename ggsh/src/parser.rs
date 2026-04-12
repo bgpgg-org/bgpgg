@@ -200,9 +200,8 @@ pub fn build_command_tree() -> Vec<CommandNode> {
     ]
 }
 
-/// Parse a command line into a Command.
-pub fn parse(input: &str, tree: &[CommandNode]) -> Result<Command, String> {
-    let tokens: Vec<&str> = input.split_whitespace().collect();
+/// Parse tokens into a Command.
+pub fn parse(tokens: &[&str], tree: &[CommandNode]) -> Result<Command, String> {
     if tokens.is_empty() {
         return Err(String::new());
     }
@@ -213,7 +212,7 @@ pub fn parse(input: &str, tree: &[CommandNode]) -> Result<Command, String> {
         return Ok(Command::Help);
     }
 
-    parse_tokens(&tokens, tree, &mut vec![])
+    parse_tokens(tokens, tree, &mut vec![])
 }
 
 fn parse_tokens(
@@ -479,6 +478,11 @@ fn parse_peer_rib_with_safi(args: &[&str], direction: &str) -> Result<Command, S
 mod tests {
     use super::*;
 
+    fn parse_str(input: &str, tree: &[CommandNode]) -> Result<Command, String> {
+        let tokens: Vec<&str> = input.split_whitespace().collect();
+        parse(&tokens, tree)
+    }
+
     #[test]
     fn test_parse_commands() {
         let tree = build_command_tree();
@@ -551,7 +555,7 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            let result = parse(input, &tree);
+            let result = parse_str(input, &tree);
             assert_eq!(result.unwrap(), expected, "failed for input: {}", input);
         }
     }
@@ -560,13 +564,13 @@ mod tests {
     fn test_parse_errors() {
         let tree = build_command_tree();
 
-        assert!(parse("", &tree).is_err());
-        assert!(parse("invalid", &tree).is_err());
+        assert!(parse_str("", &tree).is_err());
+        assert!(parse_str("invalid", &tree).is_err());
         // Non-terminal commands return HelpAt with available subcommands
         let non_terminals = vec!["show", "show bgp", "show rpki validate"];
         for input in non_terminals {
             assert!(
-                matches!(parse(input, &tree), Ok(Command::HelpAt { .. })),
+                matches!(parse_str(input, &tree), Ok(Command::HelpAt { .. })),
                 "expected HelpAt for input: {}",
                 input
             );
@@ -635,17 +639,17 @@ mod tests {
         let tree = build_command_tree();
 
         for keyword in &["?", "help", "--help"] {
-            assert_eq!(parse(keyword, &tree).unwrap(), Command::Help);
+            assert_eq!(parse_str(keyword, &tree).unwrap(), Command::Help);
             assert_eq!(
-                parse(&format!("show {}", keyword), &tree).unwrap(),
+                parse_str(&format!("show {}", keyword), &tree).unwrap(),
                 Command::Help
             );
             assert_eq!(
-                parse(&format!("show bgp {}", keyword), &tree).unwrap(),
+                parse_str(&format!("show bgp {}", keyword), &tree).unwrap(),
                 Command::Help
             );
             assert_eq!(
-                parse(&format!("show bgp peers {}", keyword), &tree).unwrap(),
+                parse_str(&format!("show bgp peers {}", keyword), &tree).unwrap(),
                 Command::Help
             );
         }

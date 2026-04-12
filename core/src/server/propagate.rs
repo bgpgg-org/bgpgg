@@ -73,11 +73,9 @@ impl BgpServer {
             };
 
             let peer_asn = conn.asn.unwrap_or(local_asn);
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(local_addr);
+            let conn_info = conn.conn_info.as_ref();
+            let local_next_hop = conn_info.map(|ci| ci.local_address).unwrap_or(local_addr);
+            let local_link_local = conn_info.and_then(|ci| ci.local_link_local);
             let send_format = conn.send_format();
             let negotiated_afi_safis = conn.negotiated_afi_safis();
 
@@ -89,6 +87,7 @@ impl BgpServer {
                 local_asn,
                 peer_asn,
                 local_next_hop,
+                local_link_local,
                 export_policies: &export_policies,
                 rr_client: entry.config.rr_client,
                 rs_client: entry.config.rs_client,
@@ -123,7 +122,15 @@ impl BgpServer {
         }
         // Extract values from conn before dropping the immutable borrow on peer_info,
         // since propagate_routes_to_peer needs &mut peer_info.adj_rib_out.
-        let (peer_asn, peer_tx, capabilities, send_format, local_next_hop, negotiated_afi_safis) = {
+        let (
+            peer_asn,
+            peer_tx,
+            capabilities,
+            send_format,
+            local_next_hop,
+            local_link_local,
+            negotiated_afi_safis,
+        ) = {
             let Some(conn) = peer_info.established_conn() else {
                 return;
             };
@@ -137,11 +144,11 @@ impl BgpServer {
                 return;
             };
             let send_format = conn.send_format();
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
+            let conn_info = conn.conn_info.as_ref();
+            let local_next_hop = conn_info
                 .map(|ci| ci.local_address)
                 .unwrap_or(self.local_addr);
+            let local_link_local = conn_info.and_then(|ci| ci.local_link_local);
             let negotiated_afi_safis = conn.negotiated_afi_safis();
             (
                 peer_asn,
@@ -149,6 +156,7 @@ impl BgpServer {
                 capabilities,
                 send_format,
                 local_next_hop,
+                local_link_local,
                 negotiated_afi_safis,
             )
         };
@@ -161,6 +169,7 @@ impl BgpServer {
             local_asn: self.config.asn,
             peer_asn,
             local_next_hop,
+            local_link_local,
             export_policies,
             rr_client: peer_info.config.rr_client,
             rs_client: peer_info.config.rs_client,

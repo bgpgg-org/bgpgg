@@ -287,6 +287,12 @@ impl BgpServer {
         conn_type: ConnectionType,
     ) {
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
+            let local_link_local = peer
+                .config
+                .interface
+                .as_ref()
+                .and_then(|iface| crate::net::get_interface_link_local(iface).ok());
+
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
                 conn.conn_info = Some(super::ConnectionInfo {
                     sent_open,
@@ -294,6 +300,7 @@ impl BgpServer {
                     local_address,
                     local_port,
                     remote_port,
+                    local_link_local,
                 });
                 conn.capabilities = Some(negotiated_capabilities);
             }
