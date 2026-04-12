@@ -279,7 +279,12 @@ fn parse(tree: &[Node], tokens: &[&str]) -> ParseResult {
     match last_node.and_then(|node| node.command) {
         Some(cmd) => ParseResult::Execution { cmd, args },
         _ => {
-            let items = nodes
+            // Show children of the last matched node.
+            let help_nodes = last_node
+                .filter(|n| !n.children.is_empty())
+                .map(|n| n.children.as_slice())
+                .unwrap_or(nodes);
+            let items = help_nodes
                 .iter()
                 .map(|n| HelpEntry {
                     keyword: n.name.to_string(),
@@ -420,9 +425,57 @@ mod tests {
             let tokens: Vec<&str> = input.split_whitespace().collect();
             assert!(
                 matches!(parse(&root, &tokens), ParseResult::Help { .. }),
-                "expected HelpAt for: {}",
+                "expected Help for: {}",
                 input
             );
+        }
+
+        // "show bgp" should show bgp's children, not show's children
+        match parse(&root, &["show", "bgp"]) {
+            ParseResult::Help { entries } => {
+                let keywords: Vec<&str> = entries.iter().map(|e| e.keyword.as_str()).collect();
+                assert!(
+                    keywords.contains(&"summary"),
+                    "expected summary in: {:?}",
+                    keywords
+                );
+                assert!(
+                    keywords.contains(&"peers"),
+                    "expected peers in: {:?}",
+                    keywords
+                );
+                assert!(
+                    !keywords.contains(&"rpki"),
+                    "should not contain rpki: {:?}",
+                    keywords
+                );
+            }
+            other => panic!(
+                "expected Help for 'show bgp', got: {:?}",
+                matches!(other, ParseResult::Error(_))
+            ),
+        }
+
+        // "show" should show show's children
+        match parse(&root, &["show"]) {
+            ParseResult::Help { entries } => {
+                let keywords: Vec<&str> = entries.iter().map(|e| e.keyword.as_str()).collect();
+                assert!(keywords.contains(&"bgp"), "expected bgp in: {:?}", keywords);
+                assert!(
+                    keywords.contains(&"rpki"),
+                    "expected rpki in: {:?}",
+                    keywords
+                );
+                assert!(
+                    keywords.contains(&"version"),
+                    "expected version in: {:?}",
+                    keywords
+                );
+            }
+            other => panic!(
+                "expected Help for 'show', got: {:?}",
+                matches!(other, ParseResult::Error(_))
+            ),
         }
     }
 
