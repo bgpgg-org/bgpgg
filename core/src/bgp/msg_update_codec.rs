@@ -1210,9 +1210,12 @@ pub(super) fn write_path_attribute(attr: &PathAttribute, use_4byte_asn: bool) ->
         PathAttrValue::NextHop(next_hop) => match next_hop {
             NextHopAddr::Ipv4(addr) => addr.octets().to_vec(),
             NextHopAddr::Ipv6(addr) => addr.octets().to_vec(),
-            // NEXT_HOP attr is IPv4-only (RFC 4271). IPv6 uses MP_REACH_NLRI.
-            // Write the global address if we somehow end up here.
-            NextHopAddr::Ipv6WithLinkLocal(global, _) => global.octets().to_vec(),
+            NextHopAddr::Ipv6WithLinkLocal(_, _) => {
+                // NEXT_HOP attr is IPv4-only (RFC 4271). IPv6 uses MP_REACH_NLRI.
+                // This is a logic bug if reached — skip rather than send a malformed attribute.
+                warn!("attempted to write Ipv6WithLinkLocal as NEXT_HOP attribute, skipping");
+                return vec![];
+            }
         },
         PathAttrValue::MultiExtiDisc(value) => value.to_be_bytes().to_vec(),
         PathAttrValue::LocalPref(value) => value.to_be_bytes().to_vec(),

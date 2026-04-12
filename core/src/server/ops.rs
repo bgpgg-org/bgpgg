@@ -24,7 +24,7 @@ use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::config::MaxPrefixAction;
 use crate::log::{debug, info, warn};
-use crate::net::IpNetwork;
+use crate::net::{get_interface_link_local, IpNetwork};
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
 use crate::policy::{Policy, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
@@ -291,7 +291,7 @@ impl BgpServer {
                 .config
                 .interface
                 .as_ref()
-                .and_then(|iface| crate::net::get_interface_link_local(iface).ok());
+                .and_then(|iface| get_interface_link_local(iface).ok());
 
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
                 conn.conn_info = Some(super::ConnectionInfo {

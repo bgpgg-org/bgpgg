@@ -565,4 +565,27 @@ mod tests {
         let result = resolve_interface_index("nonexistent_iface_xyz");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_get_interface_link_local_nonexistent() {
+        let result = get_interface_link_local("nonexistent_iface_xyz");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_get_interface_link_local_loopback_linux() {
+        // lo has no link-local address
+        let result = get_interface_link_local("lo");
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn test_get_interface_link_local_loopback_bsd() {
+        // lo0 has no link-local address
+        let result = get_interface_link_local("lo0");
+        assert!(result.is_err());
+    }
 }

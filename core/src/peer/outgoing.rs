@@ -40,7 +40,7 @@ use crate::rpki::vrp::RpkiValidation;
 #[cfg(test)]
 use crate::policy::Policy;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -93,7 +93,7 @@ pub struct PeerExportContext<'a> {
     pub peer_asn: u32,
     pub local_next_hop: IpAddr,
     /// RFC 2545: local link-local IPv6 for 32-byte next-hop in MP_REACH_NLRI
-    pub local_link_local: Option<std::net::Ipv6Addr>,
+    pub local_link_local: Option<Ipv6Addr>,
     pub export_policies: &'a [Arc<crate::policy::Policy>],
     pub rr_client: bool,
     pub rs_client: bool,

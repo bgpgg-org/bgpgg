@@ -46,7 +46,7 @@ use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -202,7 +202,7 @@ pub struct ConnectionInfo {
     pub local_port: u16,
     pub remote_port: u16,
     /// Link-local IPv6 address of the local interface (for 32-byte next-hop encoding)
-    pub local_link_local: Option<std::net::Ipv6Addr>,
+    pub local_link_local: Option<Ipv6Addr>,
 }
 
 /// Connection-specific state.
