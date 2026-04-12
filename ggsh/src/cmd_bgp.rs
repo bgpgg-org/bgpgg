@@ -12,45 +12,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::util::{parse_afi, parse_safi};
 use bgpgg::grpc::proto::{
-    extended_community, route, AsPathSegmentType, BgpState, ExtendedCommunity, LargeCommunity,
-    ListRoutesRequest, LsNlri, LsNlriType, LsProtocolId, Path, RibType,
+    extended_community, route, AddPathSendMode, AdminState, AsPathSegment, AsPathSegmentType,
+    BgpState, ExtendedCommunity, LargeCommunity, ListRoutesRequest, LsNlri, LsNlriType,
+    LsProtocolId, Path, RibType, Route,
 };
 use bgpgg::grpc::BgpClient;
 
 pub async fn show_summary(client: &BgpClient) -> Result<(), Box<dyn std::error::Error>> {
     let routes = client.list_routes(ListRoutesRequest::default()).await?;
     let peers = client.get_peers().await?;
+    let (listen_addr, listen_port, _) = client.get_server_info().await?;
 
     let total_routes = routes.len();
     let total_paths: usize = routes.iter().map(|r| r.paths.len()).sum();
-    let total_peers = peers.len();
     let established_peers = peers
         .iter()
         .filter(|p| p.state() == BgpState::Established)
         .count();
 
-    println!("BGP Summary:");
-    println!("  Total Routes:        {}", total_routes);
-    println!("  Total Paths:         {}", total_paths);
-    println!("  Total Peers:         {}", total_peers);
-    println!("  Established Peers:   {}", established_peers);
+    println!("BGP router listening on {}:{}", listen_addr, listen_port);
+    println!("RIB entries {}, {} paths", total_routes, total_paths);
+    println!("Peers {}, {} established", peers.len(), established_peers);
 
     if !peers.is_empty() {
         println!();
-        println!("{:<30} {:<10} {:<15}", "Neighbor", "AS", "State");
-        println!("{}", "-".repeat(55));
+        println!(
+            "{:<20} {:<12} {:>8} {:>8}  {:<15}",
+            "Neighbor", "AS", "MsgRcvd", "MsgSent", "State/PfxRcd"
+        );
         for peer in &peers {
             let asn_str = if peer.asn == 0 {
                 "-".to_string()
             } else {
                 peer.asn.to_string()
             };
+
+            let (msg_sent, msg_rcvd) = match client.get_peer(peer.address.clone()).await {
+                Ok((_, Some(stats))) => (
+                    stats.open_sent
+                        + stats.keepalive_sent
+                        + stats.update_sent
+                        + stats.notification_sent,
+                    stats.open_received
+                        + stats.keepalive_received
+                        + stats.update_received
+                        + stats.notification_received,
+                ),
+                _ => (0, 0),
+            };
+
+            let state_pfx = if peer.state() == BgpState::Established {
+                "Established".to_string()
+            } else {
+                format_state(peer.state()).to_string()
+            };
+
             println!(
-                "{:<30} {:<10} {:<15}",
-                peer.address,
-                asn_str,
-                format_state(peer.state())
+                "{:<20} {:<12} {:>8} {:>8}  {}",
+                peer.address, asn_str, msg_rcvd, msg_sent, state_pfx,
             );
         }
     }
@@ -60,9 +81,20 @@ pub async fn show_summary(client: &BgpClient) -> Result<(), Box<dyn std::error::
 
 pub async fn show_info(client: &BgpClient) -> Result<(), Box<dyn std::error::Error>> {
     let (listen_addr, listen_port, num_routes) = client.get_server_info().await?;
-    println!("BGP Server Information:");
-    println!("  Listen Address: {}:{}", listen_addr, listen_port);
-    println!("  Routes in RIB: {}", num_routes);
+    let peers = client.get_peers().await?;
+    let established = peers
+        .iter()
+        .filter(|p| p.state() == BgpState::Established)
+        .count();
+
+    println!("BGP Daemon:");
+    println!("  Listen:       {}:{}", listen_addr, listen_port);
+    println!("  Routes:       {}", num_routes);
+    println!(
+        "  Peers:        {} configured, {} established",
+        peers.len(),
+        established
+    );
     Ok(())
 }
 
@@ -72,8 +104,11 @@ pub async fn show_peers(client: &BgpClient) -> Result<(), Box<dyn std::error::Er
     if peers.is_empty() {
         println!("No peers configured");
     } else {
-        println!("{:<30} {:<10} {:<15}", "Address", "ASN", "State");
-        println!("{}", "-".repeat(55));
+        println!(
+            "{:<30} {:<10} {:<15} {:<8}",
+            "Address", "ASN", "State", "Admin"
+        );
+        println!("{}", "-".repeat(65));
         for peer in &peers {
             let asn_str = if peer.asn == 0 {
                 "-".to_string()
@@ -81,10 +116,11 @@ pub async fn show_peers(client: &BgpClient) -> Result<(), Box<dyn std::error::Er
                 peer.asn.to_string()
             };
             println!(
-                "{:<30} {:<10} {:<15}",
+                "{:<30} {:<10} {:<15} {:<8}",
                 peer.address,
                 asn_str,
-                format_state(peer.state())
+                format_state(peer.state()),
+                format_admin_state(peer.admin_state()),
             );
         }
     }
@@ -101,20 +137,91 @@ pub async fn show_peer(
     match (peer_opt, stats_opt) {
         (Some(peer), Some(stats)) => {
             println!("Peer: {}", address);
-            println!("  ASN:         {}", peer.asn);
-            println!("  State:       {}", format_state(peer.state()));
+            println!("  ASN:            {}", peer.asn);
+            println!("  State:          {}", format_state(peer.state()));
+            println!(
+                "  Admin State:    {}",
+                format_admin_state(peer.admin_state())
+            );
+
+            if !peer.import_policies.is_empty() {
+                println!("  Import Policy:  {}", peer.import_policies.join(", "));
+            }
+            if !peer.export_policies.is_empty() {
+                println!("  Export Policy:  {}", peer.export_policies.join(", "));
+            }
+
+            if let Some(config) = &peer.session_config {
+                println!();
+                println!("Session Config:");
+                if let Some(passive) = config.passive_mode {
+                    println!("  Passive:        {}", if passive { "yes" } else { "no" });
+                }
+                if let Some(port) = config.port {
+                    println!("  Remote Port:    {}", port);
+                }
+                if let Some(iface) = &config.interface {
+                    println!("  Interface:      {}", iface);
+                }
+                if let Some(rr) = config.rr_client {
+                    if rr {
+                        println!("  RR Client:      yes");
+                    }
+                }
+                if let Some(rs) = config.rs_client {
+                    if rs {
+                        println!("  RS Client:      yes");
+                    }
+                }
+                if let Some(nhs) = config.next_hop_self {
+                    if nhs {
+                        println!("  Next-Hop-Self:  yes");
+                    }
+                }
+                if let Some(mode) = config.add_path_send {
+                    let mode = AddPathSendMode::try_from(mode);
+                    if matches!(mode, Ok(AddPathSendMode::AddPathSendAll)) {
+                        println!("  Add-Path Send:  all");
+                    }
+                }
+                if let Some(true) = config.add_path_receive {
+                    println!("  Add-Path Recv:  yes");
+                }
+                if let Some(true) = config.graceful_shutdown {
+                    println!("  Graceful Shutdown: yes");
+                }
+                if let Some(ttl) = config.ttl_min {
+                    println!("  GTSM TTL Min:  {}", ttl);
+                }
+                if config.md5_key_file.is_some() {
+                    println!("  TCP MD5:        enabled");
+                }
+                if let Some(true) = config.send_rpki_community {
+                    println!("  RPKI Community: yes");
+                }
+                if !config.afi_safis.is_empty() {
+                    let families: Vec<String> = config
+                        .afi_safis
+                        .iter()
+                        .map(|af| format!("afi={} safi={}", af.afi, af.safi))
+                        .collect();
+                    println!("  AFI/SAFI:       {}", families.join(", "));
+                }
+            }
+
             println!();
-            println!("Statistics:");
-            println!("  Messages Sent:");
-            println!("    OPEN:         {}", stats.open_sent);
-            println!("    KEEPALIVE:    {}", stats.keepalive_sent);
-            println!("    UPDATE:       {}", stats.update_sent);
-            println!("    NOTIFICATION: {}", stats.notification_sent);
-            println!("  Messages Received:");
-            println!("    OPEN:         {}", stats.open_received);
-            println!("    KEEPALIVE:    {}", stats.keepalive_received);
-            println!("    UPDATE:       {}", stats.update_received);
-            println!("    NOTIFICATION: {}", stats.notification_received);
+            println!("Message Statistics:");
+            println!(
+                "  Sent:     OPEN={} KEEPALIVE={} UPDATE={} NOTIFICATION={}",
+                stats.open_sent, stats.keepalive_sent, stats.update_sent, stats.notification_sent
+            );
+            println!(
+                "  Received: OPEN={} KEEPALIVE={} UPDATE={} NOTIFICATION={}",
+                stats.open_received,
+                stats.keepalive_received,
+                stats.update_received,
+                stats.notification_received
+            );
         }
         _ => {
             eprintln!("Peer not found: {}", address);
@@ -149,7 +256,7 @@ pub async fn show_peer_rib(
     Ok(())
 }
 
-pub async fn show_route(
+async fn show_route(
     client: &BgpClient,
     prefix: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -171,7 +278,27 @@ pub async fn show_route(
     Ok(())
 }
 
-pub async fn show_route_filtered(
+pub async fn show_bgp_route(
+    client: &BgpClient,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    match args.first() {
+        None => show_route(client, None).await,
+        Some(arg) if arg.contains('/') => show_route(client, Some(arg)).await,
+        Some(afi_str) => {
+            let afi = parse_afi(Some(afi_str)).ok_or_else(|| {
+                format!(
+                    "unknown AFI or prefix '{}', expected: ipv4, ipv6, ls, or CIDR prefix",
+                    afi_str
+                )
+            })?;
+            let safi = parse_safi(args.get(1));
+            show_route_filtered(client, afi, safi).await
+        }
+    }
+}
+
+async fn show_route_filtered(
     client: &BgpClient,
     afi: u32,
     safi: Option<u32>,
@@ -187,7 +314,7 @@ pub async fn show_route_filtered(
     Ok(())
 }
 
-fn print_routes(routes: &[bgpgg::grpc::proto::Route]) {
+fn print_routes(routes: &[Route]) {
     if routes.is_empty() {
         println!("No routes");
         return;
@@ -241,6 +368,14 @@ fn print_routes(routes: &[bgpgg::grpc::proto::Route]) {
     println!("\nTotal routes: {}", routes.len());
 }
 
+fn format_admin_state(state: AdminState) -> &'static str {
+    match state {
+        AdminState::Up => "Up",
+        AdminState::Down => "Down",
+        AdminState::PrefixLimitExceeded => "PfxLimit",
+    }
+}
+
 fn format_state(state: BgpState) -> &'static str {
     match state {
         BgpState::Idle => "Idle",
@@ -252,7 +387,7 @@ fn format_state(state: BgpState) -> &'static str {
     }
 }
 
-fn format_as_path(segments: &[bgpgg::grpc::proto::AsPathSegment]) -> String {
+fn format_as_path(segments: &[AsPathSegment]) -> String {
     if segments.is_empty() {
         return String::from("-");
     }
@@ -260,8 +395,7 @@ fn format_as_path(segments: &[bgpgg::grpc::proto::AsPathSegment]) -> String {
     segments
         .iter()
         .map(|seg| {
-            let seg_type = AsPathSegmentType::try_from(seg.segment_type)
-                .unwrap_or(AsPathSegmentType::AsSequence);
+            let seg_type = AsPathSegmentType::try_from(seg.segment_type).unwrap_or_default();
             match seg_type {
                 AsPathSegmentType::AsSequence => seg
                     .asns

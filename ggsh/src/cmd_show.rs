@@ -12,15 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bgpgg::grpc::BgpClient;
-
-pub async fn show_config(_client: &BgpClient) -> Result<(), Box<dyn std::error::Error>> {
-    // Config file reading will come with config mode (Phase 2).
-    // For now, report that config display is not yet available.
-    println!("(config display not yet available -- coming with config mode)");
-    Ok(())
-}
-
 pub async fn show_version() -> Result<(), Box<dyn std::error::Error>> {
     println!("ggsh {}", env!("CARGO_PKG_VERSION"));
     Ok(())

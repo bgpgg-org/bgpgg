@@ -2159,6 +2159,60 @@ mod tests {
     }
 
     #[test]
+    fn test_mp_reach_ipv6_link_local_roundtrip() {
+        let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0xade0);
+        let mp_reach = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: NextHopAddr::Ipv6WithLinkLocal(global, link_local),
+            nlri: vec![Nlri {
+                prefix: IpNetwork::V6(Ipv6Net {
+                    address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                    prefix_length: 32,
+                }),
+                path_id: None,
+            }],
+            ls_nlri: vec![],
+        };
+
+        let bytes = write_attr_mp_reach_nlri(&mp_reach);
+        let parsed = read_attr_mp_reach_nlri(&bytes, DEFAULT_FORMAT).unwrap();
+
+        assert_eq!(
+            parsed.next_hop,
+            NextHopAddr::Ipv6WithLinkLocal(global, link_local)
+        );
+        assert_eq!(parsed.nlri, mp_reach.nlri);
+    }
+
+    #[test]
+    fn test_mp_reach_ipv6_32byte_parse() {
+        // 32-byte next-hop: global 2001:db8::1 + link-local fe80::1
+        let input: Vec<u8> = vec![
+            0x00, 0x02, // AFI = IPv6
+            0x01, // SAFI = unicast
+            0x20, // Next hop length = 32
+            // Global: 2001:db8::1
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, // Link-local: fe80::1
+            0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x00, // Reserved
+            // NLRI: 2001:db8::/32
+            0x20, 0x20, 0x01, 0x0d, 0xb8,
+        ];
+
+        let result = read_attr_mp_reach_nlri(&input, DEFAULT_FORMAT).unwrap();
+        assert_eq!(
+            result.next_hop,
+            NextHopAddr::Ipv6WithLinkLocal(
+                Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1),
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            )
+        );
+    }
+
+    #[test]
     fn test_mp_reach_ls_roundtrip() {
         let ls_entries = vec![build_ls_nlri(
             LsNlriType::Node,

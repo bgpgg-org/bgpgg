@@ -12,150 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod commands;
-mod parser;
+mod cmd;
+mod cmd_bgp;
+mod cmd_rpki;
+mod cmd_show;
+mod grammar;
 mod shell;
+mod util;
 
-use bgpgg::grpc::BgpClient;
+use std::collections::HashMap;
 
-const DEFAULT_ADDR: &str = "http://127.0.0.1:50051";
+use cmd::Service;
+use shell::Shell;
 
-struct Args {
-    addr: String,
-    command: Vec<String>,
-}
-
-impl Args {
-    fn parse() -> Self {
-        let mut args = std::env::args().skip(1);
-        let mut addr = DEFAULT_ADDR.to_string();
-        let mut command = Vec::new();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--addr" => {
-                    addr = args.next().unwrap_or_else(|| {
-                        eprintln!("--addr requires a value");
-                        std::process::exit(1);
-                    });
-                }
-                _ => {
-                    command.push(arg);
-                    command.extend(args);
-                    break;
-                }
-            }
-        }
-
-        Args { addr, command }
-    }
-}
+const DEFAULT_BGPGG_ADDR: &str = "http://127.0.0.1:50051";
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let (grpc_addrs, command) = parse_args();
+    let shell = Shell::new(grpc_addrs, command);
 
-    if args.command.is_empty() {
-        if let Err(err) = shell::run(&args.addr).await {
-            eprintln!("{}", err);
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    // One-shot mode
-    let tree = parser::build_command_tree();
-    let tokens: Vec<&str> = args.command.iter().map(|s| s.as_str()).collect();
-
-    match parser::parse(&tokens, &tree) {
-        Ok(commands::Command::Exit) => {}
-        Ok(commands::Command::Help) => {
-            let input = args.command.join(" ");
-            let help_items = parser::help_at(&format!("{} ?", input), &tree);
-            for (keyword, help) in &help_items {
-                println!("  {:<20} {}", keyword, help);
-            }
-        }
-        Ok(commands::Command::HelpAt { ref items }) => {
-            for (keyword, help) in items {
-                println!("  {:<20} {}", keyword, help);
-            }
-        }
-        Ok(cmd) => {
-            let client = if commands::needs_client(&cmd) {
-                match BgpClient::connect(&args.addr).await {
-                    Ok(client) => Some(client),
-                    Err(err) => {
-                        eprintln!("Failed to connect to BGP daemon at {}: {}", args.addr, err);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                None
-            };
-
-            if let Err(err) = commands::execute(&cmd, client.as_ref()).await {
-                eprintln!("Error: {}", err);
-                std::process::exit(1);
-            }
-        }
-        Err(msg) => {
-            if !msg.is_empty() {
-                eprintln!("% {}", msg);
-            }
-            std::process::exit(1);
-        }
+    if let Err(err) = shell.run().await {
+        eprintln!("{}", err);
+        std::process::exit(1);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>) {
+    let mut args = std::env::args().skip(1);
+    let mut bgpgg_addr = DEFAULT_BGPGG_ADDR.to_string();
+    let mut command = Vec::new();
 
-    impl Args {
-        fn from(raw: &[&str]) -> Self {
-            let iter = raw.iter().map(|s| s.to_string());
-            let mut addr = DEFAULT_ADDR.to_string();
-            let mut command = Vec::new();
-            let mut iter = iter.peekable();
-
-            while let Some(arg) = iter.next() {
-                match arg.as_str() {
-                    "--addr" => {
-                        if let Some(next) = iter.next() {
-                            addr = next;
-                        }
-                    }
-                    _ => {
-                        command.push(arg);
-                        command.extend(iter);
-                        break;
-                    }
-                }
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--bgpgg-addr" => {
+                bgpgg_addr = args.next().unwrap_or_else(|| {
+                    eprintln!("--bgpgg-addr requires a value");
+                    std::process::exit(1);
+                });
             }
-
-            Args { addr, command }
+            _ => {
+                command.push(arg);
+                command.extend(args);
+                break;
+            }
         }
     }
 
-    #[test]
-    fn test_args_default() {
-        let args = Args::from(&["show", "bgp", "summary"]);
-        assert_eq!(args.addr, DEFAULT_ADDR);
-        assert_eq!(args.command, vec!["show", "bgp", "summary"]);
-    }
+    let mut grpc_addrs = HashMap::new();
+    grpc_addrs.insert(Service::Bgpgg, bgpgg_addr);
 
-    #[test]
-    fn test_args_custom_addr() {
-        let args = Args::from(&["--addr", "http://10.0.0.1:50051", "show", "bgp", "summary"]);
-        assert_eq!(args.addr, "http://10.0.0.1:50051");
-        assert_eq!(args.command, vec!["show", "bgp", "summary"]);
-    }
+    let command = if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    };
 
-    #[test]
-    fn test_args_no_args() {
-        let args = Args::from(&[]);
-        assert_eq!(args.addr, DEFAULT_ADDR);
-        assert!(args.command.is_empty());
-    }
+    (grpc_addrs, command)
 }

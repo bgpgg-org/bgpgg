@@ -230,6 +230,8 @@ pub struct PathParams {
     pub rpki_validation: i32,
     /// RFC 9552: BGP-LS attribute (type 29)
     pub ls_attribute: Option<LsAttribute>,
+    /// RFC 2545: link-local IPv6 next-hop
+    pub link_local_next_hop: Option<String>,
 }
 
 impl PathParams {
@@ -309,6 +311,7 @@ pub fn build_path(params: PathParams) -> Path {
         aggregator: params.aggregator,
         rpki_validation: params.rpki_validation,
         ls_attribute: params.ls_attribute,
+        link_local_next_hop: params.link_local_next_hop,
     }
 }
 
