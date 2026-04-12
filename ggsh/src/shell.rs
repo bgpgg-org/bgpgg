@@ -254,9 +254,6 @@ fn parse(tree: &[Node], tokens: &[&str]) -> ParseResult {
                 last_node = Some(node);
                 if idx < tokens.len() - 1 {
                     if node.children.is_empty() {
-                        if let Some(cmd) = node.command {
-                            return ParseResult::Execution { cmd, args };
-                        }
                         return ParseResult::Error(format!(
                             "unexpected token: {}",
                             tokens[idx + 1]
@@ -327,10 +324,14 @@ fn completions(tree: &[Node], input: &str) -> Vec<String> {
 }
 
 fn find_match<'a>(token: &str, nodes: &'a [Node]) -> Option<&'a Node> {
+    // Keywords match first (exact match)
     if let Some(node) = nodes.iter().find(|n| !n.is_arg() && n.name == token) {
         return Some(node);
     }
-    nodes.iter().find(|n| n.is_arg())
+    // Arg nodes match if validator accepts the token
+    nodes
+        .iter()
+        .find(|n| n.validate.is_some_and(|validate| validate(token)))
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
@@ -412,7 +413,12 @@ mod tests {
     fn test_parse_errors() {
         let root = grammar::tree();
 
-        for input in &["", "invalid"] {
+        for input in &[
+            "",
+            "invalid",
+            "show bgp routes 10.0.0.0/24 unicast extra",
+            "show version extra",
+        ] {
             let tokens: Vec<&str> = input.split_whitespace().collect();
             assert!(
                 matches!(parse(&root, &tokens), ParseResult::Error(_)),

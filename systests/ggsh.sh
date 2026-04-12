@@ -162,6 +162,27 @@ if "$GGSH" --bgpgg-addr "$P1_GRPC" show bogus 2>/dev/null; then
 fi
 echo "  ok"
 
+echo "=== ggsh error: trailing tokens after prefix ==="
+if "$GGSH" --bgpgg-addr "$P1_GRPC" show bgp routes 10.99.0.0/24 random string 2>/dev/null; then
+    echo "FAIL: expected non-zero exit for trailing tokens"
+    exit 1
+fi
+echo "  ok"
+
+echo "=== ggsh error: trailing tokens after version ==="
+if "$GGSH" --bgpgg-addr "$P1_GRPC" show version extra 2>/dev/null; then
+    echo "FAIL: expected non-zero exit for trailing tokens"
+    exit 1
+fi
+echo "  ok"
+
+echo "=== ggsh error: trailing tokens after safi ==="
+if "$GGSH" --bgpgg-addr "$P1_GRPC" show bgp routes ipv4 unicast extra 2>/dev/null; then
+    echo "FAIL: expected non-zero exit for trailing tokens"
+    exit 1
+fi
+echo "  ok"
+
 cleanup
 echo ""
 echo "All ggsh system tests passed"

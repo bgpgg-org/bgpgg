@@ -14,37 +14,34 @@
 
 use crate::cmd::Command;
 
-pub(crate) enum NodeKind {
-    Keyword,
-    Arg,
-}
-
 pub(crate) struct Node {
-    pub(crate) kind: NodeKind,
     pub(crate) name: &'static str,
     pub(crate) help: &'static str,
     pub(crate) children: Vec<Node>,
     pub(crate) command: Option<Command>,
+    /// When set, the node accepts freetext input validated by this function.
+    /// The matched token is captured into the args list.
+    pub(crate) validate: Option<fn(&str) -> bool>,
 }
 
 impl Node {
     pub(crate) fn keyword(name: &'static str, help: &'static str) -> Self {
         Node {
-            kind: NodeKind::Keyword,
             name,
             help,
             children: vec![],
             command: None,
+            validate: None,
         }
     }
 
-    pub(crate) fn arg(name: &'static str, help: &'static str) -> Self {
+    pub(crate) fn arg(name: &'static str, help: &'static str, validate: fn(&str) -> bool) -> Self {
         Node {
-            kind: NodeKind::Arg,
             name,
             help,
             children: vec![],
             command: None,
+            validate: Some(validate),
         }
     }
 
@@ -59,8 +56,28 @@ impl Node {
     }
 
     pub(crate) fn is_arg(&self) -> bool {
-        matches!(self.kind, NodeKind::Arg)
+        self.validate.is_some()
     }
+}
+
+fn is_prefix(token: &str) -> bool {
+    token.contains('/')
+}
+
+fn is_ip_addr(token: &str) -> bool {
+    token.parse::<std::net::IpAddr>().is_ok()
+}
+
+fn is_asn(token: &str) -> bool {
+    token.parse::<u32>().is_ok()
+}
+
+fn is_afi(token: &str) -> bool {
+    matches!(token, "ipv4" | "ipv6" | "ls")
+}
+
+fn is_safi(token: &str) -> bool {
+    matches!(token, "unicast" | "multicast")
 }
 
 pub fn tree() -> Vec<Node> {
@@ -75,46 +92,46 @@ pub fn tree() -> Vec<Node> {
     ]
 }
 
+/// AFI/SAFI arg nodes. AFI accepts ipv4/ipv6/ls, SAFI accepts unicast/multicast.
+fn afi_safi_nodes(cmd: Command) -> Vec<Node> {
+    vec![
+        Node::arg("<afi>", "Address family (ipv4, ipv6, ls)", is_afi)
+            .cmd(cmd)
+            .children(vec![Node::arg(
+                "<safi>",
+                "Sub-address family (unicast, multicast)",
+                is_safi,
+            )
+            .cmd(cmd)]),
+    ]
+}
+
 fn tree_show_bgp() -> Vec<Node> {
     vec![
         Node::keyword("summary", "Peer table overview").cmd(Command::ShowBgpSummary),
         Node::keyword("info", "Server information").cmd(Command::ShowBgpInfo),
         Node::keyword("peers", "Peer information")
             .cmd(Command::ShowBgpPeers)
-            .children(vec![Node::arg("<address>", "Peer address")
+            .children(vec![Node::arg("<address>", "Peer address", is_ip_addr)
                 .cmd(Command::ShowBgpPeer)
                 .children(vec![
                     Node::keyword("in", "Adj-RIB-In")
                         .cmd(Command::ShowBgpPeerIn)
-                        .children(vec![Node::arg("<afi>", "Address family (ipv4, ipv6, ls)")
-                            .cmd(Command::ShowBgpPeerIn)
-                            .children(vec![Node::arg(
-                                "<safi>",
-                                "Sub-address family (unicast, multicast)",
-                            )
-                            .cmd(Command::ShowBgpPeerIn)])]),
+                        .children(afi_safi_nodes(Command::ShowBgpPeerIn)),
                     Node::keyword("out", "Adj-RIB-Out")
                         .cmd(Command::ShowBgpPeerOut)
-                        .children(vec![Node::arg("<afi>", "Address family (ipv4, ipv6, ls)")
-                            .cmd(Command::ShowBgpPeerOut)
-                            .children(vec![Node::arg(
-                                "<safi>",
-                                "Sub-address family (unicast, multicast)",
-                            )
-                            .cmd(Command::ShowBgpPeerOut)])]),
+                        .children(afi_safi_nodes(Command::ShowBgpPeerOut)),
                 ])]),
         Node::keyword("routes", "Routing table")
             .cmd(Command::ShowBgpRoute)
-            .children(vec![Node::arg(
-                "<prefix|afi>",
-                "Prefix (CIDR) or address family",
-            )
-            .cmd(Command::ShowBgpRoute)
-            .children(vec![Node::arg(
-                "<safi>",
-                "Sub-address family (unicast, multicast)",
-            )
-            .cmd(Command::ShowBgpRoute)])]),
+            .children({
+                let mut nodes = afi_safi_nodes(Command::ShowBgpRoute);
+                nodes.push(
+                    Node::arg("<prefix>", "Prefix in CIDR format", is_prefix)
+                        .cmd(Command::ShowBgpRoute),
+                );
+                nodes
+            }),
     ]
 }
 
@@ -125,9 +142,10 @@ fn tree_show_rpki() -> Vec<Node> {
         Node::keyword("validate", "Validate a prefix").children(vec![Node::arg(
             "<prefix>",
             "Prefix in CIDR format",
+            is_prefix,
         )
         .children(vec![Node::keyword("origin", "Origin AS keyword").children(
-            vec![Node::arg("<asn>", "AS number").cmd(Command::ShowRpkiValidate)],
+            vec![Node::arg("<asn>", "AS number", is_asn).cmd(Command::ShowRpkiValidate)],
         )])]),
     ]
 }

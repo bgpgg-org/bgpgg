@@ -129,112 +129,7 @@ fn parse_bool(keyword: &str, value: Option<&str>, line: usize) -> Result<bool, P
     }
 }
 
-/// Parse a keyword + optional value into a typed Setting.
-/// Returns None for unknown keywords.
-fn parse_setting(
-    keyword: &str,
-    value: Option<&str>,
-    line: usize,
-) -> Result<Option<Setting>, ParseError> {
-    match keyword {
-        "asn" => {
-            let val = value.ok_or_else(|| parse_err(line, "asn requires a value"))?;
-            let asn = val
-                .parse::<u32>()
-                .map_err(|err| parse_err(line, format!("invalid asn '{}': {}", val, err)))?;
-            Ok(Some(Setting::Asn(asn)))
-        }
-        "router-id" => {
-            let val = value.ok_or_else(|| parse_err(line, "router-id requires a value"))?;
-            let rid = val
-                .parse::<std::net::Ipv4Addr>()
-                .map_err(|err| parse_err(line, format!("invalid router-id '{}': {}", val, err)))?;
-            Ok(Some(Setting::RouterId(rid)))
-        }
-        "listen-addr" => {
-            let val = value.ok_or_else(|| parse_err(line, "listen-addr requires a value"))?;
-            Ok(Some(Setting::ListenAddr(val.to_string())))
-        }
-        "grpc-listen-addr" => {
-            let val = value.ok_or_else(|| parse_err(line, "grpc-listen-addr requires a value"))?;
-            Ok(Some(Setting::GrpcListenAddr(val.to_string())))
-        }
-        "log-level" => {
-            let val = value.ok_or_else(|| parse_err(line, "log-level requires a value"))?;
-            Ok(Some(Setting::LogLevel(val.to_string())))
-        }
-        "hold-time" => {
-            let val = value.ok_or_else(|| parse_err(line, "hold-time requires a value"))?;
-            let secs = val
-                .parse::<u64>()
-                .map_err(|err| parse_err(line, format!("invalid hold-time '{}': {}", val, err)))?;
-            Ok(Some(Setting::HoldTime(secs)))
-        }
-        "connect-retry" => {
-            let val = value.ok_or_else(|| parse_err(line, "connect-retry requires a value"))?;
-            let secs = val.parse::<u64>().map_err(|err| {
-                parse_err(line, format!("invalid connect-retry '{}': {}", val, err))
-            })?;
-            Ok(Some(Setting::ConnectRetry(secs)))
-        }
-        "cluster-id" => {
-            let val = value.ok_or_else(|| parse_err(line, "cluster-id requires a value"))?;
-            let cid = val
-                .parse::<std::net::Ipv4Addr>()
-                .map_err(|err| parse_err(line, format!("invalid cluster-id '{}': {}", val, err)))?;
-            Ok(Some(Setting::ClusterId(cid)))
-        }
-        "address" => {
-            let val = value.ok_or_else(|| parse_err(line, "address requires a value"))?;
-            Ok(Some(Setting::Address(val.to_string())))
-        }
-        "remote-as" => {
-            let val = value.ok_or_else(|| parse_err(line, "remote-as requires a value"))?;
-            let asn = val
-                .parse::<u32>()
-                .map_err(|err| parse_err(line, format!("invalid remote-as '{}': {}", val, err)))?;
-            Ok(Some(Setting::RemoteAs(asn)))
-        }
-        "port" => {
-            let val = value.ok_or_else(|| parse_err(line, "port requires a value"))?;
-            let port = val
-                .parse::<u16>()
-                .map_err(|err| parse_err(line, format!("invalid port '{}': {}", val, err)))?;
-            Ok(Some(Setting::Port(port)))
-        }
-        "interface" => {
-            let val = value.ok_or_else(|| parse_err(line, "interface requires a value"))?;
-            Ok(Some(Setting::Interface(val.to_string())))
-        }
-        "md5-key-file" => {
-            let val = value.ok_or_else(|| parse_err(line, "md5-key-file requires a value"))?;
-            Ok(Some(Setting::Md5KeyFile(val.to_string())))
-        }
-        "ttl-min" => {
-            let val = value.ok_or_else(|| parse_err(line, "ttl-min requires a value"))?;
-            let ttl = val
-                .parse::<u8>()
-                .map_err(|err| parse_err(line, format!("invalid ttl-min '{}': {}", val, err)))?;
-            Ok(Some(Setting::TtlMin(ttl)))
-        }
-        "next-hop-self" => Ok(Some(Setting::NextHopSelf(parse_bool(
-            keyword, value, line,
-        )?))),
-        "passive" => Ok(Some(Setting::Passive(parse_bool(keyword, value, line)?))),
-        "rr-client" => Ok(Some(Setting::RrClient(parse_bool(keyword, value, line)?))),
-        "rs-client" => Ok(Some(Setting::RsClient(parse_bool(keyword, value, line)?))),
-        "graceful-shutdown" => Ok(Some(Setting::GracefulShutdown(parse_bool(
-            keyword, value, line,
-        )?))),
-        "announce" => {
-            let val = value.ok_or_else(|| parse_err(line, "announce requires a prefix"))?;
-            Ok(Some(Setting::Announce(val.to_string())))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Parse a leaf statement (1-2 words) into a typed Setting.
+/// Parse a leaf statement (1-2 words) into a typed Setting and push onto the list.
 fn parse_leaf_setting(
     words: &[String],
     line: usize,
@@ -243,13 +138,101 @@ fn parse_leaf_setting(
     if words.is_empty() {
         return Ok(());
     }
+    let keyword = words[0].as_str();
     let value = words.get(1).map(|s| s.as_str());
-    match parse_setting(&words[0], value, line)? {
-        Some(setting) => settings.push(setting),
-        None => {
-            return Err(parse_err(line, format!("unknown setting '{}'", words[0])));
+    let setting = match keyword {
+        "asn" => {
+            let val = value.ok_or_else(|| parse_err(line, "asn requires a value"))?;
+            let asn = val
+                .parse::<u32>()
+                .map_err(|err| parse_err(line, format!("invalid asn '{}': {}", val, err)))?;
+            Setting::Asn(asn)
         }
-    }
+        "router-id" => {
+            let val = value.ok_or_else(|| parse_err(line, "router-id requires a value"))?;
+            let rid = val
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|err| parse_err(line, format!("invalid router-id '{}': {}", val, err)))?;
+            Setting::RouterId(rid)
+        }
+        "listen-addr" => {
+            let val = value.ok_or_else(|| parse_err(line, "listen-addr requires a value"))?;
+            Setting::ListenAddr(val.to_string())
+        }
+        "grpc-listen-addr" => {
+            let val = value.ok_or_else(|| parse_err(line, "grpc-listen-addr requires a value"))?;
+            Setting::GrpcListenAddr(val.to_string())
+        }
+        "log-level" => {
+            let val = value.ok_or_else(|| parse_err(line, "log-level requires a value"))?;
+            Setting::LogLevel(val.to_string())
+        }
+        "hold-time" => {
+            let val = value.ok_or_else(|| parse_err(line, "hold-time requires a value"))?;
+            let secs = val
+                .parse::<u64>()
+                .map_err(|err| parse_err(line, format!("invalid hold-time '{}': {}", val, err)))?;
+            Setting::HoldTime(secs)
+        }
+        "connect-retry" => {
+            let val = value.ok_or_else(|| parse_err(line, "connect-retry requires a value"))?;
+            let secs = val.parse::<u64>().map_err(|err| {
+                parse_err(line, format!("invalid connect-retry '{}': {}", val, err))
+            })?;
+            Setting::ConnectRetry(secs)
+        }
+        "cluster-id" => {
+            let val = value.ok_or_else(|| parse_err(line, "cluster-id requires a value"))?;
+            let cid = val
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|err| parse_err(line, format!("invalid cluster-id '{}': {}", val, err)))?;
+            Setting::ClusterId(cid)
+        }
+        "address" => {
+            let val = value.ok_or_else(|| parse_err(line, "address requires a value"))?;
+            Setting::Address(val.to_string())
+        }
+        "remote-as" => {
+            let val = value.ok_or_else(|| parse_err(line, "remote-as requires a value"))?;
+            let asn = val
+                .parse::<u32>()
+                .map_err(|err| parse_err(line, format!("invalid remote-as '{}': {}", val, err)))?;
+            Setting::RemoteAs(asn)
+        }
+        "port" => {
+            let val = value.ok_or_else(|| parse_err(line, "port requires a value"))?;
+            let port = val
+                .parse::<u16>()
+                .map_err(|err| parse_err(line, format!("invalid port '{}': {}", val, err)))?;
+            Setting::Port(port)
+        }
+        "interface" => {
+            let val = value.ok_or_else(|| parse_err(line, "interface requires a value"))?;
+            Setting::Interface(val.to_string())
+        }
+        "md5-key-file" => {
+            let val = value.ok_or_else(|| parse_err(line, "md5-key-file requires a value"))?;
+            Setting::Md5KeyFile(val.to_string())
+        }
+        "ttl-min" => {
+            let val = value.ok_or_else(|| parse_err(line, "ttl-min requires a value"))?;
+            let ttl = val
+                .parse::<u8>()
+                .map_err(|err| parse_err(line, format!("invalid ttl-min '{}': {}", val, err)))?;
+            Setting::TtlMin(ttl)
+        }
+        "next-hop-self" => Setting::NextHopSelf(parse_bool(keyword, value, line)?),
+        "passive" => Setting::Passive(parse_bool(keyword, value, line)?),
+        "rr-client" => Setting::RrClient(parse_bool(keyword, value, line)?),
+        "rs-client" => Setting::RsClient(parse_bool(keyword, value, line)?),
+        "graceful-shutdown" => Setting::GracefulShutdown(parse_bool(keyword, value, line)?),
+        "announce" => {
+            let val = value.ok_or_else(|| parse_err(line, "announce requires a prefix"))?;
+            Setting::Announce(val.to_string())
+        }
+        _ => return Err(parse_err(line, format!("unknown setting '{}'", keyword))),
+    };
+    settings.push(setting);
     Ok(())
 }
 
