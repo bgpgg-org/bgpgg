@@ -47,6 +47,26 @@ pub enum Service {
     Bgp(BgpServiceBody),
 }
 
+impl fmt::Display for Service {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Service::Bgp(body) => write!(f, "{}", body),
+        }
+    }
+}
+
+impl fmt::Display for Root {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, service) in self.services.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            writeln!(f, "{}", service)?;
+        }
+        Ok(())
+    }
+}
+
 /// Parse error with line number and description.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {

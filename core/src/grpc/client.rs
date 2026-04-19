@@ -29,6 +29,7 @@ use super::proto::{
     GetPeerRequest,
     GetRpkiValidationRequest,
     GetRpkiValidationResponse,
+    GetRunningConfigRequest,
     GetServerInfoRequest,
     ListBmpServersRequest,
     ListDefinedSetsRequest,
@@ -279,6 +280,18 @@ impl BgpClient {
             .parse()
             .map_err(|_| tonic::Status::internal("invalid listen_addr"))?;
         Ok((addr, resp.listen_port as u16, resp.num_routes))
+    }
+
+    /// Fetch the daemon's current running config as rogg.conf brace-format text.
+    /// Used by ggsh for `show running-config` and `show diff`.
+    pub async fn get_running_config(&self) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .get_running_config(GetRunningConfigRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.text)
     }
 
     /// Add a BMP server destination

@@ -706,6 +706,64 @@ async fn test_list_peers_stream() {
 }
 
 #[tokio::test]
+async fn test_get_running_config() {
+    // Verifies the GetRunningConfig RPC renders the daemon's current state
+    // (server-level settings + live peers from self.peers) as parseable
+    // rogg.conf text.
+    let server = start_test_server(BgpConfig::new(
+        65042,
+        "127.0.0.1:0",
+        Ipv4Addr::new(10, 0, 0, 1),
+        90,
+    ))
+    .await;
+
+    server
+        .client
+        .add_peer(
+            "10.0.0.5".to_string(),
+            Some(SessionConfig {
+                asn: Some(65099),
+                port: Some(179),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let text = server.client.get_running_config().await.unwrap();
+
+    // Server-level fields + peer block (address is the block header).
+    assert!(text.contains("service bgp {"), "missing service: {}", text);
+    assert!(text.contains("asn 65042"), "missing asn: {}", text);
+    assert!(
+        text.contains("router-id 10.0.0.1"),
+        "missing router-id: {}",
+        text
+    );
+    assert!(text.contains("hold-time 90"), "missing hold-time: {}", text);
+    assert!(
+        text.contains("peer 10.0.0.5 {"),
+        "missing peer block: {}",
+        text
+    );
+    assert!(
+        text.contains("remote-as 65099"),
+        "missing remote-as: {}",
+        text
+    );
+
+    // Round-trip: output must reparse into an equivalent BgpConfig.
+    let reparsed = BgpConfig::from_conf_str(&text).unwrap();
+    assert_eq!(reparsed.asn, 65042);
+    assert_eq!(reparsed.router_id, Ipv4Addr::new(10, 0, 0, 1));
+    assert_eq!(reparsed.hold_time_secs, 90);
+    assert_eq!(reparsed.peers.len(), 1);
+    assert_eq!(reparsed.peers[0].address, "10.0.0.5");
+    assert_eq!(reparsed.peers[0].asn, Some(65099));
+}
+
+#[tokio::test]
 async fn test_get_server_info() {
     let server = start_test_server(BgpConfig::new(
         65001,

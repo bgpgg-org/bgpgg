@@ -58,6 +58,8 @@ use super::proto::{
     GetPeerResponse,
     GetRpkiValidationRequest,
     GetRpkiValidationResponse,
+    GetRunningConfigRequest,
+    GetRunningConfigResponse,
     GetServerInfoRequest,
     GetServerInfoResponse,
     ListBmpServersRequest,
@@ -1230,6 +1232,25 @@ impl BgpService for BgpGrpcService {
             listen_port: listen_port as u32,
             num_routes,
         }))
+    }
+
+    async fn get_running_config(
+        &self,
+        _request: Request<GetRunningConfigRequest>,
+    ) -> Result<Response<GetRunningConfigResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetRunningConfig { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let text = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(GetRunningConfigResponse { text }))
     }
 
     async fn add_bmp_server(

@@ -27,6 +27,9 @@
 //! setting      = KEY VALUE NEWLINE
 //! ```
 
+use std::fmt;
+use std::net::Ipv4Addr;
+
 use crate::bgp::{Afi, Safi};
 use crate::language::{
     expect_close_brace, expect_open_brace, expect_word, finish_statement, parse_err, peek_kind,
@@ -47,14 +50,13 @@ pub struct BgpServiceBody {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Setting {
     Asn(u32),
-    RouterId(std::net::Ipv4Addr),
+    RouterId(Ipv4Addr),
     ListenAddr(String),
     GrpcListenAddr(String),
     LogLevel(String),
     HoldTime(u64),
     ConnectRetry(u64),
-    ClusterId(std::net::Ipv4Addr),
-    Address(String),
+    ClusterId(Ipv4Addr),
     RemoteAs(u32),
     Port(u16),
     Interface(String),
@@ -68,10 +70,11 @@ pub enum Setting {
     Announce(String),
 }
 
-/// `peer <name> { ... }` block.
+/// `peer <ADDRESS> { ... }` block. The block header is the peer's IP address;
+/// there is no separate symbolic name. Matches Cisco/FRR/Junos/GoBGP convention.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerBlock {
-    pub name: String,
+    pub address: String,
     pub settings: Vec<Setting>,
     pub families: Vec<FamilyBlock>,
 }
@@ -112,6 +115,144 @@ pub struct PrefixListBlock {
     pub prefixes: Vec<String>,
 }
 
+// ---- Display impls: output matches the parser grammar so
+// `parse(node.to_string()) == Ok(node)` holds. Each impl uses a 2-space indent
+// relative to its own opening; nesting types re-indent their children's output.
+
+impl fmt::Display for Setting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Setting::Asn(v) => write!(f, "asn {}", v),
+            Setting::RouterId(v) => write!(f, "router-id {}", v),
+            Setting::ListenAddr(v) => write!(f, "listen-addr {}", v),
+            Setting::GrpcListenAddr(v) => write!(f, "grpc-listen-addr {}", v),
+            Setting::LogLevel(v) => write!(f, "log-level {}", v),
+            Setting::HoldTime(v) => write!(f, "hold-time {}", v),
+            Setting::ConnectRetry(v) => write!(f, "connect-retry {}", v),
+            Setting::ClusterId(v) => write!(f, "cluster-id {}", v),
+            Setting::RemoteAs(v) => write!(f, "remote-as {}", v),
+            Setting::Port(v) => write!(f, "port {}", v),
+            Setting::Interface(v) => write!(f, "interface {}", v),
+            Setting::Md5KeyFile(v) => write!(f, "md5-key-file {}", v),
+            Setting::TtlMin(v) => write!(f, "ttl-min {}", v),
+            Setting::NextHopSelf(v) => write!(f, "next-hop-self {}", v),
+            Setting::Passive(v) => write!(f, "passive {}", v),
+            Setting::RrClient(v) => write!(f, "rr-client {}", v),
+            Setting::RsClient(v) => write!(f, "rs-client {}", v),
+            Setting::GracefulShutdown(v) => write!(f, "graceful-shutdown {}", v),
+            Setting::Announce(v) => write!(f, "announce {}", v),
+        }
+    }
+}
+
+impl fmt::Display for FamilyDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FamilyDirective::ExportPolicy(name) => write!(f, "export policy {}", name),
+            FamilyDirective::ImportPolicy(name) => write!(f, "import policy {}", name),
+        }
+    }
+}
+
+impl fmt::Display for PolicyRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PolicyRule::Match { set_name, action } => write!(f, "match {} {}", set_name, action),
+            PolicyRule::Default { action } => write!(f, "default {}", action),
+        }
+    }
+}
+
+impl fmt::Display for FamilyBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "family {} {} {{",
+            self.afi.as_config_str(),
+            self.safi.as_config_str()
+        )?;
+        for d in &self.directives {
+            writeln!(f, "  {}", d)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for PolicyBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "policy {} {{", self.name)?;
+        for rule in &self.rules {
+            writeln!(f, "  {}", rule)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for PrefixListBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "prefix-list {} {{", self.name)?;
+        for prefix in &self.prefixes {
+            writeln!(f, "  {}", prefix)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for PeerBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "peer {} {{", self.address)?;
+        for setting in &self.settings {
+            writeln!(f, "  {}", setting)?;
+        }
+        for family in &self.families {
+            writeln!(f)?;
+            for line in family.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for BgpServiceBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "service bgp {{")?;
+        let mut first = true;
+        for setting in &self.settings {
+            writeln!(f, "  {}", setting)?;
+            first = false;
+        }
+        for peer in &self.peers {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in peer.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for policy in &self.policies {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in policy.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for plist in &self.prefix_lists {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in plist.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        write!(f, "}}")
+    }
+}
+
 impl Setting {
     /// Parse a typed Setting from a keyword and optional value word. Line-free;
     /// config-file callers attach line context, ggsh uses the message directly.
@@ -125,7 +266,6 @@ impl Setting {
             "hold-time" => Setting::HoldTime(parse_value(key, value)?),
             "connect-retry" => Setting::ConnectRetry(parse_value(key, value)?),
             "cluster-id" => Setting::ClusterId(parse_value(key, value)?),
-            "address" => Setting::Address(parse_value(key, value)?),
             "remote-as" => Setting::RemoteAs(parse_value(key, value)?),
             "port" => Setting::Port(parse_value(key, value)?),
             "interface" => Setting::Interface(parse_value(key, value)?),
@@ -147,7 +287,7 @@ impl Setting {
 fn parse_value<T>(key: &str, value: Option<&str>) -> Result<T, String>
 where
     T: std::str::FromStr,
-    T::Err: std::fmt::Display,
+    T::Err: fmt::Display,
 {
     let val = value.ok_or_else(|| format!("{} requires a value", key))?;
     val.parse::<T>()
@@ -172,12 +312,12 @@ pub(crate) fn parse_bgp_body(
         let (key, line) = expect_word(tokens, pos)?;
         match key.as_str() {
             "peer" => {
-                let name = expect_word(tokens, pos)
-                    .map_err(|_| parse_err(line, "peer requires a name"))?
+                let address = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "peer requires an address"))?
                     .0;
                 skip_newlines(tokens, pos);
                 expect_open_brace(tokens, pos)?;
-                body.peers.push(parse_peer_block(name, tokens, pos)?);
+                body.peers.push(parse_peer_block(address, tokens, pos)?);
             }
             "policy" => {
                 let name = expect_word(tokens, pos)
@@ -217,7 +357,7 @@ fn unexpected_eof(tokens: &[Token], pos: usize) -> ParseError {
 }
 
 fn parse_peer_block(
-    name: String,
+    address: String,
     tokens: &[Token],
     pos: &mut usize,
 ) -> Result<PeerBlock, ParseError> {
@@ -263,7 +403,7 @@ fn parse_peer_block(
     }
     expect_close_brace(tokens, pos)?;
     Ok(PeerBlock {
-        name,
+        address,
         settings,
         families,
     })
@@ -438,8 +578,7 @@ service bgp {
   asn 65001
   router-id 1.1.1.1
 
-  peer peer1 {
-    address fe80::ade0
+  peer fe80::ade0 {
     remote-as 4242423914
     interface peer1-us3
     md5-key-file /etc/bgp/peer1.key
@@ -448,8 +587,7 @@ service bgp {
     ttl-min 254
   }
 
-  peer upstream {
-    address 10.0.0.1
+  peer 10.0.0.1 {
     remote-as 65000
     passive true
     rr-client true
@@ -460,16 +598,13 @@ service bgp {
         assert_eq!(body.peers.len(), 2);
 
         let peer1 = &body.peers[0];
-        assert_eq!(peer1.name, "peer1");
-        assert!(peer1
-            .settings
-            .contains(&Setting::Address("fe80::ade0".to_string())));
+        assert_eq!(peer1.address, "fe80::ade0");
         assert!(peer1.settings.contains(&Setting::RemoteAs(4242423914)));
         assert!(peer1.settings.contains(&Setting::NextHopSelf(true)));
         assert!(peer1.settings.contains(&Setting::Port(1179)));
 
         let upstream = &body.peers[1];
-        assert_eq!(upstream.name, "upstream");
+        assert_eq!(upstream.address, "10.0.0.1");
         assert!(upstream.settings.contains(&Setting::Passive(true)));
         assert!(upstream.settings.contains(&Setting::RrClient(true)));
     }
@@ -481,8 +616,7 @@ service bgp {
   asn 65001
   router-id 1.1.1.1
 
-  peer test {
-    address 10.0.0.1
+  peer 10.0.0.1 {
     family ipv4 unicast {
       export policy mine-only
     }
@@ -575,8 +709,7 @@ service bgp {
   log-level debug
   hold-time 90
 
-  peer peer1 {
-    address fe80::ade0
+  peer fe80::ade0 {
     interface peer1-us3
     remote-as 4242423914
     next-hop-self true
@@ -646,11 +779,6 @@ service bgp {
                 Setting::GracefulShutdown(true),
             ),
             (
-                "address",
-                Some("fe80::1"),
-                Setting::Address("fe80::1".to_string()),
-            ),
-            (
                 "interface",
                 Some("eth0"),
                 Setting::Interface("eth0".to_string()),
@@ -701,6 +829,113 @@ service bgp {
                 err
             );
         }
+    }
+
+    #[test]
+    fn test_display_round_trip() {
+        let cases = vec![
+            "service bgp {\n  asn 65001\n  router-id 1.1.1.1\n}",
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr 127.0.0.1:179
+  grpc-listen-addr 127.0.0.1:50051
+  log-level debug
+  hold-time 90
+  connect-retry 10
+}",
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  peer fe80::ade0 {
+    remote-as 4242423914
+    interface peer1-us3
+    md5-key-file /etc/bgp/peer1.key
+    next-hop-self true
+    port 1179
+    ttl-min 254
+  }
+
+  peer 10.0.0.1 {
+    remote-as 65000
+    passive true
+    rr-client true
+  }
+}",
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  peer 10.0.0.1 {
+    family ipv4 unicast {
+      export policy mine-only
+    }
+
+    family ipv6 unicast {
+      import policy allow-all
+    }
+  }
+}",
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  announce 172.23.211.0/27
+  announce fd0d:fbde:bca5::/48
+
+  policy mine-only {
+    match my-prefixes accept
+    default reject
+  }
+
+  prefix-list my-prefixes {
+    172.23.211.0/27
+    fd0d:fbde:bca5::/48
+  }
+}",
+        ];
+        for input in cases {
+            let root =
+                parse(input).unwrap_or_else(|err| panic!("parse failed for {:?}: {}", input, err));
+            let serialized = root.to_string();
+            let reparsed = parse(&serialized).unwrap_or_else(|err| {
+                panic!(
+                    "reparse failed for {:?}:\nserialized:\n{}\nerror: {}",
+                    input, serialized, err
+                )
+            });
+            assert_eq!(
+                root, reparsed,
+                "round-trip mismatch for input {:?}\nserialized:\n{}",
+                input, serialized
+            );
+        }
+    }
+
+    #[test]
+    fn test_display_format() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  peer 10.0.0.1 {
+    remote-as 65002
+  }
+}";
+        let root = parse(input).unwrap();
+        let out = root.to_string();
+        // Check key structural elements without pinning exact whitespace counts.
+        assert!(out.contains("service bgp {"));
+        assert!(out.contains("  asn 65001"));
+        assert!(out.contains("  router-id 1.1.1.1"));
+        assert!(out.contains("  peer 10.0.0.1 {"));
+        assert!(out.contains("    remote-as 65002"));
+        assert!(out.ends_with("}\n"));
     }
 
     #[test]
@@ -760,7 +995,7 @@ service bgp {
                 "unexpected trailing token",
             ),
             (
-                "service bgp { peer x { address 10.0.0.1 junk } }",
+                "service bgp { peer 10.0.0.1 { remote-as 65001 junk } }",
                 "unexpected trailing token",
             ),
             (

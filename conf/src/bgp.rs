@@ -96,6 +96,17 @@ impl std::str::FromStr for Afi {
     }
 }
 
+impl Afi {
+    /// Lowercase token as accepted by the config parser (inverse of FromStr).
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Afi::Ipv4 => "ipv4",
+            Afi::Ipv6 => "ipv6",
+            Afi::LinkState => "ls",
+        }
+    }
+}
+
 /// Subsequent Address Family Identifier per IANA registry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -153,6 +164,19 @@ impl std::str::FromStr for Safi {
                 "expected unicast|multicast|mpls-label|link-state|link-state-vpn, got '{}'",
                 s
             )),
+        }
+    }
+}
+
+impl Safi {
+    /// Lowercase token as accepted by the config parser (inverse of FromStr).
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Safi::Unicast => "unicast",
+            Safi::Multicast => "multicast",
+            Safi::MplsLabel => "mpls-label",
+            Safi::LinkState => "link-state",
+            Safi::LinkStateVpn => "link-state-vpn",
         }
     }
 }
@@ -365,7 +389,9 @@ impl AfiSafiConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct PeerConfig {
-    /// Peer IP address (IPv4 or IPv6).
+    /// Peer IP address (IPv4 or IPv6). This IS the peer's identity — the
+    /// config language keys peers by address (`peer <ADDR> { ... }`), matching
+    /// Cisco/FRR/Junos/GoBGP convention. No separate symbolic name.
     #[serde(default)]
     pub address: String,
     /// Remote BGP port (default: 179).
@@ -1112,14 +1138,107 @@ impl Default for BgpConfig {
     }
 }
 
+impl BgpConfig {
+    /// Render this config back into a brace-format `rogg.conf` string. Used by the
+    /// daemon's `GetRunningConfig` RPC so ggsh can fetch the running state.
+    ///
+    /// Only fields covered by the current config language grammar are emitted;
+    /// richer BgpConfig-only fields (bmp_servers, defined_sets, etc.) are omitted
+    /// because the language doesn't express them yet.
+    pub fn to_rogg_conf(&self) -> String {
+        let body = self.to_bgp_service_body();
+        let root = crate::language::Root {
+            services: vec![crate::language::Service::Bgp(body)],
+        };
+        root.to_string()
+    }
+
+    /// Convert this BgpConfig back into a language-level `BgpServiceBody` AST.
+    pub fn to_bgp_service_body(&self) -> crate::language_bgp::BgpServiceBody {
+        use crate::language_bgp::{BgpServiceBody, PeerBlock, Setting};
+
+        let mut settings = vec![
+            Setting::Asn(self.asn),
+            Setting::RouterId(self.router_id),
+            Setting::ListenAddr(self.listen_addr.clone()),
+            Setting::GrpcListenAddr(self.grpc_listen_addr.clone()),
+            Setting::LogLevel(self.log_level.clone()),
+            Setting::HoldTime(self.hold_time_secs),
+            Setting::ConnectRetry(self.connect_retry_secs),
+        ];
+        if let Some(cid) = self.cluster_id {
+            settings.push(Setting::ClusterId(cid));
+        }
+
+        let peers = self
+            .peers
+            .iter()
+            .map(|p| PeerBlock {
+                address: p.address.clone(),
+                settings: peer_settings_from_config(p),
+                families: Vec::new(),
+            })
+            .collect();
+
+        BgpServiceBody {
+            settings,
+            peers,
+            policies: Vec::new(),
+            prefix_lists: Vec::new(),
+        }
+    }
+}
+
+/// Emit the subset of PeerConfig fields that the language currently represents.
+/// `address` is the block header (`peer <ADDR> { ... }`) and is NOT emitted as
+/// an inner setting.
+fn peer_settings_from_config(peer: &PeerConfig) -> Vec<crate::language_bgp::Setting> {
+    use crate::language_bgp::Setting;
+
+    let mut out = Vec::new();
+    if let Some(asn) = peer.asn {
+        out.push(Setting::RemoteAs(asn));
+    }
+    if peer.port != default_port() {
+        out.push(Setting::Port(peer.port));
+    }
+    if let Some(iface) = &peer.interface {
+        out.push(Setting::Interface(iface.clone()));
+    }
+    if let Some(md5) = &peer.md5_key_file {
+        out.push(Setting::Md5KeyFile(md5.clone()));
+    }
+    if let Some(ttl) = peer.ttl_min {
+        out.push(Setting::TtlMin(ttl));
+    }
+    if peer.next_hop_self {
+        out.push(Setting::NextHopSelf(true));
+    }
+    if peer.passive_mode {
+        out.push(Setting::Passive(true));
+    }
+    if peer.rr_client {
+        out.push(Setting::RrClient(true));
+    }
+    if peer.rs_client {
+        out.push(Setting::RsClient(true));
+    }
+    if peer.graceful_shutdown {
+        out.push(Setting::GracefulShutdown(true));
+    }
+    out
+}
+
 /// Build a PeerConfig from a typed PeerBlock.
 fn peer_config_from_block(peer: &crate::language_bgp::PeerBlock) -> PeerConfig {
     use crate::language_bgp::Setting;
 
-    let mut config = PeerConfig::default();
+    let mut config = PeerConfig {
+        address: peer.address.clone(),
+        ..PeerConfig::default()
+    };
     for setting in &peer.settings {
         match setting {
-            Setting::Address(val) => config.address = val.clone(),
             Setting::RemoteAs(val) => config.asn = Some(*val),
             Setting::Port(val) => config.port = *val,
             Setting::Interface(val) => config.interface = Some(val.clone()),
@@ -1142,6 +1261,41 @@ mod tests {
     use std::env;
     use std::fs::{self, File};
     use std::io::Write;
+
+    #[test]
+    fn test_to_rogg_conf_round_trip() {
+        // Render a BgpConfig back to text and reparse; the parse result should
+        // carry the same language-level fields (what the grammar can express).
+        let input = "\
+service bgp {
+  asn 4242423930
+  router-id 172.23.211.1
+  listen-addr [::]:179
+  grpc-listen-addr [::]:50051
+  log-level debug
+  hold-time 90
+
+  peer 10.0.0.1 {
+    remote-as 65000
+    passive true
+    rr-client true
+  }
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        let rendered = config.to_rogg_conf();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.asn, config.asn);
+        assert_eq!(reparsed.router_id, config.router_id);
+        assert_eq!(reparsed.listen_addr, config.listen_addr);
+        assert_eq!(reparsed.grpc_listen_addr, config.grpc_listen_addr);
+        assert_eq!(reparsed.log_level, config.log_level);
+        assert_eq!(reparsed.hold_time_secs, config.hold_time_secs);
+        assert_eq!(reparsed.peers.len(), config.peers.len());
+        assert_eq!(reparsed.peers[0].address, config.peers[0].address);
+        assert_eq!(reparsed.peers[0].asn, config.peers[0].asn);
+        assert_eq!(reparsed.peers[0].passive_mode, config.peers[0].passive_mode);
+        assert_eq!(reparsed.peers[0].rr_client, config.peers[0].rr_client);
+    }
 
     #[test]
     fn test_config_new() {
@@ -1500,8 +1654,7 @@ service bgp {
   asn 4242423930
   router-id 172.23.211.1
 
-  peer peer1 {
-    address fe80::ade0
+  peer fe80::ade0 {
     remote-as 4242423914
     interface peer1-us3
     md5-key-file /etc/bgp/peer1.key
@@ -1510,8 +1663,7 @@ service bgp {
     ttl-min 254
   }
 
-  peer upstream {
-    address 10.0.0.1
+  peer 10.0.0.1 {
     remote-as 65000
     passive true
     rr-client true

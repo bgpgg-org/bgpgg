@@ -39,6 +39,9 @@ service BgpService {
     rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
     rpc SetPolicyAssignment(SetPolicyAssignmentRequest) returns (SetPolicyAssignmentResponse);
     rpc SetPeerGracefulShutdown(SetPeerGracefulShutdownRequest) returns (SetPeerGracefulShutdownResponse);
+
+    // Config-mode management (ggsh configure/commit flow)
+    rpc GetRunningConfig(GetRunningConfigRequest) returns (GetRunningConfigResponse);
 }
 
 message GetServerInfoRequest {}
@@ -47,6 +50,13 @@ message GetServerInfoResponse {
     string listen_addr = 1;
     uint32 listen_port = 2;
     uint64 num_routes = 3;  // Total number of routes in RIB
+}
+
+message GetRunningConfigRequest {}
+
+message GetRunningConfigResponse {
+    // Current running config as rogg.conf brace-format text.
+    string text = 1;
 }
 
 // Action when max prefix limit is reached

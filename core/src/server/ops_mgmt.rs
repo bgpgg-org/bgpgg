@@ -187,6 +187,10 @@ pub enum MgmtOp {
         origin_as: u32,
         response: oneshot::Sender<(RpkiValidation, Vec<Vrp>)>,
     },
+    // Config-mode management (ggsh configure/commit flow).
+    GetRunningConfig {
+        response: oneshot::Sender<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +353,9 @@ impl BgpServer {
                 response,
             } => {
                 self.handle_get_rpki_validation(prefix, origin_as, response);
+            }
+            MgmtOp::GetRunningConfig { response } => {
+                let _ = response.send(self.config.to_rogg_conf());
             }
         }
     }
