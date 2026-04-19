@@ -83,6 +83,19 @@ impl TryFrom<u16> for Afi {
     }
 }
 
+impl std::str::FromStr for Afi {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ipv4" => Ok(Afi::Ipv4),
+            "ipv6" => Ok(Afi::Ipv6),
+            "ls" => Ok(Afi::LinkState),
+            _ => Err(format!("expected ipv4|ipv6|ls, got '{}'", s)),
+        }
+    }
+}
+
 /// Subsequent Address Family Identifier per IANA registry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -122,6 +135,24 @@ impl fmt::Display for Safi {
             Safi::MplsLabel => write!(f, "MPLS-labeled"),
             Safi::LinkState => write!(f, "LinkState"),
             Safi::LinkStateVpn => write!(f, "LinkState-VPN"),
+        }
+    }
+}
+
+impl std::str::FromStr for Safi {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unicast" => Ok(Safi::Unicast),
+            "multicast" => Ok(Safi::Multicast),
+            "mpls-label" => Ok(Safi::MplsLabel),
+            "link-state" => Ok(Safi::LinkState),
+            "link-state-vpn" => Ok(Safi::LinkStateVpn),
+            _ => Err(format!(
+                "expected unicast|multicast|mpls-label|link-state|link-state-vpn, got '{}'",
+                s
+            )),
         }
     }
 }
@@ -1469,11 +1500,11 @@ service bgp {
   asn 4242423930
   router-id 172.23.211.1
 
-  peer kioubit {
+  peer peer1 {
     address fe80::ade0
     remote-as 4242423914
-    interface kioubit-us3
-    md5-key-file /etc/bgp/kioubit.key
+    interface peer1-us3
+    md5-key-file /etc/bgp/peer1.key
     next-hop-self true
     port 1179
     ttl-min 254
@@ -1490,17 +1521,14 @@ service bgp {
         assert_eq!(config.asn, 4242423930);
         assert_eq!(config.peers.len(), 2);
 
-        let kioubit = &config.peers[0];
-        assert_eq!(kioubit.address, "fe80::ade0");
-        assert_eq!(kioubit.asn, Some(4242423914));
-        assert_eq!(kioubit.interface.as_deref(), Some("kioubit-us3"));
-        assert_eq!(
-            kioubit.md5_key_file.as_deref(),
-            Some("/etc/bgp/kioubit.key")
-        );
-        assert!(kioubit.next_hop_self);
-        assert_eq!(kioubit.port, 1179);
-        assert_eq!(kioubit.ttl_min, Some(254));
+        let peer1 = &config.peers[0];
+        assert_eq!(peer1.address, "fe80::ade0");
+        assert_eq!(peer1.asn, Some(4242423914));
+        assert_eq!(peer1.interface.as_deref(), Some("peer1-us3"));
+        assert_eq!(peer1.md5_key_file.as_deref(), Some("/etc/bgp/peer1.key"));
+        assert!(peer1.next_hop_self);
+        assert_eq!(peer1.port, 1179);
+        assert_eq!(peer1.ttl_min, Some(254));
 
         let upstream = &config.peers[1];
         assert_eq!(upstream.address, "10.0.0.1");

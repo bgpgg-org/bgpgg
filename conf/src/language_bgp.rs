@@ -17,18 +17,21 @@
 //! ## Grammar (BGP scope)
 //!
 //! ```text
-//! bgp_body     = (setting | peer | policy | prefix_list | announce)*
+//! bgp_body     = (setting | peer | policy | prefix_list)*
 //! peer         = "peer" NAME '{' (setting | family)* '}'
 //! family       = "family" AFI SAFI '{' family_dir* '}'
 //! family_dir   = ("export" | "import") "policy" NAME
 //! policy       = "policy" NAME '{' policy_rule* '}'
-//! policy_rule  = "match" NAME "->" ACTION | "default" "->" ACTION
+//! policy_rule  = "match" NAME ACTION | "default" ACTION
 //! prefix_list  = "prefix-list" NAME '{' PREFIX* '}'
-//! announce     = "announce" PREFIX
-//! setting      = KEY VALUE? NEWLINE
+//! setting      = KEY VALUE NEWLINE
 //! ```
 
-use crate::language::{current_line, parse_err, ParseError, Token, TokenKind};
+use crate::bgp::{Afi, Safi};
+use crate::language::{
+    expect_close_brace, expect_open_brace, expect_word, finish_statement, parse_err, peek_kind,
+    skip_newlines, take_word, ParseError, Token, TokenKind,
+};
 
 /// Body of `service bgp { ... }`.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -40,7 +43,7 @@ pub struct BgpServiceBody {
 }
 
 /// Typed config setting. Values are parsed at parse time.
-/// Flags (next-hop-self, passive, etc.) are unit variants — presence means enabled.
+/// Boolean settings (next-hop-self, passive, etc.) take "true" or "false".
 #[derive(Debug, Clone, PartialEq)]
 pub enum Setting {
     Asn(u32),
@@ -76,8 +79,8 @@ pub struct PeerBlock {
 /// `family <afi> <safi> { ... }` block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FamilyBlock {
-    pub afi: String,
-    pub safi: String,
+    pub afi: Afi,
+    pub safi: Safi,
     pub directives: Vec<FamilyDirective>,
 }
 
@@ -109,131 +112,46 @@ pub struct PrefixListBlock {
     pub prefixes: Vec<String>,
 }
 
-/// Catch-all for unrecognized blocks/statements within a known scope.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnknownBlock {
-    pub words: Vec<String>,
-    pub children: Vec<UnknownBlock>,
-}
-
-fn parse_bool(keyword: &str, value: Option<&str>, line: usize) -> Result<bool, ParseError> {
-    let val =
-        value.ok_or_else(|| parse_err(line, format!("{} requires 'true' or 'false'", keyword)))?;
-    match val {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(parse_err(
-            line,
-            format!("{}: expected 'true' or 'false', got '{}'", keyword, val),
-        )),
+impl Setting {
+    /// Parse a typed Setting from a keyword and optional value word. Line-free;
+    /// config-file callers attach line context, ggsh uses the message directly.
+    pub fn parse(key: &str, value: Option<&str>) -> Result<Setting, String> {
+        Ok(match key {
+            "asn" => Setting::Asn(parse_value(key, value)?),
+            "router-id" => Setting::RouterId(parse_value(key, value)?),
+            "listen-addr" => Setting::ListenAddr(parse_value(key, value)?),
+            "grpc-listen-addr" => Setting::GrpcListenAddr(parse_value(key, value)?),
+            "log-level" => Setting::LogLevel(parse_value(key, value)?),
+            "hold-time" => Setting::HoldTime(parse_value(key, value)?),
+            "connect-retry" => Setting::ConnectRetry(parse_value(key, value)?),
+            "cluster-id" => Setting::ClusterId(parse_value(key, value)?),
+            "address" => Setting::Address(parse_value(key, value)?),
+            "remote-as" => Setting::RemoteAs(parse_value(key, value)?),
+            "port" => Setting::Port(parse_value(key, value)?),
+            "interface" => Setting::Interface(parse_value(key, value)?),
+            "md5-key-file" => Setting::Md5KeyFile(parse_value(key, value)?),
+            "ttl-min" => Setting::TtlMin(parse_value(key, value)?),
+            "next-hop-self" => Setting::NextHopSelf(parse_value(key, value)?),
+            "passive" => Setting::Passive(parse_value(key, value)?),
+            "rr-client" => Setting::RrClient(parse_value(key, value)?),
+            "rs-client" => Setting::RsClient(parse_value(key, value)?),
+            "graceful-shutdown" => Setting::GracefulShutdown(parse_value(key, value)?),
+            "announce" => Setting::Announce(parse_value(key, value)?),
+            other => return Err(format!("unknown setting '{}'", other)),
+        })
     }
 }
 
-/// Parse a leaf statement (1-2 words) into a typed Setting and push onto the list.
-fn parse_leaf_setting(
-    words: &[String],
-    line: usize,
-    settings: &mut Vec<Setting>,
-) -> Result<(), ParseError> {
-    if words.is_empty() {
-        return Ok(());
-    }
-    let keyword = words[0].as_str();
-    let value = words.get(1).map(|s| s.as_str());
-    let setting = match keyword {
-        "asn" => {
-            let val = value.ok_or_else(|| parse_err(line, "asn requires a value"))?;
-            let asn = val
-                .parse::<u32>()
-                .map_err(|err| parse_err(line, format!("invalid asn '{}': {}", val, err)))?;
-            Setting::Asn(asn)
-        }
-        "router-id" => {
-            let val = value.ok_or_else(|| parse_err(line, "router-id requires a value"))?;
-            let rid = val
-                .parse::<std::net::Ipv4Addr>()
-                .map_err(|err| parse_err(line, format!("invalid router-id '{}': {}", val, err)))?;
-            Setting::RouterId(rid)
-        }
-        "listen-addr" => {
-            let val = value.ok_or_else(|| parse_err(line, "listen-addr requires a value"))?;
-            Setting::ListenAddr(val.to_string())
-        }
-        "grpc-listen-addr" => {
-            let val = value.ok_or_else(|| parse_err(line, "grpc-listen-addr requires a value"))?;
-            Setting::GrpcListenAddr(val.to_string())
-        }
-        "log-level" => {
-            let val = value.ok_or_else(|| parse_err(line, "log-level requires a value"))?;
-            Setting::LogLevel(val.to_string())
-        }
-        "hold-time" => {
-            let val = value.ok_or_else(|| parse_err(line, "hold-time requires a value"))?;
-            let secs = val
-                .parse::<u64>()
-                .map_err(|err| parse_err(line, format!("invalid hold-time '{}': {}", val, err)))?;
-            Setting::HoldTime(secs)
-        }
-        "connect-retry" => {
-            let val = value.ok_or_else(|| parse_err(line, "connect-retry requires a value"))?;
-            let secs = val.parse::<u64>().map_err(|err| {
-                parse_err(line, format!("invalid connect-retry '{}': {}", val, err))
-            })?;
-            Setting::ConnectRetry(secs)
-        }
-        "cluster-id" => {
-            let val = value.ok_or_else(|| parse_err(line, "cluster-id requires a value"))?;
-            let cid = val
-                .parse::<std::net::Ipv4Addr>()
-                .map_err(|err| parse_err(line, format!("invalid cluster-id '{}': {}", val, err)))?;
-            Setting::ClusterId(cid)
-        }
-        "address" => {
-            let val = value.ok_or_else(|| parse_err(line, "address requires a value"))?;
-            Setting::Address(val.to_string())
-        }
-        "remote-as" => {
-            let val = value.ok_or_else(|| parse_err(line, "remote-as requires a value"))?;
-            let asn = val
-                .parse::<u32>()
-                .map_err(|err| parse_err(line, format!("invalid remote-as '{}': {}", val, err)))?;
-            Setting::RemoteAs(asn)
-        }
-        "port" => {
-            let val = value.ok_or_else(|| parse_err(line, "port requires a value"))?;
-            let port = val
-                .parse::<u16>()
-                .map_err(|err| parse_err(line, format!("invalid port '{}': {}", val, err)))?;
-            Setting::Port(port)
-        }
-        "interface" => {
-            let val = value.ok_or_else(|| parse_err(line, "interface requires a value"))?;
-            Setting::Interface(val.to_string())
-        }
-        "md5-key-file" => {
-            let val = value.ok_or_else(|| parse_err(line, "md5-key-file requires a value"))?;
-            Setting::Md5KeyFile(val.to_string())
-        }
-        "ttl-min" => {
-            let val = value.ok_or_else(|| parse_err(line, "ttl-min requires a value"))?;
-            let ttl = val
-                .parse::<u8>()
-                .map_err(|err| parse_err(line, format!("invalid ttl-min '{}': {}", val, err)))?;
-            Setting::TtlMin(ttl)
-        }
-        "next-hop-self" => Setting::NextHopSelf(parse_bool(keyword, value, line)?),
-        "passive" => Setting::Passive(parse_bool(keyword, value, line)?),
-        "rr-client" => Setting::RrClient(parse_bool(keyword, value, line)?),
-        "rs-client" => Setting::RsClient(parse_bool(keyword, value, line)?),
-        "graceful-shutdown" => Setting::GracefulShutdown(parse_bool(keyword, value, line)?),
-        "announce" => {
-            let val = value.ok_or_else(|| parse_err(line, "announce requires a prefix"))?;
-            Setting::Announce(val.to_string())
-        }
-        _ => return Err(parse_err(line, format!("unknown setting '{}'", keyword))),
-    };
-    settings.push(setting);
-    Ok(())
+/// Parse a value of type `T` for the given keyword. `T`'s `FromStr` impl validates;
+/// the Setting variant's inner type decides `T` via inference.
+fn parse_value<T>(key: &str, value: Option<&str>) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let val = value.ok_or_else(|| format!("{} requires a value", key))?;
+    val.parse::<T>()
+        .map_err(|err| format!("invalid {} '{}': {}", key, val, err))
 }
 
 pub(crate) fn parse_bgp_body(
@@ -241,80 +159,61 @@ pub(crate) fn parse_bgp_body(
     pos: &mut usize,
 ) -> Result<BgpServiceBody, ParseError> {
     let mut body = BgpServiceBody::default();
-    let mut words: Vec<String> = Vec::new();
-    let mut start_line = 0;
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                if words.is_empty() {
-                    start_line = token.line;
-                }
-                words.push(word.clone());
-                *pos += 1;
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(tokens[*pos].line, "unexpected '{'"));
             }
-            TokenKind::OpenBrace => {
-                if words.is_empty() {
-                    return Err(parse_err(token.line, "unexpected '{'"));
-                }
-                *pos += 1;
-                match words[0].as_str() {
-                    "peer" => {
-                        let name = words
-                            .get(1)
-                            .ok_or_else(|| parse_err(start_line, "peer requires a name"))?
-                            .clone();
-                        let peer = parse_peer_block(name, tokens, pos)?;
-                        body.peers.push(peer);
-                    }
-                    "policy" => {
-                        let name = words
-                            .get(1)
-                            .ok_or_else(|| parse_err(start_line, "policy requires a name"))?
-                            .clone();
-                        let policy = parse_policy_block(name, tokens, pos)?;
-                        body.policies.push(policy);
-                    }
-                    "prefix-list" => {
-                        let name = words
-                            .get(1)
-                            .ok_or_else(|| parse_err(start_line, "prefix-list requires a name"))?
-                            .clone();
-                        let prefix_list = parse_prefix_list_block(name, tokens, pos)?;
-                        body.prefix_lists.push(prefix_list);
-                    }
-                    _ => {
-                        return Err(parse_err(
-                            start_line,
-                            format!("unknown block '{}' in service bgp", words[0]),
-                        ));
-                    }
-                }
-                words.clear();
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "peer" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "peer requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.peers.push(parse_peer_block(name, tokens, pos)?);
             }
-            TokenKind::CloseBrace => {
-                if !words.is_empty() {
-                    parse_leaf_setting(&words, start_line, &mut body.settings)?;
-                    words.clear();
-                }
-                *pos += 1;
-                return Ok(body);
+            "policy" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "policy requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.policies.push(parse_policy_block(name, tokens, pos)?);
             }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    parse_leaf_setting(&words, start_line, &mut body.settings)?;
-                    words.clear();
-                }
-                *pos += 1;
+            "prefix-list" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "prefix-list requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.prefix_lists
+                    .push(parse_prefix_list_block(name, tokens, pos)?);
+            }
+            _ => {
+                let value = take_word(tokens, pos);
+                finish_statement(tokens, pos)?;
+                body.settings.push(
+                    Setting::parse(&key, value.as_deref()).map_err(|msg| parse_err(line, msg))?,
+                );
             }
         }
     }
+    expect_close_brace(tokens, pos)?;
+    Ok(body)
+}
 
-    Err(parse_err(
-        current_line(tokens, *pos),
+fn unexpected_eof(tokens: &[Token], pos: usize) -> ParseError {
+    parse_err(
+        crate::language::current_line(tokens, pos),
         "unexpected end of input, expected '}'",
-    ))
+    )
 }
 
 fn parse_peer_block(
@@ -324,137 +223,106 @@ fn parse_peer_block(
 ) -> Result<PeerBlock, ParseError> {
     let mut settings = Vec::new();
     let mut families = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut start_line = 0;
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                if words.is_empty() {
-                    start_line = token.line;
-                }
-                words.push(word.clone());
-                *pos += 1;
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(tokens[*pos].line, "unexpected '{'"));
             }
-            TokenKind::OpenBrace => {
-                if words.is_empty() {
-                    return Err(parse_err(token.line, "unexpected '{'"));
-                }
-                *pos += 1;
-                match words[0].as_str() {
-                    "family" => {
-                        let afi = words
-                            .get(1)
-                            .ok_or_else(|| parse_err(start_line, "family requires afi"))?
-                            .clone();
-                        let safi = words
-                            .get(2)
-                            .ok_or_else(|| parse_err(start_line, "family requires safi"))?
-                            .clone();
-                        let family = parse_family_block(afi, safi, tokens, pos)?;
-                        families.push(family);
-                    }
-                    _ => {
-                        return Err(parse_err(
-                            start_line,
-                            format!("unknown block '{}' in peer", words[0]),
-                        ));
-                    }
-                }
-                words.clear();
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "family" => {
+                let afi_str = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "family requires afi"))?
+                    .0;
+                let afi: Afi = afi_str.parse().map_err(|err| {
+                    parse_err(line, format!("invalid afi '{}': {}", afi_str, err))
+                })?;
+                let safi_str = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "family requires safi"))?
+                    .0;
+                let safi: Safi = safi_str.parse().map_err(|err| {
+                    parse_err(line, format!("invalid safi '{}': {}", safi_str, err))
+                })?;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                families.push(parse_family_block(afi, safi, tokens, pos)?);
             }
-            TokenKind::CloseBrace => {
-                if !words.is_empty() {
-                    parse_leaf_setting(&words, start_line, &mut settings)?;
-                    words.clear();
-                }
-                *pos += 1;
-                return Ok(PeerBlock {
-                    name,
-                    settings,
-                    families,
-                });
-            }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    parse_leaf_setting(&words, start_line, &mut settings)?;
-                    words.clear();
-                }
-                *pos += 1;
+            _ => {
+                let value = take_word(tokens, pos);
+                finish_statement(tokens, pos)?;
+                settings.push(
+                    Setting::parse(&key, value.as_deref()).map_err(|msg| parse_err(line, msg))?,
+                );
             }
         }
     }
-
-    Err(parse_err(
-        current_line(tokens, *pos),
-        "unexpected end of input, expected '}'",
-    ))
+    expect_close_brace(tokens, pos)?;
+    Ok(PeerBlock {
+        name,
+        settings,
+        families,
+    })
 }
 
 fn parse_family_block(
-    afi: String,
-    safi: String,
+    afi: Afi,
+    safi: Safi,
     tokens: &[Token],
     pos: &mut usize,
 ) -> Result<FamilyBlock, ParseError> {
     let mut directives = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut start_line = 0;
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                if words.is_empty() {
-                    start_line = token.line;
-                }
-                words.push(word.clone());
-                *pos += 1;
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(tokens[*pos].line, "unexpected '{' inside family"));
             }
-            TokenKind::OpenBrace => {
-                return Err(parse_err(token.line, "unexpected '{' inside family"));
-            }
-            TokenKind::CloseBrace => {
-                if !words.is_empty() {
-                    directives.push(parse_family_directive(&words, start_line)?);
-                    words.clear();
-                }
-                *pos += 1;
-                return Ok(FamilyBlock {
-                    afi,
-                    safi,
-                    directives,
-                });
-            }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    directives.push(parse_family_directive(&words, start_line)?);
-                    words.clear();
-                }
-                *pos += 1;
-            }
-        }
-    }
-
-    Err(parse_err(
-        current_line(tokens, *pos),
-        "unexpected end of input, expected '}'",
-    ))
-}
-
-fn parse_family_directive(words: &[String], line: usize) -> Result<FamilyDirective, ParseError> {
-    if words.len() == 3 && words[1] == "policy" {
-        match words[0].as_str() {
-            "export" => return Ok(FamilyDirective::ExportPolicy(words[2].clone())),
-            "import" => return Ok(FamilyDirective::ImportPolicy(words[2].clone())),
             _ => {}
         }
+        let (key, line) = expect_word(tokens, pos)?;
+        let directive = match key.as_str() {
+            "export" | "import" => {
+                let sub = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, format!("{} requires 'policy'", key)))?
+                    .0;
+                if sub != "policy" {
+                    return Err(parse_err(
+                        line,
+                        format!("{} requires 'policy', got '{}'", key, sub),
+                    ));
+                }
+                let policy_name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, format!("{} policy requires a name", key)))?
+                    .0;
+                if key == "export" {
+                    FamilyDirective::ExportPolicy(policy_name)
+                } else {
+                    FamilyDirective::ImportPolicy(policy_name)
+                }
+            }
+            other => {
+                return Err(parse_err(
+                    line,
+                    format!("unknown family directive '{}'", other),
+                ));
+            }
+        };
+        finish_statement(tokens, pos)?;
+        directives.push(directive);
     }
-    Err(parse_err(
-        line,
-        format!("unknown family directive '{}'", words.join(" ")),
-    ))
+    expect_close_brace(tokens, pos)?;
+    Ok(FamilyBlock {
+        afi,
+        safi,
+        directives,
+    })
 }
 
 fn parse_policy_block(
@@ -463,62 +331,42 @@ fn parse_policy_block(
     pos: &mut usize,
 ) -> Result<PolicyBlock, ParseError> {
     let mut rules = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut start_line = 0;
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                if words.is_empty() {
-                    start_line = token.line;
-                }
-                words.push(word.clone());
-                *pos += 1;
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(tokens[*pos].line, "unexpected '{' inside policy"));
             }
-            TokenKind::OpenBrace => {
-                return Err(parse_err(token.line, "unexpected '{' inside policy"));
-            }
-            TokenKind::CloseBrace => {
-                if !words.is_empty() {
-                    rules.push(parse_policy_rule(&words, start_line)?);
-                    words.clear();
-                }
-                *pos += 1;
-                return Ok(PolicyBlock { name, rules });
-            }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    rules.push(parse_policy_rule(&words, start_line)?);
-                    words.clear();
-                }
-                *pos += 1;
-            }
+            _ => {}
         }
+        let (key, line) = expect_word(tokens, pos)?;
+        let rule = match key.as_str() {
+            "match" => {
+                let set_name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "match requires a set name"))?
+                    .0;
+                let action = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "match requires an action"))?
+                    .0;
+                PolicyRule::Match { set_name, action }
+            }
+            "default" => {
+                let action = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "default requires an action"))?
+                    .0;
+                PolicyRule::Default { action }
+            }
+            other => {
+                return Err(parse_err(line, format!("unknown policy rule '{}'", other)));
+            }
+        };
+        finish_statement(tokens, pos)?;
+        rules.push(rule);
     }
-
-    Err(parse_err(
-        current_line(tokens, *pos),
-        "unexpected end of input, expected '}'",
-    ))
-}
-
-fn parse_policy_rule(words: &[String], line: usize) -> Result<PolicyRule, ParseError> {
-    if words.len() == 3 && words[0] == "match" {
-        return Ok(PolicyRule::Match {
-            set_name: words[1].clone(),
-            action: words[2].clone(),
-        });
-    }
-    if words.len() == 2 && words[0] == "default" {
-        return Ok(PolicyRule::Default {
-            action: words[1].clone(),
-        });
-    }
-    Err(parse_err(
-        line,
-        format!("unknown policy rule '{}'", words.join(" ")),
-    ))
+    expect_close_brace(tokens, pos)?;
+    Ok(PolicyBlock { name, rules })
 }
 
 fn parse_prefix_list_block(
@@ -527,40 +375,25 @@ fn parse_prefix_list_block(
     pos: &mut usize,
 ) -> Result<PrefixListBlock, ParseError> {
     let mut prefixes = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-
-    while *pos < tokens.len() {
-        let token = &tokens[*pos];
-        match &token.kind {
-            TokenKind::Word(word) => {
-                words.push(word.clone());
-                *pos += 1;
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(
+                    tokens[*pos].line,
+                    "unexpected '{' inside prefix-list",
+                ));
             }
-            TokenKind::OpenBrace => {
-                return Err(parse_err(token.line, "unexpected '{' inside prefix-list"));
-            }
-            TokenKind::CloseBrace => {
-                if !words.is_empty() {
-                    prefixes.push(words.join(" "));
-                    words.clear();
-                }
-                *pos += 1;
-                return Ok(PrefixListBlock { name, prefixes });
-            }
-            TokenKind::Newline => {
-                if !words.is_empty() {
-                    prefixes.push(words.join(" "));
-                    words.clear();
-                }
-                *pos += 1;
-            }
+            _ => {}
         }
+        let (prefix, _) = expect_word(tokens, pos)?;
+        finish_statement(tokens, pos)?;
+        prefixes.push(prefix);
     }
-
-    Err(parse_err(
-        current_line(tokens, *pos),
-        "unexpected end of input, expected '}'",
-    ))
+    expect_close_brace(tokens, pos)?;
+    Ok(PrefixListBlock { name, prefixes })
 }
 
 #[cfg(test)]
@@ -605,11 +438,11 @@ service bgp {
   asn 65001
   router-id 1.1.1.1
 
-  peer kioubit {
+  peer peer1 {
     address fe80::ade0
     remote-as 4242423914
-    interface kioubit-us3
-    md5-key-file /etc/bgp/kioubit.key
+    interface peer1-us3
+    md5-key-file /etc/bgp/peer1.key
     next-hop-self true
     port 1179
     ttl-min 254
@@ -626,14 +459,14 @@ service bgp {
         let Service::Bgp(body) = &root.services[0];
         assert_eq!(body.peers.len(), 2);
 
-        let kioubit = &body.peers[0];
-        assert_eq!(kioubit.name, "kioubit");
-        assert!(kioubit
+        let peer1 = &body.peers[0];
+        assert_eq!(peer1.name, "peer1");
+        assert!(peer1
             .settings
             .contains(&Setting::Address("fe80::ade0".to_string())));
-        assert!(kioubit.settings.contains(&Setting::RemoteAs(4242423914)));
-        assert!(kioubit.settings.contains(&Setting::NextHopSelf(true)));
-        assert!(kioubit.settings.contains(&Setting::Port(1179)));
+        assert!(peer1.settings.contains(&Setting::RemoteAs(4242423914)));
+        assert!(peer1.settings.contains(&Setting::NextHopSelf(true)));
+        assert!(peer1.settings.contains(&Setting::Port(1179)));
 
         let upstream = &body.peers[1];
         assert_eq!(upstream.name, "upstream");
@@ -742,12 +575,12 @@ service bgp {
   log-level debug
   hold-time 90
 
-  peer kioubit {
+  peer peer1 {
     address fe80::ade0
-    interface kioubit-us3
+    interface peer1-us3
     remote-as 4242423914
     next-hop-self true
-    md5-key-file /etc/bgp/kioubit.key
+    md5-key-file /etc/bgp/peer1.key
 
     family ipv4 unicast {
       export policy mine-only
@@ -784,5 +617,174 @@ service bgp {
         assert_eq!(body.policies.len(), 1);
         assert_eq!(body.prefix_lists.len(), 1);
         assert!(body.peers[0].settings.contains(&Setting::NextHopSelf(true)));
+    }
+
+    #[test]
+    fn test_setting_parse_ok() {
+        let cases = vec![
+            ("asn", Some("65001"), Setting::Asn(65001)),
+            (
+                "router-id",
+                Some("1.2.3.4"),
+                Setting::RouterId("1.2.3.4".parse().unwrap()),
+            ),
+            (
+                "cluster-id",
+                Some("10.0.0.1"),
+                Setting::ClusterId("10.0.0.1".parse().unwrap()),
+            ),
+            ("port", Some("179"), Setting::Port(179)),
+            ("ttl-min", Some("254"), Setting::TtlMin(254)),
+            ("hold-time", Some("90"), Setting::HoldTime(90)),
+            ("next-hop-self", Some("true"), Setting::NextHopSelf(true)),
+            ("passive", Some("false"), Setting::Passive(false)),
+            ("rr-client", Some("true"), Setting::RrClient(true)),
+            ("rs-client", Some("true"), Setting::RsClient(true)),
+            (
+                "graceful-shutdown",
+                Some("true"),
+                Setting::GracefulShutdown(true),
+            ),
+            (
+                "address",
+                Some("fe80::1"),
+                Setting::Address("fe80::1".to_string()),
+            ),
+            (
+                "interface",
+                Some("eth0"),
+                Setting::Interface("eth0".to_string()),
+            ),
+            (
+                "md5-key-file",
+                Some("/etc/bgp/x.key"),
+                Setting::Md5KeyFile("/etc/bgp/x.key".to_string()),
+            ),
+            (
+                "listen-addr",
+                Some("[::]:179"),
+                Setting::ListenAddr("[::]:179".to_string()),
+            ),
+            (
+                "announce",
+                Some("10.0.0.0/24"),
+                Setting::Announce("10.0.0.0/24".to_string()),
+            ),
+        ];
+        for (key, value, expected) in cases {
+            let got = Setting::parse(key, value).unwrap();
+            assert_eq!(got, expected, "for ({:?}, {:?})", key, value);
+        }
+    }
+
+    #[test]
+    fn test_setting_parse_errors() {
+        let cases = vec![
+            ("asn", None, "asn requires a value"),
+            ("asn", Some("true"), "invalid asn 'true'"),
+            ("asn", Some("foo"), "invalid asn 'foo'"),
+            ("router-id", Some("300.0.0.0"), "invalid router-id"),
+            ("port", Some("99999"), "invalid port"),
+            ("next-hop-self", Some("yes"), "invalid next-hop-self 'yes'"),
+            ("next-hop-self", None, "next-hop-self requires a value"),
+            ("weird-key", Some("x"), "unknown setting 'weird-key'"),
+            ("weird-key", None, "unknown setting 'weird-key'"),
+        ];
+        for (key, value, expected) in cases {
+            let err = Setting::parse(key, value).unwrap_err();
+            assert!(
+                err.contains(expected),
+                "for ({:?}, {:?}): expected {:?} in {:?}",
+                key,
+                value,
+                expected,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_afi_safi_rejected_at_parse_time() {
+        let cases = vec![
+            (
+                "service bgp { peer x { family ipvv4 unicast { } } }",
+                "invalid afi 'ipvv4'",
+            ),
+            (
+                "service bgp { peer x { family ipv4 unicorn { } } }",
+                "invalid safi 'unicorn'",
+            ),
+        ];
+        for (input, expected) in cases {
+            let err = parse(input).unwrap_err();
+            assert!(
+                err.message.contains(expected),
+                "for {:?}: expected {:?} in {:?}",
+                input,
+                expected,
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_settings_carry_line() {
+        // Errors from Setting::parse are wrapped with the keyword's line by the
+        // recursive-descent parser.
+        let cases = vec![
+            ("service bgp { asn }", "asn requires a value"),
+            ("service bgp { asn true }", "invalid asn 'true'"),
+            ("service bgp { weird-key x }", "unknown setting 'weird-key'"),
+            (
+                "service bgp { peer x { weird-key x } }",
+                "unknown setting 'weird-key'",
+            ),
+        ];
+        for (input, expected) in cases {
+            let err = parse(input).unwrap_err();
+            assert!(
+                err.message.contains(expected),
+                "for {:?}: expected {:?} in {:?}",
+                input,
+                expected,
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_trailing_tokens_rejected() {
+        let cases = vec![
+            (
+                "service bgp { asn 65001 junk }",
+                "unexpected trailing token",
+            ),
+            (
+                "service bgp { peer x { address 10.0.0.1 junk } }",
+                "unexpected trailing token",
+            ),
+            (
+                "service bgp { peer x { family ipv4 unicast { export policy p extra } } }",
+                "unexpected trailing token",
+            ),
+            (
+                "service bgp { policy p { default reject extra } }",
+                "unexpected trailing token",
+            ),
+            (
+                "service bgp { prefix-list p { 10.0.0.0/24 extra } }",
+                "unexpected trailing token",
+            ),
+        ];
+        for (input, expected) in cases {
+            let err = parse(input).unwrap_err();
+            assert!(
+                err.message.contains(expected),
+                "for {:?}: expected {:?} in {:?}",
+                input,
+                expected,
+                err.message
+            );
+        }
     }
 }
