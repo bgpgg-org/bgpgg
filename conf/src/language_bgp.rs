@@ -67,7 +67,7 @@ pub enum Setting {
     RrClient(bool),
     RsClient(bool),
     GracefulShutdown(bool),
-    Announce(String),
+    Originate(String),
 }
 
 /// `peer <ADDRESS> { ... }` block. The block header is the peer's IP address;
@@ -140,7 +140,7 @@ impl fmt::Display for Setting {
             Setting::RrClient(v) => write!(f, "rr-client {}", v),
             Setting::RsClient(v) => write!(f, "rs-client {}", v),
             Setting::GracefulShutdown(v) => write!(f, "graceful-shutdown {}", v),
-            Setting::Announce(v) => write!(f, "announce {}", v),
+            Setting::Originate(v) => write!(f, "originate {}", v),
         }
     }
 }
@@ -276,7 +276,7 @@ impl Setting {
             "rr-client" => Setting::RrClient(parse_value(key, value)?),
             "rs-client" => Setting::RsClient(parse_value(key, value)?),
             "graceful-shutdown" => Setting::GracefulShutdown(parse_value(key, value)?),
-            "announce" => Setting::Announce(parse_value(key, value)?),
+            "originate" => Setting::Originate(parse_value(key, value)?),
             other => return Err(format!("unknown setting '{}'", other)),
         })
     }
@@ -680,22 +680,22 @@ service bgp {
     }
 
     #[test]
-    fn test_parse_announce() {
+    fn test_parse_originate() {
         let input = "\
 service bgp {
   asn 65001
   router-id 1.1.1.1
-  announce 172.23.211.0/27
-  announce fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27
+  originate fd0d:fbde:bca5::/48
 }";
         let root = parse(input).unwrap();
         let Service::Bgp(body) = &root.services[0];
         assert!(body
             .settings
-            .contains(&Setting::Announce("172.23.211.0/27".to_string())));
+            .contains(&Setting::Originate("172.23.211.0/27".to_string())));
         assert!(body
             .settings
-            .contains(&Setting::Announce("fd0d:fbde:bca5::/48".to_string())));
+            .contains(&Setting::Originate("fd0d:fbde:bca5::/48".to_string())));
     }
 
     #[test]
@@ -724,8 +724,8 @@ service bgp {
     }
   }
 
-  announce 172.23.211.0/27
-  announce fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27
+  originate fd0d:fbde:bca5::/48
 
   policy mine-only {
     match my-prefixes accept
@@ -746,7 +746,7 @@ service bgp {
         assert_eq!(body.peers.len(), 1);
         assert!(body
             .settings
-            .contains(&Setting::Announce("172.23.211.0/27".to_string())));
+            .contains(&Setting::Originate("172.23.211.0/27".to_string())));
         assert_eq!(body.policies.len(), 1);
         assert_eq!(body.prefix_lists.len(), 1);
         assert!(body.peers[0].settings.contains(&Setting::NextHopSelf(true)));
@@ -794,9 +794,9 @@ service bgp {
                 Setting::ListenAddr("[::]:179".to_string()),
             ),
             (
-                "announce",
+                "originate",
                 Some("10.0.0.0/24"),
-                Setting::Announce("10.0.0.0/24".to_string()),
+                Setting::Originate("10.0.0.0/24".to_string()),
             ),
         ];
         for (key, value, expected) in cases {
@@ -884,8 +884,8 @@ service bgp {
 service bgp {
   asn 65001
   router-id 1.1.1.1
-  announce 172.23.211.0/27
-  announce fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27
+  originate fd0d:fbde:bca5::/48
 
   policy mine-only {
     match my-prefixes accept

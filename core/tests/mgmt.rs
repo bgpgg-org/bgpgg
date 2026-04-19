@@ -110,6 +110,16 @@ async fn test_add_peer_success() {
         "Timeout waiting for peers to establish",
     )
     .await;
+
+    // AddPeer routes through commit_config -- rogg.conf must reflect the new peer.
+    let conf = server1.read_conf();
+    let peer_addr = server2.address.to_string();
+    assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should include {}; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -130,17 +140,32 @@ async fn test_remove_peer_not_found() {
 #[tokio::test]
 async fn test_remove_peer_success() {
     let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let peer_addr = server2.address.to_string();
 
-    // Verify peer exists
+    // Verify peer exists -- in memory and on disk.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
+    let conf = server1.read_conf();
+    assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should include {} before RemovePeer; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 
     // Remove peer
     server1.remove_peer(&server2).await;
 
-    // Verify peer is gone
+    // Verify peer is gone -- in memory and on disk.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
+    let conf = server1.read_conf();
+    assert!(
+        !conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf peers should not include {} after RemovePeer; got {:?}",
+        peer_addr,
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

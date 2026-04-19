@@ -57,6 +57,9 @@ use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fs, io, process};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio::time::Duration;
@@ -92,9 +95,46 @@ pub struct TestServer {
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
     pub config: BgpConfig,
     runtime: Option<tokio::runtime::Runtime>,
+    /// Tempdir backing `rogg.conf`. Held so it isn't deleted mid-test.
+    config_dir: TempDir,
+}
+
+/// Tempdir for tests. Deletes itself when dropped.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new() -> io::Result<Self> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!("bgpgg-test-{}-{}", process::id(), n));
+        fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &FsPath {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 impl TestServer {
+    /// Parse the on-disk rogg.conf this server commits to. Panics if missing
+    /// or unparseable -- both are bugs in commit_config.
+    pub fn read_conf(&self) -> BgpConfig {
+        let path = self.config_dir.path().join("rogg.conf");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
     /// Kill the BGP server by shutting down its runtime (simulates process death)
     pub fn kill(&mut self) {
         // Shutdown the runtime - this kills ALL tasks in it (simulates process death)
@@ -495,7 +535,9 @@ pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     let grpc_listener = grpc_listener.into_std().unwrap();
 
     let config_clone = config.clone();
-    let server = BgpServer::new(config).expect("valid server config");
+    let config_dir = TempDir::new().expect("create config tempdir");
+    let config_path = config_dir.path().join("rogg.conf");
+    let server = BgpServer::new(config, config_path).expect("valid server config");
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -559,6 +601,7 @@ pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
         address: bind_ip,
         config: config_clone,
         runtime: Some(runtime),
+        config_dir,
     }
 }
 

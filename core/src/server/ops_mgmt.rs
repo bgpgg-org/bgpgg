@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::config::{candidate_path_for, commit_config};
 use super::{
-    AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionType, GetPeerResponse,
-    GetPeersResponse, PeerInfo, PolicyDirection, ResetType,
+    AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, GetPeerResponse, GetPeersResponse,
+    PeerInfo, PolicyDirection, ResetType,
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::log::{error, info};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::net::apply_tcp_md5;
-#[cfg(target_os = "freebsd")]
-use crate::net::remove_tcp_md5;
+use crate::log::info;
 use crate::net::IpNetwork;
 use crate::peer::PeerOp;
 use crate::policy::sets::{
@@ -31,15 +28,14 @@ use crate::policy::sets::{
 };
 use crate::policy::DefinedSetType;
 use crate::rib::{PathAttrs, Route, RouteKey};
-use crate::types::PeerDownReason;
-use conf::bgp::{DefinedSetConfig, PeerConfig, StatementConfig};
+use conf::bgp::{BgpConfig, DefinedSetConfig, PeerConfig, StatementConfig};
 use regex::Regex;
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::bgp::msg_notification::CeaseSubcode;
 use crate::grpc::proto::RibType;
 use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
 use crate::rpki::vrp::{RpkiValidation, Vrp};
@@ -191,6 +187,10 @@ pub enum MgmtOp {
     GetRunningConfig {
         response: oneshot::Sender<String>,
     },
+    /// Apply ggsh's staged candidate config.
+    CommitConfig {
+        response: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +211,7 @@ impl BgpServer {
                     .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
-                self.handle_remove_peer(addr, response).await;
+                self.handle_remove_peer(addr, response, bind_addr).await;
             }
             MgmtOp::DisablePeer { addr, response } => {
                 self.handle_disable_peer(addr, response);
@@ -357,25 +357,59 @@ impl BgpServer {
             MgmtOp::GetRunningConfig { response } => {
                 let _ = response.send(self.config.to_rogg_conf());
             }
+            MgmtOp::CommitConfig { response } => {
+                self.handle_commit_config(response, bind_addr).await;
+            }
         }
     }
 
+    /// Read the candidate file ggsh staged, parse it, run `commit_config`.
+    /// On success, the candidate file has already been renamed over
+    /// `rogg.conf` by `commit_config`'s persist step, so there's nothing to
+    /// clean up. On failure, leave the candidate file in place so the
+    /// operator can inspect what was attempted.
+    async fn handle_commit_config(
+        &mut self,
+        response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
+    ) {
+        let candidate = candidate_path_for(&self.config_path);
+
+        let text = match fs::read_to_string(&candidate) {
+            Ok(text) => text,
+            Err(e) => {
+                let _ = response.send(Err(format!(
+                    "failed to read candidate file {}: {}",
+                    candidate.display(),
+                    e
+                )));
+                return;
+            }
+        };
+
+        let new_config = match BgpConfig::from_conf_str(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to parse candidate config: {}", e)));
+                return;
+            }
+        };
+
+        let _ = response.send(commit_config(self, new_config, bind_addr).await);
+    }
+
+    /// Imperative AddPeer routes through `commit_config`: build new config in
+    /// memory (current + new peer), then let `reconfigure_peers` apply the
+    /// delta and persist `rogg.conf`. Same code path as ggsh's `Commit`.
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        config: PeerConfig,
+        mut config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
         info!(peer_addr = %addr, "adding peer via request");
 
-        // Validate peer configuration
-        if let Err(e) = config.validate() {
-            let _ = response.send(Err(e));
-            return;
-        }
-
-        // Parse peer IP address
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -384,55 +418,30 @@ impl BgpServer {
             }
         };
 
-        let peer_addr = SocketAddr::new(peer_ip, config.port);
-
-        // Check if peer already exists
         if self.peers.contains_key(&peer_ip) {
             let _ = response.send(Err(format!("peer {} already exists", peer_ip)));
             return;
         }
 
-        // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        // Passive mode peers only accept incoming connections
-        let conn_type = if config.passive_mode {
-            ConnectionType::Incoming
-        } else {
-            ConnectionType::Outgoing
-        };
+        config.address = addr;
+        let mut new_config = self.config.clone();
+        new_config.peers.push(config);
 
-        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
-
-        self.peers.insert(
-            peer_ip,
-            PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
-        );
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
-            if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
-                error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
-            }
-        }
-
-        // RFC 4271: ManualStart for admin-added peers
-        if config.passive_mode {
-            let _ = peer_tx.send(PeerOp::ManualStartPassive);
-        } else {
-            let _ = peer_tx.send(PeerOp::ManualStart);
-        }
-
-        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
-        let _ = response.send(Ok(()));
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
+    /// Imperative RemovePeer routes through `commit_config`: build new config
+    /// in memory (current minus this peer), then let `reconfigure_peers` apply
+    /// the delta and persist `rogg.conf`.
     async fn handle_remove_peer(
         &mut self,
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
     ) {
         info!(peer_ip = %addr, "removing peer via request");
 
-        // Parse the address to get IpAddr
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -441,56 +450,18 @@ impl BgpServer {
             }
         };
 
-        // Send graceful shutdown notification to all active connections
-        if let Some(entry) = self.peers.get(&peer_ip) {
-            entry.send_to_all(|| PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
-        } else {
+        if !self.peers.contains_key(&peer_ip) {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
 
-        // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
-        if let Some(entry) = self.peers.get(&peer_ip) {
-            if let Some(conn) = entry.established_conn() {
-                if let (Some(asn), Some(bgp_id)) = (conn.asn, conn.bgp_id) {
-                    let use_4byte_asn = entry.supports_4byte_asn();
-                    self.broadcast_bmp(BmpOp::PeerDown {
-                        peer_ip,
-                        peer_as: asn,
-                        peer_bgp_id: bgp_id,
-                        reason: PeerDownReason::PeerDeConfigured,
-                        use_4byte_asn,
-                    });
-                }
-            }
-        }
+        let mut new_config = self.config.clone();
+        new_config
+            .peers
+            .retain(|peer| peer.address.parse::<IpAddr>().ok() != Some(peer_ip));
 
-        // Clean up SADB entries on FreeBSD when the peer had MD5 configured.
-        #[cfg(target_os = "freebsd")]
-        if let (Some(fd), Some(entry)) = (self.listener_fd, self.peers.get(&peer_ip)) {
-            if entry.config.md5_key_file.is_some() {
-                if let Err(e) = remove_tcp_md5(fd, peer_ip) {
-                    error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
-                }
-            }
-        }
-
-        // Cancel any running timers before removing the peer
-        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-            peer_info.llgr_timers.cancel_all();
-            peer_info.rr_stale_timers.cancel_all();
-        }
-
-        // Now remove the peer from the map
-        self.peers.remove(&peer_ip);
-
-        // Notify Loc-RIB to remove routes from this peer
-        let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
-
-        // Propagate route changes (withdrawals or new best paths) to all remaining peers
-        self.propagate_routes(delta, None).await;
-
-        let _ = response.send(Ok(()));
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
     fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {

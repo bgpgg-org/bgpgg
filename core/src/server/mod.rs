@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod config;
 pub(crate) mod ops;
 pub(crate) mod ops_mgmt;
 pub(crate) mod propagate;
@@ -28,6 +29,8 @@ use crate::log::{error, info, warn};
 use crate::net::apply_gtsm;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
+#[cfg(target_os = "freebsd")]
+use crate::net::remove_tcp_md5;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::set_ttl_max;
 use crate::net::{bind_addr_from_ip, peer_ip};
@@ -49,6 +52,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -532,10 +536,12 @@ pub struct BgpServer {
     pub(crate) vrp_table: VrpTable,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
+    /// Path to rogg.conf. Commits write here.
+    pub(crate) config_path: PathBuf,
 }
 
 impl BgpServer {
-    pub fn new(config: BgpConfig) -> Result<Self, ServerError> {
+    pub fn new(config: BgpConfig, config_path: PathBuf) -> Result<Self, ServerError> {
         let local_bgp_id = u32::from(config.router_id);
         let sock_addr: SocketAddr = config
             .listen_addr
@@ -567,6 +573,7 @@ impl BgpServer {
             rpki_tx: None,
             vrp_table: VrpTable::new(),
             listener_fd: None,
+            config_path,
         })
     }
 
@@ -704,6 +711,50 @@ impl BgpServer {
         }
     }
 
+    /// Diff `old.peers` vs `new.peers` and apply: spawn added, drop removed,
+    /// restart modified. Called by `commit_config`.
+    pub(crate) async fn reconfigure_peers(
+        &mut self,
+        old: &BgpConfig,
+        new: &BgpConfig,
+        bind_addr: SocketAddr,
+    ) -> Result<(), String> {
+        let old_peers: HashMap<IpAddr, &PeerConfig> = old
+            .peers
+            .iter()
+            .filter_map(|peer| peer.address.parse::<IpAddr>().ok().map(|ip| (ip, peer)))
+            .collect();
+        let new_peers: HashMap<IpAddr, &PeerConfig> = new
+            .peers
+            .iter()
+            .filter_map(|peer| peer.address.parse::<IpAddr>().ok().map(|ip| (ip, peer)))
+            .collect();
+
+        for ip in old_peers.keys() {
+            if !new_peers.contains_key(ip) {
+                self.shutdown_and_remove_peer(*ip).await;
+            }
+        }
+
+        for (ip, cfg) in &new_peers {
+            if !old_peers.contains_key(ip) {
+                self.spawn_and_start_peer(*ip, (*cfg).clone(), bind_addr);
+            }
+        }
+
+        for (ip, new_cfg) in &new_peers {
+            if let Some(old_cfg) = old_peers.get(ip) {
+                if old_cfg != new_cfg {
+                    info!(%ip, "peer config changed -- restarting session");
+                    self.shutdown_and_remove_peer(*ip).await;
+                    self.spawn_and_start_peer(*ip, (*new_cfg).clone(), bind_addr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn init_configured_bmp_servers(&mut self) {
         for bmp_cfg in &self.config.bmp_servers.clone() {
             let Ok(addr) = bmp_cfg.address.parse::<SocketAddr>() else {
@@ -800,6 +851,87 @@ impl BgpServer {
         });
 
         peer_tx
+    }
+
+    /// Spawn a peer task and start it. Caller keeps `self.config.peers` in sync.
+    pub(crate) fn spawn_and_start_peer(
+        &mut self,
+        peer_ip: IpAddr,
+        config: PeerConfig,
+        bind_addr: SocketAddr,
+    ) {
+        let peer_addr = SocketAddr::new(peer_ip, config.port);
+
+        let conn_type = if config.passive_mode {
+            ConnectionType::Incoming
+        } else {
+            ConnectionType::Outgoing
+        };
+
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
+
+        self.peers.insert(
+            peer_ip,
+            PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
+            if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
+                error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
+            }
+        }
+
+        if config.passive_mode {
+            let _ = peer_tx.send(PeerOp::ManualStartPassive);
+        } else {
+            let _ = peer_tx.send(PeerOp::ManualStart);
+        }
+
+        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
+    }
+
+    /// Tear down a peer session and drop it. Caller keeps `self.config.peers` in sync.
+    pub(crate) async fn shutdown_and_remove_peer(&mut self, peer_ip: IpAddr) {
+        let Some(entry) = self.peers.get(&peer_ip) else {
+            return;
+        };
+
+        entry.send_to_all(|| PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+
+        if let Some(conn) = entry.established_conn() {
+            if let (Some(asn), Some(bgp_id)) = (conn.asn, conn.bgp_id) {
+                let use_4byte_asn = entry.supports_4byte_asn();
+                self.broadcast_bmp(BmpOp::PeerDown {
+                    peer_ip,
+                    peer_as: asn,
+                    peer_bgp_id: bgp_id,
+                    reason: PeerDownReason::PeerDeConfigured,
+                    use_4byte_asn,
+                });
+            }
+        }
+
+        #[cfg(target_os = "freebsd")]
+        if let (Some(fd), Some(entry)) = (self.listener_fd, self.peers.get(&peer_ip)) {
+            if entry.config.md5_key_file.is_some() {
+                if let Err(e) = remove_tcp_md5(fd, peer_ip) {
+                    error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
+                }
+            }
+        }
+
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            peer_info.llgr_timers.cancel_all();
+            peer_info.rr_stale_timers.cancel_all();
+        }
+
+        self.peers.remove(&peer_ip);
+
+        let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
+        self.propagate_routes(delta, None).await;
+
+        info!(%peer_ip, "peer removed");
     }
 
     async fn accept_peer(&mut self, stream: TcpStream) {
@@ -1010,7 +1142,8 @@ mod tests {
 
     fn make_server() -> BgpServer {
         let config = BgpConfig::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
-        BgpServer::new(config).expect("valid config")
+        // Path required by constructor; these tests never commit so it's unused.
+        BgpServer::new(config, PathBuf::from("/tmp/test-rogg.conf")).expect("valid config")
     }
 
     #[test]

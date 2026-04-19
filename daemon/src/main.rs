@@ -17,6 +17,8 @@ use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use clap::Parser;
 use conf::bgp::BgpConfig;
+use std::path::PathBuf;
+use std::process;
 use tracing::info;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -36,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = BgpConfig::from_conf_file(&args.config).unwrap_or_else(|err| {
         eprintln!("Error: failed to load config from {}: {}", args.config, err);
-        std::process::exit(1);
+        process::exit(1);
     });
 
     // Validate peer configurations
@@ -46,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Error: invalid peer configuration ({}): {}",
                 peer_config.address, err
             );
-            std::process::exit(1);
+            process::exit(1);
         }
     }
 
@@ -78,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create BGP server
-    let server = BgpServer::new(config)?;
+    let server = BgpServer::new(config, PathBuf::from(&args.config))?;
 
     // Create gRPC service with cloned components
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());

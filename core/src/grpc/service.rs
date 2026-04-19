@@ -50,6 +50,8 @@ use super::proto::{
     AddRpkiCacheResponse,
     AdminState as ProtoAdminState,
     BgpState as ProtoBgpState,
+    CommitConfigRequest,
+    CommitConfigResponse,
     DisablePeerRequest,
     DisablePeerResponse,
     EnablePeerRequest,
@@ -1251,6 +1253,33 @@ impl BgpService for BgpGrpcService {
             .map_err(|_| Status::internal("request processing failed"))?;
 
         Ok(Response::new(GetRunningConfigResponse { text }))
+    }
+
+    async fn commit_config(
+        &self,
+        _request: Request<CommitConfigRequest>,
+    ) -> Result<Response<CommitConfigResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::CommitConfig { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(CommitConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(CommitConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
     }
 
     async fn add_bmp_server(

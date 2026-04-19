@@ -246,7 +246,7 @@ pub enum MaxPrefixAction {
 }
 
 /// Max prefix limit configuration
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MaxPrefixSetting {
     pub limit: u32,
     #[serde(default = "default_max_prefix_action")]
@@ -258,7 +258,7 @@ fn default_max_prefix_action() -> MaxPrefixAction {
 }
 
 /// Graceful Restart configuration (RFC 4724)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct GracefulRestartConfig {
     /// Enable Graceful Restart (default: true)
     #[serde(default = "default_gr_enabled")]
@@ -293,7 +293,7 @@ fn default_llgr_enabled() -> bool {
 
 /// RFC 9494: Long-Lived Graceful Restart configuration.
 /// Used at both server level and per-peer level.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct LlgrConfig {
     /// Enable LLGR (default: true). Set to false to explicitly disable.
@@ -355,7 +355,7 @@ pub enum AddPathSend {
 
 /// Per address-family configuration overrides.
 /// Fields set to None inherit from the peer-level PeerConfig defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct AfiSafiConfig {
     pub afi: Afi,
@@ -386,7 +386,7 @@ impl AfiSafiConfig {
 }
 
 /// Peer configuration in YAML config file.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct PeerConfig {
     /// Peer IP address (IPv4 or IPv6). This IS the peer's identity — the
