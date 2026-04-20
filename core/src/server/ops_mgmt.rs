@@ -14,8 +14,8 @@
 
 use super::config::{candidate_path_for, commit_config};
 use super::{
-    AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, GetPeerResponse, GetPeersResponse,
-    PeerInfo, PolicyDirection, ResetType,
+    AdminState, BgpServer, BmpOp, BmpPeerStats, GetPeerResponse, GetPeersResponse, PeerInfo,
+    PolicyDirection, ResetType,
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
@@ -28,7 +28,7 @@ use crate::policy::sets::{
 };
 use crate::policy::DefinedSetType;
 use crate::rib::{PathAttrs, Route, RouteKey};
-use conf::bgp::{BgpConfig, DefinedSetConfig, PeerConfig, StatementConfig};
+use conf::bgp::{BgpConfig, BmpConfig, DefinedSetConfig, PeerConfig, RpkiCacheConfig, StatementConfig};
 use regex::Regex;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -37,7 +37,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::grpc::proto::RibType;
-use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
+use crate::rpki::manager::{RpkiCacheState, RpkiOp};
 use crate::rpki::vrp::{RpkiValidation, Vrp};
 
 /// Map a DefinedSetConfig to its DefinedSetType.
@@ -168,7 +168,7 @@ pub enum MgmtOp {
     },
     // RPKI Cache Management
     AddRpkiCache {
-        config: RtrCacheConfig,
+        config: RpkiCacheConfig,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRpkiCache {
@@ -277,11 +277,12 @@ impl BgpServer {
                 statistics_timeout,
                 response,
             } => {
-                self.handle_add_bmp_server(addr, statistics_timeout, response)
+                self.handle_add_bmp_server(addr, statistics_timeout, response, bind_addr)
                     .await;
             }
             MgmtOp::RemoveBmpServer { addr, response } => {
-                self.handle_remove_bmp_server(addr, response);
+                self.handle_remove_bmp_server(addr, response, bind_addr)
+                    .await;
             }
             MgmtOp::GetBmpServers { response } => {
                 self.handle_get_bmp_servers(response);
@@ -339,10 +340,10 @@ impl BgpServer {
                 self.handle_set_peer_graceful_shutdown(addr, enabled, response);
             }
             MgmtOp::AddRpkiCache { config, response } => {
-                self.handle_add_rpki_cache(config, response);
+                self.handle_add_rpki_cache(config, response, bind_addr).await;
             }
             MgmtOp::RemoveRpkiCache { addr, response } => {
-                self.handle_remove_rpki_cache(addr, response);
+                self.handle_remove_rpki_cache(addr, response, bind_addr).await;
             }
             MgmtOp::GetRpkiCaches { response } => {
                 self.handle_get_rpki_caches(response).await;
@@ -355,7 +356,7 @@ impl BgpServer {
                 self.handle_get_rpki_validation(prefix, origin_as, response);
             }
             MgmtOp::GetRunningConfig { response } => {
-                let _ = response.send(self.config.to_rogg_conf());
+                let _ = response.send(self.config.to_conf_str());
             }
             MgmtOp::CommitConfig { response } => {
                 self.handle_commit_config(response, bind_addr).await;
@@ -930,42 +931,46 @@ impl BgpServer {
         }
     }
 
+    /// Route AddBmpServer through `commit_config`: append a BmpConfig to the
+    /// new config, commit_config's reconfigure spawns the task and persists.
     async fn handle_add_bmp_server(
         &mut self,
         addr: SocketAddr,
         statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
     ) {
-        // Spawn new BmpTask
-        let task_tx = self.spawn_bmp_task(addr, statistics_timeout);
-
-        // Store in HashMap
-        let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
-        self.bmp_tasks.insert(addr, task_info);
-
-        info!(%addr, "BMP task added");
-
-        // Send initial state to new BMP destination
-        let established_peers = self.get_established_peers();
-        send_initial_bmp_state_to_task(
-            &self.bmp_tasks.get(&addr).unwrap().task_tx,
-            established_peers,
-            response,
-        );
+        if self.bmp_tasks.contains_key(&addr) {
+            let _ = response.send(Err(format!("BMP server {} already exists", addr)));
+            return;
+        }
+        let mut new_config = self.config.clone();
+        new_config.bmp_servers.push(BmpConfig {
+            address: addr.to_string(),
+            statistics_timeout,
+        });
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
-    fn handle_remove_bmp_server(
+    /// Route RemoveBmpServer through `commit_config`: drop the matching entry
+    /// from the new config, reconfigure shuts the task down and persists.
+    async fn handle_remove_bmp_server(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
     ) {
-        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
-            drop(task_info.task_tx); // Channel drop triggers graceful shutdown
-            info!(%addr, "BMP task removed");
-            let _ = response.send(Ok(()));
-        } else {
+        if !self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
+            return;
         }
+        let mut new_config = self.config.clone();
+        new_config
+            .bmp_servers
+            .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
     fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
@@ -998,39 +1003,57 @@ impl BgpServer {
         let _ = response.send(stats);
     }
 
-    fn handle_add_rpki_cache(
+    /// Route AddRpkiCache through `commit_config`: append the RpkiCacheConfig
+    /// to the new config, reconfigure spawns the RTR session and persists.
+    async fn handle_add_rpki_cache(
         &mut self,
-        config: RtrCacheConfig,
+        config: RpkiCacheConfig,
         response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
     ) {
-        let rpki_tx = match &self.rpki_tx {
-            Some(tx) => tx.clone(),
-            None => self.spawn_rtr_manager(),
+        let addr: SocketAddr = match config.address.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = response.send(Err(format!(
+                    "invalid RPKI cache address '{}': {}",
+                    config.address, e
+                )));
+                return;
+            }
         };
-        let addr = config.address;
-        if rpki_tx.send(RpkiOp::AddCache(config)).is_err() {
-            let _ = response.send(Err("RPKI manager not running".to_string()));
+        if self
+            .config
+            .rpki_caches
+            .iter()
+            .any(|c| c.address.parse::<SocketAddr>().ok() == Some(addr))
+        {
+            let _ = response.send(Err(format!("RPKI cache {} already exists", addr)));
             return;
         }
-        info!(%addr, "RPKI cache added via gRPC");
-        let _ = response.send(Ok(()));
+        let mut new_config = self.config.clone();
+        new_config.rpki_caches.push(config);
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
-    fn handle_remove_rpki_cache(
+    /// Route RemoveRpkiCache through `commit_config`.
+    async fn handle_remove_rpki_cache(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
     ) {
-        let Some(rpki_tx) = &self.rpki_tx else {
-            let _ = response.send(Err("no RPKI caches configured".to_string()));
-            return;
-        };
-        if rpki_tx.send(RpkiOp::RemoveCache(addr)).is_err() {
-            let _ = response.send(Err("RPKI manager not running".to_string()));
+        let mut new_config = self.config.clone();
+        let before = new_config.rpki_caches.len();
+        new_config
+            .rpki_caches
+            .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
+        if new_config.rpki_caches.len() == before {
+            let _ = response.send(Err(format!("RPKI cache {} not found", addr)));
             return;
         }
-        info!(%addr, "RPKI cache removed via gRPC");
-        let _ = response.send(Ok(()));
+        let result = commit_config(self, new_config, bind_addr).await;
+        let _ = response.send(result);
     }
 
     async fn handle_get_rpki_caches(
@@ -1465,7 +1488,7 @@ impl BgpServer {
         let _ = response.send(Ok(()));
     }
 
-    fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
+    pub(super) fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
         self.peers
             .iter()
             .filter(|(_, peer_info)| peer_info.established_conn().is_some())
@@ -1597,11 +1620,10 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     ))
 }
 
-/// Send initial BMP messages for existing peers after BMP server connects
-fn send_initial_bmp_state_to_task(
+/// Send initial BMP messages for existing peers after BMP server connects.
+pub(super) fn send_initial_bmp_state(
     task_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
     established_peers: Vec<(IpAddr, &PeerInfo)>,
-    response: oneshot::Sender<Result<(), String>>,
 ) {
     use crate::bgp::msg::MessageFormat;
     use crate::peer::outgoing::batch_announcements;
@@ -1665,5 +1687,4 @@ fn send_initial_bmp_state_to_task(
             }
         }
     }
-    let _ = response.send(Ok(()));
 }

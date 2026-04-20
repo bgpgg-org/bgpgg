@@ -19,12 +19,12 @@ use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
-use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
 use crate::server::AdminState;
 use conf::bgp::{
     AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
+    RpkiCacheConfig, TransportType,
 };
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
@@ -1376,27 +1376,33 @@ impl BgpService for BgpGrpcService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {}", e)))?;
 
-        let transport = match inner.transport.as_deref() {
-            Some("ssh") => {
-                let username = inner.ssh_username.ok_or_else(|| {
-                    Status::invalid_argument("ssh_username required for SSH transport")
-                })?;
-                let private_key_file = inner.ssh_private_key_file.ok_or_else(|| {
-                    Status::invalid_argument("ssh_private_key_file required for SSH transport")
-                })?;
-                RtrTransport::Ssh(SshTransport {
-                    username,
-                    private_key_file,
-                    known_hosts_file: inner.ssh_known_hosts_file,
-                })
+        let transport = inner
+            .transport
+            .as_deref()
+            .map(str::parse::<TransportType>)
+            .transpose()
+            .map_err(|e| Status::invalid_argument(format!("invalid transport: {}", e)))?
+            .unwrap_or_default();
+        if matches!(transport, TransportType::Ssh) {
+            if inner.ssh_username.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_username required for SSH transport",
+                ));
             }
-            _ => RtrTransport::Tcp,
-        };
+            if inner.ssh_private_key_file.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_private_key_file required for SSH transport",
+                ));
+            }
+        }
 
-        let config = RtrCacheConfig {
-            address: addr,
+        let config = RpkiCacheConfig {
+            address: addr.to_string(),
             preference: inner.preference.map(|p| p as u8).unwrap_or(0),
             transport,
+            ssh_username: inner.ssh_username,
+            ssh_private_key_file: inner.ssh_private_key_file,
+            ssh_known_hosts_file: inner.ssh_known_hosts_file,
             retry_interval: inner.retry_interval,
             refresh_interval: inner.refresh_interval,
             expire_interval: inner.expire_interval,

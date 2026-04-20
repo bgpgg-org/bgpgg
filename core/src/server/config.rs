@@ -36,13 +36,9 @@ pub(crate) async fn commit_config(
 
     let old_config = server.config.clone();
 
-    if let Err(apply_err) = server
-        .reconfigure_peers(&old_config, &new_config, bind_addr)
-        .await
-    {
-        if let Err(revert_err) = server
-            .reconfigure_peers(&new_config, &old_config, bind_addr)
-            .await
+    if let Err(apply_err) = reconfigure_all(server, &old_config, &new_config, bind_addr).await {
+        if let Err(revert_err) =
+            reconfigure_all(server, &new_config, &old_config, bind_addr).await
         {
             error!(
                 apply_err = %apply_err,
@@ -53,13 +49,28 @@ pub(crate) async fn commit_config(
         return Err(apply_err);
     }
 
-    server.config = new_config;
-
-    if let Err(e) = persist_config(server) {
+    if let Err(e) = persist_config(&server.config_path, &new_config) {
         error!(error = %e, "failed to persist rogg.conf after in-memory commit");
         return Err(format!("applied but failed to persist: {}", e));
     }
 
+    server.config = new_config;
+
+    Ok(())
+}
+
+/// Apply the new config to runtime by calling each subsystem's reconfigure in
+/// sequence. The first failure aborts the rest and bubbles up; commit_config's
+/// revert loop runs this same function with (old, new) swapped.
+async fn reconfigure_all(
+    server: &mut BgpServer,
+    old: &BgpConfig,
+    new: &BgpConfig,
+    bind_addr: SocketAddr,
+) -> Result<(), String> {
+    server.reconfigure_peers(old, new, bind_addr).await?;
+    server.reconfigure_bmp_servers(old, new).await?;
+    server.reconfigure_rpki_caches(old, new).await?;
     Ok(())
 }
 
@@ -76,14 +87,6 @@ fn reject_unsupported_changes(old: &BgpConfig, new: &BgpConfig) -> Result<(), St
     }
     if old.grpc_listen_addr != new.grpc_listen_addr {
         return Err("changing 'grpc-listen-addr' requires daemon restart".into());
-    }
-    // Compare opaque vec content (not just length) so a swap of two equal-count
-    // entries is still rejected.
-    if !json_eq(&old.bmp_servers, &new.bmp_servers) {
-        return Err("bmp-servers cannot yet be changed via commit".into());
-    }
-    if !json_eq(&old.rpki_caches, &new.rpki_caches) {
-        return Err("rpki-caches cannot yet be changed via commit".into());
     }
     if !json_eq(&old.policy_definitions, &new.policy_definitions) {
         return Err("policy-definitions cannot yet be changed via commit".into());
@@ -102,10 +105,9 @@ fn json_eq<T: serde::Serialize>(a: &T, b: &T) -> bool {
     }
 }
 
-fn persist_config(server: &BgpServer) -> io::Result<()> {
-    let path = &server.config_path;
+fn persist_config(path: &Path, config: &BgpConfig) -> io::Result<()> {
     let candidate = candidate_path_for(path);
-    fs::write(&candidate, server.config.to_rogg_conf())?;
+    fs::write(&candidate, config.to_conf_str())?;
     fs::rename(&candidate, path)?;
     Ok(())
 }

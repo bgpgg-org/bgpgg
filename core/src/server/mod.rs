@@ -43,7 +43,7 @@ use crate::rib::AdjRibOut;
 use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager, RtrTransport, SshTransport};
 use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
-use conf::bgp::{get_peer_llgr, BgpConfig, PeerConfig, RpkiCacheConfig, TransportType};
+use conf::bgp::{get_peer_llgr, BgpConfig, BmpConfig, PeerConfig, RpkiCacheConfig, TransportType};
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
@@ -768,6 +768,120 @@ impl BgpServer {
 
             info!(%addr, "configured BMP server");
         }
+    }
+
+    /// Diff `old.bmp_servers` vs `new.bmp_servers` by address; spawn added,
+    /// drop removed, restart on statistics-timeout change. Called by
+    /// `commit_config`.
+    pub(crate) async fn reconfigure_bmp_servers(
+        &mut self,
+        old: &BgpConfig,
+        new: &BgpConfig,
+    ) -> Result<(), String> {
+        let mut new_by_addr: HashMap<SocketAddr, &BmpConfig> = HashMap::new();
+        for cfg in &new.bmp_servers {
+            let addr = cfg.address.parse::<SocketAddr>().map_err(|e| {
+                format!("invalid BMP server address '{}': {}", cfg.address, e)
+            })?;
+            new_by_addr.insert(addr, cfg);
+        }
+        let old_by_addr: HashMap<SocketAddr, &BmpConfig> = old
+            .bmp_servers
+            .iter()
+            .filter_map(|c| c.address.parse::<SocketAddr>().ok().map(|a| (a, c)))
+            .collect();
+
+        for addr in old_by_addr.keys() {
+            if !new_by_addr.contains_key(addr) {
+                if let Some(task_info) = self.bmp_tasks.remove(addr) {
+                    drop(task_info.task_tx);
+                    info!(%addr, "BMP task removed via reconfigure");
+                }
+            }
+        }
+
+        for (addr, cfg) in &new_by_addr {
+            let stats = cfg.statistics_timeout;
+            let needs_spawn = match old_by_addr.get(addr) {
+                None => true,
+                Some(old_cfg) => old_cfg.statistics_timeout != stats,
+            };
+            if !needs_spawn {
+                continue;
+            }
+            if let Some(task_info) = self.bmp_tasks.remove(addr) {
+                drop(task_info.task_tx);
+            }
+            let task_tx = self.spawn_bmp_task(*addr, stats);
+            self.bmp_tasks
+                .insert(*addr, BmpTaskInfo::new(*addr, stats, task_tx));
+            info!(%addr, "BMP task added/updated via reconfigure");
+            let established = self.get_established_peers();
+            if let Some(info_ref) = self.bmp_tasks.get(addr) {
+                ops_mgmt::send_initial_bmp_state(&info_ref.task_tx, established);
+            }
+        }
+        Ok(())
+    }
+
+    /// Diff `old.rpki_caches` vs `new.rpki_caches` by address. Spawns the RTR
+    /// manager on first addition; sends `AddCache`/`RemoveCache` for deltas.
+    pub(crate) async fn reconfigure_rpki_caches(
+        &mut self,
+        old: &BgpConfig,
+        new: &BgpConfig,
+    ) -> Result<(), String> {
+        let mut new_by_addr: HashMap<SocketAddr, &RpkiCacheConfig> = HashMap::new();
+        for cfg in &new.rpki_caches {
+            let addr = cfg.address.parse::<SocketAddr>().map_err(|e| {
+                format!("invalid RPKI cache address '{}': {}", cfg.address, e)
+            })?;
+            rpki_cache_to_transport(cfg)?;
+            new_by_addr.insert(addr, cfg);
+        }
+        let old_by_addr: HashMap<SocketAddr, &RpkiCacheConfig> = old
+            .rpki_caches
+            .iter()
+            .filter_map(|c| c.address.parse::<SocketAddr>().ok().map(|a| (a, c)))
+            .collect();
+
+        if new_by_addr.is_empty() && old_by_addr.is_empty() {
+            return Ok(());
+        }
+
+        let rpki_tx = match &self.rpki_tx {
+            Some(tx) => tx.clone(),
+            None => self.spawn_rtr_manager(),
+        };
+
+        for addr in old_by_addr.keys() {
+            if !new_by_addr.contains_key(addr) {
+                if rpki_tx.send(RpkiOp::RemoveCache(*addr)).is_err() {
+                    return Err("RPKI manager not running".to_string());
+                }
+                info!(%addr, "RPKI cache removed via reconfigure");
+            }
+        }
+
+        for (addr, cfg) in &new_by_addr {
+            if old_by_addr.contains_key(addr) {
+                continue;
+            }
+            let transport = rpki_cache_to_transport(cfg)?;
+            let cache_config = RtrCacheConfig {
+                address: *addr,
+                preference: cfg.preference,
+                transport,
+                retry_interval: cfg.retry_interval,
+                refresh_interval: cfg.refresh_interval,
+                expire_interval: cfg.expire_interval,
+            };
+            if rpki_tx.send(RpkiOp::AddCache(cache_config)).is_err() {
+                return Err("RPKI manager not running".to_string());
+            }
+            info!(%addr, "RPKI cache added via reconfigure");
+        }
+        Ok(())
     }
 
     fn init_configured_rpki_caches(&mut self) {

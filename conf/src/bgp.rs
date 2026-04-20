@@ -643,6 +643,28 @@ pub enum TransportType {
     Ssh,
 }
 
+impl TransportType {
+    /// Lowercase token as accepted by the config parser (inverse of FromStr).
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            TransportType::Tcp => "tcp",
+            TransportType::Ssh => "ssh",
+        }
+    }
+}
+
+impl std::str::FromStr for TransportType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tcp" => Ok(TransportType::Tcp),
+            "ssh" => Ok(TransportType::Ssh),
+            _ => Err(format!("expected tcp|ssh, got '{}'", s)),
+        }
+    }
+}
+
 /// Configuration for an RPKI cache server (RTR, RFC 8210).
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -1109,6 +1131,14 @@ impl BgpConfig {
             config.peers.push(peer_config_from_block(peer_block));
         }
 
+        for bmp_block in &bgp.bmp_servers {
+            config.bmp_servers.push(bmp_config_from_block(bmp_block));
+        }
+
+        for rpki_block in &bgp.rpki_caches {
+            config.rpki_caches.push(rpki_config_from_block(rpki_block));
+        }
+
         Ok(config)
     }
 }
@@ -1145,7 +1175,7 @@ impl BgpConfig {
     /// Only fields covered by the current config language grammar are emitted;
     /// richer BgpConfig-only fields (bmp_servers, defined_sets, etc.) are omitted
     /// because the language doesn't express them yet.
-    pub fn to_rogg_conf(&self) -> String {
+    pub fn to_conf_str(&self) -> String {
         let body = self.to_bgp_service_body();
         let root = crate::language::Root {
             services: vec![crate::language::Service::Bgp(body)],
@@ -1180,11 +1210,25 @@ impl BgpConfig {
             })
             .collect();
 
+        let bmp_servers = self
+            .bmp_servers
+            .iter()
+            .map(bmp_block_from_config)
+            .collect();
+
+        let rpki_caches = self
+            .rpki_caches
+            .iter()
+            .map(rpki_block_from_config)
+            .collect();
+
         BgpServiceBody {
             settings,
             peers,
             policies: Vec::new(),
             prefix_lists: Vec::new(),
+            bmp_servers,
+            rpki_caches,
         }
     }
 }
@@ -1229,6 +1273,59 @@ fn peer_settings_from_config(peer: &PeerConfig) -> Vec<crate::language_bgp::Sett
     out
 }
 
+fn bmp_block_from_config(cfg: &BmpConfig) -> crate::language_bgp::BmpServerBlock {
+    crate::language_bgp::BmpServerBlock {
+        address: cfg.address.clone(),
+        statistics_timeout: cfg.statistics_timeout,
+    }
+}
+
+fn bmp_config_from_block(block: &crate::language_bgp::BmpServerBlock) -> BmpConfig {
+    BmpConfig {
+        address: block.address.clone(),
+        statistics_timeout: block.statistics_timeout,
+    }
+}
+
+fn rpki_block_from_config(cfg: &RpkiCacheConfig) -> crate::language_bgp::RpkiCacheBlock {
+    // Emit non-default scalars only, so rendered config stays compact.
+    let transport = if matches!(cfg.transport, TransportType::Tcp) {
+        None
+    } else {
+        Some(cfg.transport.clone())
+    };
+    let preference = if cfg.preference == 0 {
+        None
+    } else {
+        Some(cfg.preference)
+    };
+    crate::language_bgp::RpkiCacheBlock {
+        address: cfg.address.clone(),
+        preference,
+        transport,
+        ssh_username: cfg.ssh_username.clone(),
+        ssh_private_key_file: cfg.ssh_private_key_file.clone(),
+        ssh_known_hosts_file: cfg.ssh_known_hosts_file.clone(),
+        retry_interval: cfg.retry_interval,
+        refresh_interval: cfg.refresh_interval,
+        expire_interval: cfg.expire_interval,
+    }
+}
+
+fn rpki_config_from_block(block: &crate::language_bgp::RpkiCacheBlock) -> RpkiCacheConfig {
+    RpkiCacheConfig {
+        address: block.address.clone(),
+        preference: block.preference.unwrap_or(0),
+        transport: block.transport.clone().unwrap_or_default(),
+        ssh_username: block.ssh_username.clone(),
+        ssh_private_key_file: block.ssh_private_key_file.clone(),
+        ssh_known_hosts_file: block.ssh_known_hosts_file.clone(),
+        retry_interval: block.retry_interval,
+        refresh_interval: block.refresh_interval,
+        expire_interval: block.expire_interval,
+    }
+}
+
 /// Build a PeerConfig from a typed PeerBlock.
 fn peer_config_from_block(peer: &crate::language_bgp::PeerBlock) -> PeerConfig {
     use crate::language_bgp::Setting;
@@ -1263,7 +1360,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn test_to_rogg_conf_round_trip() {
+    fn test_to_conf_str_round_trip() {
         // Render a BgpConfig back to text and reparse; the parse result should
         // carry the same language-level fields (what the grammar can express).
         let input = "\
@@ -1282,7 +1379,7 @@ service bgp {
   }
 }";
         let config = BgpConfig::from_conf_str(input).unwrap();
-        let rendered = config.to_rogg_conf();
+        let rendered = config.to_conf_str();
         let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
         assert_eq!(reparsed.asn, config.asn);
         assert_eq!(reparsed.router_id, config.router_id);
@@ -1295,6 +1392,59 @@ service bgp {
         assert_eq!(reparsed.peers[0].asn, config.peers[0].asn);
         assert_eq!(reparsed.peers[0].passive_mode, config.peers[0].passive_mode);
         assert_eq!(reparsed.peers[0].rr_client, config.peers[0].rr_client);
+    }
+
+    #[test]
+    fn test_bmp_and_rpki_round_trip() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  bmp-server 127.0.0.1:1790 {
+    statistics-timeout 60
+  }
+
+  rpki-cache 10.0.0.1:323 {
+    preference 2
+    transport ssh
+    ssh-username rtr-user
+    ssh-private-key-file /etc/bgp/rtr.key
+    ssh-known-hosts-file /etc/bgp/known_hosts
+    retry-interval 60
+    refresh-interval 3600
+    expire-interval 7200
+  }
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        assert_eq!(config.bmp_servers.len(), 1);
+        assert_eq!(config.bmp_servers[0].address, "127.0.0.1:1790");
+        assert_eq!(config.bmp_servers[0].statistics_timeout, Some(60));
+
+        assert_eq!(config.rpki_caches.len(), 1);
+        let cache = &config.rpki_caches[0];
+        assert_eq!(cache.address, "10.0.0.1:323");
+        assert_eq!(cache.preference, 2);
+        assert!(matches!(cache.transport, TransportType::Ssh));
+        assert_eq!(cache.ssh_username.as_deref(), Some("rtr-user"));
+        assert_eq!(cache.retry_interval, Some(60));
+        assert_eq!(cache.refresh_interval, Some(3600));
+        assert_eq!(cache.expire_interval, Some(7200));
+
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.bmp_servers.len(), 1);
+        assert_eq!(
+            reparsed.bmp_servers[0].statistics_timeout,
+            config.bmp_servers[0].statistics_timeout
+        );
+        assert_eq!(reparsed.rpki_caches.len(), 1);
+        assert_eq!(reparsed.rpki_caches[0].address, cache.address);
+        assert_eq!(reparsed.rpki_caches[0].preference, cache.preference);
+        assert_eq!(
+            reparsed.rpki_caches[0].ssh_username,
+            cache.ssh_username
+        );
     }
 
     #[test]

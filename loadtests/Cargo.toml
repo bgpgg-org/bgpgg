@@ -12,7 +12,6 @@ tonic.workspace = true
 prost.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde_yaml.workspace = true
 tempfile = "3"
 rand = "0.8"
 

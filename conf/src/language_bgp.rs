@@ -17,20 +17,27 @@
 //! ## Grammar (BGP scope)
 //!
 //! ```text
-//! bgp_body     = (setting | peer | policy | prefix_list)*
+//! bgp_body     = (setting | peer | policy | prefix_list | bmp_server | rpki_cache)*
 //! peer         = "peer" NAME '{' (setting | family)* '}'
 //! family       = "family" AFI SAFI '{' family_dir* '}'
 //! family_dir   = ("export" | "import") "policy" NAME
 //! policy       = "policy" NAME '{' policy_rule* '}'
 //! policy_rule  = "match" NAME ACTION | "default" ACTION
 //! prefix_list  = "prefix-list" NAME '{' PREFIX* '}'
+//! bmp_server   = "bmp-server" ADDR '{' bmp_directive* '}'
+//! bmp_directive = "statistics-timeout" N
+//! rpki_cache   = "rpki-cache" ADDR '{' rpki_directive* '}'
+//! rpki_directive = "preference" N | "transport" ("tcp" | "ssh")
+//!                | "ssh-username" NAME | "ssh-private-key-file" PATH
+//!                | "ssh-known-hosts-file" PATH
+//!                | "retry-interval" N | "refresh-interval" N | "expire-interval" N
 //! setting      = KEY VALUE NEWLINE
 //! ```
 
 use std::fmt;
 use std::net::Ipv4Addr;
 
-use crate::bgp::{Afi, Safi};
+use crate::bgp::{Afi, Safi, TransportType};
 use crate::language::{
     expect_close_brace, expect_open_brace, expect_word, finish_statement, parse_err, peek_kind,
     skip_newlines, take_word, ParseError, Token, TokenKind,
@@ -43,6 +50,8 @@ pub struct BgpServiceBody {
     pub peers: Vec<PeerBlock>,
     pub policies: Vec<PolicyBlock>,
     pub prefix_lists: Vec<PrefixListBlock>,
+    pub bmp_servers: Vec<BmpServerBlock>,
+    pub rpki_caches: Vec<RpkiCacheBlock>,
 }
 
 /// Typed config setting. Values are parsed at parse time.
@@ -113,6 +122,27 @@ pub enum PolicyRule {
 pub struct PrefixListBlock {
     pub name: String,
     pub prefixes: Vec<String>,
+}
+
+/// `bmp-server <ADDR> { ... }` block. Mirrors `conf::bgp::BmpConfig`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BmpServerBlock {
+    pub address: String,
+    pub statistics_timeout: Option<u64>,
+}
+
+/// `rpki-cache <ADDR> { ... }` block. Mirrors `conf::bgp::RpkiCacheConfig`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RpkiCacheBlock {
+    pub address: String,
+    pub preference: Option<u8>,
+    pub transport: Option<TransportType>,
+    pub ssh_username: Option<String>,
+    pub ssh_private_key_file: Option<String>,
+    pub ssh_known_hosts_file: Option<String>,
+    pub retry_interval: Option<u64>,
+    pub refresh_interval: Option<u64>,
+    pub expire_interval: Option<u64>,
 }
 
 // ---- Display impls: output matches the parser grammar so
@@ -198,6 +228,47 @@ impl fmt::Display for PrefixListBlock {
     }
 }
 
+impl fmt::Display for BmpServerBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "bmp-server {} {{", self.address)?;
+        if let Some(v) = self.statistics_timeout {
+            writeln!(f, "  statistics-timeout {}", v)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for RpkiCacheBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "rpki-cache {} {{", self.address)?;
+        if let Some(v) = self.preference {
+            writeln!(f, "  preference {}", v)?;
+        }
+        if let Some(v) = &self.transport {
+            writeln!(f, "  transport {}", v.as_config_str())?;
+        }
+        if let Some(v) = &self.ssh_username {
+            writeln!(f, "  ssh-username {}", v)?;
+        }
+        if let Some(v) = &self.ssh_private_key_file {
+            writeln!(f, "  ssh-private-key-file {}", v)?;
+        }
+        if let Some(v) = &self.ssh_known_hosts_file {
+            writeln!(f, "  ssh-known-hosts-file {}", v)?;
+        }
+        if let Some(v) = self.retry_interval {
+            writeln!(f, "  retry-interval {}", v)?;
+        }
+        if let Some(v) = self.refresh_interval {
+            writeln!(f, "  refresh-interval {}", v)?;
+        }
+        if let Some(v) = self.expire_interval {
+            writeln!(f, "  expire-interval {}", v)?;
+        }
+        write!(f, "}}")
+    }
+}
+
 impl fmt::Display for PeerBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "peer {} {{", self.address)?;
@@ -227,6 +298,24 @@ impl fmt::Display for BgpServiceBody {
                 writeln!(f)?;
             }
             for line in peer.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for bmp in &self.bmp_servers {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in bmp.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for rpki in &self.rpki_caches {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in rpki.to_string().lines() {
                 writeln!(f, "  {}", line)?;
             }
             first = false;
@@ -335,6 +424,24 @@ pub(crate) fn parse_bgp_body(
                 expect_open_brace(tokens, pos)?;
                 body.prefix_lists
                     .push(parse_prefix_list_block(name, tokens, pos)?);
+            }
+            "bmp-server" => {
+                let address = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "bmp-server requires an address"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.bmp_servers
+                    .push(parse_bmp_server_block(address, tokens, pos)?);
+            }
+            "rpki-cache" => {
+                let address = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "rpki-cache requires an address"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.rpki_caches
+                    .push(parse_rpki_cache_block(address, tokens, pos)?);
             }
             _ => {
                 let value = take_word(tokens, pos);
@@ -534,6 +641,118 @@ fn parse_prefix_list_block(
     }
     expect_close_brace(tokens, pos)?;
     Ok(PrefixListBlock { name, prefixes })
+}
+
+/// Parse a scalar `key VALUE\n` line. `T` decides how the value is interpreted.
+fn parse_scalar<T>(
+    key: &str,
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<T, ParseError>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    let value = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, format!("{} requires a value", key)))?
+        .0;
+    let parsed = value
+        .parse::<T>()
+        .map_err(|err| parse_err(line, format!("invalid {} '{}': {}", key, value, err)))?;
+    finish_statement(tokens, pos)?;
+    Ok(parsed)
+}
+
+fn parse_bmp_server_block(
+    address: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<BmpServerBlock, ParseError> {
+    let mut block = BmpServerBlock {
+        address,
+        statistics_timeout: None,
+    };
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(
+                    tokens[*pos].line,
+                    "unexpected '{' inside bmp-server",
+                ));
+            }
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "statistics-timeout" => {
+                block.statistics_timeout = Some(parse_scalar(&key, line, tokens, pos)?);
+            }
+            other => {
+                return Err(parse_err(
+                    line,
+                    format!("unknown bmp-server directive '{}'", other),
+                ));
+            }
+        }
+    }
+    expect_close_brace(tokens, pos)?;
+    Ok(block)
+}
+
+fn parse_rpki_cache_block(
+    address: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<RpkiCacheBlock, ParseError> {
+    let mut block = RpkiCacheBlock {
+        address,
+        ..RpkiCacheBlock::default()
+    };
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(
+                    tokens[*pos].line,
+                    "unexpected '{' inside rpki-cache",
+                ));
+            }
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "preference" => block.preference = Some(parse_scalar(&key, line, tokens, pos)?),
+            "transport" => block.transport = Some(parse_scalar(&key, line, tokens, pos)?),
+            "ssh-username" => block.ssh_username = Some(parse_scalar(&key, line, tokens, pos)?),
+            "ssh-private-key-file" => {
+                block.ssh_private_key_file = Some(parse_scalar(&key, line, tokens, pos)?);
+            }
+            "ssh-known-hosts-file" => {
+                block.ssh_known_hosts_file = Some(parse_scalar(&key, line, tokens, pos)?);
+            }
+            "retry-interval" => block.retry_interval = Some(parse_scalar(&key, line, tokens, pos)?),
+            "refresh-interval" => {
+                block.refresh_interval = Some(parse_scalar(&key, line, tokens, pos)?);
+            }
+            "expire-interval" => {
+                block.expire_interval = Some(parse_scalar(&key, line, tokens, pos)?);
+            }
+            other => {
+                return Err(parse_err(
+                    line,
+                    format!("unknown rpki-cache directive '{}'", other),
+                ));
+            }
+        }
+    }
+    expect_close_brace(tokens, pos)?;
+    Ok(block)
 }
 
 #[cfg(test)]
@@ -897,6 +1116,23 @@ service bgp {
     fd0d:fbde:bca5::/48
   }
 }",
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  bmp-server 127.0.0.1:1790 {
+    statistics-timeout 60
+  }
+
+  rpki-cache 10.0.0.1:323 {
+    preference 1
+    transport ssh
+    ssh-username rtr-user
+    ssh-private-key-file /etc/bgp/rtr.key
+    retry-interval 60
+  }
+}",
         ];
         for input in cases {
             let root =
@@ -985,6 +1221,109 @@ service bgp {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn test_parse_bmp_server() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  bmp-server 127.0.0.1:1790 {
+    statistics-timeout 60
+  }
+
+  bmp-server [::1]:1790 {
+  }
+}";
+        let root = parse(input).unwrap();
+        let Service::Bgp(body) = &root.services[0];
+        assert_eq!(body.bmp_servers.len(), 2);
+        assert_eq!(body.bmp_servers[0].address, "127.0.0.1:1790");
+        assert_eq!(body.bmp_servers[0].statistics_timeout, Some(60));
+        assert_eq!(body.bmp_servers[1].address, "[::1]:1790");
+        assert_eq!(body.bmp_servers[1].statistics_timeout, None);
+    }
+
+    #[test]
+    fn test_parse_rpki_cache() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  rpki-cache 127.0.0.1:323 {
+    preference 1
+    transport tcp
+    refresh-interval 3600
+  }
+
+  rpki-cache 10.0.0.1:323 {
+    preference 2
+    transport ssh
+    ssh-username rtr-user
+    ssh-private-key-file /etc/bgp/rtr.key
+    ssh-known-hosts-file /etc/bgp/known_hosts
+    retry-interval 60
+    expire-interval 7200
+  }
+}";
+        let root = parse(input).unwrap();
+        let Service::Bgp(body) = &root.services[0];
+        assert_eq!(body.rpki_caches.len(), 2);
+
+        let first = &body.rpki_caches[0];
+        assert_eq!(first.address, "127.0.0.1:323");
+        assert_eq!(first.preference, Some(1));
+        assert_eq!(first.transport, Some(TransportType::Tcp));
+        assert_eq!(first.refresh_interval, Some(3600));
+
+        let second = &body.rpki_caches[1];
+        assert_eq!(second.preference, Some(2));
+        assert_eq!(second.transport, Some(TransportType::Ssh));
+        assert_eq!(second.ssh_username.as_deref(), Some("rtr-user"));
+        assert_eq!(
+            second.ssh_private_key_file.as_deref(),
+            Some("/etc/bgp/rtr.key")
+        );
+        assert_eq!(second.retry_interval, Some(60));
+        assert_eq!(second.expire_interval, Some(7200));
+    }
+
+    #[test]
+    fn test_parse_bmp_server_unknown_directive() {
+        let err = parse(
+            "service bgp { asn 1\n router-id 1.1.1.1\n bmp-server 127.0.0.1:1 { weird 1 } }",
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("unknown bmp-server directive 'weird'"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parse_rpki_cache_unknown_directive() {
+        let err = parse(
+            "service bgp { asn 1\n router-id 1.1.1.1\n rpki-cache 127.0.0.1:1 { weird 1 } }",
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("unknown rpki-cache directive 'weird'"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parse_rpki_cache_invalid_transport() {
+        let err = parse(
+            "service bgp { asn 1\n router-id 1.1.1.1\n rpki-cache 127.0.0.1:1 { transport foo } }",
+        )
+        .unwrap_err();
+        assert!(err.message.contains("invalid transport 'foo'"), "got: {}", err.message);
     }
 
     #[test]

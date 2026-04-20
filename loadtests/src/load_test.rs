@@ -462,8 +462,7 @@ impl BgpggProcess {
             bgp_ls: Default::default(),
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        config_file.write_all(yaml.as_bytes())?;
+        config_file.write_all(config.to_conf_str().as_bytes())?;
         config_file.flush()?;
 
         let process = Command::new("../target/release/bgpggd")
