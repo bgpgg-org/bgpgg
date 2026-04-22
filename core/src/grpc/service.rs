@@ -52,6 +52,7 @@ use super::proto::{
     BgpState as ProtoBgpState,
     CommitConfigRequest,
     CommitConfigResponse,
+    ConfigSnapshot as ProtoConfigSnapshot,
     DisablePeerRequest,
     DisablePeerResponse,
     EnablePeerRequest,
@@ -66,6 +67,8 @@ use super::proto::{
     GetServerInfoResponse,
     ListBmpServersRequest,
     ListBmpServersResponse,
+    ListConfigSnapshotsRequest,
+    ListConfigSnapshotsResponse,
     ListDefinedSetsRequest,
     ListDefinedSetsResponse,
     ListPeersRequest,
@@ -93,6 +96,8 @@ use super::proto::{
     RemoveRpkiCacheResponse,
     ResetPeerRequest,
     ResetPeerResponse,
+    RollbackConfigRequest,
+    RollbackConfigResponse,
     Route as ProtoRoute,
     RpkiCacheInfo,
     RpkiVrp,
@@ -1280,6 +1285,67 @@ impl BgpService for BgpGrpcService {
                 error: e,
             })),
         }
+    }
+
+    async fn rollback_config(
+        &self,
+        request: Request<RollbackConfigRequest>,
+    ) -> Result<Response<RollbackConfigResponse>, Status> {
+        let index = request.into_inner().index;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RollbackConfig {
+            index,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(RollbackConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(RollbackConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn list_config_snapshots(
+        &self,
+        _request: Request<ListConfigSnapshotsRequest>,
+    ) -> Result<Response<ListConfigSnapshotsResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::ListConfigSnapshots { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let snapshots = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        let proto_snapshots = snapshots
+            .into_iter()
+            .map(|s| ProtoConfigSnapshot {
+                index: s.index,
+                mtime_unix: s.mtime_unix,
+                size_bytes: s.size_bytes,
+            })
+            .collect();
+
+        Ok(Response::new(ListConfigSnapshotsResponse {
+            snapshots: proto_snapshots,
+        }))
     }
 
     async fn add_bmp_server(

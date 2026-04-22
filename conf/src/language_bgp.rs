@@ -1293,10 +1293,9 @@ service bgp {
 
     #[test]
     fn test_parse_bmp_server_unknown_directive() {
-        let err = parse(
-            "service bgp { asn 1\n router-id 1.1.1.1\n bmp-server 127.0.0.1:1 { weird 1 } }",
-        )
-        .unwrap_err();
+        let err =
+            parse("service bgp { asn 1\n router-id 1.1.1.1\n bmp-server 127.0.0.1:1 { weird 1 } }")
+                .unwrap_err();
         assert!(
             err.message.contains("unknown bmp-server directive 'weird'"),
             "got: {}",
@@ -1306,10 +1305,9 @@ service bgp {
 
     #[test]
     fn test_parse_rpki_cache_unknown_directive() {
-        let err = parse(
-            "service bgp { asn 1\n router-id 1.1.1.1\n rpki-cache 127.0.0.1:1 { weird 1 } }",
-        )
-        .unwrap_err();
+        let err =
+            parse("service bgp { asn 1\n router-id 1.1.1.1\n rpki-cache 127.0.0.1:1 { weird 1 } }")
+                .unwrap_err();
         assert!(
             err.message.contains("unknown rpki-cache directive 'weird'"),
             "got: {}",
@@ -1323,7 +1321,11 @@ service bgp {
             "service bgp { asn 1\n router-id 1.1.1.1\n rpki-cache 127.0.0.1:1 { transport foo } }",
         )
         .unwrap_err();
-        assert!(err.message.contains("invalid transport 'foo'"), "got: {}", err.message);
+        assert!(
+            err.message.contains("invalid transport 'foo'"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

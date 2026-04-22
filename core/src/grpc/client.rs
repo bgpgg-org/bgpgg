@@ -22,6 +22,7 @@ use super::proto::{
     AddRouteRequest,
     // RPKI
     AddRpkiCacheRequest,
+    CommitConfigRequest,
     DefinedSetConfig,
     DefinedSetInfo,
     DisablePeerRequest,
@@ -32,6 +33,7 @@ use super::proto::{
     GetRunningConfigRequest,
     GetServerInfoRequest,
     ListBmpServersRequest,
+    ListConfigSnapshotsRequest,
     ListDefinedSetsRequest,
     ListPeersRequest,
     ListPoliciesRequest,
@@ -48,6 +50,7 @@ use super::proto::{
     RemoveRouteRequest,
     RemoveRpkiCacheRequest,
     ResetPeerRequest,
+    RollbackConfigRequest,
     Route,
     SessionConfig,
     SetPeerGracefulShutdownRequest,
@@ -282,6 +285,23 @@ impl BgpClient {
         Ok((addr, resp.listen_port as u16, resp.num_routes))
     }
 
+    /// Commit the candidate config staged at `${config_path}.candidate`.
+    /// The daemon reads the file, parses, reconfigures, persists (rotating
+    /// the prior rogg.conf into `rogg.1.conf`).
+    pub async fn commit_config(&self) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .commit_config(CommitConfigRequest {})
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
+    }
+
     /// Fetch the daemon's current running config as rogg.conf brace-format text.
     /// Used by ggsh for `show running-config` and `show diff`.
     pub async fn get_running_config(&self) -> Result<String, tonic::Status> {
@@ -292,6 +312,34 @@ impl BgpClient {
             .await?
             .into_inner();
         Ok(resp.text)
+    }
+
+    /// List stored config snapshots. Returns one entry per existing
+    /// `rogg.<n>.conf` file, sorted by index ascending.
+    pub async fn list_config_snapshots(&self) -> Result<Vec<proto::ConfigSnapshot>, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .list_config_snapshots(ListConfigSnapshotsRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.snapshots)
+    }
+
+    /// Roll back to the config at `index` (1-based). Loads the snapshot file,
+    /// parses it, and commits it — the rollback itself becomes a new commit.
+    pub async fn rollback_config(&self, index: u32) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .rollback_config(RollbackConfigRequest { index })
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
     }
 
     /// Add a BMP server destination

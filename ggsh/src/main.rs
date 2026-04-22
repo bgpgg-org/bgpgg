@@ -14,6 +14,7 @@
 
 mod cmd;
 mod cmd_bgp;
+mod cmd_config;
 mod cmd_rpki;
 mod cmd_show;
 mod grammar;

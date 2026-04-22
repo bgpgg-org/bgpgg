@@ -718,7 +718,7 @@ impl BgpServer {
         old: &BgpConfig,
         new: &BgpConfig,
         bind_addr: SocketAddr,
-    ) -> Result<(), String> {
+    ) {
         let old_peers: HashMap<IpAddr, &PeerConfig> = old
             .peers
             .iter()
@@ -751,8 +751,6 @@ impl BgpServer {
                 }
             }
         }
-
-        Ok(())
     }
 
     fn init_configured_bmp_servers(&mut self) {
@@ -780,9 +778,10 @@ impl BgpServer {
     ) -> Result<(), String> {
         let mut new_by_addr: HashMap<SocketAddr, &BmpConfig> = HashMap::new();
         for cfg in &new.bmp_servers {
-            let addr = cfg.address.parse::<SocketAddr>().map_err(|e| {
-                format!("invalid BMP server address '{}': {}", cfg.address, e)
-            })?;
+            let addr = cfg
+                .address
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid BMP server address '{}': {}", cfg.address, e))?;
             new_by_addr.insert(addr, cfg);
         }
         let old_by_addr: HashMap<SocketAddr, &BmpConfig> = old
@@ -833,9 +832,10 @@ impl BgpServer {
     ) -> Result<(), String> {
         let mut new_by_addr: HashMap<SocketAddr, &RpkiCacheConfig> = HashMap::new();
         for cfg in &new.rpki_caches {
-            let addr = cfg.address.parse::<SocketAddr>().map_err(|e| {
-                format!("invalid RPKI cache address '{}': {}", cfg.address, e)
-            })?;
+            let addr = cfg
+                .address
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid RPKI cache address '{}': {}", cfg.address, e))?;
             rpki_cache_to_transport(cfg)?;
             new_by_addr.insert(addr, cfg);
         }

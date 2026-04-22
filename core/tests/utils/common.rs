@@ -135,6 +135,32 @@ impl TestServer {
             .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
     }
 
+    /// Path to snapshot file at `index` (e.g. `rogg.1.conf`).
+    pub fn snapshot_path(&self, index: u32) -> PathBuf {
+        self.config_dir.path().join(format!("rogg.{}.conf", index))
+    }
+
+    /// True if snapshot `index` exists on disk.
+    pub fn snapshot_exists(&self, index: u32) -> bool {
+        self.snapshot_path(index).exists()
+    }
+
+    /// Parse the snapshot at `index`. Panics if missing or unparseable.
+    pub fn read_snapshot(&self, index: u32) -> BgpConfig {
+        let path = self.snapshot_path(index);
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
+    /// Write `text` to the candidate file ggsh would stage. Used by tests
+    /// that exercise the `CommitConfig` RPC directly (e.g. apply-failure).
+    pub fn stage_candidate(&self, text: &str) -> std::io::Result<()> {
+        let path = self.config_dir.path().join("rogg.conf.candidate");
+        fs::write(path, text)
+    }
+
     /// Kill the BGP server by shutting down its runtime (simulates process death)
     pub fn kill(&mut self) {
         // Shutdown the runtime - this kills ALL tasks in it (simulates process death)

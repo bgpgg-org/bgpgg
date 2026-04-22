@@ -492,10 +492,11 @@ mod tests {
         let cases = vec![
             ("", vec!["show", "exit", "quit"]),
             ("sh", vec!["show"]),
-            ("show ", vec!["bgp", "rpki", "version"]),
+            ("show ", vec!["bgp", "config", "rpki", "version"]),
             ("show bgp ", vec!["summary", "info", "peers", "routes"]),
             ("show bgp s", vec!["summary"]),
             ("show rpki ", vec!["caches", "roa", "validate"]),
+            ("show config ", vec!["history"]),
         ];
 
         for (input, expected) in cases {

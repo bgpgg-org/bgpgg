@@ -85,6 +85,7 @@ pub fn tree() -> Vec<Node> {
         Node::keyword("show", "Show operational information").children(vec![
             Node::keyword("bgp", "BGP information").children(tree_show_bgp()),
             Node::keyword("rpki", "RPKI information").children(tree_show_rpki()),
+            Node::keyword("config", "Config information").children(tree_show_config()),
             Node::keyword("version", "Version information").cmd(Command::ShowVersion),
         ]),
         Node::keyword("exit", "Exit ggsh").cmd(Command::Exit),
@@ -133,6 +134,10 @@ fn tree_show_bgp() -> Vec<Node> {
                 nodes
             }),
     ]
+}
+
+fn tree_show_config() -> Vec<Node> {
+    vec![Node::keyword("history", "Stored config snapshots").cmd(Command::ShowConfigHistory)]
 }
 
 fn tree_show_rpki() -> Vec<Node> {

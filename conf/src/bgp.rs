@@ -1210,11 +1210,7 @@ impl BgpConfig {
             })
             .collect();
 
-        let bmp_servers = self
-            .bmp_servers
-            .iter()
-            .map(bmp_block_from_config)
-            .collect();
+        let bmp_servers = self.bmp_servers.iter().map(bmp_block_from_config).collect();
 
         let rpki_caches = self
             .rpki_caches
@@ -1441,10 +1437,7 @@ service bgp {
         assert_eq!(reparsed.rpki_caches.len(), 1);
         assert_eq!(reparsed.rpki_caches[0].address, cache.address);
         assert_eq!(reparsed.rpki_caches[0].preference, cache.preference);
-        assert_eq!(
-            reparsed.rpki_caches[0].ssh_username,
-            cache.ssh_username
-        );
+        assert_eq!(reparsed.rpki_caches[0].ssh_username, cache.ssh_username);
     }
 
     #[test]

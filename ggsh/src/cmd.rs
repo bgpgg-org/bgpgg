@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use bgpgg::grpc::BgpClient;
 
 use crate::cmd_bgp;
+use crate::cmd_config;
 use crate::cmd_rpki;
 use crate::cmd_show;
 use crate::util::{parse_afi, parse_safi};
@@ -49,6 +50,7 @@ pub enum Command {
     ShowRpkiCaches,
     ShowRpkiRoa,
     ShowRpkiValidate,
+    ShowConfigHistory,
     ShowVersion,
     Exit,
 }
@@ -119,6 +121,7 @@ async fn execute_bgpgg(
                 .map_err(|_| "invalid ASN")?;
             cmd_rpki::show_validate(client, prefix, origin_as).await
         }
+        Command::ShowConfigHistory => cmd_config::show_history(client).await,
         Command::ShowVersion | Command::Exit => Ok(()),
     }
 }

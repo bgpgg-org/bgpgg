@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::{candidate_path_for, commit_config};
+use super::config::{
+    candidate_path_for, commit_config, list_snapshots, load_snapshot, SnapshotInfo, SNAPSHOT_COUNT,
+};
 use super::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, GetPeerResponse, GetPeersResponse, PeerInfo,
     PolicyDirection, ResetType,
@@ -28,7 +30,9 @@ use crate::policy::sets::{
 };
 use crate::policy::DefinedSetType;
 use crate::rib::{PathAttrs, Route, RouteKey};
-use conf::bgp::{BgpConfig, BmpConfig, DefinedSetConfig, PeerConfig, RpkiCacheConfig, StatementConfig};
+use conf::bgp::{
+    BgpConfig, BmpConfig, DefinedSetConfig, PeerConfig, RpkiCacheConfig, StatementConfig,
+};
 use regex::Regex;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -191,6 +195,16 @@ pub enum MgmtOp {
     CommitConfig {
         response: oneshot::Sender<Result<(), String>>,
     },
+    /// Load `rogg.<index>.conf`, parse, commit it. The rollback itself
+    /// becomes a new commit (forward history preserved).
+    RollbackConfig {
+        index: u32,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Return metadata for each stored snapshot that currently exists.
+    ListConfigSnapshots {
+        response: oneshot::Sender<Vec<SnapshotInfo>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -340,10 +354,12 @@ impl BgpServer {
                 self.handle_set_peer_graceful_shutdown(addr, enabled, response);
             }
             MgmtOp::AddRpkiCache { config, response } => {
-                self.handle_add_rpki_cache(config, response, bind_addr).await;
+                self.handle_add_rpki_cache(config, response, bind_addr)
+                    .await;
             }
             MgmtOp::RemoveRpkiCache { addr, response } => {
-                self.handle_remove_rpki_cache(addr, response, bind_addr).await;
+                self.handle_remove_rpki_cache(addr, response, bind_addr)
+                    .await;
             }
             MgmtOp::GetRpkiCaches { response } => {
                 self.handle_get_rpki_caches(response).await;
@@ -361,7 +377,41 @@ impl BgpServer {
             MgmtOp::CommitConfig { response } => {
                 self.handle_commit_config(response, bind_addr).await;
             }
+            MgmtOp::RollbackConfig { index, response } => {
+                self.handle_rollback_config(index, response, bind_addr)
+                    .await;
+            }
+            MgmtOp::ListConfigSnapshots { response } => {
+                let _ = response.send(list_snapshots(&self.config_path, SNAPSHOT_COUNT));
+            }
         }
+    }
+
+    /// Load `rogg.<index>.conf` from disk, parse it, run `commit_config`.
+    /// The rollback itself goes through the normal snapshot-rotate flow — the
+    /// current `rogg.conf` becomes the new `rogg.1.conf`, so a subsequent
+    /// rollback can recover from a bad rollback.
+    async fn handle_rollback_config(
+        &mut self,
+        index: u32,
+        response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
+    ) {
+        let text = match load_snapshot(&self.config_path, index) {
+            Ok(text) => text,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to read snapshot {}: {}", index, e)));
+                return;
+            }
+        };
+        let new_config = match BgpConfig::from_conf_str(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to parse snapshot {}: {}", index, e)));
+                return;
+            }
+        };
+        let _ = response.send(commit_config(self, new_config, bind_addr).await);
     }
 
     /// Read the candidate file ggsh staged, parse it, run `commit_config`.
