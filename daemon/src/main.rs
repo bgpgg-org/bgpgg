@@ -16,7 +16,6 @@ use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use clap::Parser;
-use conf::bgp::BgpConfig;
 use std::path::PathBuf;
 use std::process;
 use tracing::info;
@@ -36,13 +35,15 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let config = BgpConfig::from_conf_file(&args.config).unwrap_or_else(|err| {
-        eprintln!("Error: failed to load config from {}: {}", args.config, err);
+    let server = BgpServer::new(PathBuf::from(&args.config)).unwrap_or_else(|err| {
+        eprintln!(
+            "Error: failed to start BGP server from {}: {}",
+            args.config, err
+        );
         process::exit(1);
     });
 
-    // Validate peer configurations
-    for peer_config in &config.peers {
+    for peer_config in &server.config.peers {
         if let Err(err) = peer_config.validate() {
             eprintln!(
                 "Error: invalid peer configuration ({}): {}",
@@ -52,8 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Initialize tracing subscriber with configured log level
-    let level = match config.log_level.to_lowercase().as_str() {
+    let level = match server.config.log_level.to_lowercase().as_str() {
         "error" => LevelFilter::ERROR,
         "warn" => LevelFilter::WARN,
         "info" => LevelFilter::INFO,
@@ -69,23 +69,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_span_events(FmtSpan::NONE)
         .init();
 
-    let grpc_addr = config.grpc_listen_addr.parse()?;
+    let grpc_addr = server.config.grpc_listen_addr.parse()?;
 
     info!(
-        bgp_addr = %config.listen_addr,
-        grpc_addr = %config.grpc_listen_addr,
-        asn = config.asn,
-        router_id = %config.router_id,
+        bgp_addr = %server.config.listen_addr,
+        grpc_addr = %server.config.grpc_listen_addr,
+        asn = server.config.asn,
+        router_id = %server.config.router_id,
         "starting BGP daemon"
     );
 
-    // Create BGP server
-    let server = BgpServer::new(config, PathBuf::from(&args.config))?;
-
-    // Create gRPC service with cloned components
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
-    // Run both servers concurrently
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {

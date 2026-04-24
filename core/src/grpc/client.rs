@@ -52,6 +52,7 @@ use super::proto::{
     ResetPeerRequest,
     RollbackConfigRequest,
     Route,
+    SaveConfigRequest,
     SessionConfig,
     SetPeerGracefulShutdownRequest,
     SetPolicyAssignmentRequest,
@@ -322,6 +323,22 @@ impl BgpClient {
             .await?
             .into_inner();
         Ok(resp.snapshots)
+    }
+
+    /// Persist the daemon's current `self.config` to `rogg.conf`.
+    /// Used after gRPC-imperative mutations to capture them on disk.
+    pub async fn save_config(&self) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .save_config(SaveConfigRequest {})
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
     }
 
     /// Roll back to the config at `index` (1-based). Loads the snapshot file,

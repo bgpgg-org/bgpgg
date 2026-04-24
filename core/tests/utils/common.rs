@@ -54,12 +54,12 @@ use bgpgg::grpc::{BgpClient, BgpGrpcService};
 use bgpgg::net::apply_gtsm;
 use bgpgg::server::BgpServer;
 use conf::bgp::BgpConfig;
+use conf::testutil::TempDir;
+use std::fs;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::{env, fs, io, process};
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio::time::Duration;
@@ -99,31 +99,6 @@ pub struct TestServer {
     config_dir: TempDir,
 }
 
-/// Tempdir for tests. Deletes itself when dropped.
-pub struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    pub fn new() -> io::Result<Self> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = env::temp_dir().join(format!("bgpgg-test-{}-{}", process::id(), n));
-        fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    pub fn path(&self) -> &FsPath {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 impl TestServer {
     /// Parse the on-disk rogg.conf this server commits to. Panics if missing
     /// or unparseable -- both are bugs in commit_config.
@@ -133,6 +108,11 @@ impl TestServer {
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
         BgpConfig::from_conf_str(&text)
             .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
+    /// True if `rogg.conf` exists on disk for this server.
+    pub fn rogg_conf_exists(&self) -> bool {
+        self.config_dir.path().join("rogg.conf").exists()
     }
 
     /// Path to snapshot file at `index` (e.g. `rogg.1.conf`).
@@ -553,10 +533,14 @@ pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
 
-    let config_clone = config.clone();
     let config_dir = TempDir::new().expect("create config tempdir");
     let config_path = config_dir.path().join("rogg.conf");
-    let server = BgpServer::new(config, config_path).expect("valid server config");
+    fs::write(&config_path, config.to_conf_str()).expect("write initial rogg.conf");
+    let server = BgpServer::new(config_path).expect("valid server config");
+    // TestServer.config mirrors what the daemon actually loaded -- not the
+    // pre-write input. They diverge whenever the grammar can't round-trip
+    // a field; tests should see what the daemon sees.
+    let loaded_config = server.config.clone();
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -618,7 +602,7 @@ pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
         bgp_port,
         asn,
         address: bind_ip,
-        config: config_clone,
+        config: loaded_config,
         runtime: Some(runtime),
         config_dir,
     }

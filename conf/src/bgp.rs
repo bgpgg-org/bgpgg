@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::language::{self, Service};
+use crate::language_bgp::{
+    BgpLsBlock, BgpServiceBody, BmpServerBlock, PeerBlock, RpkiCacheBlock, Setting,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
@@ -477,6 +481,11 @@ pub struct PeerConfig {
     /// Each entry can optionally override peer-level settings for that family.
     #[serde(default)]
     pub afi_safis: Vec<AfiSafiConfig>,
+    /// Administratively shut down. When true the peer task does not auto-start
+    /// and active sessions are stopped. Persisted so DisablePeer survives a
+    /// SaveConfig + restart cycle.
+    #[serde(default)]
+    pub admin_down: bool,
 }
 
 fn default_idle_hold_time() -> Option<u64> {
@@ -622,6 +631,7 @@ impl Default for PeerConfig {
             llgr: None,
             send_rpki_community: false,
             afi_safis: Vec::new(),
+            admin_down: false,
         }
     }
 }
@@ -1083,16 +1093,13 @@ impl BgpConfig {
     }
 
     /// Load configuration from a rogg.conf file.
-    pub fn from_conf_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_conf_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = fs::read_to_string(path)?;
         Self::from_conf_str(&contents)
     }
 
     /// Parse a rogg.conf string into a BgpConfig.
     pub fn from_conf_str(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        use crate::language::{self, Service};
-        use crate::language_bgp::Setting;
-
         let root = language::parse(input)?;
         let Service::Bgp(bgp) = root.services.first().ok_or("missing 'service bgp' block")?;
 
@@ -1116,8 +1123,15 @@ impl BgpConfig {
                 Setting::HoldTime(val) => config.hold_time_secs = *val,
                 Setting::ConnectRetry(val) => config.connect_retry_secs = *val,
                 Setting::ClusterId(val) => config.cluster_id = Some(*val),
+                Setting::SysName(val) => config.sys_name = Some(val.clone()),
+                Setting::SysDescr(val) => config.sys_descr = Some(val.clone()),
+                Setting::EnhancedRrStaleTtl(val) => config.enhanced_rr_stale_ttl = Some(*val),
                 _ => {}
             }
+        }
+
+        if let Some(bgp_ls) = &bgp.bgp_ls {
+            config.bgp_ls.instance_id = bgp_ls.instance_id;
         }
 
         if !has_asn {
@@ -1184,9 +1198,7 @@ impl BgpConfig {
     }
 
     /// Convert this BgpConfig back into a language-level `BgpServiceBody` AST.
-    pub fn to_bgp_service_body(&self) -> crate::language_bgp::BgpServiceBody {
-        use crate::language_bgp::{BgpServiceBody, PeerBlock, Setting};
-
+    pub fn to_bgp_service_body(&self) -> BgpServiceBody {
         let mut settings = vec![
             Setting::Asn(self.asn),
             Setting::RouterId(self.router_id),
@@ -1198,6 +1210,17 @@ impl BgpConfig {
         ];
         if let Some(cid) = self.cluster_id {
             settings.push(Setting::ClusterId(cid));
+        }
+        if let Some(name) = &self.sys_name {
+            settings.push(Setting::SysName(name.clone()));
+        }
+        if let Some(descr) = &self.sys_descr {
+            settings.push(Setting::SysDescr(descr.clone()));
+        }
+        if let Some(ttl) = self.enhanced_rr_stale_ttl {
+            if Some(ttl) != default_enhanced_rr_stale_ttl() {
+                settings.push(Setting::EnhancedRrStaleTtl(ttl));
+            }
         }
 
         let peers = self
@@ -1218,6 +1241,14 @@ impl BgpConfig {
             .map(rpki_block_from_config)
             .collect();
 
+        let bgp_ls = if self.bgp_ls.instance_id != 0 {
+            Some(BgpLsBlock {
+                instance_id: self.bgp_ls.instance_id,
+            })
+        } else {
+            None
+        };
+
         BgpServiceBody {
             settings,
             peers,
@@ -1225,6 +1256,7 @@ impl BgpConfig {
             prefix_lists: Vec::new(),
             bmp_servers,
             rpki_caches,
+            bgp_ls,
         }
     }
 }
@@ -1232,9 +1264,7 @@ impl BgpConfig {
 /// Emit the subset of PeerConfig fields that the language currently represents.
 /// `address` is the block header (`peer <ADDR> { ... }`) and is NOT emitted as
 /// an inner setting.
-fn peer_settings_from_config(peer: &PeerConfig) -> Vec<crate::language_bgp::Setting> {
-    use crate::language_bgp::Setting;
-
+fn peer_settings_from_config(peer: &PeerConfig) -> Vec<Setting> {
     let mut out = Vec::new();
     if let Some(asn) = peer.asn {
         out.push(Setting::RemoteAs(asn));
@@ -1266,24 +1296,53 @@ fn peer_settings_from_config(peer: &PeerConfig) -> Vec<crate::language_bgp::Sett
     if peer.graceful_shutdown {
         out.push(Setting::GracefulShutdown(true));
     }
+    if let Some(v) = peer.delay_open_time_secs {
+        out.push(Setting::DelayOpenTimeSecs(v));
+    }
+    if let Some(v) = peer.idle_hold_time_secs {
+        if Some(v) != default_idle_hold_time() {
+            out.push(Setting::IdleHoldTimeSecs(v));
+        }
+    }
+    if peer.damp_peer_oscillations != default_damp_peer_oscillations() {
+        out.push(Setting::DampPeerOscillations(peer.damp_peer_oscillations));
+    }
+    if peer.allow_automatic_stop != default_allow_automatic_stop() {
+        out.push(Setting::AllowAutomaticStop(peer.allow_automatic_stop));
+    }
+    if peer.send_notification_without_open {
+        out.push(Setting::SendNotificationWithoutOpen(true));
+    }
+    if let Some(v) = peer.min_route_advertisement_interval_secs {
+        out.push(Setting::MinRouteAdvertisementIntervalSecs(v));
+    }
+    if peer.enforce_first_as != default_enforce_first_as() {
+        out.push(Setting::EnforceFirstAs(peer.enforce_first_as));
+    }
+    if peer.send_rpki_community {
+        out.push(Setting::SendRpkiCommunity(true));
+    }
+    if peer.admin_down {
+        out.push(Setting::AdminDown(true));
+    }
     out
 }
 
-fn bmp_block_from_config(cfg: &BmpConfig) -> crate::language_bgp::BmpServerBlock {
-    crate::language_bgp::BmpServerBlock {
+fn bmp_block_from_config(cfg: &BmpConfig) -> BmpServerBlock {
+    BmpServerBlock {
         address: cfg.address.clone(),
         statistics_timeout: cfg.statistics_timeout,
     }
 }
 
-fn bmp_config_from_block(block: &crate::language_bgp::BmpServerBlock) -> BmpConfig {
+fn bmp_config_from_block(block: &BmpServerBlock) -> BmpConfig {
     BmpConfig {
         address: block.address.clone(),
         statistics_timeout: block.statistics_timeout,
     }
 }
 
-fn rpki_block_from_config(cfg: &RpkiCacheConfig) -> crate::language_bgp::RpkiCacheBlock {
+fn rpki_block_from_config(cfg: &RpkiCacheConfig) -> RpkiCacheBlock {
     // Emit non-default scalars only, so rendered config stays compact.
     let transport = if matches!(cfg.transport, TransportType::Tcp) {
         None
@@ -1295,7 +1354,7 @@ fn rpki_block_from_config(cfg: &RpkiCacheConfig) -> crate::language_bgp::RpkiCac
     } else {
         Some(cfg.preference)
     };
-    crate::language_bgp::RpkiCacheBlock {
+    RpkiCacheBlock {
         address: cfg.address.clone(),
         preference,
         transport,
@@ -1308,7 +1367,7 @@ fn rpki_block_from_config(cfg: &RpkiCacheConfig) -> crate::language_bgp::RpkiCac
     }
 }
 
-fn rpki_config_from_block(block: &crate::language_bgp::RpkiCacheBlock) -> RpkiCacheConfig {
+fn rpki_config_from_block(block: &RpkiCacheBlock) -> RpkiCacheConfig {
     RpkiCacheConfig {
         address: block.address.clone(),
         preference: block.preference.unwrap_or(0),
@@ -1323,9 +1382,7 @@ fn rpki_config_from_block(block: &crate::language_bgp::RpkiCacheBlock) -> RpkiCa
 }
 
 /// Build a PeerConfig from a typed PeerBlock.
-fn peer_config_from_block(peer: &crate::language_bgp::PeerBlock) -> PeerConfig {
-    use crate::language_bgp::Setting;
-
+fn peer_config_from_block(peer: &PeerBlock) -> PeerConfig {
     let mut config = PeerConfig {
         address: peer.address.clone(),
         ..PeerConfig::default()
@@ -1342,6 +1399,19 @@ fn peer_config_from_block(peer: &crate::language_bgp::PeerBlock) -> PeerConfig {
             Setting::RrClient(val) => config.rr_client = *val,
             Setting::RsClient(val) => config.rs_client = *val,
             Setting::GracefulShutdown(val) => config.graceful_shutdown = *val,
+            Setting::DelayOpenTimeSecs(val) => config.delay_open_time_secs = Some(*val),
+            Setting::IdleHoldTimeSecs(val) => config.idle_hold_time_secs = Some(*val),
+            Setting::DampPeerOscillations(val) => config.damp_peer_oscillations = *val,
+            Setting::AllowAutomaticStop(val) => config.allow_automatic_stop = *val,
+            Setting::SendNotificationWithoutOpen(val) => {
+                config.send_notification_without_open = *val
+            }
+            Setting::MinRouteAdvertisementIntervalSecs(val) => {
+                config.min_route_advertisement_interval_secs = Some(*val)
+            }
+            Setting::EnforceFirstAs(val) => config.enforce_first_as = *val,
+            Setting::SendRpkiCommunity(val) => config.send_rpki_community = *val,
+            Setting::AdminDown(val) => config.admin_down = *val,
             _ => {}
         }
     }
@@ -1388,6 +1458,61 @@ service bgp {
         assert_eq!(reparsed.peers[0].asn, config.peers[0].asn);
         assert_eq!(reparsed.peers[0].passive_mode, config.peers[0].passive_mode);
         assert_eq!(reparsed.peers[0].rr_client, config.peers[0].rr_client);
+    }
+
+    #[test]
+    fn test_optional_settings_round_trip() {
+        // Populate every optional scalar setting on BgpConfig and PeerConfig
+        // (the ones the basic round-trip test doesn't exercise) and verify
+        // they survive to_conf_str -> from_conf_str unchanged.
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.sys_name = Some("test-router".to_string());
+        config.sys_descr = Some("test-build".to_string());
+        config.enhanced_rr_stale_ttl = Some(120);
+        config.bgp_ls.instance_id = 99;
+        config.peers.push(PeerConfig {
+            address: "10.0.0.1".to_string(),
+            asn: Some(65002),
+            delay_open_time_secs: Some(2),
+            idle_hold_time_secs: Some(60),
+            damp_peer_oscillations: false,
+            allow_automatic_stop: false,
+            send_notification_without_open: true,
+            min_route_advertisement_interval_secs: Some(15),
+            enforce_first_as: false,
+            send_rpki_community: true,
+            ..Default::default()
+        });
+
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered)
+            .unwrap_or_else(|err| panic!("reparse failed:\n{}\nerror: {}", rendered, err));
+
+        assert_eq!(reparsed.sys_name, config.sys_name);
+        assert_eq!(reparsed.sys_descr, config.sys_descr);
+        assert_eq!(reparsed.enhanced_rr_stale_ttl, config.enhanced_rr_stale_ttl);
+        assert_eq!(reparsed.bgp_ls.instance_id, config.bgp_ls.instance_id);
+
+        assert_eq!(reparsed.peers.len(), 1);
+        let original = &config.peers[0];
+        let parsed = &reparsed.peers[0];
+        assert_eq!(parsed.delay_open_time_secs, original.delay_open_time_secs);
+        assert_eq!(parsed.idle_hold_time_secs, original.idle_hold_time_secs);
+        assert_eq!(
+            parsed.damp_peer_oscillations,
+            original.damp_peer_oscillations
+        );
+        assert_eq!(parsed.allow_automatic_stop, original.allow_automatic_stop);
+        assert_eq!(
+            parsed.send_notification_without_open,
+            original.send_notification_without_open
+        );
+        assert_eq!(
+            parsed.min_route_advertisement_interval_secs,
+            original.min_route_advertisement_interval_secs
+        );
+        assert_eq!(parsed.enforce_first_as, original.enforce_first_as);
+        assert_eq!(parsed.send_rpki_community, original.send_rpki_community);
     }
 
     #[test]

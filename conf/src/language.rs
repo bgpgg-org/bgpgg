@@ -47,6 +47,25 @@ pub enum Service {
     Bgp(BgpServiceBody),
 }
 
+impl Root {
+    /// Return a new `Root` with `service` placed in the same-variant slot
+    /// if present, otherwise appended. Used by writeback so other daemons'
+    /// service blocks pass through untouched.
+    pub fn with_service(&self, service: Service) -> Self {
+        let mut new = self.clone();
+        if let Some(slot) = new
+            .services
+            .iter_mut()
+            .find(|s| matches!(s, Service::Bgp(_)))
+        {
+            *slot = service;
+        } else {
+            new.services.push(service);
+        }
+        new
+    }
+}
+
 impl fmt::Display for Service {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -107,17 +126,14 @@ pub(crate) const CHAR_OPENING_BRACE: char = '{';
 pub(crate) const CHAR_CLOSING_BRACE: char = '}';
 pub(crate) const CHAR_COMMENT: char = '#';
 
-/// Lexer. Produces a token stream from source text.
+/// Lexer. Produces a token stream from source text. Comments (`#` to EOL) inside
+/// double-quoted strings are not treated as comments.
 pub(crate) fn tokenize(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
 
-    for (line_idx, line) in input.lines().enumerate() {
+    for (line_idx, raw_line) in input.lines().enumerate() {
         let line_num = line_idx + 1;
-
-        let line = match line.find(CHAR_COMMENT) {
-            Some(pos) => &line[..pos],
-            None => line,
-        };
+        let line = strip_comment(raw_line);
 
         let mut chars = line.chars().peekable();
         while let Some(&ch) = chars.peek() {
@@ -137,6 +153,23 @@ pub(crate) fn tokenize(input: &str) -> Vec<Token> {
                     line: line_num,
                 });
                 chars.next();
+            } else if ch == '"' {
+                // Quoted string: consume until matching `"` or EOL. Unterminated
+                // strings end at EOL with whatever was read so far.
+                chars.next();
+                let mut word = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '"' {
+                        chars.next();
+                        break;
+                    }
+                    word.push(c);
+                    chars.next();
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Word(word),
+                    line: line_num,
+                });
             } else {
                 let mut word = String::new();
                 while let Some(&c) = chars.peek() {
@@ -160,6 +193,19 @@ pub(crate) fn tokenize(input: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+/// Strip a trailing `#` comment, ignoring `#` inside double-quoted strings.
+fn strip_comment(line: &str) -> &str {
+    let mut in_quote = false;
+    for (i, ch) in line.char_indices() {
+        if ch == '"' {
+            in_quote = !in_quote;
+        } else if ch == CHAR_COMMENT && !in_quote {
+            return &line[..i];
+        }
+    }
+    line
 }
 
 pub(crate) fn current_line(tokens: &[Token], pos: usize) -> usize {
@@ -352,6 +398,32 @@ mod tests {
         assert!(body
             .settings
             .contains(&crate::language_bgp::Setting::Asn(65001)));
+    }
+
+    #[test]
+    fn test_tokenize_quoted_strings() {
+        let cases = [
+            // Single quoted token preserves whitespace inside.
+            ("sys-descr \"my router\"", vec!["sys-descr", "my router"]),
+            // Empty quoted string yields an empty Word token.
+            ("sys-name \"\"", vec!["sys-name", ""]),
+            // `#` inside quotes is not a comment.
+            ("sys-descr \"a#b\"", vec!["sys-descr", "a#b"]),
+            // Quoted token can sit next to braces without a separator.
+            ("name \"x y\"{}", vec!["name", "x y"]),
+            // Unterminated quote ends at EOL with whatever was read.
+            ("name \"unterminated", vec!["name", "unterminated"]),
+        ];
+        for (input, expected) in cases {
+            let words: Vec<String> = tokenize(input)
+                .into_iter()
+                .filter_map(|t| match t.kind {
+                    TokenKind::Word(w) => Some(w),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(words, expected, "for {:?}", input);
+        }
     }
 
     #[test]

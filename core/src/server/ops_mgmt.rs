@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::{commit_config, list_snapshots, load_snapshot, SnapshotInfo, SNAPSHOT_COUNT};
+use super::config::{commit_config, save_config};
 use super::{
     AdminState, BgpServer, BmpOp, BmpPeerStats, GetPeerResponse, GetPeersResponse, PeerInfo,
     PolicyDirection, ResetType,
@@ -26,11 +26,14 @@ use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
     PrefixSet,
 };
-use crate::policy::DefinedSetType;
+use crate::policy::{DefinedSetType, Policy};
 use crate::rib::{PathAttrs, Route, RouteKey};
 use conf::bgp::{
-    BgpConfig, BmpConfig, DefinedSetConfig, PeerConfig, RpkiCacheConfig, StatementConfig,
+    AsPathSetConfig, BgpConfig, BmpConfig, CommunitySetConfig, DefinedSetConfig, NeighborSetConfig,
+    PeerConfig, PolicyDefinitionConfig, PrefixMatchConfig, PrefixSetConfig, RpkiCacheConfig,
+    StatementConfig,
 };
+use conf::fs::{list_snapshots, load_snapshot, SnapshotInfo, SNAPSHOT_COUNT};
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -193,6 +196,12 @@ pub enum MgmtOp {
         text: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    /// Persist the daemon's current `self.config` to `rogg.conf`. Used
+    /// by the gRPC-imperative path; the operator-declarative path
+    /// (`CommitConfig`) already persists.
+    SaveConfig {
+        response: oneshot::Sender<Result<(), String>>,
+    },
     /// Load `rogg.<index>.conf`, parse, commit it. The rollback itself
     /// becomes a new commit (forward history preserved).
     RollbackConfig {
@@ -212,6 +221,16 @@ pub struct PolicyInfoResponse {
 }
 
 impl BgpServer {
+    /// Look up a `PeerConfig` in `self.config.peers` by IP for in-place
+    /// mutation. Used by handlers that need to mirror a runtime change to the
+    /// persisted config (admin_down, graceful_shutdown, policy assignments).
+    fn find_peer_config_mut(&mut self, peer_ip: IpAddr) -> Option<&mut PeerConfig> {
+        self.config
+            .peers
+            .iter_mut()
+            .find(|p| p.address.parse::<IpAddr>().ok() == Some(peer_ip))
+    }
+
     pub(crate) async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
         match req {
             MgmtOp::AddPeer {
@@ -375,6 +394,9 @@ impl BgpServer {
             MgmtOp::CommitConfig { text, response } => {
                 self.handle_commit_config(text, response, bind_addr).await;
             }
+            MgmtOp::SaveConfig { response } => {
+                let _ = response.send(save_config(self));
+            }
             MgmtOp::RollbackConfig { index, response } => {
                 self.handle_rollback_config(index, response, bind_addr)
                     .await;
@@ -428,9 +450,6 @@ impl BgpServer {
         let _ = response.send(commit_config(self, new_config, bind_addr).await);
     }
 
-    /// Imperative AddPeer routes through `commit_config`: build new config in
-    /// memory (current + new peer), then let `reconfigure_peers` apply the
-    /// delta and persist `rogg.conf`. Same code path as ggsh's `Commit`.
     async fn handle_add_peer(
         &mut self,
         addr: String,
@@ -454,21 +473,21 @@ impl BgpServer {
         }
 
         config.address = addr;
-        let mut new_config = self.config.clone();
-        new_config.peers.push(config);
+        if let Err(e) = config.validate() {
+            let _ = response.send(Err(e));
+            return;
+        }
 
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        self.config.peers.push(config.clone());
+        self.spawn_and_start_peer(peer_ip, config, bind_addr);
+        let _ = response.send(Ok(()));
     }
 
-    /// Imperative RemovePeer routes through `commit_config`: build new config
-    /// in memory (current minus this peer), then let `reconfigure_peers` apply
-    /// the delta and persist `rogg.conf`.
     async fn handle_remove_peer(
         &mut self,
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
-        bind_addr: SocketAddr,
+        _bind_addr: SocketAddr,
     ) {
         info!(peer_ip = %addr, "removing peer via request");
 
@@ -485,13 +504,11 @@ impl BgpServer {
             return;
         }
 
-        let mut new_config = self.config.clone();
-        new_config
+        self.config
             .peers
             .retain(|peer| peer.address.parse::<IpAddr>().ok() != Some(peer_ip));
-
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        self.shutdown_and_remove_peer(peer_ip).await;
+        let _ = response.send(Ok(()));
     }
 
     fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
@@ -509,9 +526,12 @@ impl BgpServer {
         };
 
         entry.admin_state = AdminState::Down;
-
-        // Stop all active sessions
+        entry.config.admin_down = true;
         entry.send_to_all(|| PeerOp::ManualStop);
+
+        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+            cfg.admin_down = true;
+        }
 
         let _ = response.send(Ok(()));
     }
@@ -531,6 +551,7 @@ impl BgpServer {
         };
 
         entry.admin_state = AdminState::Up;
+        entry.config.admin_down = false;
 
         // RFC 4271: ManualStart for admin-enabled peers (send to all tasks)
         let passive = entry.config.passive_mode;
@@ -541,6 +562,10 @@ impl BgpServer {
                 PeerOp::ManualStart
             }
         });
+
+        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+            cfg.admin_down = false;
+        }
 
         let _ = response.send(Ok(()));
     }
@@ -553,8 +578,6 @@ impl BgpServer {
         safi: Option<Safi>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        use crate::bgp::multiprotocol::AfiSafi;
-
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -755,6 +778,9 @@ impl BgpServer {
             .expect("peer should exist after contains_key check")
             .config
             .graceful_shutdown = enabled;
+        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+            cfg.graceful_shutdown = enabled;
+        }
         info!(%peer_ip, enabled, "set graceful_shutdown");
 
         // Resend all routes so the updated community list is propagated.
@@ -960,46 +986,40 @@ impl BgpServer {
         }
     }
 
-    /// Route AddBmpServer through `commit_config`: append a BmpConfig to the
-    /// new config, commit_config's reconfigure spawns the task and persists.
     async fn handle_add_bmp_server(
         &mut self,
         addr: SocketAddr,
         statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
-        bind_addr: SocketAddr,
+        _bind_addr: SocketAddr,
     ) {
         if self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server {} already exists", addr)));
             return;
         }
-        let mut new_config = self.config.clone();
-        new_config.bmp_servers.push(BmpConfig {
+        self.config.bmp_servers.push(BmpConfig {
             address: addr.to_string(),
             statistics_timeout,
         });
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        self.spawn_single_bmp_task(addr, statistics_timeout);
+        let _ = response.send(Ok(()));
     }
 
-    /// Route RemoveBmpServer through `commit_config`: drop the matching entry
-    /// from the new config, reconfigure shuts the task down and persists.
     async fn handle_remove_bmp_server(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
-        bind_addr: SocketAddr,
+        _bind_addr: SocketAddr,
     ) {
         if !self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
             return;
         }
-        let mut new_config = self.config.clone();
-        new_config
+        self.config
             .bmp_servers
             .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        self.stop_single_bmp_task(addr);
+        let _ = response.send(Ok(()));
     }
 
     fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
@@ -1032,13 +1052,11 @@ impl BgpServer {
         let _ = response.send(stats);
     }
 
-    /// Route AddRpkiCache through `commit_config`: append the RpkiCacheConfig
-    /// to the new config, reconfigure spawns the RTR session and persists.
     async fn handle_add_rpki_cache(
         &mut self,
         config: RpkiCacheConfig,
         response: oneshot::Sender<Result<(), String>>,
-        bind_addr: SocketAddr,
+        _bind_addr: SocketAddr,
     ) {
         let addr: SocketAddr = match config.address.parse() {
             Ok(a) => a,
@@ -1059,30 +1077,33 @@ impl BgpServer {
             let _ = response.send(Err(format!("RPKI cache {} already exists", addr)));
             return;
         }
-        let mut new_config = self.config.clone();
-        new_config.rpki_caches.push(config);
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        if let Err(e) = self.spawn_single_rpki_cache(&config) {
+            let _ = response.send(Err(e));
+            return;
+        }
+        self.config.rpki_caches.push(config);
+        let _ = response.send(Ok(()));
     }
 
-    /// Route RemoveRpkiCache through `commit_config`.
     async fn handle_remove_rpki_cache(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
-        bind_addr: SocketAddr,
+        _bind_addr: SocketAddr,
     ) {
-        let mut new_config = self.config.clone();
-        let before = new_config.rpki_caches.len();
-        new_config
+        let before = self.config.rpki_caches.len();
+        self.config
             .rpki_caches
             .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
-        if new_config.rpki_caches.len() == before {
+        if self.config.rpki_caches.len() == before {
             let _ = response.send(Err(format!("RPKI cache {} not found", addr)));
             return;
         }
-        let result = commit_config(self, new_config, bind_addr).await;
-        let _ = response.send(result);
+        if let Err(e) = self.stop_single_rpki_cache(addr) {
+            let _ = response.send(Err(e));
+            return;
+        }
+        let _ = response.send(Ok(()));
     }
 
     async fn handle_get_rpki_caches(
@@ -1141,7 +1162,7 @@ impl BgpServer {
         }
 
         // Add the set - convert config to runtime type
-        match set {
+        match &set {
             DefinedSetConfig::PrefixSet(config) => {
                 let mut prefix_matches = Vec::new();
                 for pm_config in &config.prefixes {
@@ -1265,6 +1286,20 @@ impl BgpServer {
         // Replace the Arc (atomic update)
         self.policy_ctx.defined_sets = Arc::new(new_sets);
 
+        // Mirror to self.config so SaveConfig persists the addition.
+        match set {
+            DefinedSetConfig::PrefixSet(c) => self.config.defined_sets.prefix_sets.push(c),
+            DefinedSetConfig::AsPathSet(c) => self.config.defined_sets.as_path_sets.push(c),
+            DefinedSetConfig::CommunitySet(c) => self.config.defined_sets.community_sets.push(c),
+            DefinedSetConfig::ExtCommunitySet(c) => {
+                self.config.defined_sets.ext_community_sets.push(c)
+            }
+            DefinedSetConfig::NeighborSet(c) => self.config.defined_sets.neighbor_sets.push(c),
+            DefinedSetConfig::LargeCommunitySet(c) => {
+                self.config.defined_sets.large_community_sets.push(c)
+            }
+        }
+
         let _ = response.send(Ok(()));
     }
 
@@ -1292,6 +1327,41 @@ impl BgpServer {
         // Delete specific set (idempotent - succeed even if not found)
         new_sets.remove(set_type, &name);
         self.policy_ctx.defined_sets = Arc::new(new_sets);
+
+        // Mirror to self.config so SaveConfig persists the removal.
+        match set_type {
+            DefinedSetType::PrefixSet => self
+                .config
+                .defined_sets
+                .prefix_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::AsPathSet => self
+                .config
+                .defined_sets
+                .as_path_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::CommunitySet => self
+                .config
+                .defined_sets
+                .community_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::ExtCommunitySet => self
+                .config
+                .defined_sets
+                .ext_community_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::NeighborSet => self
+                .config
+                .defined_sets
+                .neighbor_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::LargeCommunitySet => self
+                .config
+                .defined_sets
+                .large_community_sets
+                .retain(|s| s.name != name),
+        }
+
         let _ = response.send(Ok(()));
     }
 
@@ -1301,11 +1371,6 @@ impl BgpServer {
         name: Option<String>,
         response: oneshot::Sender<Vec<DefinedSetConfig>>,
     ) {
-        use conf::bgp::{
-            AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixMatchConfig,
-            PrefixSetConfig,
-        };
-
         let mut results = Vec::new();
 
         // Collect prefix sets
@@ -1404,9 +1469,6 @@ impl BgpServer {
         statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        use crate::policy::Policy;
-        use conf::bgp::PolicyDefinitionConfig;
-
         // Reject policy names starting with underscore (reserved for built-in policies)
         if name.starts_with('_') {
             let _ = response.send(Err(
@@ -1425,7 +1487,20 @@ impl BgpServer {
         // Build Policy from definition using current defined_sets
         match Policy::from_config(&policy_def, &self.policy_ctx.defined_sets) {
             Ok(policy) => {
-                self.policy_ctx.policies.insert(name, Arc::new(policy));
+                self.policy_ctx
+                    .policies
+                    .insert(name.clone(), Arc::new(policy));
+                // Mirror to self.config: replace existing or append.
+                if let Some(existing) = self
+                    .config
+                    .policy_definitions
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    *existing = policy_def;
+                } else {
+                    self.config.policy_definitions.push(policy_def);
+                }
                 let _ = response.send(Ok(()));
             }
             Err(e) => {
@@ -1441,6 +1516,7 @@ impl BgpServer {
     ) {
         // Idempotent - succeed even if policy doesn't exist
         self.policy_ctx.policies.remove(&name);
+        self.config.policy_definitions.retain(|p| p.name != name);
         let _ = response.send(Ok(()));
     }
 
@@ -1505,12 +1581,20 @@ impl BgpServer {
         // survive session reconnections.
         match direction {
             PolicyDirection::Import => {
-                peer.config.import_policy = policy_names;
+                peer.config.import_policy = policy_names.clone();
                 peer.import_policies = resolved_policies;
             }
             PolicyDirection::Export => {
-                peer.config.export_policy = policy_names;
+                peer.config.export_policy = policy_names.clone();
                 peer.export_policies = resolved_policies;
+            }
+        }
+
+        // Mirror to self.config so SaveConfig persists the assignment.
+        if let Some(cfg) = self.find_peer_config_mut(peer_addr) {
+            match direction {
+                PolicyDirection::Import => cfg.import_policy = policy_names,
+                PolicyDirection::Export => cfg.export_policy = policy_names,
             }
         }
 

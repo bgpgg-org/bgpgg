@@ -52,6 +52,7 @@ pub struct BgpServiceBody {
     pub prefix_lists: Vec<PrefixListBlock>,
     pub bmp_servers: Vec<BmpServerBlock>,
     pub rpki_caches: Vec<RpkiCacheBlock>,
+    pub bgp_ls: Option<BgpLsBlock>,
 }
 
 /// Typed config setting. Values are parsed at parse time.
@@ -66,6 +67,9 @@ pub enum Setting {
     HoldTime(u64),
     ConnectRetry(u64),
     ClusterId(Ipv4Addr),
+    SysName(String),
+    SysDescr(String),
+    EnhancedRrStaleTtl(u64),
     RemoteAs(u32),
     Port(u16),
     Interface(String),
@@ -77,6 +81,15 @@ pub enum Setting {
     RsClient(bool),
     GracefulShutdown(bool),
     Originate(String),
+    DelayOpenTimeSecs(u64),
+    IdleHoldTimeSecs(u64),
+    DampPeerOscillations(bool),
+    AllowAutomaticStop(bool),
+    SendNotificationWithoutOpen(bool),
+    MinRouteAdvertisementIntervalSecs(u64),
+    EnforceFirstAs(bool),
+    SendRpkiCommunity(bool),
+    AdminDown(bool),
 }
 
 /// `peer <ADDRESS> { ... }` block. The block header is the peer's IP address;
@@ -131,6 +144,12 @@ pub struct BmpServerBlock {
     pub statistics_timeout: Option<u64>,
 }
 
+/// `bgp-ls { ... }` block. Mirrors operational fields of `conf::bgp::BgpLsConfig`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BgpLsBlock {
+    pub instance_id: u64,
+}
+
 /// `rpki-cache <ADDR> { ... }` block. Mirrors `conf::bgp::RpkiCacheConfig`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RpkiCacheBlock {
@@ -160,6 +179,9 @@ impl fmt::Display for Setting {
             Setting::HoldTime(v) => write!(f, "hold-time {}", v),
             Setting::ConnectRetry(v) => write!(f, "connect-retry {}", v),
             Setting::ClusterId(v) => write!(f, "cluster-id {}", v),
+            Setting::SysName(v) => write!(f, "sys-name {}", quote_if_needed(v)),
+            Setting::SysDescr(v) => write!(f, "sys-descr {}", quote_if_needed(v)),
+            Setting::EnhancedRrStaleTtl(v) => write!(f, "enhanced-rr-stale-ttl {}", v),
             Setting::RemoteAs(v) => write!(f, "remote-as {}", v),
             Setting::Port(v) => write!(f, "port {}", v),
             Setting::Interface(v) => write!(f, "interface {}", v),
@@ -171,6 +193,19 @@ impl fmt::Display for Setting {
             Setting::RsClient(v) => write!(f, "rs-client {}", v),
             Setting::GracefulShutdown(v) => write!(f, "graceful-shutdown {}", v),
             Setting::Originate(v) => write!(f, "originate {}", v),
+            Setting::DelayOpenTimeSecs(v) => write!(f, "delay-open-time-secs {}", v),
+            Setting::IdleHoldTimeSecs(v) => write!(f, "idle-hold-time-secs {}", v),
+            Setting::DampPeerOscillations(v) => write!(f, "damp-peer-oscillations {}", v),
+            Setting::AllowAutomaticStop(v) => write!(f, "allow-automatic-stop {}", v),
+            Setting::SendNotificationWithoutOpen(v) => {
+                write!(f, "send-notification-without-open {}", v)
+            }
+            Setting::MinRouteAdvertisementIntervalSecs(v) => {
+                write!(f, "min-route-advertisement-interval-secs {}", v)
+            }
+            Setting::EnforceFirstAs(v) => write!(f, "enforce-first-as {}", v),
+            Setting::SendRpkiCommunity(v) => write!(f, "send-rpki-community {}", v),
+            Setting::AdminDown(v) => write!(f, "admin-down {}", v),
         }
     }
 }
@@ -224,6 +259,14 @@ impl fmt::Display for PrefixListBlock {
         for prefix in &self.prefixes {
             writeln!(f, "  {}", prefix)?;
         }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for BgpLsBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "bgp-ls {{")?;
+        writeln!(f, "  instance-id {}", self.instance_id)?;
         write!(f, "}}")
     }
 }
@@ -338,6 +381,14 @@ impl fmt::Display for BgpServiceBody {
             }
             first = false;
         }
+        if let Some(bgp_ls) = &self.bgp_ls {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in bgp_ls.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+        }
         write!(f, "}}")
     }
 }
@@ -355,6 +406,9 @@ impl Setting {
             "hold-time" => Setting::HoldTime(parse_value(key, value)?),
             "connect-retry" => Setting::ConnectRetry(parse_value(key, value)?),
             "cluster-id" => Setting::ClusterId(parse_value(key, value)?),
+            "sys-name" => Setting::SysName(parse_value(key, value)?),
+            "sys-descr" => Setting::SysDescr(parse_value(key, value)?),
+            "enhanced-rr-stale-ttl" => Setting::EnhancedRrStaleTtl(parse_value(key, value)?),
             "remote-as" => Setting::RemoteAs(parse_value(key, value)?),
             "port" => Setting::Port(parse_value(key, value)?),
             "interface" => Setting::Interface(parse_value(key, value)?),
@@ -366,8 +420,30 @@ impl Setting {
             "rs-client" => Setting::RsClient(parse_value(key, value)?),
             "graceful-shutdown" => Setting::GracefulShutdown(parse_value(key, value)?),
             "originate" => Setting::Originate(parse_value(key, value)?),
+            "delay-open-time-secs" => Setting::DelayOpenTimeSecs(parse_value(key, value)?),
+            "idle-hold-time-secs" => Setting::IdleHoldTimeSecs(parse_value(key, value)?),
+            "damp-peer-oscillations" => Setting::DampPeerOscillations(parse_value(key, value)?),
+            "allow-automatic-stop" => Setting::AllowAutomaticStop(parse_value(key, value)?),
+            "send-notification-without-open" => {
+                Setting::SendNotificationWithoutOpen(parse_value(key, value)?)
+            }
+            "min-route-advertisement-interval-secs" => {
+                Setting::MinRouteAdvertisementIntervalSecs(parse_value(key, value)?)
+            }
+            "enforce-first-as" => Setting::EnforceFirstAs(parse_value(key, value)?),
+            "send-rpki-community" => Setting::SendRpkiCommunity(parse_value(key, value)?),
+            "admin-down" => Setting::AdminDown(parse_value(key, value)?),
             other => return Err(format!("unknown setting '{}'", other)),
         })
+    }
+}
+
+fn quote_if_needed(s: &str) -> String {
+    if s.contains(|c: char| c.is_whitespace() || c == '"' || c == '#' || c == '{' || c == '}') {
+        let cleaned: String = s.chars().filter(|c| *c != '"').collect();
+        format!("\"{}\"", cleaned)
+    } else {
+        s.to_string()
     }
 }
 
@@ -442,6 +518,14 @@ pub(crate) fn parse_bgp_body(
                 expect_open_brace(tokens, pos)?;
                 body.rpki_caches
                     .push(parse_rpki_cache_block(address, tokens, pos)?);
+            }
+            "bgp-ls" => {
+                if body.bgp_ls.is_some() {
+                    return Err(parse_err(line, "duplicate 'bgp-ls' block"));
+                }
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.bgp_ls = Some(parse_bgp_ls_block(tokens, pos)?);
             }
             _ => {
                 let value = take_word(tokens, pos);
@@ -695,6 +779,35 @@ fn parse_bmp_server_block(
                 return Err(parse_err(
                     line,
                     format!("unknown bmp-server directive '{}'", other),
+                ));
+            }
+        }
+    }
+    expect_close_brace(tokens, pos)?;
+    Ok(block)
+}
+
+fn parse_bgp_ls_block(tokens: &[Token], pos: &mut usize) -> Result<BgpLsBlock, ParseError> {
+    let mut block = BgpLsBlock::default();
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(tokens[*pos].line, "unexpected '{' inside bgp-ls"));
+            }
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "instance-id" => {
+                block.instance_id = parse_scalar(&key, line, tokens, pos)?;
+            }
+            other => {
+                return Err(parse_err(
+                    line,
+                    format!("unknown bgp-ls directive '{}'", other),
                 ));
             }
         }

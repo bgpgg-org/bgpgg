@@ -88,6 +88,7 @@ pub enum ServerError {
     InvalidListenAddr(String),
     BindError(io::Error),
     IoError(io::Error),
+    ConfigParse(String),
 }
 
 impl std::fmt::Display for ServerError {
@@ -96,6 +97,7 @@ impl std::fmt::Display for ServerError {
             ServerError::InvalidListenAddr(addr) => write!(f, "Invalid listen address: {}", addr),
             ServerError::BindError(e) => write!(f, "Failed to bind listener: {}", e),
             ServerError::IoError(e) => write!(f, "I/O error: {}", e),
+            ServerError::ConfigParse(msg) => write!(f, "Failed to parse rogg.conf: {}", msg),
         }
     }
 }
@@ -408,8 +410,13 @@ impl PeerInfo {
             Some(ConnectionType::Incoming) => (None, Some(conn_state)),
             None => (None, None),
         };
+        let admin_state = if config.admin_down {
+            AdminState::Down
+        } else {
+            AdminState::Up
+        };
         Self {
-            admin_state: AdminState::Up,
+            admin_state,
             import_policies: Vec::new(),
             export_policies: Vec::new(),
             config,
@@ -520,7 +527,7 @@ impl PeerInfo {
 pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
-    pub(crate) config: BgpConfig,
+    pub config: BgpConfig,
     pub(crate) policy_ctx: PolicyContext,
     local_bgp_id: u32,
     pub(crate) local_addr: IpAddr,
@@ -541,7 +548,12 @@ pub struct BgpServer {
 }
 
 impl BgpServer {
-    pub fn new(config: BgpConfig, config_path: PathBuf) -> Result<Self, ServerError> {
+    /// Read and parse `rogg.conf` from `config_path`, then construct the server.
+    /// `config_path` is the single source of truth -- the daemon owns the read,
+    /// not the caller.
+    pub fn new(config_path: PathBuf) -> Result<Self, ServerError> {
+        let config = BgpConfig::from_conf_file(&config_path)
+            .map_err(|e| ServerError::ConfigParse(e.to_string()))?;
         let local_bgp_id = u32::from(config.router_id);
         let sock_addr: SocketAddr = config
             .listen_addr
@@ -679,6 +691,7 @@ impl BgpServer {
             let peer_ip = peer_addr.ip();
             let config = peer_cfg.clone();
             let passive = config.passive_mode;
+            let admin_down = config.admin_down;
             let allow_auto_start = config.allow_automatic_start();
 
             // Passive mode peers only accept incoming connections
@@ -699,15 +712,15 @@ impl BgpServer {
             }
             self.peers.insert(peer_ip, entry);
 
-            // RFC 4271: AutomaticStart for configured peers (if allowed)
-            if allow_auto_start {
+            // RFC 4271: AutomaticStart for configured peers (if allowed and not admin-down)
+            if allow_auto_start && !admin_down {
                 if passive {
                     let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
                 } else {
                     let _ = peer_tx.send(PeerOp::AutomaticStart);
                 }
             }
-            info!(%peer_ip, passive, "configured peer");
+            info!(%peer_ip, passive, admin_down, "configured peer");
         }
     }
 
@@ -792,10 +805,7 @@ impl BgpServer {
 
         for addr in old_by_addr.keys() {
             if !new_by_addr.contains_key(addr) {
-                if let Some(task_info) = self.bmp_tasks.remove(addr) {
-                    drop(task_info.task_tx);
-                    info!(%addr, "BMP task removed via reconfigure");
-                }
+                self.stop_single_bmp_task(*addr);
             }
         }
 
@@ -808,19 +818,39 @@ impl BgpServer {
             if !needs_spawn {
                 continue;
             }
-            if let Some(task_info) = self.bmp_tasks.remove(addr) {
-                drop(task_info.task_tx);
-            }
-            let task_tx = self.spawn_bmp_task(*addr, stats);
-            self.bmp_tasks
-                .insert(*addr, BmpTaskInfo::new(*addr, stats, task_tx));
-            info!(%addr, "BMP task added/updated via reconfigure");
-            let established = self.get_established_peers();
-            if let Some(info_ref) = self.bmp_tasks.get(addr) {
-                ops_mgmt::send_initial_bmp_state(&info_ref.task_tx, established);
-            }
+            self.spawn_single_bmp_task(*addr, stats);
         }
         Ok(())
+    }
+
+    /// Spawn (or restart) a BMP task for `addr` with the given statistics
+    /// timeout. Sends the established-peer initial state once spawned so the
+    /// remote sees existing peers immediately. Used by both
+    /// `reconfigure_bmp_servers` and `handle_add_bmp_server`.
+    pub(crate) fn spawn_single_bmp_task(
+        &mut self,
+        addr: SocketAddr,
+        statistics_timeout: Option<u64>,
+    ) {
+        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
+            drop(task_info.task_tx);
+        }
+        let task_tx = self.spawn_bmp_task(addr, statistics_timeout);
+        self.bmp_tasks
+            .insert(addr, BmpTaskInfo::new(addr, statistics_timeout, task_tx));
+        info!(%addr, "BMP task spawned");
+        let established = self.get_established_peers();
+        if let Some(info_ref) = self.bmp_tasks.get(&addr) {
+            ops_mgmt::send_initial_bmp_state(&info_ref.task_tx, established);
+        }
+    }
+
+    /// Drop the BMP task for `addr` if running. Idempotent.
+    pub(crate) fn stop_single_bmp_task(&mut self, addr: SocketAddr) {
+        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
+            drop(task_info.task_tx);
+            info!(%addr, "BMP task stopped");
+        }
     }
 
     /// Diff `old.rpki_caches` vs `new.rpki_caches` by address. Spawns the RTR
@@ -849,17 +879,9 @@ impl BgpServer {
             return Ok(());
         }
 
-        let rpki_tx = match &self.rpki_tx {
-            Some(tx) => tx.clone(),
-            None => self.spawn_rtr_manager(),
-        };
-
         for addr in old_by_addr.keys() {
             if !new_by_addr.contains_key(addr) {
-                if rpki_tx.send(RpkiOp::RemoveCache(*addr)).is_err() {
-                    return Err("RPKI manager not running".to_string());
-                }
-                info!(%addr, "RPKI cache removed via reconfigure");
+                self.stop_single_rpki_cache(*addr)?;
             }
         }
 
@@ -867,20 +889,50 @@ impl BgpServer {
             if old_by_addr.contains_key(addr) {
                 continue;
             }
-            let transport = rpki_cache_to_transport(cfg)?;
-            let cache_config = RtrCacheConfig {
-                address: *addr,
-                preference: cfg.preference,
-                transport,
-                retry_interval: cfg.retry_interval,
-                refresh_interval: cfg.refresh_interval,
-                expire_interval: cfg.expire_interval,
-            };
-            if rpki_tx.send(RpkiOp::AddCache(cache_config)).is_err() {
-                return Err("RPKI manager not running".to_string());
-            }
-            info!(%addr, "RPKI cache added via reconfigure");
+            self.spawn_single_rpki_cache(cfg)?;
+            let _ = addr;
         }
+        Ok(())
+    }
+
+    /// Send `AddCache` to the RTR manager for `cfg`, spawning the manager if
+    /// it isn't running yet. Used by both `reconfigure_rpki_caches` and
+    /// `handle_add_rpki_cache`.
+    pub(crate) fn spawn_single_rpki_cache(&mut self, cfg: &RpkiCacheConfig) -> Result<(), String> {
+        let addr: SocketAddr = cfg
+            .address
+            .parse()
+            .map_err(|e| format!("invalid RPKI cache address '{}': {}", cfg.address, e))?;
+        let transport = rpki_cache_to_transport(cfg)?;
+        let rpki_tx = match &self.rpki_tx {
+            Some(tx) => tx.clone(),
+            None => self.spawn_rtr_manager(),
+        };
+        let cache_config = RtrCacheConfig {
+            address: addr,
+            preference: cfg.preference,
+            transport,
+            retry_interval: cfg.retry_interval,
+            refresh_interval: cfg.refresh_interval,
+            expire_interval: cfg.expire_interval,
+        };
+        if rpki_tx.send(RpkiOp::AddCache(cache_config)).is_err() {
+            return Err("RPKI manager not running".to_string());
+        }
+        info!(%addr, "RPKI cache added");
+        Ok(())
+    }
+
+    /// Send `RemoveCache` to the RTR manager. Returns Err if the manager isn't
+    /// running.
+    pub(crate) fn stop_single_rpki_cache(&mut self, addr: SocketAddr) -> Result<(), String> {
+        let Some(rpki_tx) = &self.rpki_tx else {
+            return Err("RPKI manager not running".to_string());
+        };
+        if rpki_tx.send(RpkiOp::RemoveCache(addr)).is_err() {
+            return Err("RPKI manager not running".to_string());
+        }
+        info!(%addr, "RPKI cache removed");
         Ok(())
     }
 
@@ -968,6 +1020,7 @@ impl BgpServer {
     }
 
     /// Spawn a peer task and start it. Caller keeps `self.config.peers` in sync.
+    /// Honors `config.admin_down`: the task is spawned but no Start op is sent.
     pub(crate) fn spawn_and_start_peer(
         &mut self,
         peer_ip: IpAddr,
@@ -996,13 +1049,15 @@ impl BgpServer {
             }
         }
 
-        if config.passive_mode {
-            let _ = peer_tx.send(PeerOp::ManualStartPassive);
-        } else {
-            let _ = peer_tx.send(PeerOp::ManualStart);
+        if !config.admin_down {
+            if config.passive_mode {
+                let _ = peer_tx.send(PeerOp::ManualStartPassive);
+            } else {
+                let _ = peer_tx.send(PeerOp::ManualStart);
+            }
         }
 
-        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
+        info!(%peer_ip, passive = config.passive_mode, admin_down = config.admin_down, total_peers = self.peers.len(), "peer added");
     }
 
     /// Tear down a peer session and drop it. Caller keeps `self.config.peers` in sync.
@@ -1248,16 +1303,22 @@ impl BgpServer {
 mod tests {
     use super::*;
     use crate::policy::{Policy, DEFAULT_DENY_ALL, DEFAULT_PERMIT_ALL};
+    use conf::testutil::TempDir;
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
         PeerInfo::new(PeerConfig::default(), None, None)
     }
 
-    fn make_server() -> BgpServer {
+    /// Returns the server plus the TempDir guard. The caller must keep the
+    /// guard alive for the test's lifetime; dropping it removes rogg.conf.
+    fn make_server() -> (BgpServer, TempDir) {
         let config = BgpConfig::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
-        // Path required by constructor; these tests never commit so it's unused.
-        BgpServer::new(config, PathBuf::from("/tmp/test-rogg.conf")).expect("valid config")
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rogg.conf");
+        std::fs::write(&path, config.to_conf_str()).unwrap();
+        let server = BgpServer::new(path).expect("valid config");
+        (server, dir)
     }
 
     #[test]
@@ -1265,11 +1326,11 @@ mod tests {
         let peer_ip: IpAddr = "10.0.0.1".parse().unwrap();
 
         // Unconfigured peer -> reject
-        let server = make_server();
+        let (server, _dir) = make_server();
         assert!(!server.should_accept_peer(peer_ip));
 
         // Configured peer -> accept
-        let mut server = make_server();
+        let (mut server, _dir) = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
     }
@@ -1311,7 +1372,7 @@ mod tests {
         ];
 
         for tc in cases {
-            let mut server = make_server();
+            let (mut server, _dir) = make_server();
 
             for name in &tc.user_policies {
                 server

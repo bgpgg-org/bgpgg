@@ -101,6 +101,8 @@ use super::proto::{
     Route as ProtoRoute,
     RpkiCacheInfo,
     RpkiVrp,
+    SaveConfigRequest,
+    SaveConfigResponse,
     SessionConfig as ProtoSessionConfig,
     SetPeerGracefulShutdownRequest,
     SetPeerGracefulShutdownResponse,
@@ -404,6 +406,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
             .unwrap_or(defaults.send_rpki_community),
         afi_safis: proto_to_afi_safis(&cfg.afi_safis)?,
         interface: cfg.interface.or(defaults.interface.clone()),
+        admin_down: defaults.admin_down,
     })
 }
 
@@ -1282,6 +1285,33 @@ impl BgpService for BgpGrpcService {
                 error: String::new(),
             })),
             Err(e) => Ok(Response::new(CommitConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn save_config(
+        &self,
+        _request: Request<SaveConfigRequest>,
+    ) -> Result<Response<SaveConfigResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::SaveConfig { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(SaveConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(SaveConfigResponse {
                 ok: false,
                 error: e,
             })),

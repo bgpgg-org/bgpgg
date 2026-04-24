@@ -111,12 +111,19 @@ async fn test_add_peer_success() {
     )
     .await;
 
-    // AddPeer routes through commit_config -- rogg.conf must reflect the new peer.
-    let conf = server1.read_conf();
     let peer_addr = server2.address.to_string();
+    let conf = server1.read_conf();
+    assert!(
+        !conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf must NOT contain new peer until SaveConfig; got {:?}",
+        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+    );
+
+    server1.client.save_config().await.unwrap();
+    let conf = server1.read_conf();
     assert!(
         conf.peers.iter().any(|p| p.address == peer_addr),
-        "rogg.conf peers should include {}; got {:?}",
+        "rogg.conf peers should include {} after save_config; got {:?}",
         peer_addr,
         conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
     );
@@ -142,29 +149,36 @@ async fn test_remove_peer_success() {
     let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
     let peer_addr = server2.address.to_string();
 
-    // Verify peer exists -- in memory and on disk.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     let conf = server1.read_conf();
     assert!(
-        conf.peers.iter().any(|p| p.address == peer_addr),
-        "rogg.conf peers should include {} before RemovePeer; got {:?}",
-        peer_addr,
+        !conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf must NOT contain peer until SaveConfig; got {:?}",
         conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
     );
 
-    // Remove peer
-    server1.remove_peer(&server2).await;
+    server1.client.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf should contain peer after save"
+    );
 
-    // Verify peer is gone -- in memory and on disk.
+    server1.remove_peer(&server2).await;
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 0);
     let conf = server1.read_conf();
     assert!(
+        conf.peers.iter().any(|p| p.address == peer_addr),
+        "rogg.conf still contains peer until next SaveConfig"
+    );
+
+    server1.client.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    assert!(
         !conf.peers.iter().any(|p| p.address == peer_addr),
-        "rogg.conf peers should not include {} after RemovePeer; got {:?}",
-        peer_addr,
-        conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
+        "rogg.conf should not contain peer after save"
     );
 }
 
@@ -349,6 +363,16 @@ async fn test_disable_enable_peer() {
     )
     .await;
 
+    // Disable persists across SaveConfig: rogg.conf records admin_down = true.
+    server1.client.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    let saved = conf
+        .peers
+        .iter()
+        .find(|p| p.address == server2.address.to_string())
+        .expect("peer in saved config");
+    assert!(saved.admin_down, "rogg.conf must record admin_down = true");
+
     // Enable peer
     server1
         .client
@@ -378,6 +402,19 @@ async fn test_disable_enable_peer() {
         Duration::from_secs(30),
     )
     .await;
+
+    // Enable persists too: rogg.conf clears admin_down.
+    server1.client.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    let saved = conf
+        .peers
+        .iter()
+        .find(|p| p.address == server2.address.to_string())
+        .expect("peer in saved config");
+    assert!(
+        !saved.admin_down,
+        "rogg.conf must clear admin_down on enable"
+    );
 }
 
 #[tokio::test]
@@ -1394,29 +1431,30 @@ const SNAPSHOT_COUNT: u32 = 10;
 /// Drive a fresh commit by adding one more BMP server; each call produces a
 /// distinct config diff so snapshot rotation can be observed.
 async fn commit_once(server: &TestServer, port: u16) {
+    // Imperative AddBmpServer no longer persists; pair it with SaveConfig so
+    // each call exercises the same rotate-snapshot + atomic-write pipeline as
+    // before.
     server
         .client
         .add_bmp_server(format!("127.0.0.1:{}", port), None)
         .await
-        .expect("commit via add_bmp_server");
+        .expect("add bmp server");
+    server.client.save_config().await.expect("save config");
 }
 
 #[tokio::test]
-async fn test_no_snapshot_on_first_commit() {
+async fn test_first_commit_rotates_startup_state() {
+    // bgpggd reads rogg.conf at startup, so the file already exists when the
+    // first commit lands. The first commit therefore rotates the startup
+    // state into rogg.1.conf.
     let server = start_test_server(test_config(65001, 1)).await;
 
     assert!(!server.snapshot_exists(1), "no snapshot before any commit");
 
     commit_once(&server, 11100).await;
     assert!(
-        !server.snapshot_exists(1),
-        "first commit should not create a snapshot (no previous state)"
-    );
-
-    commit_once(&server, 11101).await;
-    assert!(
         server.snapshot_exists(1),
-        "second commit should create rogg.1.conf"
+        "first commit rotates the startup-loaded rogg.conf into rogg.1.conf"
     );
 }
 
@@ -1424,9 +1462,10 @@ async fn test_no_snapshot_on_first_commit() {
 async fn test_commit_rotates_snapshots() {
     let server = start_test_server(test_config(65001, 1)).await;
 
-    // Do N+2 commits. First commit doesn't snapshot (no prior state);
-    // each subsequent commit rotates.
-    let total = SNAPSHOT_COUNT + 2;
+    // Each commit rotates: startup file -> .1 on first commit, .1 -> .2 on
+    // second commit, etc. After SNAPSHOT_COUNT+1 commits the oldest is
+    // dropped and we have exactly SNAPSHOT_COUNT snapshots.
+    let total = SNAPSHOT_COUNT + 1;
     for i in 0..total {
         commit_once(&server, 11200 + i as u16).await;
     }
@@ -1461,19 +1500,14 @@ async fn test_commit_rotates_snapshots() {
 async fn test_list_snapshots() {
     let server = start_test_server(test_config(65001, 1)).await;
 
-    // First commit: no snapshot produced.
-    commit_once(&server, 11300).await;
-    let snapshots = server.client.list_config_snapshots().await.unwrap();
-    assert_eq!(snapshots.len(), 0);
-
-    // Three more commits -> three snapshots.
-    for i in 1..=3 {
+    // Four commits -> four snapshots (each commit rotates the prior file).
+    for i in 0..4 {
         commit_once(&server, 11300 + i as u16).await;
     }
     let snapshots = server.client.list_config_snapshots().await.unwrap();
-    assert_eq!(snapshots.len(), 3);
+    assert_eq!(snapshots.len(), 4);
     let indices: Vec<u32> = snapshots.iter().map(|s| s.index).collect();
-    assert_eq!(indices, vec![1, 2, 3]);
+    assert_eq!(indices, vec![1, 2, 3, 4]);
     for snap in &snapshots {
         assert!(snap.size_bytes > 0, "snapshot {} has size", snap.index);
         assert!(snap.mtime_unix > 0, "snapshot {} has mtime", snap.index);
@@ -1514,11 +1548,13 @@ async fn test_rollback_restores_previous() {
 async fn test_apply_failure_no_revert() {
     let server = start_test_server(test_config(65001, 1)).await;
 
-    // Establish a known-good state with one BMP server.
+    // Establish a known-good state with one BMP server. First commit
+    // rotates the startup file into rogg.1.conf.
     commit_once(&server, 11500).await;
     let before = server.read_conf();
     assert_eq!(before.bmp_servers.len(), 1);
-    assert!(!server.snapshot_exists(1), "first commit: no snapshot");
+    assert!(server.snapshot_exists(1));
+    assert!(!server.snapshot_exists(2), "only one rotation so far");
 
     // Bad BMP address: peer validator and `reject_unsupported_changes` pass;
     // apply fails inside `reconfigure_bmp_servers` when it parses the address.
@@ -1537,7 +1573,27 @@ async fn test_apply_failure_no_revert() {
         "failed commit must not mutate rogg.conf"
     );
     assert!(
-        !server.snapshot_exists(1),
+        !server.snapshot_exists(2),
         "failed commit must not rotate snapshots"
     );
+}
+
+#[tokio::test]
+async fn test_save_config_rotates_snapshot() {
+    // Calling save twice rotates the prior rogg.conf into rogg.1.conf,
+    // exercising the same persist pipeline as commit but without going
+    // through reconfigure.
+    let server = start_test_server(test_config(65001, 1)).await;
+
+    server.client.save_config().await.expect("first save");
+    assert!(
+        server.snapshot_exists(1),
+        "save rotates startup file into .1"
+    );
+
+    let conf = server.read_conf();
+    assert_eq!(conf.asn, 65001);
+
+    server.client.save_config().await.expect("second save");
+    assert!(server.snapshot_exists(2), "second save shifts .1 -> .2");
 }

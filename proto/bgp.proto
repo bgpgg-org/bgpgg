@@ -43,6 +43,7 @@ service BgpService {
     // Config-mode management (ggsh configure/commit flow)
     rpc GetRunningConfig(GetRunningConfigRequest) returns (GetRunningConfigResponse);
     rpc CommitConfig(CommitConfigRequest) returns (CommitConfigResponse);
+    rpc SaveConfig(SaveConfigRequest) returns (SaveConfigResponse);
     rpc RollbackConfig(RollbackConfigRequest) returns (RollbackConfigResponse);
     rpc ListConfigSnapshots(ListConfigSnapshotsRequest) returns (ListConfigSnapshotsResponse);
 }
@@ -69,6 +70,16 @@ message CommitConfigRequest {
 }
 
 message CommitConfigResponse {
+    bool ok = 1;
+    string error = 2;
+}
+
+// SaveConfig persists the daemon's current self.config to rogg.conf.
+// Used by the gRPC-imperative path (AddPeer / RemovePeer / ...) which
+// mutates self.config and runtime but does not write the file.
+message SaveConfigRequest {}
+
+message SaveConfigResponse {
     bool ok = 1;
     string error = 2;
 }
