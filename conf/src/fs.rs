@@ -13,19 +13,21 @@
 // limitations under the License.
 
 //! Filesystem primitives shared across rogg daemons: atomic config write
-//! with snapshot rotation, sibling-lockfile coordination, snapshot
-//! enumeration, snapshot loading.
+//! with snapshot rotation, snapshot enumeration, sibling-lockfile
+//! coordination.
 //!
-//! `persist_config` is the single write entry point. It locks the file
-//! against concurrent writers (multi-daemon: bgpgg vs ospfgg etc.), reads
-//! the existing rogg.conf, replaces the caller-supplied service slice,
-//! and atomically writes the merged result.
+//! The sibling `<path>.lock` file is the rogg-wide config-mode lock.
+//! ggsh holds an exclusive flock during configure mode and writes a
+//! per-session UUID into the file. Imperative handlers take a shared
+//! flock to refuse mutations during a session. Write RPCs verify the
+//! caller's session_uuid against the file content.
 
 use crate::language::{self, Root, Service};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
 /// Number of historical config snapshots kept on disk.
 pub const SNAPSHOT_COUNT: u32 = 10;
@@ -37,32 +39,85 @@ pub struct SnapshotInfo {
     pub size_bytes: u64,
 }
 
-/// Exclusive advisory lock on rogg.conf's sibling `.lock` file. Held for
-/// the duration of a daemon's read-modify-write so multi-daemon writes
-/// don't clobber each other's slices. Released on Drop.
-pub struct FileLock {
-    _file: File,
+/// Open (create if missing) the sibling `.lock` file for `config_path`.
+/// Creates parent directories as needed (e.g. on first ggsh run when
+/// `~/.config/rogg/` doesn't exist yet).
+pub fn open_lock_file(config_path: &Path) -> io::Result<File> {
+    let lock_path = lock_path_for(config_path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
 }
 
-impl FileLock {
-    pub fn acquire(path: &Path) -> io::Result<Self> {
-        let lock_path = lock_path_for(path);
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        file.lock()?;
-        Ok(Self { _file: file })
+/// Caller holds SH for as long as the returned `File` is alive.
+/// `Err("config locked")` when an EX holder exists.
+pub fn acquire_shared_lock(config_path: &Path) -> Result<File, String> {
+    let file = open_lock_file(config_path).map_err(|e| format!("lock error: {}", e))?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err("config locked".into()),
+        Err(TryLockError::Error(e)) => Err(format!("lock error: {}", e)),
     }
 }
 
-/// Persist `service` into `path` as the new value for its slot. Reads
-/// the existing rogg.conf under an exclusive lock, replaces the
-/// matching service block (or appends if absent), rotates the prior
-/// version into `.1`, and atomically writes the merged result.
+/// Take EX on the lock file and write `session_uuid` into it. Caller
+/// holds EX for as long as the returned `File` is alive. Used by ggsh
+/// on `configure`. Truncates only after the flock is ours (a rejected
+/// attempt must not clobber a held session's UUID).
+pub fn acquire_exclusive_lock(config_path: &Path, session_uuid: Uuid) -> Result<File, String> {
+    use std::io::Write;
+    let mut file = open_lock_file(config_path).map_err(|e| format!("lock error: {}", e))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err("another configure session is active".into()),
+        Err(TryLockError::Error(e)) => return Err(format!("lock error: {}", e)),
+    }
+    file.set_len(0)
+        .map_err(|e| format!("truncate failed: {}", e))?;
+    write!(file, "{}", session_uuid).map_err(|e| format!("write failed: {}", e))?;
+    file.flush().map_err(|e| format!("flush failed: {}", e))?;
+    Ok(file)
+}
+
+/// Fresh v4 UUID. Coordination identity for a configure session;
+/// not a security boundary.
+pub fn make_session_uuid() -> Uuid {
+    Uuid::new_v4()
+}
+
+/// `Ok(None)` if the lock file is missing or empty.
+pub fn read_session_uuid(config_path: &Path) -> io::Result<Option<Uuid>> {
+    let lock_path = lock_path_for(config_path);
+    match fs::read_to_string(&lock_path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            Uuid::parse_str(trimmed).map(Some).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lock file content is not a UUID",
+                )
+            })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Replace `service`'s slot in rogg.conf, rotate prior version into
+/// `.1`, atomically write the merged result.
+///
+/// Caller must serialize concurrent writers (operator's EX flock or
+/// ggsh's serial commit fan-out).
 pub fn persist_service_config(path: &Path, service: Service) -> io::Result<()> {
-    let _lock = FileLock::acquire(path)?;
     let existing = match fs::read_to_string(path) {
         Ok(text) => language::parse(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
@@ -167,11 +222,38 @@ fn tmp_write_path_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Sibling lockfile used by `FileLock`.
-fn lock_path_for(path: &Path) -> PathBuf {
+/// Sibling lockfile path: `<path>.lock`.
+pub fn lock_path_for(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".lock");
     PathBuf::from(s)
+}
+
+/// XDG-compliant default path for `rogg.conf`:
+/// `${XDG_CONFIG_HOME:-$HOME/.config}/rogg/rogg.conf`.
+pub fn default_config_path() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+        .join("rogg")
+        .join("rogg.conf")
+}
+
+/// XDG-compliant per-user state directory for rogg:
+/// `${XDG_STATE_HOME:-$HOME/.local/state}/rogg`. Callers append a
+/// tool-prefixed filename (e.g. `ggsh_history`).
+pub fn user_state_dir() -> PathBuf {
+    xdg_dir("XDG_STATE_HOME", ".local/state").join("rogg")
+}
+
+fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    if let Some(v) = std::env::var_os(var) {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(fallback)
 }
 
 #[cfg(test)]
@@ -302,5 +384,51 @@ mod tests {
         persist_service_config(&path, Service::Bgp(cfg_v2.to_bgp_service_body())).unwrap();
         assert!(dir.read("rogg.conf").contains("65002"));
         assert!(dir.read("rogg.1.conf").contains("65001"));
+    }
+
+    #[test]
+    fn test_acquire_shared_lock_blocked_by_exclusive() {
+        let dir = TestDir::new();
+        let path = dir.conf_path();
+        let exclusive = open_lock_file(&path).unwrap();
+        exclusive.lock().unwrap();
+        let err = acquire_shared_lock(&path).unwrap_err();
+        assert!(err.contains("config locked"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_acquire_shared_lock_compatible_with_other_shared() {
+        let dir = TestDir::new();
+        let path = dir.conf_path();
+        let _first = acquire_shared_lock(&path).expect("first SH");
+        let _second = acquire_shared_lock(&path).expect("second SH (compatible)");
+    }
+
+    #[test]
+    fn test_read_session_uuid() {
+        type Expected = Result<Option<Uuid>, io::ErrorKind>;
+        let written = Uuid::new_v4();
+        let cases: [(&str, Option<&str>, Expected); 4] = [
+            ("missing file", None, Ok(None)),
+            ("empty file", Some(""), Ok(None)),
+            ("valid uuid", Some(&written.to_string()), Ok(Some(written))),
+            (
+                "invalid content",
+                Some("not-a-uuid"),
+                Err(io::ErrorKind::InvalidData),
+            ),
+        ];
+        for (name, content, expected) in cases {
+            let dir = TestDir::new();
+            if let Some(c) = content {
+                dir.touch("rogg.conf.lock", c);
+            }
+            let result = read_session_uuid(&dir.conf_path());
+            match (result, expected) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{}", name),
+                (Err(e), Err(want)) => assert_eq!(e.kind(), want, "{}", name),
+                (got, want) => panic!("{}: got {:?}, want {:?}", name, got, want),
+            }
+        }
     }
 }

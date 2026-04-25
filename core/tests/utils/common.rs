@@ -141,6 +141,52 @@ impl TestServer {
             runtime.shutdown_background();
         }
     }
+
+    /// Path to the sibling `<config>.lock` file.
+    pub fn lock_path(&self) -> PathBuf {
+        conf::fs::lock_path_for(&self.config_dir.path().join("rogg.conf"))
+    }
+
+    /// Take EX flock, write UUID, run closure, release. Mimics
+    /// `ggsh configure` for tests calling `save_config` / `commit_config`.
+    pub async fn with_session_lock<F, Fut, T>(&self, f: F) -> T
+    where
+        F: FnOnce(uuid::Uuid) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        use std::io::Write;
+        let lock_path = self.lock_path();
+        let session_uuid = conf::fs::make_session_uuid();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+            .expect("open lock file");
+        file.lock().expect("acquire EX flock");
+        write!(file, "{}", session_uuid).expect("write UUID to lock file");
+        file.flush().expect("flush lock file");
+        let result = f(session_uuid).await;
+        drop(file);
+        let _ = std::fs::remove_file(&lock_path);
+        result
+    }
+
+    pub async fn save_config(&self) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.save_config(uuid).await })
+            .await
+    }
+
+    pub async fn commit_config(&self, text: String) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.commit_config(text, uuid).await })
+            .await
+    }
+
+    pub async fn rollback_config(&self, index: u32) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.rollback_config(index, uuid).await })
+            .await
+    }
 }
 
 impl Drop for TestServer {

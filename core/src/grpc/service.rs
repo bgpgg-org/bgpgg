@@ -1267,9 +1267,13 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<CommitConfigRequest>,
     ) -> Result<Response<CommitConfigResponse>, Status> {
-        let text = request.into_inner().text;
+        let inner = request.into_inner();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::CommitConfig { text, response: tx };
+        let req = MgmtOp::CommitConfig {
+            text: inner.text,
+            session_uuid: inner.session_uuid,
+            response: tx,
+        };
 
         self.mgmt_request_tx
             .send(req)
@@ -1293,10 +1297,14 @@ impl BgpService for BgpGrpcService {
 
     async fn save_config(
         &self,
-        _request: Request<SaveConfigRequest>,
+        request: Request<SaveConfigRequest>,
     ) -> Result<Response<SaveConfigResponse>, Status> {
+        let inner = request.into_inner();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = MgmtOp::SaveConfig { response: tx };
+        let req = MgmtOp::SaveConfig {
+            session_uuid: inner.session_uuid,
+            response: tx,
+        };
 
         self.mgmt_request_tx
             .send(req)
@@ -1322,10 +1330,11 @@ impl BgpService for BgpGrpcService {
         &self,
         request: Request<RollbackConfigRequest>,
     ) -> Result<Response<RollbackConfigResponse>, Status> {
-        let index = request.into_inner().index;
+        let inner = request.into_inner();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::RollbackConfig {
-            index,
+            index: inner.index,
+            session_uuid: inner.session_uuid,
             response: tx,
         };
 

@@ -119,7 +119,7 @@ async fn test_add_peer_success() {
         conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
     );
 
-    server1.client.save_config().await.unwrap();
+    server1.save_config().await.unwrap();
     let conf = server1.read_conf();
     assert!(
         conf.peers.iter().any(|p| p.address == peer_addr),
@@ -158,7 +158,7 @@ async fn test_remove_peer_success() {
         conf.peers.iter().map(|p| &p.address).collect::<Vec<_>>()
     );
 
-    server1.client.save_config().await.unwrap();
+    server1.save_config().await.unwrap();
     let conf = server1.read_conf();
     assert!(
         conf.peers.iter().any(|p| p.address == peer_addr),
@@ -174,7 +174,7 @@ async fn test_remove_peer_success() {
         "rogg.conf still contains peer until next SaveConfig"
     );
 
-    server1.client.save_config().await.unwrap();
+    server1.save_config().await.unwrap();
     let conf = server1.read_conf();
     assert!(
         !conf.peers.iter().any(|p| p.address == peer_addr),
@@ -364,7 +364,7 @@ async fn test_disable_enable_peer() {
     .await;
 
     // Disable persists across SaveConfig: rogg.conf records admin_down = true.
-    server1.client.save_config().await.unwrap();
+    server1.save_config().await.unwrap();
     let conf = server1.read_conf();
     let saved = conf
         .peers
@@ -404,7 +404,7 @@ async fn test_disable_enable_peer() {
     .await;
 
     // Enable persists too: rogg.conf clears admin_down.
-    server1.client.save_config().await.unwrap();
+    server1.save_config().await.unwrap();
     let conf = server1.read_conf();
     let saved = conf
         .peers
@@ -1439,7 +1439,7 @@ async fn commit_once(server: &TestServer, port: u16) {
         .add_bmp_server(format!("127.0.0.1:{}", port), None)
         .await
         .expect("add bmp server");
-    server.client.save_config().await.expect("save config");
+    server.save_config().await.expect("save config");
 }
 
 #[tokio::test]
@@ -1528,7 +1528,7 @@ async fn test_rollback_restores_previous() {
     assert_eq!(conf_b.bmp_servers.len(), 2);
 
     // Roll back to A.
-    server.client.rollback_config(1).await.unwrap();
+    server.rollback_config(1).await.unwrap();
 
     // Running config matches A.
     let after = server.read_conf();
@@ -1562,7 +1562,7 @@ async fn test_apply_failure_no_revert() {
         "router-id {}\nasn 65001\nlisten-addr \"{}\"\nbmp-server \"not-a-valid-address\" {{}}\n",
         before.router_id, before.listen_addr
     );
-    let result = server.client.commit_config(bad_candidate).await;
+    let result = server.commit_config(bad_candidate).await;
     assert!(result.is_err(), "commit with bad BMP address must fail");
 
     // rogg.conf unchanged; no snapshot rotation triggered by the failure.
@@ -1585,7 +1585,7 @@ async fn test_save_config_rotates_snapshot() {
     // through reconfigure.
     let server = start_test_server(test_config(65001, 1)).await;
 
-    server.client.save_config().await.expect("first save");
+    server.save_config().await.expect("first save");
     assert!(
         server.snapshot_exists(1),
         "save rotates startup file into .1"
@@ -1594,6 +1594,101 @@ async fn test_save_config_rotates_snapshot() {
     let conf = server.read_conf();
     assert_eq!(conf.asn, 65001);
 
-    server.client.save_config().await.expect("second save");
+    server.save_config().await.expect("second save");
     assert!(server.snapshot_exists(2), "second save shifts .1 -> .2");
+}
+
+/// Opens the lock file with EX flock held for as long as the returned
+/// File lives. Optionally writes `uuid` into the file content.
+/// Mirrors what `ggsh configure` does.
+fn hold_exclusive_lock_with_uuid(server: &TestServer, uuid: Option<uuid::Uuid>) -> std::fs::File {
+    use std::io::Write;
+    let lock_path = server.lock_path();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .expect("open lock file");
+    file.lock().expect("acquire EX flock");
+    if let Some(uuid) = uuid {
+        write!(file, "{}", uuid).expect("write UUID");
+        file.flush().expect("flush");
+    }
+    file
+}
+
+#[tokio::test]
+async fn test_add_peer_blocked_by_session_lock_then_resumes() {
+    let server = start_test_server(test_config(65001, 1)).await;
+    let cfg = SessionConfig {
+        port: Some(179),
+        ..Default::default()
+    };
+
+    {
+        let _held = hold_exclusive_lock_with_uuid(&server, None);
+        let err = server
+            .client
+            .add_peer("10.0.0.99".to_string(), Some(cfg.clone()))
+            .await
+            .expect_err("add_peer rejected while EX held");
+        assert!(
+            err.message().contains("config locked"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    server
+        .client
+        .add_peer("10.0.0.99".to_string(), Some(cfg))
+        .await
+        .expect("add_peer succeeds after lock released");
+}
+
+#[tokio::test]
+async fn test_save_and_commit_uuid_check() {
+    let server = start_test_server(test_config(65001, 1)).await;
+    let real = conf::fs::make_session_uuid();
+    let other = conf::fs::make_session_uuid();
+    let text = || server.read_conf().to_conf_str();
+
+    // No session: any UUID rejected.
+    let save_err = server.client.save_config(other).await.unwrap_err();
+    assert!(
+        save_err.message().contains("no active configure session"),
+        "save no-session: got {}",
+        save_err.message()
+    );
+    let commit_err = server
+        .client
+        .commit_config(text(), other)
+        .await
+        .unwrap_err();
+    assert!(
+        commit_err.message().contains("no active configure session"),
+        "commit no-session: got {}",
+        commit_err.message()
+    );
+
+    // Session held with `real`: wrong UUID rejected.
+    let _held = hold_exclusive_lock_with_uuid(&server, Some(real));
+    let save_err = server.client.save_config(other).await.unwrap_err();
+    assert!(
+        save_err.message().contains("session UUID mismatch"),
+        "save mismatch: got {}",
+        save_err.message()
+    );
+    let commit_err = server
+        .client
+        .commit_config(text(), other)
+        .await
+        .unwrap_err();
+    assert!(
+        commit_err.message().contains("session UUID mismatch"),
+        "commit mismatch: got {}",
+        commit_err.message()
+    );
 }

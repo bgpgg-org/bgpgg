@@ -26,19 +26,21 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[command(name = "bgpggd")]
 #[command(about = "BGP daemon server", version)]
 struct Args {
-    /// Path to rogg.conf configuration file
-    #[arg(short, long)]
-    config: String,
+    /// Path to rogg.conf. Defaults to `$XDG_CONFIG_HOME/rogg/rogg.conf`
+    /// (i.e. `~/.config/rogg/rogg.conf`).
+    #[arg(short, long, default_value_os_t = conf::fs::default_config_path())]
+    config: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let server = BgpServer::new(PathBuf::from(&args.config)).unwrap_or_else(|err| {
+    let server = BgpServer::new(args.config.clone()).unwrap_or_else(|err| {
         eprintln!(
             "Error: failed to start BGP server from {}: {}",
-            args.config, err
+            args.config.display(),
+            err
         );
         process::exit(1);
     });

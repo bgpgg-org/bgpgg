@@ -287,11 +287,18 @@ impl BgpClient {
     }
 
     /// Commit `text` as the new running config.
-    pub async fn commit_config(&self, text: String) -> Result<(), tonic::Status> {
+    pub async fn commit_config(
+        &self,
+        text: String,
+        session_uuid: uuid::Uuid,
+    ) -> Result<(), tonic::Status> {
         let resp = self
             .inner
             .clone()
-            .commit_config(CommitConfigRequest { text })
+            .commit_config(CommitConfigRequest {
+                text,
+                session_uuid: session_uuid.to_string(),
+            })
             .await?
             .into_inner();
         if resp.ok {
@@ -326,12 +333,13 @@ impl BgpClient {
     }
 
     /// Persist the daemon's current `self.config` to `rogg.conf`.
-    /// Used after gRPC-imperative mutations to capture them on disk.
-    pub async fn save_config(&self) -> Result<(), tonic::Status> {
+    pub async fn save_config(&self, session_uuid: uuid::Uuid) -> Result<(), tonic::Status> {
         let resp = self
             .inner
             .clone()
-            .save_config(SaveConfigRequest {})
+            .save_config(SaveConfigRequest {
+                session_uuid: session_uuid.to_string(),
+            })
             .await?
             .into_inner();
         if resp.ok {
@@ -343,11 +351,18 @@ impl BgpClient {
 
     /// Roll back to the config at `index` (1-based). Loads the snapshot file,
     /// parses it, and commits it — the rollback itself becomes a new commit.
-    pub async fn rollback_config(&self, index: u32) -> Result<(), tonic::Status> {
+    pub async fn rollback_config(
+        &self,
+        index: u32,
+        session_uuid: uuid::Uuid,
+    ) -> Result<(), tonic::Status> {
         let resp = self
             .inner
             .clone()
-            .rollback_config(RollbackConfigRequest { index })
+            .rollback_config(RollbackConfigRequest {
+                index,
+                session_uuid: session_uuid.to_string(),
+            })
             .await?
             .into_inner();
         if resp.ok {

@@ -192,20 +192,26 @@ pub enum MgmtOp {
         response: oneshot::Sender<String>,
     },
     /// Apply the candidate config text supplied by the caller.
+    /// `session_uuid` must match the per-session UUID written by the
+    /// operator (ggsh) into `<config>.lock` on `configure`.
     CommitConfig {
         text: String,
+        session_uuid: String,
         response: oneshot::Sender<Result<(), String>>,
     },
-    /// Persist the daemon's current `self.config` to `rogg.conf`. Used
-    /// by the gRPC-imperative path; the operator-declarative path
-    /// (`CommitConfig`) already persists.
+    /// Persist the daemon's current `self.config` to `rogg.conf`.
+    /// `CommitConfig` already persists; this exists for callers that
+    /// mutated state via AddPeer/etc. and want the result on disk.
     SaveConfig {
+        session_uuid: String,
         response: oneshot::Sender<Result<(), String>>,
     },
     /// Load `rogg.<index>.conf`, parse, commit it. The rollback itself
-    /// becomes a new commit (forward history preserved).
+    /// becomes a new commit (forward history preserved). Same
+    /// `session_uuid` rule.
     RollbackConfig {
         index: u32,
+        session_uuid: String,
         response: oneshot::Sender<Result<(), String>>,
     },
     /// Return metadata for each stored snapshot that currently exists.
@@ -391,20 +397,53 @@ impl BgpServer {
             MgmtOp::GetRunningConfig { response } => {
                 let _ = response.send(self.config.to_conf_str());
             }
-            MgmtOp::CommitConfig { text, response } => {
-                self.handle_commit_config(text, response, bind_addr).await;
+            MgmtOp::CommitConfig {
+                text,
+                session_uuid,
+                response,
+            } => {
+                self.handle_commit_config(text, session_uuid, response, bind_addr)
+                    .await;
             }
-            MgmtOp::SaveConfig { response } => {
-                let _ = response.send(save_config(self));
+            MgmtOp::SaveConfig {
+                session_uuid,
+                response,
+            } => {
+                let _ = response.send(self.handle_save_config(&session_uuid));
             }
-            MgmtOp::RollbackConfig { index, response } => {
-                self.handle_rollback_config(index, response, bind_addr)
+            MgmtOp::RollbackConfig {
+                index,
+                session_uuid,
+                response,
+            } => {
+                self.handle_rollback_config(index, session_uuid, response, bind_addr)
                     .await;
             }
             MgmtOp::ListConfigSnapshots { response } => {
                 let _ = response.send(list_snapshots(&self.config_path, SNAPSHOT_COUNT));
             }
         }
+    }
+
+    fn verify_session_uuid(&self, session_uuid: &str) -> Result<(), String> {
+        let parsed = uuid::Uuid::parse_str(session_uuid)
+            .map_err(|_| "session_uuid is not a valid UUID".to_string())?;
+        match conf::fs::read_session_uuid(&self.config_path) {
+            Ok(Some(file_uuid)) => {
+                if file_uuid == parsed {
+                    Ok(())
+                } else {
+                    Err("session UUID mismatch".into())
+                }
+            }
+            Ok(None) => Err("no active configure session (lock file missing or empty)".into()),
+            Err(e) => Err(format!("failed to read session UUID: {}", e)),
+        }
+    }
+
+    fn handle_save_config(&self, session_uuid: &str) -> Result<(), String> {
+        self.verify_session_uuid(session_uuid)?;
+        save_config(self)
     }
 
     /// Load `rogg.<index>.conf` from disk, parse it, run `commit_config`.
@@ -414,9 +453,14 @@ impl BgpServer {
     async fn handle_rollback_config(
         &mut self,
         index: u32,
+        session_uuid: String,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
+        if let Err(e) = self.verify_session_uuid(&session_uuid) {
+            let _ = response.send(Err(e));
+            return;
+        }
         let text = match load_snapshot(&self.config_path, index) {
             Ok(text) => text,
             Err(e) => {
@@ -437,9 +481,14 @@ impl BgpServer {
     async fn handle_commit_config(
         &mut self,
         text: String,
+        session_uuid: String,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
+        if let Err(e) = self.verify_session_uuid(&session_uuid) {
+            let _ = response.send(Err(e));
+            return;
+        }
         let new_config = match BgpConfig::from_conf_str(&text) {
             Ok(cfg) => cfg,
             Err(e) => {
@@ -457,6 +506,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         info!(peer_addr = %addr, "adding peer via request");
 
         let peer_ip: IpAddr = match addr.parse() {
@@ -489,6 +545,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         info!(peer_ip = %addr, "removing peer via request");
 
         let peer_ip: IpAddr = match addr.parse() {
@@ -512,6 +575,13 @@ impl BgpServer {
     }
 
     fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -537,6 +607,13 @@ impl BgpServer {
     }
 
     fn handle_enable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -752,6 +829,13 @@ impl BgpServer {
         enabled: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -993,6 +1077,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         if self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server {} already exists", addr)));
             return;
@@ -1011,6 +1102,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         if !self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
             return;
@@ -1058,6 +1156,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let addr: SocketAddr = match config.address.parse() {
             Ok(a) => a,
             Err(e) => {
@@ -1091,6 +1196,13 @@ impl BgpServer {
         response: oneshot::Sender<Result<(), String>>,
         _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let before = self.config.rpki_caches.len();
         self.config
             .rpki_caches
@@ -1152,6 +1264,13 @@ impl BgpServer {
         set: DefinedSetConfig,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Clone current defined sets (clone-on-write pattern)
         let mut new_sets = (*self.policy_ctx.defined_sets).clone();
 
@@ -1309,6 +1428,13 @@ impl BgpServer {
         name: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Check if any policy references this set
         for (policy_name, policy) in &self.policy_ctx.policies {
             if self.policy_references_set(policy, set_type, &name) {
@@ -1469,6 +1595,13 @@ impl BgpServer {
         statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Reject policy names starting with underscore (reserved for built-in policies)
         if name.starts_with('_') {
             let _ = response.send(Err(
@@ -1514,6 +1647,13 @@ impl BgpServer {
         name: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Idempotent - succeed even if policy doesn't exist
         self.policy_ctx.policies.remove(&name);
         self.config.policy_definitions.retain(|p| p.name != name);
@@ -1556,6 +1696,13 @@ impl BgpServer {
         _default_action: Option<crate::policy::PolicyResult>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Check if peer exists
         let peer = match self.peers.get_mut(&peer_addr) {
             Some(p) => p,

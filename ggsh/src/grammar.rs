@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cmd::Command;
+use crate::parser::{BgpggCommand, Command};
 
 pub(crate) struct Node {
     pub(crate) name: &'static str,
@@ -82,15 +82,33 @@ fn is_safi(token: &str) -> bool {
 
 pub fn tree() -> Vec<Node> {
     vec![
-        Node::keyword("show", "Show operational information").children(vec![
-            Node::keyword("bgp", "BGP information").children(tree_show_bgp()),
-            Node::keyword("rpki", "RPKI information").children(tree_show_rpki()),
-            Node::keyword("config", "Config information").children(tree_show_config()),
-            Node::keyword("version", "Version information").cmd(Command::ShowVersion),
-        ]),
+        Node::keyword("show", "Show operational information").children(tree_show()),
+        Node::keyword("configure", "Enter configuration mode").cmd(Command::Configure),
         Node::keyword("exit", "Exit ggsh").cmd(Command::Exit),
         Node::keyword("quit", "Exit ggsh").cmd(Command::Exit),
     ]
+}
+
+pub fn tree_config() -> Vec<Node> {
+    vec![
+        Node::keyword("show", "Show operational information").children(tree_show()),
+        Node::keyword("abort", "Discard candidate and exit configuration mode").cmd(Command::Abort),
+        Node::keyword("exit", "Exit ggsh").cmd(Command::Exit),
+        Node::keyword("quit", "Exit ggsh").cmd(Command::Exit),
+    ]
+}
+
+fn tree_show() -> Vec<Node> {
+    vec![
+        Node::keyword("bgp", "BGP information").children(tree_show_bgp()),
+        Node::keyword("rpki", "RPKI information").children(tree_show_rpki()),
+        Node::keyword("config", "Config information").children(tree_show_config()),
+        Node::keyword("version", "Version information").cmd(Command::Version),
+    ]
+}
+
+fn bgpgg(c: BgpggCommand) -> Command {
+    Command::Bgpgg(c)
 }
 
 /// AFI/SAFI arg nodes. AFI accepts ipv4/ipv6/ls, SAFI accepts unicast/multicast.
@@ -109,27 +127,27 @@ fn afi_safi_nodes(cmd: Command) -> Vec<Node> {
 
 fn tree_show_bgp() -> Vec<Node> {
     vec![
-        Node::keyword("summary", "Peer table overview").cmd(Command::ShowBgpSummary),
-        Node::keyword("info", "Server information").cmd(Command::ShowBgpInfo),
+        Node::keyword("summary", "Peer table overview").cmd(bgpgg(BgpggCommand::BgpSummary)),
+        Node::keyword("info", "Server information").cmd(bgpgg(BgpggCommand::BgpInfo)),
         Node::keyword("peers", "Peer information")
-            .cmd(Command::ShowBgpPeers)
+            .cmd(bgpgg(BgpggCommand::BgpPeers))
             .children(vec![Node::arg("<address>", "Peer address", is_ip_addr)
-                .cmd(Command::ShowBgpPeer)
+                .cmd(bgpgg(BgpggCommand::BgpPeer))
                 .children(vec![
                     Node::keyword("in", "Adj-RIB-In")
-                        .cmd(Command::ShowBgpPeerIn)
-                        .children(afi_safi_nodes(Command::ShowBgpPeerIn)),
+                        .cmd(bgpgg(BgpggCommand::BgpPeerIn))
+                        .children(afi_safi_nodes(bgpgg(BgpggCommand::BgpPeerIn))),
                     Node::keyword("out", "Adj-RIB-Out")
-                        .cmd(Command::ShowBgpPeerOut)
-                        .children(afi_safi_nodes(Command::ShowBgpPeerOut)),
+                        .cmd(bgpgg(BgpggCommand::BgpPeerOut))
+                        .children(afi_safi_nodes(bgpgg(BgpggCommand::BgpPeerOut))),
                 ])]),
         Node::keyword("routes", "Routing table")
-            .cmd(Command::ShowBgpRoute)
+            .cmd(bgpgg(BgpggCommand::BgpRoute))
             .children({
-                let mut nodes = afi_safi_nodes(Command::ShowBgpRoute);
+                let mut nodes = afi_safi_nodes(bgpgg(BgpggCommand::BgpRoute));
                 nodes.push(
                     Node::arg("<prefix>", "Prefix in CIDR format", is_prefix)
-                        .cmd(Command::ShowBgpRoute),
+                        .cmd(bgpgg(BgpggCommand::BgpRoute)),
                 );
                 nodes
             }),
@@ -137,20 +155,20 @@ fn tree_show_bgp() -> Vec<Node> {
 }
 
 fn tree_show_config() -> Vec<Node> {
-    vec![Node::keyword("history", "Stored config snapshots").cmd(Command::ShowConfigHistory)]
+    vec![Node::keyword("history", "Stored config snapshots").cmd(bgpgg(BgpggCommand::ConfigHistory))]
 }
 
 fn tree_show_rpki() -> Vec<Node> {
     vec![
-        Node::keyword("caches", "RPKI cache status").cmd(Command::ShowRpkiCaches),
-        Node::keyword("roa", "ROA table").cmd(Command::ShowRpkiRoa),
+        Node::keyword("caches", "RPKI cache status").cmd(bgpgg(BgpggCommand::RpkiCaches)),
+        Node::keyword("roa", "ROA table").cmd(bgpgg(BgpggCommand::RpkiRoa)),
         Node::keyword("validate", "Validate a prefix").children(vec![Node::arg(
             "<prefix>",
             "Prefix in CIDR format",
             is_prefix,
         )
         .children(vec![Node::keyword("origin", "Origin AS keyword").children(
-            vec![Node::arg("<asn>", "AS number", is_asn).cmd(Command::ShowRpkiValidate)],
+            vec![Node::arg("<asn>", "AS number", is_asn).cmd(bgpgg(BgpggCommand::RpkiValidate))],
         )])]),
     ]
 }
@@ -163,6 +181,8 @@ mod tests {
     fn test_tree_structure() {
         let root = tree();
         let top: Vec<&str> = root.iter().map(|n| n.name).collect();
-        assert_eq!(top, vec!["show", "exit", "quit"]);
+        assert_eq!(top, vec!["show", "configure", "exit", "quit"]);
+        let cfg: Vec<&str> = tree_config().iter().map(|n| n.name).collect();
+        assert_eq!(cfg, vec!["show", "abort", "exit", "quit"]);
     }
 }

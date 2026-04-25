@@ -12,26 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod cmd;
 mod cmd_bgp;
 mod cmd_config;
+mod cmd_configure;
 mod cmd_rpki;
 mod cmd_show;
 mod grammar;
+mod parser;
 mod shell;
 mod util;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use cmd::Service;
-use shell::Shell;
+use shell::{Service, Shell};
 
 const DEFAULT_BGPGG_ADDR: &str = "http://127.0.0.1:50051";
 
 #[tokio::main]
 async fn main() {
-    let (grpc_addrs, command) = parse_args();
-    let shell = Shell::new(grpc_addrs, command);
+    let (grpc_addrs, command, config_path) = parse_args();
+    let shell = Shell::new(grpc_addrs, command, config_path);
 
     if let Err(err) = shell.run().await {
         eprintln!("{}", err);
@@ -39,9 +40,10 @@ async fn main() {
     }
 }
 
-fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>) {
+fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
     let mut args = std::env::args().skip(1);
     let mut bgpgg_addr = DEFAULT_BGPGG_ADDR.to_string();
+    let mut config_path = conf::fs::default_config_path();
     let mut command = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -51,6 +53,12 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>) {
                     eprintln!("--bgpgg-addr requires a value");
                     std::process::exit(1);
                 });
+            }
+            "--config" => {
+                config_path = PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("--config requires a value");
+                    std::process::exit(1);
+                }));
             }
             _ => {
                 command.push(arg);
@@ -69,5 +77,5 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>) {
         Some(command)
     };
 
-    (grpc_addrs, command)
+    (grpc_addrs, command, config_path)
 }

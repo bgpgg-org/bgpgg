@@ -65,8 +65,14 @@ message GetRunningConfigResponse {
 
 // CommitConfig applies the candidate carried in `text`. Daemon parses,
 // validates, reconfigures, persists rogg.conf (rotating prior into .1).
+//
+// `session_uuid` must match the per-session UUID that the operator wrote
+// to the sibling `.lock` file when entering configure mode (ggsh does
+// this on `configure`). Daemon reads the file content and rejects the
+// request on mismatch. See conf::fs::read_session_uuid.
 message CommitConfigRequest {
     string text = 1;
+    string session_uuid = 2;
 }
 
 message CommitConfigResponse {
@@ -75,9 +81,13 @@ message CommitConfigResponse {
 }
 
 // SaveConfig persists the daemon's current self.config to rogg.conf.
-// Used by the gRPC-imperative path (AddPeer / RemovePeer / ...) which
-// mutates self.config and runtime but does not write the file.
-message SaveConfigRequest {}
+// AddPeer/RemovePeer/... mutate self.config without writing the file;
+// this writes whatever's in self.config to disk on demand.
+//
+// Same session_uuid verification as CommitConfig.
+message SaveConfigRequest {
+    string session_uuid = 1;
+}
 
 message SaveConfigResponse {
     bool ok = 1;
@@ -86,8 +96,11 @@ message SaveConfigResponse {
 
 // RollbackConfig loads rogg.<index>.conf, parses, and runs CommitConfig
 // against it. Indices are 1-based; 1 is the most recent previous version.
+//
+// Same session_uuid verification as CommitConfig.
 message RollbackConfigRequest {
     uint32 index = 1;
+    string session_uuid = 2;
 }
 
 message RollbackConfigResponse {
