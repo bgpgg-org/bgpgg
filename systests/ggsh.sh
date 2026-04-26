@@ -6,8 +6,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BGPGGD="${BGPGGD:-$PROJECT_DIR/target/release/bgpggd}"
-BGPGG="${BGPGG:-$PROJECT_DIR/target/release/bgpgg}"
 GGSH="${GGSH:-$PROJECT_DIR/target/release/ggsh}"
+
+ggsh_configure() {
+    local grpc=$1 conf=$2
+    shift 2
+    {
+        echo configure
+        echo service bgp
+        for line in "$@"; do echo "$line"; done
+        echo commit
+        echo exit
+        echo exit
+    } | "$GGSH" --bgpgg-addr "$grpc" --config "$conf" >/dev/null
+}
 
 PEER1_PID=
 PEER2_PID=
@@ -66,21 +78,28 @@ echo "Starting peer2 (ASN 65001, 127.0.0.2:14179, router-id 2.2.2.2)..."
 PEER2_PID=$!
 
 echo "Waiting for gRPC..."
-poll_until "peer1 gRPC not ready" 10 "$BGPGG --addr $P1_GRPC peer list"
-poll_until "peer2 gRPC not ready" 10 "$BGPGG --addr $P2_GRPC peer list"
+poll_until "peer1 gRPC not ready" 10 "$GGSH --bgpgg-addr $P1_GRPC show bgp summary"
+poll_until "peer2 gRPC not ready" 10 "$GGSH --bgpgg-addr $P2_GRPC show bgp summary"
 
 echo "Adding peers..."
-"$BGPGG" --addr "$P1_GRPC" peer add 127.0.0.2 65001 --port 14179
-"$BGPGG" --addr "$P2_GRPC" peer add 127.0.0.1 65001 --port 14179
+ggsh_configure "$P1_GRPC" "$TMPDIR/peer1.conf" \
+    "peer 127.0.0.2 remote-as 65001" \
+    "peer 127.0.0.2 port 14179"
+ggsh_configure "$P2_GRPC" "$TMPDIR/peer2.conf" \
+    "peer 127.0.0.1 remote-as 65001" \
+    "peer 127.0.0.1 port 14179"
 
 echo "Waiting for session to establish..."
-poll_until "Peering failed to establish" 30 "$BGPGG --addr $P1_GRPC peer list | grep -q Established"
+poll_until "Peering failed to establish" 30 \
+    "$GGSH --bgpgg-addr $P1_GRPC show bgp summary | grep -q Established"
 
 echo "Announcing 10.99.0.0/24 from peer2..."
-"$BGPGG" --addr "$P2_GRPC" global rib add 10.99.0.0/24 --nexthop 192.168.1.1
+ggsh_configure "$P2_GRPC" "$TMPDIR/peer2.conf" \
+    "originate 10.99.0.0/24 nexthop 192.168.1.1"
 
 echo "Waiting for route to propagate..."
-poll_until "Route did not propagate" 10 "$BGPGG --addr $P1_GRPC global rib show | grep -q 10.99.0.0/24"
+poll_until "Route did not propagate" 10 \
+    "$GGSH --bgpgg-addr $P1_GRPC show bgp routes | grep -q 10.99.0.0/24"
 
 # --- ggsh tests ---
 

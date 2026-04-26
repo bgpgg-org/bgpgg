@@ -17,7 +17,7 @@
 //! Disk primitives (lock, snapshot rotation, atomic write, multi-service
 //! merge) live in `conf::fs`.
 
-use super::BgpServer;
+use super::{parse_prefix_and_nexthop, BgpServer};
 use crate::log::error;
 use conf::bgp::BgpConfig;
 use conf::fs::persist_service_config;
@@ -33,6 +33,9 @@ pub(crate) async fn commit_config(
 ) -> Result<(), String> {
     for peer in &new_config.peers {
         peer.validate()?;
+    }
+    for entry in &new_config.originate {
+        parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop)?;
     }
     reject_unsupported_changes(&server.config, &new_config)?;
 
@@ -68,6 +71,7 @@ async fn reconfigure_all(
     bind_addr: SocketAddr,
 ) -> Result<(), String> {
     server.reconfigure_peers(new, bind_addr).await;
+    server.reconfigure_originate_routes(old, new).await;
     server.reconfigure_bmp_servers(old, new).await?;
     server.reconfigure_rpki_caches(old, new).await?;
     Ok(())

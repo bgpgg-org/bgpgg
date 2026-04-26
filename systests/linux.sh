@@ -16,7 +16,22 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BGPGGD="${BGPGGD:-$PROJECT_DIR/target/release/bgpggd}"
-BGPGG="${BGPGG:-$PROJECT_DIR/target/release/bgpgg}"
+GGSH="${GGSH:-$PROJECT_DIR/target/release/ggsh}"
+
+# Drive ggsh through configure mode inside a netns. Each `cmd` arg is one
+# line inside `service bgp`. NS is the netns to exec the ggsh in.
+ggsh_configure() {
+    local ns=$1 grpc=$2 conf=$3
+    shift 3
+    {
+        echo configure
+        echo service bgp
+        for line in "$@"; do echo "$line"; done
+        echo commit
+        echo exit
+        echo exit
+    } | ip netns exec "$ns" "$GGSH" --bgpgg-addr "$grpc" --config "$conf" >/dev/null
+}
 
 PEER1_PID=
 PEER2_PID=
@@ -105,22 +120,31 @@ CONF
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."
-    poll_until "peer1 gRPC not ready" 10 "ip netns exec $NS1 $BGPGG --addr $p1_grpc peer list"
-    poll_until "peer2 gRPC not ready" 10 "ip netns exec $NS2 $BGPGG --addr $p2_grpc peer list"
+    poll_until "peer1 gRPC not ready" 10 \
+        "ip netns exec $NS1 $GGSH --bgpgg-addr $p1_grpc show bgp summary"
+    poll_until "peer2 gRPC not ready" 10 \
+        "ip netns exec $NS2 $GGSH --bgpgg-addr $p2_grpc show bgp summary"
 
     echo "Adding peers with link-local addresses..."
-    ip netns exec "$NS1" "$BGPGG" --addr "$p1_grpc" peer add "$ll2" 65001 --port 13179 --interface "$VETH1"
-    ip netns exec "$NS2" "$BGPGG" --addr "$p2_grpc" peer add "$ll1" 65001 --port 13179 --interface "$VETH2"
+    ggsh_configure "$NS1" "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "peer $ll2 remote-as 65001" \
+        "peer $ll2 port 13179" \
+        "peer $ll2 interface $VETH1"
+    ggsh_configure "$NS2" "$p2_grpc" "$TMPDIR/peer2.conf" \
+        "peer $ll1 remote-as 65001" \
+        "peer $ll1 port 13179" \
+        "peer $ll1 interface $VETH2"
 
     echo "Waiting for BGP session to establish..."
     poll_until "Link-local peering failed to establish" 30 \
-        "ip netns exec $NS1 $BGPGG --addr $p1_grpc peer list | grep -q Established"
+        "ip netns exec $NS1 $GGSH --bgpgg-addr $p1_grpc show bgp summary | grep -q Established"
     echo "  established"
 
     echo "Announcing route over link-local session..."
-    ip netns exec "$NS1" "$BGPGG" --addr "$p1_grpc" global rib add 10.99.0.0/24 --nexthop 192.168.1.1
+    ggsh_configure "$NS1" "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "originate 10.99.0.0/24 nexthop 192.168.1.1"
     poll_until "Route did not propagate over link-local" 10 \
-        "ip netns exec $NS2 $BGPGG --addr $p2_grpc global rib show | grep -q 10.99.0.0/24"
+        "ip netns exec $NS2 $GGSH --bgpgg-addr $p2_grpc show bgp routes | grep -q 10.99.0.0/24"
     echo "  propagated"
 
     cleanup

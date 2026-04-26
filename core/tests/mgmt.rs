@@ -25,6 +25,7 @@ use bgpgg::grpc::proto::{
     RibType, Route, SessionConfig,
 };
 use conf::bgp::BgpConfig;
+use conf::language_bgp::OriginateRoute;
 use std::net::Ipv4Addr;
 use tokio::net::TcpListener;
 
@@ -1796,4 +1797,84 @@ async fn test_ggsh_set_then_commit_persists() {
         added.export_policy_for(conf::bgp::Afi::Ipv4, conf::bgp::Safi::Unicast),
         ["mine-only".to_string()]
     );
+}
+
+/// Configure-mode commits with `originate` entries must reconcile with the
+/// loc-RIB at runtime: adds inject local routes, removes withdraw them, and
+/// nexthop changes round-trip as withdraw + announce. Pre-validation rejects
+/// invalid prefixes without touching server state.
+#[tokio::test]
+async fn test_config_originate_route() {
+    let server = start_test_server(test_config(65001, 1)).await;
+    let originate = |prefix: &str, nexthop: &str| OriginateRoute {
+        prefix: prefix.to_string(),
+        nexthop: nexthop.to_string(),
+    };
+    let commit = |entries: Vec<OriginateRoute>| async {
+        let mut cfg = server.read_conf();
+        cfg.originate = entries;
+        server.commit_config(cfg.to_conf_str()).await
+    };
+    // Locally-originated routes carry an empty AS_PATH, IGP origin, default
+    // local-pref 100, and the synthetic LOCAL_ROUTE_SOURCE_STR peer address.
+    let local = |prefix: &str, nexthop: &str| {
+        expected_route(
+            prefix,
+            PathParams {
+                next_hop: nexthop.to_string(),
+                peer_address: "127.0.0.1".to_string(),
+                local_pref: Some(100),
+                ..Default::default()
+            },
+        )
+    };
+
+    // 1) Initial commit adds two originated routes.
+    commit(vec![
+        originate("10.99.0.0/24", "192.168.1.1"),
+        originate("10.100.0.0/24", "192.168.1.2"),
+    ])
+    .await
+    .expect("commit 1");
+    poll_rib(&[(
+        &server,
+        vec![
+            local("10.99.0.0/24", "192.168.1.1"),
+            local("10.100.0.0/24", "192.168.1.2"),
+        ],
+    )])
+    .await;
+
+    // 2) Change one nexthop, keep one unchanged, add a third.
+    commit(vec![
+        originate("10.99.0.0/24", "192.168.1.99"),
+        originate("10.100.0.0/24", "192.168.1.2"),
+        originate("10.101.0.0/24", "192.168.1.3"),
+    ])
+    .await
+    .expect("commit 2");
+    poll_rib(&[(
+        &server,
+        vec![
+            local("10.99.0.0/24", "192.168.1.99"),
+            local("10.100.0.0/24", "192.168.1.2"),
+            local("10.101.0.0/24", "192.168.1.3"),
+        ],
+    )])
+    .await;
+
+    // 3) Drop every originate. loc-RIB must end empty.
+    commit(vec![]).await.expect("commit 3");
+    poll_route_withdrawal(&[&server]).await;
+
+    // 4) Bad prefix is rejected at validate-time. State stays clean.
+    let err = commit(vec![originate("not-a-prefix", "192.168.1.1")])
+        .await
+        .expect_err("bad prefix must be rejected");
+    assert!(
+        err.message().contains("invalid prefix"),
+        "expected validate failure, got: {}",
+        err.message()
+    );
+    poll_route_withdrawal(&[&server]).await;
 }

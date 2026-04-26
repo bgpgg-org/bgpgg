@@ -21,8 +21,7 @@ service bgp {
   router-id 1.1.1.1
   listen-addr 0.0.0.0:17900
 
-  peer upstream {
-    address 192.168.1.1
+  peer 192.168.1.1 {
     remote-as 65001
     port 17900
   }

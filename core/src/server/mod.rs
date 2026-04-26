@@ -44,6 +44,7 @@ use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager, RtrTransport, Ssh
 use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
 use conf::bgp::{get_peer_llgr, BgpConfig, BmpConfig, PeerConfig, RpkiCacheConfig, TransportType};
+use conf::language_bgp::OriginateRoute;
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
@@ -60,6 +61,29 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// PathAttrs for a configured `originate` entry. Locally-sourced, IGP origin,
+/// empty AS_PATH, default local-pref 100. Used by both startup-time
+/// initialization and runtime commit.
+fn originate_path_attrs(next_hop: NextHopAddr) -> PathAttrs {
+    PathAttrs {
+        origin: Origin::IGP,
+        as_path: vec![],
+        next_hop,
+        source: RouteSource::Local,
+        local_pref: Some(100),
+        med: None,
+        atomic_aggregate: false,
+        aggregator: None,
+        communities: vec![],
+        extended_communities: vec![],
+        large_communities: vec![],
+        unknown_attrs: vec![],
+        originator_id: None,
+        cluster_list: vec![],
+        ls_attr: None,
+    }
+}
 
 /// Parse a CIDR prefix and forwarding next-hop address into runtime types.
 pub(crate) fn parse_prefix_and_nexthop(
@@ -994,7 +1018,7 @@ impl BgpServer {
 
     fn init_configured_originate_routes(&mut self) {
         let routes = self.config.originate.clone();
-        for entry in routes {
+        for entry in &routes {
             let (prefix, next_hop) = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
                 Ok(parsed) => parsed,
                 Err(err) => {
@@ -1003,31 +1027,84 @@ impl BgpServer {
                     continue;
                 }
             };
-            let attrs = PathAttrs {
-                origin: Origin::IGP,
-                as_path: vec![],
-                next_hop,
-                source: RouteSource::Local,
-                local_pref: Some(100),
-                med: None,
-                atomic_aggregate: false,
-                aggregator: None,
-                communities: vec![],
-                extended_communities: vec![],
-                large_communities: vec![],
-                unknown_attrs: vec![],
-                originator_id: None,
-                cluster_list: vec![],
-                ls_attr: None,
-            };
             match self
                 .loc_rib
-                .add_local_route(RouteKey::Prefix(prefix), attrs)
+                .add_local_route(RouteKey::Prefix(prefix), originate_path_attrs(next_hop))
             {
                 Ok(_) => info!(prefix = %entry.prefix, nexthop = %entry.nexthop,
                                "originated static route"),
                 Err(err) => warn!(prefix = %entry.prefix, ?err,
                                   "loc-rib rejected static originate entry"),
+            }
+        }
+    }
+
+    /// Diff `old.originate` vs `new.originate` and apply the change to the
+    /// loc-RIB plus propagate. Called by `commit_config` after originate
+    /// entries have been pre-validated. A changed nexthop counts as
+    /// remove + add. Same prefix+nexthop is a no-op.
+    pub(crate) async fn reconfigure_originate_routes(&mut self, old: &BgpConfig, new: &BgpConfig) {
+        let new_by_prefix: HashMap<&str, &OriginateRoute> = new
+            .originate
+            .iter()
+            .map(|entry| (entry.prefix.as_str(), entry))
+            .collect();
+        let old_by_prefix: HashMap<&str, &OriginateRoute> = old
+            .originate
+            .iter()
+            .map(|entry| (entry.prefix.as_str(), entry))
+            .collect();
+
+        for entry in &old.originate {
+            let needs_remove = match new_by_prefix.get(entry.prefix.as_str()) {
+                Some(new_entry) => new_entry.nexthop != entry.nexthop,
+                None => true,
+            };
+            if !needs_remove {
+                continue;
+            }
+            let prefix = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok((prefix, _)) => prefix,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                          "skipping originate removal: invalid entry");
+                    continue;
+                }
+            };
+            let delta = self.loc_rib.remove_local_route(&RouteKey::Prefix(prefix));
+            self.propagate_routes(delta, None).await;
+            info!(prefix = %entry.prefix, "withdrew configured originate");
+        }
+
+        for entry in &new.originate {
+            let needs_add = match old_by_prefix.get(entry.prefix.as_str()) {
+                Some(old_entry) => old_entry.nexthop != entry.nexthop,
+                None => true,
+            };
+            if !needs_add {
+                continue;
+            }
+            let (prefix, next_hop) = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                          "skipping originate add: invalid entry (should have been caught at validate)");
+                    continue;
+                }
+            };
+            match self
+                .loc_rib
+                .add_local_route(RouteKey::Prefix(prefix), originate_path_attrs(next_hop))
+            {
+                Ok(delta) => {
+                    self.propagate_routes(delta, None).await;
+                    info!(prefix = %entry.prefix, nexthop = %entry.nexthop,
+                          "originated configured route");
+                }
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, ?err,
+                          "loc-rib rejected configured originate");
+                }
             }
         }
     }

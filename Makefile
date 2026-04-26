@@ -40,13 +40,13 @@ loadtest: setup
 	cargo test -p loadtests --release -- --nocapture --test-threads=1
 
 systest: setup
-	cargo build --release --bin bgpggd --bin bgpgg
+	cargo build --release --bin bgpggd --bin ggsh
 	./systests/basic.sh
 
 systest-ggsh: setup
-	cargo build --release --bin bgpggd --bin bgpgg --bin ggsh
+	cargo build --release --bin bgpggd --bin ggsh
 	./systests/ggsh.sh
 
 systest-linux: setup
-	cargo build --release --bin bgpggd --bin bgpgg
+	cargo build --release --bin bgpggd --bin ggsh
 	sudo ./systests/linux.sh
