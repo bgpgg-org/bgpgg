@@ -21,6 +21,10 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::Helper;
 
+use conf::language_bgp::{
+    BgpLsKey, BmpServerKey, FamilyDirectiveKey, PeerKey, RpkiCacheKey, TopKey,
+};
+
 use crate::grammar::Node;
 
 /// Commands dispatched to the bgpggd daemon.
@@ -39,13 +43,51 @@ pub enum BgpggCommand {
     ConfigHistory,
 }
 
+/// Top-level service kind (for `(config)> service <kind>`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ServiceKind {
+    Bgp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Command {
     Bgpgg(BgpggCommand),
     Version,
     Configure,
-    Abort,
     Exit,
+
+    EnterService(ServiceKind),
+    Commit,
+    ShowDiff,
+    ShowRunningConfig,
+    ShowCandidate,
+
+    SetTop(TopKey),                    // args: [value]
+    SetTopOriginate,                   // args: [prefix]
+    SetPeer(PeerKey),                  // args: [addr, value]
+    SetPeerFamily(FamilyDirectiveKey), // args: [addr, afi, safi, name]
+    SetPolicyMatch,                    // args: [name, set, action]
+    SetPolicyDefault,                  // args: [name, action]
+    SetPrefixListEntry,                // args: [name, prefix]
+    SetBmpServer(BmpServerKey),        // args: [addr, value]
+    SetRpkiCache(RpkiCacheKey),        // args: [addr, value]
+    SetBgpLs(BgpLsKey),                // args: [value]
+
+    UnsetTop(TopKey),                             // args: []
+    UnsetTopOriginate,                            // args: [prefix]
+    UnsetPeer,                                    // args: [addr]
+    UnsetPeerSetting(PeerKey),                    // args: [addr]
+    UnsetPeerFamily,                              // args: [addr, afi, safi]
+    UnsetPeerFamilyDirective(FamilyDirectiveKey), // args: [addr, afi, safi]
+    UnsetPolicy,                                  // args: [name]
+    UnsetPrefixList,                              // args: [name]
+    UnsetPrefixListEntry,                         // args: [name, prefix]
+    UnsetBmpServer,                               // args: [addr]
+    UnsetBmpServerSetting(BmpServerKey),          // args: [addr]
+    UnsetRpkiCache,                               // args: [addr]
+    UnsetRpkiCacheSetting(RpkiCacheKey),          // args: [addr]
+    UnsetBgpLs,                                   // args: []
+    UnsetBgpLsSetting(BgpLsKey),                  // args: []
 }
 
 pub struct HelpEntry {
@@ -198,7 +240,7 @@ fn find_match<'a>(token: &str, nodes: &'a [Node]) -> Option<&'a Node> {
     }
     nodes
         .iter()
-        .find(|n| n.validate.is_some_and(|validate| validate(token)))
+        .find(|n| n.kind.is_some_and(|kind| kind.validate(token)))
 }
 
 #[cfg(test)]
@@ -272,6 +314,208 @@ mod tests {
             assert_eq!(cmd, expected_cmd, "wrong command for: {}", input);
             let expected_args: Vec<String> = expected_args.iter().map(|s| s.to_string()).collect();
             assert_eq!(args, expected_args, "wrong args for: {}", input);
+        }
+    }
+
+    fn parse_cfg_root(input: &str) -> ParseResult {
+        let tree = grammar::tree_config();
+        let tokens: Vec<&str> = input.split_whitespace().collect();
+        parse(&tree, &tokens)
+    }
+
+    fn parse_cfg_bgp(input: &str) -> (Command, Vec<String>) {
+        let tree = grammar::tree_config_bgp();
+        let tokens: Vec<&str> = input.split_whitespace().collect();
+        match parse(&tree, &tokens) {
+            ParseResult::Execution { cmd, args } => (cmd, args),
+            other => panic!(
+                "expected Execution for {:?}, got {:?}",
+                input,
+                match other {
+                    ParseResult::Error(e) => e,
+                    ParseResult::Help { entries } => format!("Help with {} entries", entries.len()),
+                    ParseResult::Execution { .. } => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_root_commands() {
+        for (input, expected) in [
+            ("service bgp", Command::EnterService(ServiceKind::Bgp)),
+            ("commit", Command::Commit),
+            ("exit", Command::Exit),
+            ("show diff", Command::ShowDiff),
+            ("show running-config", Command::ShowRunningConfig),
+        ] {
+            match parse_cfg_root(input) {
+                ParseResult::Execution { cmd, args } => {
+                    assert_eq!(cmd, expected, "wrong cmd for {:?}", input);
+                    assert!(args.is_empty(), "expected no args for {:?}", input);
+                }
+                other => panic!(
+                    "expected Execution for {:?}: {:?}",
+                    input,
+                    match other {
+                        ParseResult::Error(e) => e,
+                        _ => "non-error".into(),
+                    }
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_config_bgp_top_settings() {
+        let (cmd, args) = parse_cfg_bgp("asn 65001");
+        assert_eq!(cmd, Command::SetTop(TopKey::Asn));
+        assert_eq!(args, vec!["65001".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("router-id 1.2.3.4");
+        assert_eq!(cmd, Command::SetTop(TopKey::RouterId));
+        assert_eq!(args, vec!["1.2.3.4".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("originate 10.0.0.0/24");
+        assert_eq!(cmd, Command::SetTopOriginate);
+        assert_eq!(args, vec!["10.0.0.0/24".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_config_bgp_peer_settings() {
+        let (cmd, args) = parse_cfg_bgp("peer fe80::ade0 remote-as 65001");
+        assert_eq!(cmd, Command::SetPeer(PeerKey::RemoteAs));
+        assert_eq!(args, vec!["fe80::ade0".to_string(), "65001".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("peer 10.0.0.1 next-hop-self true");
+        assert_eq!(cmd, Command::SetPeer(PeerKey::NextHopSelf));
+        assert_eq!(args, vec!["10.0.0.1".to_string(), "true".to_string()]);
+
+        let (cmd, args) =
+            parse_cfg_bgp("peer 10.0.0.1 family ipv4 unicast export policy mine-only");
+        assert_eq!(
+            cmd,
+            Command::SetPeerFamily(FamilyDirectiveKey::ExportPolicy)
+        );
+        assert_eq!(
+            args,
+            vec![
+                "10.0.0.1".to_string(),
+                "ipv4".to_string(),
+                "unicast".to_string(),
+                "mine-only".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_config_bgp_policy() {
+        let (cmd, args) = parse_cfg_bgp("policy mine-only match my-prefixes accept");
+        assert_eq!(cmd, Command::SetPolicyMatch);
+        assert_eq!(
+            args,
+            vec![
+                "mine-only".to_string(),
+                "my-prefixes".to_string(),
+                "accept".to_string(),
+            ]
+        );
+
+        let (cmd, args) = parse_cfg_bgp("policy mine-only default reject");
+        assert_eq!(cmd, Command::SetPolicyDefault);
+        assert_eq!(args, vec!["mine-only".to_string(), "reject".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_config_bgp_prefix_list() {
+        let (cmd, args) = parse_cfg_bgp("prefix-list my-prefixes 10.0.0.0/24");
+        assert_eq!(cmd, Command::SetPrefixListEntry);
+        assert_eq!(
+            args,
+            vec!["my-prefixes".to_string(), "10.0.0.0/24".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_config_bgp_bmp_rpki_bgp_ls() {
+        let (cmd, args) = parse_cfg_bgp("bmp-server 127.0.0.1:1790 statistics-timeout 60");
+        assert_eq!(cmd, Command::SetBmpServer(BmpServerKey::StatisticsTimeout));
+        assert_eq!(args, vec!["127.0.0.1:1790".to_string(), "60".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("rpki-cache 127.0.0.1:323 transport tcp");
+        assert_eq!(cmd, Command::SetRpkiCache(RpkiCacheKey::Transport));
+        assert_eq!(args, vec!["127.0.0.1:323".to_string(), "tcp".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("bgp-ls instance-id 99");
+        assert_eq!(cmd, Command::SetBgpLs(BgpLsKey::InstanceId));
+        assert_eq!(args, vec!["99".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_config_bgp_unset() {
+        let (cmd, args) = parse_cfg_bgp("unset asn");
+        assert_eq!(cmd, Command::UnsetTop(TopKey::Asn));
+        assert!(args.is_empty());
+
+        let (cmd, args) = parse_cfg_bgp("unset peer 10.0.0.1");
+        assert_eq!(cmd, Command::UnsetPeer);
+        assert_eq!(args, vec!["10.0.0.1".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("unset peer 10.0.0.1 remote-as");
+        assert_eq!(cmd, Command::UnsetPeerSetting(PeerKey::RemoteAs));
+        assert_eq!(args, vec!["10.0.0.1".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("unset peer 10.0.0.1 family ipv4 unicast");
+        assert_eq!(cmd, Command::UnsetPeerFamily);
+        assert_eq!(
+            args,
+            vec![
+                "10.0.0.1".to_string(),
+                "ipv4".to_string(),
+                "unicast".to_string()
+            ]
+        );
+
+        let (cmd, args) = parse_cfg_bgp("unset peer 10.0.0.1 family ipv4 unicast export policy");
+        assert_eq!(
+            cmd,
+            Command::UnsetPeerFamilyDirective(FamilyDirectiveKey::ExportPolicy)
+        );
+        assert_eq!(
+            args,
+            vec![
+                "10.0.0.1".to_string(),
+                "ipv4".to_string(),
+                "unicast".to_string()
+            ]
+        );
+
+        let (cmd, args) = parse_cfg_bgp("unset prefix-list p 10.0.0.0/24");
+        assert_eq!(cmd, Command::UnsetPrefixListEntry);
+        assert_eq!(args, vec!["p".to_string(), "10.0.0.0/24".to_string()]);
+
+        let (cmd, args) = parse_cfg_bgp("unset bgp-ls");
+        assert_eq!(cmd, Command::UnsetBgpLs);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_bgp_invalid_value_rejected() {
+        let tree = grammar::tree_config_bgp();
+        for bad in &[
+            "asn notanumber",
+            "router-id 999.999.999.999",
+            "peer notanip remote-as 65001",
+            "peer 10.0.0.1 port notnum",
+            "rpki-cache 127.0.0.1:323 transport ftp",
+            "rpki-cache 127.0.0.1:323 preference 999", // u8 overflow
+        ] {
+            let tokens: Vec<&str> = bad.split_whitespace().collect();
+            assert!(
+                matches!(parse(&tree, &tokens), ParseResult::Error(_)),
+                "expected Error for {:?}",
+                bad
+            );
         }
     }
 

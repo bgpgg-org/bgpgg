@@ -164,10 +164,6 @@ pub struct RpkiCacheBlock {
     pub expire_interval: Option<u64>,
 }
 
-// ---- Display impls: output matches the parser grammar so
-// `parse(node.to_string()) == Ok(node)` holds. Each impl uses a 2-space indent
-// relative to its own opening; nesting types re-indent their children's output.
-
 impl fmt::Display for Setting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -868,6 +864,449 @@ fn parse_rpki_cache_block(
     Ok(block)
 }
 
+/// Token shape vocabulary. Each variant is a predicate over a single token,
+/// shared by config-setting values and grammar-tree args (peer addresses,
+/// AFI/SAFI keywords, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    Asn,
+    Ipv4,
+    IpAddr,
+    AddrPort,
+    Prefix,
+    Afi,
+    Safi,
+    LogLevel,
+    String,
+    Bool,
+    U8,
+    U16,
+    U64,
+    Transport,
+    PolicyName,
+    SetName,
+    Action,
+}
+
+impl ValueKind {
+    pub fn validate(self, token: &str) -> bool {
+        match self {
+            ValueKind::Asn => token.parse::<u32>().is_ok(),
+            ValueKind::Ipv4 => token.parse::<std::net::Ipv4Addr>().is_ok(),
+            ValueKind::IpAddr => token.parse::<std::net::IpAddr>().is_ok(),
+            ValueKind::AddrPort => token.parse::<std::net::SocketAddr>().is_ok(),
+            ValueKind::Prefix => token.contains('/'),
+            ValueKind::Afi => matches!(token, "ipv4" | "ipv6" | "ls"),
+            ValueKind::Safi => matches!(token, "unicast" | "multicast"),
+            ValueKind::LogLevel
+            | ValueKind::String
+            | ValueKind::PolicyName
+            | ValueKind::SetName
+            | ValueKind::Action => !token.is_empty(),
+            ValueKind::Bool => matches!(token, "true" | "false"),
+            ValueKind::U8 => token.parse::<u8>().is_ok(),
+            ValueKind::U16 => token.parse::<u16>().is_ok(),
+            ValueKind::U64 => token.parse::<u64>().is_ok(),
+            ValueKind::Transport => matches!(token, "tcp" | "ssh"),
+        }
+    }
+}
+
+/// Top-level settings inside `service bgp { ... }` (excluding `originate`,
+/// which is multi-valued and handled separately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TopKey {
+    Asn,
+    RouterId,
+    ListenAddr,
+    GrpcListenAddr,
+    LogLevel,
+    HoldTime,
+    ConnectRetry,
+    ClusterId,
+    SysName,
+    SysDescr,
+    EnhancedRrStaleTtl,
+}
+
+impl TopKey {
+    pub fn all() -> &'static [TopKey] {
+        &[
+            TopKey::Asn,
+            TopKey::RouterId,
+            TopKey::ListenAddr,
+            TopKey::GrpcListenAddr,
+            TopKey::LogLevel,
+            TopKey::HoldTime,
+            TopKey::ConnectRetry,
+            TopKey::ClusterId,
+            TopKey::SysName,
+            TopKey::SysDescr,
+            TopKey::EnhancedRrStaleTtl,
+        ]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TopKey::Asn => "asn",
+            TopKey::RouterId => "router-id",
+            TopKey::ListenAddr => "listen-addr",
+            TopKey::GrpcListenAddr => "grpc-listen-addr",
+            TopKey::LogLevel => "log-level",
+            TopKey::HoldTime => "hold-time",
+            TopKey::ConnectRetry => "connect-retry",
+            TopKey::ClusterId => "cluster-id",
+            TopKey::SysName => "sys-name",
+            TopKey::SysDescr => "sys-descr",
+            TopKey::EnhancedRrStaleTtl => "enhanced-rr-stale-ttl",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            TopKey::Asn => ValueKind::Asn,
+            TopKey::RouterId => ValueKind::Ipv4,
+            TopKey::ListenAddr => ValueKind::AddrPort,
+            TopKey::GrpcListenAddr => ValueKind::AddrPort,
+            TopKey::LogLevel => ValueKind::LogLevel,
+            TopKey::HoldTime => ValueKind::U64,
+            TopKey::ConnectRetry => ValueKind::U64,
+            TopKey::ClusterId => ValueKind::Ipv4,
+            TopKey::SysName => ValueKind::String,
+            TopKey::SysDescr => ValueKind::String,
+            TopKey::EnhancedRrStaleTtl => ValueKind::U64,
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            TopKey::Asn => "Local autonomous system number",
+            TopKey::RouterId => "BGP router ID (IPv4)",
+            TopKey::ListenAddr => "BGP listen address (host:port)",
+            TopKey::GrpcListenAddr => "gRPC management listen address (host:port)",
+            TopKey::LogLevel => "Daemon log level (e.g. debug, info)",
+            TopKey::HoldTime => "Hold time in seconds",
+            TopKey::ConnectRetry => "Connect retry interval in seconds",
+            TopKey::ClusterId => "Route reflector cluster ID (IPv4)",
+            TopKey::SysName => "System name advertised in BMP / ops tooling",
+            TopKey::SysDescr => "System description string",
+            TopKey::EnhancedRrStaleTtl => "Enhanced route refresh stale TTL (seconds)",
+        }
+    }
+}
+
+/// Per-peer settings inside `peer <addr> { ... }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerKey {
+    RemoteAs,
+    Port,
+    Interface,
+    Md5KeyFile,
+    TtlMin,
+    NextHopSelf,
+    Passive,
+    RrClient,
+    RsClient,
+    GracefulShutdown,
+    DelayOpenTimeSecs,
+    IdleHoldTimeSecs,
+    DampPeerOscillations,
+    AllowAutomaticStop,
+    SendNotificationWithoutOpen,
+    MinRouteAdvertisementIntervalSecs,
+    EnforceFirstAs,
+    SendRpkiCommunity,
+    AdminDown,
+}
+
+impl PeerKey {
+    pub fn all() -> &'static [PeerKey] {
+        &[
+            PeerKey::RemoteAs,
+            PeerKey::Port,
+            PeerKey::Interface,
+            PeerKey::Md5KeyFile,
+            PeerKey::TtlMin,
+            PeerKey::NextHopSelf,
+            PeerKey::Passive,
+            PeerKey::RrClient,
+            PeerKey::RsClient,
+            PeerKey::GracefulShutdown,
+            PeerKey::DelayOpenTimeSecs,
+            PeerKey::IdleHoldTimeSecs,
+            PeerKey::DampPeerOscillations,
+            PeerKey::AllowAutomaticStop,
+            PeerKey::SendNotificationWithoutOpen,
+            PeerKey::MinRouteAdvertisementIntervalSecs,
+            PeerKey::EnforceFirstAs,
+            PeerKey::SendRpkiCommunity,
+            PeerKey::AdminDown,
+        ]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerKey::RemoteAs => "remote-as",
+            PeerKey::Port => "port",
+            PeerKey::Interface => "interface",
+            PeerKey::Md5KeyFile => "md5-key-file",
+            PeerKey::TtlMin => "ttl-min",
+            PeerKey::NextHopSelf => "next-hop-self",
+            PeerKey::Passive => "passive",
+            PeerKey::RrClient => "rr-client",
+            PeerKey::RsClient => "rs-client",
+            PeerKey::GracefulShutdown => "graceful-shutdown",
+            PeerKey::DelayOpenTimeSecs => "delay-open-time-secs",
+            PeerKey::IdleHoldTimeSecs => "idle-hold-time-secs",
+            PeerKey::DampPeerOscillations => "damp-peer-oscillations",
+            PeerKey::AllowAutomaticStop => "allow-automatic-stop",
+            PeerKey::SendNotificationWithoutOpen => "send-notification-without-open",
+            PeerKey::MinRouteAdvertisementIntervalSecs => "min-route-advertisement-interval-secs",
+            PeerKey::EnforceFirstAs => "enforce-first-as",
+            PeerKey::SendRpkiCommunity => "send-rpki-community",
+            PeerKey::AdminDown => "admin-down",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            PeerKey::RemoteAs => ValueKind::Asn,
+            PeerKey::Port => ValueKind::U16,
+            PeerKey::Interface => ValueKind::String,
+            PeerKey::Md5KeyFile => ValueKind::String,
+            PeerKey::TtlMin => ValueKind::U8,
+            PeerKey::NextHopSelf => ValueKind::Bool,
+            PeerKey::Passive => ValueKind::Bool,
+            PeerKey::RrClient => ValueKind::Bool,
+            PeerKey::RsClient => ValueKind::Bool,
+            PeerKey::GracefulShutdown => ValueKind::Bool,
+            PeerKey::DelayOpenTimeSecs => ValueKind::U64,
+            PeerKey::IdleHoldTimeSecs => ValueKind::U64,
+            PeerKey::DampPeerOscillations => ValueKind::Bool,
+            PeerKey::AllowAutomaticStop => ValueKind::Bool,
+            PeerKey::SendNotificationWithoutOpen => ValueKind::Bool,
+            PeerKey::MinRouteAdvertisementIntervalSecs => ValueKind::U64,
+            PeerKey::EnforceFirstAs => ValueKind::Bool,
+            PeerKey::SendRpkiCommunity => ValueKind::Bool,
+            PeerKey::AdminDown => ValueKind::Bool,
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            PeerKey::RemoteAs => "Peer ASN",
+            PeerKey::Port => "Peer TCP port",
+            PeerKey::Interface => "Outgoing interface (link-local peers)",
+            PeerKey::Md5KeyFile => "Path to TCP MD5 key file",
+            PeerKey::TtlMin => "Minimum incoming TTL (RFC 5082)",
+            PeerKey::NextHopSelf => "Set self as next-hop on advertisements",
+            PeerKey::Passive => "Passive mode (do not initiate connections)",
+            PeerKey::RrClient => "Treat peer as a route-reflector client",
+            PeerKey::RsClient => "Treat peer as a route-server client",
+            PeerKey::GracefulShutdown => "Send graceful shutdown community on outbound",
+            PeerKey::DelayOpenTimeSecs => "Delay before sending OPEN (seconds)",
+            PeerKey::IdleHoldTimeSecs => "Idle hold time before retry (seconds)",
+            PeerKey::DampPeerOscillations => "Damp peer oscillations",
+            PeerKey::AllowAutomaticStop => "Allow automatic state transition to Idle",
+            PeerKey::SendNotificationWithoutOpen => "Send NOTIFICATION before OPEN exchange",
+            PeerKey::MinRouteAdvertisementIntervalSecs => "MinRouteAdvertisementInterval (seconds)",
+            PeerKey::EnforceFirstAs => "Reject UPDATE if peer ASN is not first in AS_PATH",
+            PeerKey::SendRpkiCommunity => "Append RPKI validation community to outbound",
+            PeerKey::AdminDown => "Administratively disable the peer",
+        }
+    }
+}
+
+/// Per-family directive inside `peer <addr> { family <afi> <safi> { ... } }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FamilyDirectiveKey {
+    ExportPolicy,
+    ImportPolicy,
+}
+
+impl FamilyDirectiveKey {
+    pub fn all() -> &'static [FamilyDirectiveKey] {
+        &[
+            FamilyDirectiveKey::ExportPolicy,
+            FamilyDirectiveKey::ImportPolicy,
+        ]
+    }
+
+    /// First word of the directive (`export` / `import`). The grammar requires
+    /// the literal `policy` keyword next, then a name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FamilyDirectiveKey::ExportPolicy => "export",
+            FamilyDirectiveKey::ImportPolicy => "import",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        ValueKind::PolicyName
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            FamilyDirectiveKey::ExportPolicy => "Apply policy to outbound updates",
+            FamilyDirectiveKey::ImportPolicy => "Apply policy to inbound updates",
+        }
+    }
+}
+
+/// Rule keyword inside `policy <name> { ... }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PolicyRuleKey {
+    Match,
+    Default,
+}
+
+impl PolicyRuleKey {
+    pub fn all() -> &'static [PolicyRuleKey] {
+        &[PolicyRuleKey::Match, PolicyRuleKey::Default]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PolicyRuleKey::Match => "match",
+            PolicyRuleKey::Default => "default",
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            PolicyRuleKey::Match => "Match a prefix-list and apply an action",
+            PolicyRuleKey::Default => "Default action when no rules match",
+        }
+    }
+}
+
+/// Directive keyword inside `bmp-server <addr> { ... }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BmpServerKey {
+    StatisticsTimeout,
+}
+
+impl BmpServerKey {
+    pub fn all() -> &'static [BmpServerKey] {
+        &[BmpServerKey::StatisticsTimeout]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BmpServerKey::StatisticsTimeout => "statistics-timeout",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            BmpServerKey::StatisticsTimeout => ValueKind::U64,
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            BmpServerKey::StatisticsTimeout => "BMP statistics report interval (seconds)",
+        }
+    }
+}
+
+/// Directive keyword inside `rpki-cache <addr> { ... }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpkiCacheKey {
+    Preference,
+    Transport,
+    SshUsername,
+    SshPrivateKeyFile,
+    SshKnownHostsFile,
+    RetryInterval,
+    RefreshInterval,
+    ExpireInterval,
+}
+
+impl RpkiCacheKey {
+    pub fn all() -> &'static [RpkiCacheKey] {
+        &[
+            RpkiCacheKey::Preference,
+            RpkiCacheKey::Transport,
+            RpkiCacheKey::SshUsername,
+            RpkiCacheKey::SshPrivateKeyFile,
+            RpkiCacheKey::SshKnownHostsFile,
+            RpkiCacheKey::RetryInterval,
+            RpkiCacheKey::RefreshInterval,
+            RpkiCacheKey::ExpireInterval,
+        ]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RpkiCacheKey::Preference => "preference",
+            RpkiCacheKey::Transport => "transport",
+            RpkiCacheKey::SshUsername => "ssh-username",
+            RpkiCacheKey::SshPrivateKeyFile => "ssh-private-key-file",
+            RpkiCacheKey::SshKnownHostsFile => "ssh-known-hosts-file",
+            RpkiCacheKey::RetryInterval => "retry-interval",
+            RpkiCacheKey::RefreshInterval => "refresh-interval",
+            RpkiCacheKey::ExpireInterval => "expire-interval",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            RpkiCacheKey::Preference => ValueKind::U8,
+            RpkiCacheKey::Transport => ValueKind::Transport,
+            RpkiCacheKey::SshUsername => ValueKind::String,
+            RpkiCacheKey::SshPrivateKeyFile => ValueKind::String,
+            RpkiCacheKey::SshKnownHostsFile => ValueKind::String,
+            RpkiCacheKey::RetryInterval => ValueKind::U64,
+            RpkiCacheKey::RefreshInterval => ValueKind::U64,
+            RpkiCacheKey::ExpireInterval => ValueKind::U64,
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            RpkiCacheKey::Preference => "Cache preference tier (lower wins)",
+            RpkiCacheKey::Transport => "Transport: tcp or ssh",
+            RpkiCacheKey::SshUsername => "SSH username (transport ssh)",
+            RpkiCacheKey::SshPrivateKeyFile => "Path to SSH private key (transport ssh)",
+            RpkiCacheKey::SshKnownHostsFile => "Path to SSH known_hosts (transport ssh)",
+            RpkiCacheKey::RetryInterval => "Retry interval (seconds)",
+            RpkiCacheKey::RefreshInterval => "Refresh interval (seconds)",
+            RpkiCacheKey::ExpireInterval => "Expire interval (seconds)",
+        }
+    }
+}
+
+/// Directive keyword inside `bgp-ls { ... }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BgpLsKey {
+    InstanceId,
+}
+
+impl BgpLsKey {
+    pub fn all() -> &'static [BgpLsKey] {
+        &[BgpLsKey::InstanceId]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BgpLsKey::InstanceId => "instance-id",
+        }
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            BgpLsKey::InstanceId => ValueKind::U64,
+        }
+    }
+
+    pub fn help(&self) -> &'static str {
+        match self {
+            BgpLsKey::InstanceId => "BGP-LS instance ID (RFC 9552)",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,6 +1913,186 @@ service bgp {
                 expected,
                 err.message
             );
+        }
+    }
+
+    fn sample_for(kind: ValueKind) -> &'static str {
+        match kind {
+            ValueKind::Asn => "65001",
+            ValueKind::Ipv4 => "1.2.3.4",
+            ValueKind::IpAddr => "1.2.3.4",
+            ValueKind::AddrPort => "127.0.0.1:179",
+            ValueKind::LogLevel => "debug",
+            ValueKind::String => "value",
+            ValueKind::Prefix => "10.0.0.0/24",
+            ValueKind::Afi => "ipv4",
+            ValueKind::Safi => "unicast",
+            ValueKind::U8 => "100",
+            ValueKind::U16 => "1179",
+            ValueKind::U64 => "90",
+            ValueKind::Bool => "true",
+            ValueKind::Transport => "tcp",
+            ValueKind::PolicyName => "mine-only",
+            ValueKind::SetName => "my-prefixes",
+            ValueKind::Action => "accept",
+        }
+    }
+
+    #[test]
+    fn test_top_key_parity() {
+        for &key in TopKey::all() {
+            let value = sample_for(key.value_kind());
+            let parsed = Setting::parse(key.as_str(), Some(value));
+            assert!(
+                parsed.is_ok(),
+                "TopKey::{:?} ({}) failed to parse value {:?}: {:?}",
+                key,
+                key.as_str(),
+                value,
+                parsed.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_peer_key_parity() {
+        for &key in PeerKey::all() {
+            let value = sample_for(key.value_kind());
+            let parsed = Setting::parse(key.as_str(), Some(value));
+            assert!(
+                parsed.is_ok(),
+                "PeerKey::{:?} ({}) failed to parse value {:?}: {:?}",
+                key,
+                key.as_str(),
+                value,
+                parsed.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_top_key_round_trip_through_grammar() {
+        for &key in TopKey::all() {
+            let value = sample_for(key.value_kind());
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  {} {}\n}}",
+                key.as_str(),
+                value
+            );
+            let root = parse(&input)
+                .unwrap_or_else(|err| panic!("TopKey::{:?} grammar parse failed: {:?}", key, err));
+            let Service::Bgp(body) = &root.services[0];
+            assert!(
+                body.settings
+                    .iter()
+                    .any(|s| s.to_string().starts_with(key.as_str())),
+                "TopKey::{:?} ({}) not present after round-trip",
+                key,
+                key.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_peer_key_round_trip_through_grammar() {
+        for &key in PeerKey::all() {
+            let value = sample_for(key.value_kind());
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  peer 10.0.0.1 {{\n    {} {}\n  }}\n}}",
+                key.as_str(),
+                value
+            );
+            let root = parse(&input)
+                .unwrap_or_else(|err| panic!("PeerKey::{:?} grammar parse failed: {:?}", key, err));
+            let Service::Bgp(body) = &root.services[0];
+            let peer = &body.peers[0];
+            assert!(
+                peer.settings
+                    .iter()
+                    .any(|s| s.to_string().starts_with(key.as_str())),
+                "PeerKey::{:?} ({}) not present after round-trip",
+                key,
+                key.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_family_directive_key_round_trip() {
+        for &key in FamilyDirectiveKey::all() {
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  peer 10.0.0.1 {{\n    family ipv4 unicast {{\n      {} policy mine-only\n    }}\n  }}\n}}",
+                key.as_str()
+            );
+            let root = parse(&input).unwrap_or_else(|err| {
+                panic!("FamilyDirectiveKey::{:?} parse failed: {:?}", key, err)
+            });
+            let Service::Bgp(body) = &root.services[0];
+            assert_eq!(body.peers[0].families[0].directives.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_policy_rule_key_round_trip() {
+        let input = "service bgp {\n  asn 1\n  router-id 0.0.0.0\n  policy mine-only {\n    match my-prefixes accept\n    default reject\n  }\n}";
+        let root = parse(input).unwrap();
+        let Service::Bgp(body) = &root.services[0];
+        assert_eq!(body.policies[0].rules.len(), 2);
+        assert!(matches!(
+            &body.policies[0].rules[0],
+            PolicyRule::Match { .. }
+        ));
+        assert!(matches!(
+            &body.policies[0].rules[1],
+            PolicyRule::Default { .. }
+        ));
+    }
+
+    #[test]
+    fn test_bmp_server_key_round_trip() {
+        for &key in BmpServerKey::all() {
+            let value = sample_for(key.value_kind());
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  bmp-server 127.0.0.1:1790 {{\n    {} {}\n  }}\n}}",
+                key.as_str(),
+                value
+            );
+            let root = parse(&input)
+                .unwrap_or_else(|err| panic!("BmpServerKey::{:?} parse failed: {:?}", key, err));
+            let Service::Bgp(body) = &root.services[0];
+            assert_eq!(body.bmp_servers[0].address, "127.0.0.1:1790");
+        }
+    }
+
+    #[test]
+    fn test_rpki_cache_key_round_trip() {
+        for &key in RpkiCacheKey::all() {
+            let value = sample_for(key.value_kind());
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  rpki-cache 127.0.0.1:323 {{\n    {} {}\n  }}\n}}",
+                key.as_str(),
+                value
+            );
+            let root = parse(&input)
+                .unwrap_or_else(|err| panic!("RpkiCacheKey::{:?} parse failed: {:?}", key, err));
+            let Service::Bgp(body) = &root.services[0];
+            assert_eq!(body.rpki_caches[0].address, "127.0.0.1:323");
+        }
+    }
+
+    #[test]
+    fn test_bgp_ls_key_round_trip() {
+        for &key in BgpLsKey::all() {
+            let value = sample_for(key.value_kind());
+            let input = format!(
+                "service bgp {{\n  asn 1\n  router-id 0.0.0.0\n  bgp-ls {{\n    {} {}\n  }}\n}}",
+                key.as_str(),
+                value
+            );
+            let root = parse(&input)
+                .unwrap_or_else(|err| panic!("BgpLsKey::{:?} parse failed: {:?}", key, err));
+            let Service::Bgp(body) = &root.services[0];
+            assert!(body.bgp_ls.is_some());
         }
     }
 }

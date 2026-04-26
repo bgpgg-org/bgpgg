@@ -1692,3 +1692,86 @@ async fn test_save_and_commit_uuid_check() {
         commit_err.message()
     );
 }
+
+/// Validates that the brace-format text produced by ggsh's per-block AST
+/// (via `Display`) round-trips through the daemon's `commit_config` and lands
+/// in both `self.config` and on-disk `rogg.conf`. The candidate is built
+/// directly from `conf::language_bgp` types to mirror what the
+/// `apply_set_*` functions in `ggsh/src/cmd_configure.rs` produce.
+#[tokio::test]
+async fn test_ggsh_set_then_commit_persists() {
+    use conf::language::{Root, Service};
+    use conf::language_bgp::{
+        BgpServiceBody, FamilyBlock, FamilyDirective, PeerBlock, PolicyBlock, PolicyRule,
+        PrefixListBlock, Setting,
+    };
+
+    let server = start_test_server(test_config(65001, 1)).await;
+    let starting = server.read_conf();
+    let asn = starting.asn;
+    let router_id = starting.router_id;
+    let listen_addr = starting.listen_addr.clone();
+
+    let body = BgpServiceBody {
+        settings: vec![
+            Setting::Asn(asn),
+            Setting::RouterId(router_id),
+            Setting::ListenAddr(listen_addr.clone()),
+            Setting::SysName("test-bgpgg-127.0.0.1".to_string()),
+            Setting::SysDescr("test bgpgg router".to_string()),
+        ],
+        peers: vec![PeerBlock {
+            address: "10.0.0.1".to_string(),
+            settings: vec![
+                Setting::RemoteAs(65002),
+                Setting::Interface("eth0".to_string()),
+                Setting::NextHopSelf(true),
+            ],
+            families: vec![FamilyBlock {
+                afi: conf::bgp::Afi::Ipv4,
+                safi: conf::bgp::Safi::Unicast,
+                directives: vec![FamilyDirective::ExportPolicy("mine-only".to_string())],
+            }],
+        }],
+        policies: vec![PolicyBlock {
+            name: "mine-only".to_string(),
+            rules: vec![
+                PolicyRule::Match {
+                    set_name: "my-prefixes".to_string(),
+                    action: "accept".to_string(),
+                },
+                PolicyRule::Default {
+                    action: "reject".to_string(),
+                },
+            ],
+        }],
+        prefix_lists: vec![PrefixListBlock {
+            name: "my-prefixes".to_string(),
+            prefixes: vec!["172.23.211.0/27".to_string()],
+        }],
+        bmp_servers: Vec::new(),
+        rpki_caches: Vec::new(),
+        bgp_ls: None,
+    };
+    let candidate = Root {
+        services: vec![Service::Bgp(body)],
+    };
+
+    server
+        .commit_config(candidate.to_string())
+        .await
+        .expect("commit succeeds");
+
+    // Daemon's persisted view reflects the new peer settings.
+    let after = server.read_conf();
+    assert_eq!(after.peers.len(), 1, "peer added");
+    assert_eq!(after.peers[0].address, "10.0.0.1");
+    assert_eq!(after.peers[0].asn, Some(65002));
+    assert_eq!(after.peers[0].interface.as_deref(), Some("eth0"));
+    assert!(after.peers[0].next_hop_self);
+    // policy / prefix-list / family blocks are syntactically accepted but
+    // silently stripped by `BgpConfig::from_conf_str` until the round-trip
+    // ticket lands (`.claude/tasks/open/20260421-grammar-roundtrip-gaps.md`,
+    // also `20260425-ggsh-policy-roundtrip-gap.md` for the ggsh-side
+    // exposure). Don't assert them here.
+}

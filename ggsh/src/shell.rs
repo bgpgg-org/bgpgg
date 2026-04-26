@@ -25,15 +25,20 @@ use crate::cmd_configure;
 use crate::cmd_rpki;
 use crate::cmd_show;
 use crate::grammar;
-use crate::parser::{self, BgpggCommand, Command, ParseResult, TabCompleter};
+use crate::parser::{self, BgpggCommand, Command, ParseResult, ServiceKind, TabCompleter};
 use crate::util::{parse_afi, parse_safi};
 
 const HISTORY_FILENAME: &str = "ggsh_history";
 
+/// Stack frame for the shell's current context. `[Root]` = operational
+/// (`ggsh>`). `[Root, Configure]` = `ggsh(config)>`.
+/// `[Root, Configure, BgpService]` = `ggsh(config-bgp)>`. Popping `Root`
+/// exits the shell; popping `Configure` ends the configure session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShellMode {
-    Operational,
+pub enum ShellLevel {
+    Root,
     Configure,
+    BgpService,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,9 +54,12 @@ pub struct Shell {
     grpc_addrs: HashMap<Service, String>,
     command: Option<Vec<String>>,
     tree_op: Vec<crate::grammar::Node>,
-    tree_cfg: Vec<crate::grammar::Node>,
+    tree_cfg_root: Vec<crate::grammar::Node>,
+    tree_cfg_bgp: Vec<crate::grammar::Node>,
     clients: HashMap<Service, Client>,
-    pub mode: ShellMode,
+    /// Always non-empty during the shell's lifetime: starts as `[Root]`.
+    /// `enter_configure` / `enter_service_bgp` push; `exit_level` pops.
+    pub levels: Vec<ShellLevel>,
     pub candidate: Option<conf::language::Root>,
     pub session_uuid: uuid::Uuid,
     /// EX flock on `<config>.lock` held for the configure session.
@@ -69,9 +77,10 @@ impl Shell {
             grpc_addrs,
             command,
             tree_op: grammar::tree(),
-            tree_cfg: grammar::tree_config(),
+            tree_cfg_root: grammar::tree_config(),
+            tree_cfg_bgp: grammar::tree_config_bgp(),
             clients: HashMap::new(),
-            mode: ShellMode::Operational,
+            levels: vec![ShellLevel::Root],
             candidate: None,
             session_uuid: conf::fs::make_session_uuid(),
             session_lock: None,
@@ -80,10 +89,45 @@ impl Shell {
     }
 
     fn current_tree(&self) -> &[crate::grammar::Node] {
-        match self.mode {
-            ShellMode::Operational => &self.tree_op,
-            ShellMode::Configure => &self.tree_cfg,
+        match self.levels.last() {
+            Some(ShellLevel::Root) | None => &self.tree_op,
+            Some(ShellLevel::Configure) => &self.tree_cfg_root,
+            Some(ShellLevel::BgpService) => &self.tree_cfg_bgp,
         }
+    }
+
+    /// Push a level onto the stack. Validates the current top is the
+    /// required parent for the new level.
+    pub fn enter_level(&mut self, level: ShellLevel) -> Result<(), String> {
+        let required_top = match level {
+            ShellLevel::Root => return Err("cannot enter root".into()),
+            ShellLevel::Configure => ShellLevel::Root,
+            ShellLevel::BgpService => ShellLevel::Configure,
+        };
+        if self.levels.last() != Some(&required_top) {
+            return Err(format!("cannot enter {:?} from here", level));
+        }
+        self.levels.push(level);
+        Ok(())
+    }
+
+    /// Pop one stack frame. Returns `Some(0)` if the shell should quit
+    /// (popped `Root` or stack was already empty). Otherwise `None`.
+    pub fn exit_level(&mut self) -> Option<i32> {
+        match self.levels.pop() {
+            Some(ShellLevel::BgpService) => None,
+            Some(ShellLevel::Configure) => {
+                self.exit_configure_mode();
+                None
+            }
+            Some(ShellLevel::Root) | None => Some(0),
+        }
+    }
+
+    fn exit_configure_mode(&mut self) {
+        let _ = std::fs::remove_file(conf::fs::lock_path_for(&self.config_path));
+        self.session_lock = None;
+        self.candidate = None;
     }
 
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -117,7 +161,7 @@ impl Shell {
         }
     }
 
-    async fn bgp(&mut self) -> Result<&BgpClient, String> {
+    pub(crate) async fn bgp(&mut self) -> Result<&BgpClient, String> {
         self.connect(Service::Bgpgg).await?;
         match self.clients.get(&Service::Bgpgg) {
             Some(Client::Bgpgg(c)) => Ok(c),
@@ -129,11 +173,71 @@ impl Shell {
     /// `Ok(Some(code))` to exit with the given code, `Err` on failure.
     async fn execute(&mut self, cmd: Command, args: &[String]) -> Result<Option<i32>, String> {
         match cmd {
-            Command::Exit => return Ok(Some(0)),
+            Command::Exit => return Ok(self.exit_level()),
             Command::Configure => cmd_configure::enter_configure(self)?,
-            Command::Abort => cmd_configure::abort_configure(self)?,
             Command::Version => cmd_show::show_version().await.map_err(|e| e.to_string())?,
             Command::Bgpgg(c) => self.execute_bgpgg(c, args).await?,
+
+            Command::EnterService(ServiceKind::Bgp) => self.enter_level(ShellLevel::BgpService)?,
+            Command::Commit => cmd_configure::commit_configure(self).await?,
+            Command::ShowDiff => cmd_configure::show_diff(self).await?,
+            Command::ShowRunningConfig => cmd_configure::show_running_config(self).await?,
+            Command::ShowCandidate => cmd_configure::show_candidate(self)?,
+
+            Command::SetTop(key) => cmd_configure::apply_set_top(self, key, &args[0])?,
+            Command::SetTopOriginate => cmd_configure::apply_set_top_originate(self, &args[0])?,
+            Command::SetPeer(key) => cmd_configure::apply_set_peer(self, key, &args[0], &args[1])?,
+            Command::SetPeerFamily(directive) => cmd_configure::apply_set_peer_family(
+                self, directive, &args[0], &args[1], &args[2], &args[3],
+            )?,
+            Command::SetPolicyMatch => {
+                cmd_configure::apply_set_policy_match(self, &args[0], &args[1], &args[2])?
+            }
+            Command::SetPolicyDefault => {
+                cmd_configure::apply_set_policy_default(self, &args[0], &args[1])?
+            }
+            Command::SetPrefixListEntry => {
+                cmd_configure::apply_set_prefix_list_entry(self, &args[0], &args[1])?
+            }
+            Command::SetBmpServer(key) => {
+                cmd_configure::apply_set_bmp_server(self, key, &args[0], &args[1])?
+            }
+            Command::SetRpkiCache(key) => {
+                cmd_configure::apply_set_rpki_cache(self, key, &args[0], &args[1])?
+            }
+            Command::SetBgpLs(key) => cmd_configure::apply_set_bgp_ls(self, key, &args[0])?,
+
+            Command::UnsetTop(key) => cmd_configure::apply_unset_top(self, key)?,
+            Command::UnsetTopOriginate => cmd_configure::apply_unset_top_originate(self, &args[0])?,
+            Command::UnsetPeer => cmd_configure::apply_unset_peer(self, &args[0])?,
+            Command::UnsetPeerSetting(key) => {
+                cmd_configure::apply_unset_peer_setting(self, key, &args[0])?
+            }
+            Command::UnsetPeerFamily => {
+                cmd_configure::apply_unset_peer_family(self, &args[0], &args[1], &args[2])?
+            }
+            Command::UnsetPeerFamilyDirective(directive) => {
+                cmd_configure::apply_unset_peer_family_directive(
+                    self, directive, &args[0], &args[1], &args[2],
+                )?
+            }
+            Command::UnsetPolicy => cmd_configure::apply_unset_policy(self, &args[0])?,
+            Command::UnsetPrefixList => cmd_configure::apply_unset_prefix_list(self, &args[0])?,
+            Command::UnsetPrefixListEntry => {
+                cmd_configure::apply_unset_prefix_list_entry(self, &args[0], &args[1])?
+            }
+            Command::UnsetBmpServer => cmd_configure::apply_unset_bmp_server(self, &args[0])?,
+            Command::UnsetBmpServerSetting(key) => {
+                cmd_configure::apply_unset_bmp_server_setting(self, key, &args[0])?
+            }
+            Command::UnsetRpkiCache => cmd_configure::apply_unset_rpki_cache(self, &args[0])?,
+            Command::UnsetRpkiCacheSetting(key) => {
+                cmd_configure::apply_unset_rpki_cache_setting(self, key, &args[0])?
+            }
+            Command::UnsetBgpLs => cmd_configure::apply_unset_bgp_ls(self)?,
+            Command::UnsetBgpLsSetting(key) => {
+                cmd_configure::apply_unset_bgp_ls_setting(self, key)?
+            }
         }
         Ok(None)
     }
@@ -201,10 +305,15 @@ impl Shell {
         println!("ggshell {}\n", env!("CARGO_PKG_VERSION"));
 
         loop {
-            let prompt = match self.mode {
-                ShellMode::Operational => "ggsh> ",
-                ShellMode::Configure => "ggsh(config)> ",
+            let prompt = match self.levels.last() {
+                Some(ShellLevel::Root) | None => "ggsh> ",
+                Some(ShellLevel::Configure) => "ggsh(config)> ",
+                Some(ShellLevel::BgpService) => "ggsh(config-bgp)> ",
             };
+            // Refresh completer to match the active mode's grammar.
+            editor.set_helper(Some(TabCompleter {
+                tree: self.current_tree().to_vec(),
+            }));
             match editor.readline(prompt) {
                 Ok(line) => {
                     let trimmed = line.trim();
@@ -213,7 +322,7 @@ impl Shell {
                     }
                     let _ = editor.add_history_entry(trimmed);
                     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-                    let result = parser::parse(self.current_tree(),&tokens);
+                    let result = parser::parse(self.current_tree(), &tokens);
                     if self.handle_result(result).await == Some(0) {
                         break;
                     }
@@ -233,7 +342,7 @@ impl Shell {
     }
 
     async fn run_single(&mut self, tokens: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-        let result = parser::parse(self.current_tree(),tokens);
+        let result = parser::parse(self.current_tree(), tokens);
         if let Some(code) = self.handle_result(result).await {
             if code != 0 {
                 std::process::exit(code);
