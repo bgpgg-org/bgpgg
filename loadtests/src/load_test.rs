@@ -452,7 +452,7 @@ impl BgpggProcess {
             grpc_listen_addr: grpc_addr.clone(),
             hold_time_secs: 3600, // 1 hour for long-running load tests
             connect_retry_secs: 30,
-            peers: vec![],
+            peers: Vec::new(),
             bmp_servers: vec![],
             rpki_caches: vec![],
             defined_sets: Default::default(),

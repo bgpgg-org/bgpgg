@@ -791,8 +791,9 @@ async fn test_get_running_config() {
     assert_eq!(reparsed.router_id, Ipv4Addr::new(10, 0, 0, 1));
     assert_eq!(reparsed.hold_time_secs, 90);
     assert_eq!(reparsed.peers.len(), 1);
-    assert_eq!(reparsed.peers[0].address, "10.0.0.5");
-    assert_eq!(reparsed.peers[0].asn, Some(65099));
+    let saved = reparsed.peers.first().unwrap();
+    assert_eq!(saved.address, "10.0.0.5");
+    assert_eq!(saved.asn, Some(65099));
 }
 
 #[tokio::test]
@@ -1773,10 +1774,11 @@ async fn test_ggsh_set_then_commit_persists() {
     // Daemon's persisted view reflects the new peer settings.
     let after = server.read_conf();
     assert_eq!(after.peers.len(), 1, "peer added");
-    assert_eq!(after.peers[0].address, "10.0.0.1");
-    assert_eq!(after.peers[0].asn, Some(65002));
-    assert_eq!(after.peers[0].interface.as_deref(), Some("eth0"));
-    assert!(after.peers[0].next_hop_self);
+    let added = after.peers.first().unwrap();
+    assert_eq!(added.address, "10.0.0.1");
+    assert_eq!(added.asn, Some(65002));
+    assert_eq!(added.interface.as_deref(), Some("eth0"));
+    assert!(added.next_hop_self);
 
     // policy / prefix-list / family blocks now survive the round-trip.
     assert_eq!(after.policy_definitions.len(), 1);
@@ -1791,7 +1793,7 @@ async fn test_ggsh_set_then_commit_persists() {
     );
 
     assert_eq!(
-        after.peers[0].export_policy_for(conf::bgp::Afi::Ipv4, conf::bgp::Safi::Unicast),
+        added.export_policy_for(conf::bgp::Afi::Ipv4, conf::bgp::Safi::Unicast),
         ["mine-only".to_string()]
     );
 }

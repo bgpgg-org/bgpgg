@@ -678,16 +678,26 @@ pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     }
 }
 
+/// Insert a passive peer at the given address into the BgpConfig before
+/// starting the test server. Uses defaults for everything else; for tests
+/// that need extra fields (GR, LLGR, port, ...), build the PeerConfig
+/// inline and call `config.insert_peer(...)` directly.
+pub fn add_passive_peer(config: &mut BgpConfig, address: &str) {
+    config
+        .insert_peer(conf::bgp::PeerConfig {
+            address: address.to_string(),
+            passive_mode: true,
+            ..Default::default()
+        })
+        .unwrap();
+}
+
 /// Setup a test server with a passive peer configured (no connection yet).
 ///
 /// Use when you need custom handshake behavior (e.g., partial handshake for OpenConfirm tests).
 pub async fn setup_server_with_passive_peer() -> TestServer {
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(conf::bgp::PeerConfig {
-        address: "127.0.0.1".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    add_passive_peer(&mut config, "127.0.0.1");
     let server = start_test_server(config).await;
     // FakePeer will be eBGP (ASN 65002): apply accept-all policies
     apply_import_accept_all(&server, "127.0.0.1").await;

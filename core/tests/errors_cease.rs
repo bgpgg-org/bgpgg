@@ -263,11 +263,13 @@ async fn test_collision_immediate() {
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
         let mut config = BgpConfig::new(65001, "127.0.0.1:0", server_bgp_id, 300);
-        config.peers.push(PeerConfig {
-            address: "127.0.0.3".to_string(),
-            port: peer.port(),
-            ..Default::default()
-        });
+        config
+            .insert_peer(PeerConfig {
+                address: "127.0.0.3".to_string(),
+                port: peer.port(),
+                ..Default::default()
+            })
+            .unwrap();
         let server = start_test_server(config).await;
 
         // Accept server's outgoing connection and complete OPEN exchange
@@ -361,12 +363,14 @@ async fn test_collision_connect_state() {
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(PeerConfig {
-        address: "127.0.0.3".to_string(),
-        port: peer.port(),
-        delay_open_time_secs: Some(2), // DelayOpen keeps peer in Connect state long enough
-        ..Default::default()
-    });
+    config
+        .insert_peer(PeerConfig {
+            address: "127.0.0.3".to_string(),
+            port: peer.port(),
+            delay_open_time_secs: Some(2),
+            ..Default::default()
+        })
+        .unwrap();
     let server = start_test_server(config).await;
 
     // Accept outgoing connection - server is now in Connect waiting for DelayOpen timer
@@ -429,11 +433,13 @@ async fn test_collision_deferred() {
         let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
         let mut config = BgpConfig::new(65001, "127.0.0.1:0", server_bgp_id, 300);
-        config.peers.push(PeerConfig {
-            address: "127.0.0.3".to_string(),
-            port: peer.port(),
-            ..Default::default()
-        });
+        config
+            .insert_peer(PeerConfig {
+                address: "127.0.0.3".to_string(),
+                port: peer.port(),
+                ..Default::default()
+            })
+            .unwrap();
         let server = start_test_server(config).await;
 
         // Accept server's outbound connection (server sends OPEN, but we don't read it yet)
@@ -514,11 +520,13 @@ async fn test_collision_candidate_promotion_on_primary_disconnect() {
     let mut peer = FakePeer::new("127.0.0.3:0", 65002).await;
 
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(PeerConfig {
-        address: "127.0.0.3".to_string(),
-        port: peer.port(),
-        ..Default::default()
-    });
+    config
+        .insert_peer(PeerConfig {
+            address: "127.0.0.3".to_string(),
+            port: peer.port(),
+            ..Default::default()
+        })
+        .unwrap();
     let server = start_test_server(config).await;
 
     // Accept server's outgoing connection
@@ -570,11 +578,13 @@ async fn test_collision_candidate_asn_preserved_on_promotion() {
     let mut peer = FakePeer::new("127.0.0.4:0", 65002).await;
 
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(PeerConfig {
-        address: "127.0.0.4".to_string(),
-        port: peer.port(),
-        ..Default::default()
-    });
+    config
+        .insert_peer(PeerConfig {
+            address: "127.0.0.4".to_string(),
+            port: peer.port(),
+            ..Default::default()
+        })
+        .unwrap();
     let server = start_test_server(config).await;
 
     // Accept server's outgoing connection

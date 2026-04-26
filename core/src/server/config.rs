@@ -50,8 +50,8 @@ pub(crate) async fn commit_config(
 }
 
 /// Persist `server.config` to `server.config_path`. Used by the
-/// gRPC-imperative path which mutates `self.config` in place and asks
-/// the operator (or `auto-save`) to flush on demand.
+/// gRPC-imperative path which mutates `self.config` in place and asks the
+/// operator (or `auto-save`) to flush on demand.
 pub(crate) fn save_config(server: &BgpServer) -> Result<(), String> {
     let service = Service::Bgp(server.config.to_bgp_service_body());
     persist_service_config(&server.config_path, service)
@@ -67,7 +67,7 @@ async fn reconfigure_all(
     new: &BgpConfig,
     bind_addr: SocketAddr,
 ) -> Result<(), String> {
-    server.reconfigure_peers(old, new, bind_addr).await;
+    server.reconfigure_peers(new, bind_addr).await;
     server.reconfigure_bmp_servers(old, new).await?;
     server.reconfigure_rpki_caches(old, new).await?;
     Ok(())

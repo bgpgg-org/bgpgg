@@ -526,6 +526,11 @@ fn default_port() -> u16 {
 }
 
 impl PeerConfig {
+    /// Returns the parsed peer IP, or None if `address` is not a valid IP.
+    pub fn ip(&self) -> Option<IpAddr> {
+        self.address.parse().ok()
+    }
+
     /// Returns the socket address (IP + port) for this peer.
     pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
         let ip: IpAddr = self.address.parse()?;
@@ -552,6 +557,34 @@ impl PeerConfig {
                 None
             }
         }
+    }
+
+    /// Deduplicated import-policy names across all families, in declaration order.
+    pub fn import_policy_names(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for entry in &self.afi_safis {
+            for name in &entry.import_policy {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Deduplicated export-policy names across all families, in declaration order.
+    pub fn export_policy_names(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for entry in &self.afi_safis {
+            for name in &entry.export_policy {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Extract plain AfiSafi list for protocol-level use (capability negotiation, etc.).
@@ -1125,6 +1158,37 @@ impl BgpConfig {
         Self::from_conf_str(&contents)
     }
 
+    /// Append a peer. Errors if the address is not a valid IP or if a
+    /// peer with that IP is already present.
+    pub fn insert_peer(&mut self, cfg: PeerConfig) -> Result<(), String> {
+        let peer_ip: IpAddr = cfg
+            .address
+            .parse()
+            .map_err(|e| format!("peer address '{}' is not a valid IP: {}", cfg.address, e))?;
+        if self.find_peer(peer_ip).is_some() {
+            return Err(format!("duplicate peer address '{}'", peer_ip));
+        }
+        self.peers.push(cfg);
+        Ok(())
+    }
+
+    /// Look up a peer's config by IP. O(N) scan -- peer counts are
+    /// small (typically <100, ~1000 for big route reflectors) so this
+    /// is cheaper than a HashMap for our use.
+    pub fn find_peer(&self, ip: IpAddr) -> Option<&PeerConfig> {
+        self.peers.iter().find(|p| p.ip() == Some(ip))
+    }
+
+    pub fn find_peer_mut(&mut self, ip: IpAddr) -> Option<&mut PeerConfig> {
+        self.peers.iter_mut().find(|p| p.ip() == Some(ip))
+    }
+
+    /// Remove a peer by IP. Returns the removed config, or None if absent.
+    pub fn remove_peer(&mut self, ip: IpAddr) -> Option<PeerConfig> {
+        let pos = self.peers.iter().position(|p| p.ip() == Some(ip))?;
+        Some(self.peers.remove(pos))
+    }
+
     /// Parse a rogg.conf string into a BgpConfig.
     pub fn from_conf_str(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let root = language::parse(input)?;
@@ -1169,7 +1233,7 @@ impl BgpConfig {
         }
 
         for peer_block in &bgp.peers {
-            config.peers.push(peer_config_from_block(peer_block));
+            config.insert_peer(peer_config_from_block(peer_block))?;
         }
 
         for prefix_list_block in &bgp.prefix_lists {
@@ -2216,10 +2280,12 @@ service bgp {
         assert_eq!(reparsed.log_level, config.log_level);
         assert_eq!(reparsed.hold_time_secs, config.hold_time_secs);
         assert_eq!(reparsed.peers.len(), config.peers.len());
-        assert_eq!(reparsed.peers[0].address, config.peers[0].address);
-        assert_eq!(reparsed.peers[0].asn, config.peers[0].asn);
-        assert_eq!(reparsed.peers[0].passive_mode, config.peers[0].passive_mode);
-        assert_eq!(reparsed.peers[0].rr_client, config.peers[0].rr_client);
+        let original = config.peers.first().unwrap();
+        let parsed = reparsed.peers.first().unwrap();
+        assert_eq!(parsed.address, original.address);
+        assert_eq!(parsed.asn, original.asn);
+        assert_eq!(parsed.passive_mode, original.passive_mode);
+        assert_eq!(parsed.rr_client, original.rr_client);
     }
 
     #[test]
@@ -2232,19 +2298,21 @@ service bgp {
         config.sys_descr = Some("test-build".to_string());
         config.enhanced_rr_stale_ttl = Some(120);
         config.bgp_ls.instance_id = 99;
-        config.peers.push(PeerConfig {
-            address: "10.0.0.1".to_string(),
-            asn: Some(65002),
-            delay_open_time_secs: Some(2),
-            idle_hold_time_secs: Some(60),
-            damp_peer_oscillations: false,
-            allow_automatic_stop: false,
-            send_notification_without_open: true,
-            min_route_advertisement_interval_secs: Some(15),
-            enforce_first_as: false,
-            send_rpki_community: true,
-            ..Default::default()
-        });
+        config
+            .insert_peer(PeerConfig {
+                address: "10.0.0.1".to_string(),
+                asn: Some(65002),
+                delay_open_time_secs: Some(2),
+                idle_hold_time_secs: Some(60),
+                damp_peer_oscillations: false,
+                allow_automatic_stop: false,
+                send_notification_without_open: true,
+                min_route_advertisement_interval_secs: Some(15),
+                enforce_first_as: false,
+                send_rpki_community: true,
+                ..Default::default()
+            })
+            .unwrap();
 
         let rendered = config.to_conf_str();
         let reparsed = BgpConfig::from_conf_str(&rendered)
@@ -2256,8 +2324,8 @@ service bgp {
         assert_eq!(reparsed.bgp_ls.instance_id, config.bgp_ls.instance_id);
 
         assert_eq!(reparsed.peers.len(), 1);
-        let original = &config.peers[0];
-        let parsed = &reparsed.peers[0];
+        let original = config.peers.first().unwrap();
+        let parsed = reparsed.peers.first().unwrap();
         assert_eq!(parsed.delay_open_time_secs, original.delay_open_time_secs);
         assert_eq!(parsed.idle_hold_time_secs, original.idle_hold_time_secs);
         assert_eq!(
@@ -2361,7 +2429,7 @@ service bgp {
 }";
         let config = BgpConfig::from_conf_str(input).unwrap();
         assert_eq!(config.peers.len(), 1);
-        let peer = &config.peers[0];
+        let peer = config.peers.first().unwrap();
         assert_eq!(
             peer.import_policy_for(Afi::Ipv4, Safi::Unicast),
             ["in-v4".to_string()]
@@ -2378,7 +2446,7 @@ service bgp {
 
         let rendered = config.to_conf_str();
         let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
-        let parsed_peer = &reparsed.peers[0];
+        let parsed_peer = reparsed.peers.first().unwrap();
         assert_eq!(
             parsed_peer.import_policy_for(Afi::Ipv4, Safi::Unicast),
             peer.import_policy_for(Afi::Ipv4, Safi::Unicast)
@@ -2478,10 +2546,10 @@ service bgp {
             import_policy: Vec::new(),
             export_policy: Vec::new(),
         });
-        config.peers.push(peer);
+        config.insert_peer(peer).unwrap();
         let rendered = config.to_conf_str();
         let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
-        let p = &reparsed.peers[0];
+        let p = reparsed.peers.first().unwrap();
         let v4 = p
             .afi_safis
             .iter()
@@ -3168,7 +3236,7 @@ service bgp {
         assert_eq!(config.asn, 4242423930);
         assert_eq!(config.peers.len(), 2);
 
-        let peer1 = &config.peers[0];
+        let peer1 = config.find_peer("fe80::ade0".parse().unwrap()).unwrap();
         assert_eq!(peer1.address, "fe80::ade0");
         assert_eq!(peer1.asn, Some(4242423914));
         assert_eq!(peer1.interface.as_deref(), Some("peer1-us3"));
@@ -3177,11 +3245,34 @@ service bgp {
         assert_eq!(peer1.port, 1179);
         assert_eq!(peer1.ttl_min, Some(254));
 
-        let upstream = &config.peers[1];
+        let upstream = config.find_peer("10.0.0.1".parse().unwrap()).unwrap();
         assert_eq!(upstream.address, "10.0.0.1");
         assert_eq!(upstream.asn, Some(65000));
         assert!(upstream.passive_mode);
         assert!(upstream.rr_client);
+    }
+
+    #[test]
+    fn test_peer_order_preserved_round_trip() {
+        // Operator-written order in rogg.conf must survive parse -> serialize.
+        // Listed deliberately out of IP-sort order so we'd notice if the
+        // container resorted them.
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  peer 10.0.0.5 { remote-as 65005 }
+  peer 10.0.0.1 { remote-as 65001 }
+  peer 10.0.0.3 { remote-as 65003 }
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        let order: Vec<&str> = config.peers.iter().map(|p| p.address.as_str()).collect();
+        assert_eq!(order, ["10.0.0.5", "10.0.0.1", "10.0.0.3"]);
+
+        let reparsed = BgpConfig::from_conf_str(&config.to_conf_str()).unwrap();
+        let reparsed_order: Vec<&str> = reparsed.peers.iter().map(|p| p.address.as_str()).collect();
+        assert_eq!(reparsed_order, order);
     }
 
     #[test]

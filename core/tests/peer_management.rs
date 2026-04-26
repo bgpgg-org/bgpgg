@@ -265,11 +265,7 @@ async fn test_manually_stopped_no_auto_reconnect() {
 async fn test_reject_unconfigured_peer() {
     // Server with 127.0.0.2 as configured passive peer
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(conf::bgp::PeerConfig {
-        address: "127.0.0.2".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    add_passive_peer(&mut config, "127.0.0.2");
     let server = start_test_server(config).await;
 
     // Configured peer from 127.0.0.2 should be accepted

@@ -31,11 +31,7 @@ async fn test_hold_timer_expiry() {
         Ipv4Addr::new(1, 1, 1, 1),
         hold_timer_secs as u64,
     );
-    config.peers.push(conf::bgp::PeerConfig {
-        address: "127.0.0.1".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    add_passive_peer(&mut config, "127.0.0.1");
     let server = start_test_server(config).await;
 
     // FakePeer connects with same hold time but won't send keepalives

@@ -320,12 +320,12 @@ impl ConnectionState {
 /// (outgoing vs incoming), not by a conn_type field.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    /// Resolved import policies. Populated from `config.afi_safis` at handshake.
+    /// Resolved import policies. Populated from `BgpConfig.peers[ip].afi_safis`
+    /// at handshake.
     pub import_policies: AfiSafiPolicies,
-    /// Resolved export policies. Populated from `config.afi_safis` at handshake.
+    /// Resolved export policies. Populated from `BgpConfig.peers[ip].afi_safis`
+    /// at handshake.
     pub export_policies: AfiSafiPolicies,
-    /// Per-peer session configuration
-    pub config: PeerConfig,
     /// Outgoing connection slot (we initiated)
     pub outgoing: Option<ConnectionState>,
     /// Incoming connection slot (peer initiated)
@@ -402,7 +402,7 @@ impl<K: Eq + Hash + Copy> ServerOpTimers<K> {
 
 impl PeerInfo {
     pub fn new(
-        config: PeerConfig,
+        admin_down: bool,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
         conn_type: Option<ConnectionType>,
     ) -> Self {
@@ -412,7 +412,7 @@ impl PeerInfo {
             Some(ConnectionType::Incoming) => (None, Some(conn_state)),
             None => (None, None),
         };
-        let admin_state = if config.admin_down {
+        let admin_state = if admin_down {
             AdminState::Down
         } else {
             AdminState::Up
@@ -421,7 +421,6 @@ impl PeerInfo {
             admin_state,
             import_policies: HashMap::new(),
             export_policies: HashMap::new(),
-            config,
             outgoing,
             incoming,
             adj_rib_in: AdjRibIn::new(),
@@ -518,34 +517,6 @@ impl PeerInfo {
             .get(&family)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Deduplicated import-policy names across all families, in declaration order.
-    pub fn import_policy_names(&self) -> Vec<String> {
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for entry in &self.config.afi_safis {
-            for name in &entry.import_policy {
-                if seen.insert(name.clone()) {
-                    out.push(name.clone());
-                }
-            }
-        }
-        out
-    }
-
-    /// Deduplicated export-policy names across all families, in declaration order.
-    pub fn export_policy_names(&self) -> Vec<String> {
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for entry in &self.config.afi_safis {
-            for name in &entry.export_policy {
-                if seen.insert(name.clone()) {
-                    out.push(name.clone());
-                }
-            }
-        }
-        out
     }
 
     pub fn supports_4byte_asn(&self) -> bool {
@@ -719,18 +690,20 @@ impl BgpServer {
         }
     }
 
-    /// Initialize configured peers from config and spawn their tasks.
+    /// Initialize configured peers from `self.config.peers` and spawn their
+    /// tasks. Per-peer config stays in `self.config.peers` for the lifetime
+    /// of the server; `PeerInfo` only carries runtime state.
     fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
-        for peer_cfg in &self.config.peers.clone() {
+        let peer_specs: Vec<PeerConfig> = self.config.peers.clone();
+        for peer_cfg in peer_specs {
             let Ok(peer_addr) = peer_cfg.socket_addr() else {
                 error!(addr = %peer_cfg.address, "invalid peer address in config");
                 continue;
             };
             let peer_ip = peer_addr.ip();
-            let config = peer_cfg.clone();
-            let passive = config.passive_mode;
-            let admin_down = config.admin_down;
-            let allow_auto_start = config.allow_automatic_start();
+            let passive = peer_cfg.passive_mode;
+            let admin_down = peer_cfg.admin_down;
+            let allow_auto_start = peer_cfg.allow_automatic_start();
 
             // Passive mode peers only accept incoming connections
             let conn_type = if passive {
@@ -739,10 +712,10 @@ impl BgpServer {
                 ConnectionType::Outgoing
             };
 
-            let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
+            let peer_tx = self.spawn_peer(peer_addr, peer_cfg, bind_addr, conn_type);
 
             // Create peer with connection in the appropriate slot
-            let mut entry = PeerInfo::new(config, None, None);
+            let mut entry = PeerInfo::new(admin_down, None, None);
             let conn_state = ConnectionState::new(Some(peer_tx.clone()));
             match conn_type {
                 ConnectionType::Outgoing => entry.outgoing = Some(conn_state),
@@ -762,44 +735,36 @@ impl BgpServer {
         }
     }
 
-    /// Diff `old.peers` vs `new.peers` and apply: spawn added, drop removed,
-    /// restart modified. Called by `commit_config`.
-    pub(crate) async fn reconfigure_peers(
-        &mut self,
-        old: &BgpConfig,
-        new: &BgpConfig,
-        bind_addr: SocketAddr,
-    ) {
-        let old_peers: HashMap<IpAddr, &PeerConfig> = old
+    /// Diff `self.config.peers` (the running peer set) vs `new.peers` and
+    /// apply: spawn added, drop removed, restart modified. Called by
+    /// `commit_config` BEFORE `self.config` is replaced with `new`.
+    pub(crate) async fn reconfigure_peers(&mut self, new: &BgpConfig, bind_addr: SocketAddr) {
+        let old_ips: Vec<IpAddr> = self
+            .config
             .peers
             .iter()
-            .filter_map(|peer| peer.address.parse::<IpAddr>().ok().map(|ip| (ip, peer)))
+            .filter_map(|cfg| cfg.ip())
             .collect();
-        let new_peers: HashMap<IpAddr, &PeerConfig> = new
-            .peers
-            .iter()
-            .filter_map(|peer| peer.address.parse::<IpAddr>().ok().map(|ip| (ip, peer)))
-            .collect();
+        let new_ips: HashSet<IpAddr> = new.peers.iter().filter_map(|cfg| cfg.ip()).collect();
 
-        for ip in old_peers.keys() {
-            if !new_peers.contains_key(ip) {
+        for ip in &old_ips {
+            if !new_ips.contains(ip) {
                 self.shutdown_and_remove_peer(*ip).await;
             }
         }
 
-        for (ip, cfg) in &new_peers {
-            if !old_peers.contains_key(ip) {
-                self.spawn_and_start_peer(*ip, (*cfg).clone(), bind_addr);
-            }
-        }
-
-        for (ip, new_cfg) in &new_peers {
-            if let Some(old_cfg) = old_peers.get(ip) {
-                if old_cfg != new_cfg {
+        for new_cfg in &new.peers {
+            let Some(ip) = new_cfg.ip() else {
+                continue;
+            };
+            match self.config.find_peer(ip) {
+                None => self.spawn_and_start_peer(ip, new_cfg.clone(), bind_addr),
+                Some(old_cfg) if old_cfg != new_cfg => {
                     info!(%ip, "peer config changed -- restarting session");
-                    self.shutdown_and_remove_peer(*ip).await;
-                    self.spawn_and_start_peer(*ip, (*new_cfg).clone(), bind_addr);
+                    self.shutdown_and_remove_peer(ip).await;
+                    self.spawn_and_start_peer(ip, new_cfg.clone(), bind_addr);
                 }
+                Some(_) => {}
             }
         }
     }
@@ -1057,8 +1022,8 @@ impl BgpServer {
         peer_tx
     }
 
-    /// Spawn a peer task and start it. Caller keeps `self.config.peers` in sync.
-    /// Honors `config.admin_down`: the task is spawned but no Start op is sent.
+    /// Spawn a peer task and start it. Honors `config.admin_down`: the task is
+    /// spawned but no Start op is sent.
     pub(crate) fn spawn_and_start_peer(
         &mut self,
         peer_ip: IpAddr,
@@ -1077,7 +1042,7 @@ impl BgpServer {
 
         self.peers.insert(
             peer_ip,
-            PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
+            PeerInfo::new(config.admin_down, Some(peer_tx.clone()), Some(conn_type)),
         );
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1098,7 +1063,7 @@ impl BgpServer {
         info!(%peer_ip, passive = config.passive_mode, admin_down = config.admin_down, total_peers = self.peers.len(), "peer added");
     }
 
-    /// Tear down a peer session and drop it. Caller keeps `self.config.peers` in sync.
+    /// Tear down a peer session and drop it.
     pub(crate) async fn shutdown_and_remove_peer(&mut self, peer_ip: IpAddr) {
         let Some(entry) = self.peers.get(&peer_ip) else {
             return;
@@ -1120,8 +1085,8 @@ impl BgpServer {
         }
 
         #[cfg(target_os = "freebsd")]
-        if let (Some(fd), Some(entry)) = (self.listener_fd, self.peers.get(&peer_ip)) {
-            if entry.config.md5_key_file.is_some() {
+        if let (Some(fd), Some(cfg)) = (self.listener_fd, self.config.find_peer(peer_ip)) {
+            if cfg.md5_key_file.is_some() {
                 if let Err(e) = remove_tcp_md5(fd, peer_ip) {
                     error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
                 }
@@ -1165,22 +1130,26 @@ impl BgpServer {
     /// a collision candidate in the incoming slot.
     /// Caller must ensure peer is pre-configured (via should_accept_peer check).
     pub(crate) fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
-        let Some(peer) = self.peers.get_mut(&peer_ip) else {
+        let Some(peer_cfg) = self.config.find_peer(peer_ip).cloned() else {
             // This should not happen - should_accept_peer should have rejected
             error!(%peer_ip, "accept_incoming_connection called for unconfigured peer");
+            return;
+        };
+        let Some(peer) = self.peers.get_mut(&peer_ip) else {
+            error!(%peer_ip, "accept_incoming_connection: PeerInfo missing");
             return;
         };
 
         // Apply GTSM on the accepted socket if configured
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let Some(min_ttl) = peer.config.ttl_min {
+        if let Some(min_ttl) = peer_cfg.ttl_min {
             if let Err(e) = apply_gtsm(stream.as_raw_fd(), peer_ip, min_ttl) {
                 warn!(%peer_ip, error = %e, "failed to apply GTSM on incoming connection");
             }
         }
 
         // Passive mode with existing task: send connection to existing task
-        if peer.config.passive_mode {
+        if peer_cfg.passive_mode {
             if let Some(peer_tx) = peer
                 .slot(ConnectionType::Incoming)
                 .and_then(|c| c.peer_tx.as_ref())
@@ -1228,10 +1197,9 @@ impl BgpServer {
         }
 
         // Spawn incoming connection - let check_collision() decide winner
-        let config = peer.config.clone();
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
         peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, config);
+        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, peer_cfg);
         info!(%peer_ip, "spawned incoming connection");
     }
 
@@ -1345,7 +1313,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
-        PeerInfo::new(PeerConfig::default(), None, None)
+        PeerInfo::new(false, None, None)
     }
 
     /// Returns the server plus the TempDir guard. The caller must keep the

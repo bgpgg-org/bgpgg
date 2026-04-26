@@ -1686,15 +1686,17 @@ async fn test_gr_reconnection_accepts_new_connection() {
 
     // Start server with GR enabled
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(conf::bgp::PeerConfig {
-        address: "127.0.0.2".to_string(),
-        port: peer_port,
-        graceful_restart: conf::bgp::GracefulRestartConfig {
-            enabled: true,
-            restart_time: 120,
-        },
-        ..Default::default()
-    });
+    config
+        .insert_peer(conf::bgp::PeerConfig {
+            address: "127.0.0.2".to_string(),
+            port: peer_port,
+            graceful_restart: conf::bgp::GracefulRestartConfig {
+                enabled: true,
+                restart_time: 120,
+            },
+            ..Default::default()
+        })
+        .unwrap();
     let server = start_test_server(config).await;
 
     // Accept server's outgoing connection
@@ -1746,15 +1748,17 @@ async fn test_reject_incoming_when_established_no_gr() {
 
     // Start server with GR disabled
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(conf::bgp::PeerConfig {
-        address: "127.0.0.2".to_string(),
-        port: peer_port,
-        graceful_restart: conf::bgp::GracefulRestartConfig {
-            enabled: false,
-            restart_time: 0,
-        },
-        ..Default::default()
-    });
+    config
+        .insert_peer(conf::bgp::PeerConfig {
+            address: "127.0.0.2".to_string(),
+            port: peer_port,
+            graceful_restart: conf::bgp::GracefulRestartConfig {
+                enabled: false,
+                restart_time: 0,
+            },
+            ..Default::default()
+        })
+        .unwrap();
     let server = start_test_server(config).await;
 
     // Accept server's outgoing connection

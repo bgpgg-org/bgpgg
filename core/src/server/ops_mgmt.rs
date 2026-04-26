@@ -229,16 +229,6 @@ pub struct PolicyInfoResponse {
 }
 
 impl BgpServer {
-    /// Look up a `PeerConfig` in `self.config.peers` by IP for in-place
-    /// mutation. Used by handlers that need to mirror a runtime change to the
-    /// persisted config (admin_down, graceful_shutdown, policy assignments).
-    fn find_peer_config_mut(&mut self, peer_ip: IpAddr) -> Option<&mut PeerConfig> {
-        self.config
-            .peers
-            .iter_mut()
-            .find(|p| p.address.parse::<IpAddr>().ok() == Some(peer_ip))
-    }
-
     pub(crate) async fn handle_mgmt_op(&mut self, req: MgmtOp, bind_addr: SocketAddr) {
         match req {
             MgmtOp::AddPeer {
@@ -571,9 +561,7 @@ impl BgpServer {
             return;
         }
 
-        self.config
-            .peers
-            .retain(|peer| peer.address.parse::<IpAddr>().ok() != Some(peer_ip));
+        self.config.remove_peer(peer_ip);
         self.shutdown_and_remove_peer(peer_ip).await;
         let _ = response.send(Ok(()));
     }
@@ -600,10 +588,9 @@ impl BgpServer {
         };
 
         entry.admin_state = AdminState::Down;
-        entry.config.admin_down = true;
         entry.send_to_all(|| PeerOp::ManualStop);
 
-        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
             cfg.admin_down = true;
         }
 
@@ -626,16 +613,18 @@ impl BgpServer {
             }
         };
 
+        let passive = self
+            .config
+            .find_peer(peer_ip)
+            .is_some_and(|cfg| cfg.passive_mode);
+
         let Some(entry) = self.peers.get_mut(&peer_ip) else {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         };
 
         entry.admin_state = AdminState::Up;
-        entry.config.admin_down = false;
-
         // RFC 4271: ManualStart for admin-enabled peers (send to all tasks)
-        let passive = entry.config.passive_mode;
         entry.send_to_all(|| {
             if passive {
                 PeerOp::ManualStartPassive
@@ -644,7 +633,7 @@ impl BgpServer {
             }
         });
 
-        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
             cfg.admin_down = false;
         }
 
@@ -861,12 +850,7 @@ impl BgpServer {
             .map(|conn| conn.negotiated_afi_safis().into_iter().collect())
             .unwrap_or_default();
 
-        self.peers
-            .get_mut(&peer_ip)
-            .expect("peer should exist after contains_key check")
-            .config
-            .graceful_shutdown = enabled;
-        if let Some(cfg) = self.find_peer_config_mut(peer_ip) {
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
             cfg.graceful_shutdown = enabled;
         }
         info!(%peer_ip, enabled, "set graceful_shutdown");
@@ -924,13 +908,14 @@ impl BgpServer {
             .iter()
             .map(|(addr, entry)| {
                 let (asn, state) = entry.max_state();
+                let cfg = self.config.find_peer(*addr);
                 GetPeersResponse {
                     address: addr.to_string(),
-                    asn: asn.or(entry.config.asn),
+                    asn: asn.or_else(|| cfg.and_then(|c| c.asn)),
                     state,
                     admin_state: entry.admin_state,
-                    import_policies: entry.import_policy_names(),
-                    export_policies: entry.export_policy_names(),
+                    import_policies: cfg.map(|c| c.import_policy_names()).unwrap_or_default(),
+                    export_policies: cfg.map(|c| c.export_policy_names()).unwrap_or_default(),
                 }
             })
             .collect();
@@ -954,6 +939,10 @@ impl BgpServer {
             let _ = response.send(None);
             return;
         };
+        let Some(cfg) = self.config.find_peer(peer_ip) else {
+            let _ = response.send(None);
+            return;
+        };
 
         let mut stats = entry.get_statistics().await.unwrap_or_default();
         stats.adj_rib_in_count = entry.adj_rib_in.prefix_count() as u64;
@@ -961,13 +950,13 @@ impl BgpServer {
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
-            asn: asn.or(entry.config.asn),
+            asn: asn.or(cfg.asn),
             state,
             admin_state: entry.admin_state,
-            import_policies: entry.import_policy_names(),
-            export_policies: entry.export_policy_names(),
+            import_policies: cfg.import_policy_names(),
+            export_policies: cfg.export_policy_names(),
             statistics: stats,
-            config: entry.config.clone(),
+            config: cfg.clone(),
         }));
     }
 
@@ -1036,13 +1025,14 @@ impl BgpServer {
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
         for (addr, entry) in self.peers.iter() {
             let (asn, state) = entry.max_state();
+            let cfg = self.config.find_peer(*addr);
             let peer = GetPeersResponse {
                 address: addr.to_string(),
-                asn: asn.or(entry.config.asn),
+                asn: asn.or_else(|| cfg.and_then(|c| c.asn)),
                 state,
                 admin_state: entry.admin_state,
-                import_policies: entry.import_policy_names(),
-                export_policies: entry.export_policy_names(),
+                import_policies: cfg.map(|c| c.import_policy_names()).unwrap_or_default(),
+                export_policies: cfg.map(|c| c.export_policy_names()).unwrap_or_default(),
             };
             if tx.send(peer).is_err() {
                 break;
@@ -1697,22 +1687,10 @@ impl BgpServer {
             }
         }
 
-        let peer = match self.peers.get_mut(&peer_addr) {
-            Some(p) => p,
-            None => {
-                let _ = response.send(Err(format!("peer {} not found", peer_addr)));
-                return;
-            }
+        let Some(peer) = self.peers.get_mut(&peer_addr) else {
+            let _ = response.send(Err(format!("peer {} not found", peer_addr)));
+            return;
         };
-
-        // Persist the assignment in the peer's per-family config so it
-        // survives session reconnections. Auto-create the family entry if
-        // the peer didn't have one for this (afi, safi) yet.
-        let entry = afi_safi_entry_mut(&mut peer.config.afi_safis, family.afi, family.safi);
-        match direction {
-            PolicyDirection::Import => entry.import_policy = policy_names.clone(),
-            PolicyDirection::Export => entry.export_policy = policy_names.clone(),
-        }
 
         // Update resolved runtime policies for this family.
         match direction {
@@ -1724,8 +1702,10 @@ impl BgpServer {
             }
         }
 
-        // Mirror to self.config so SaveConfig persists the assignment.
-        if let Some(cfg) = self.find_peer_config_mut(peer_addr) {
+        // Persist the assignment in the peer's per-family config so it
+        // survives session reconnections. Auto-create the family entry if
+        // the peer didn't have one for this (afi, safi) yet.
+        if let Some(cfg) = self.config.find_peer_mut(peer_addr) {
             let entry = afi_safi_entry_mut(&mut cfg.afi_safis, family.afi, family.safi);
             match direction {
                 PolicyDirection::Import => entry.import_policy = policy_names,

@@ -152,13 +152,15 @@ async fn test_invalid_message_type() {
 async fn test_send_notification_without_open() {
     for flag in [true, false] {
         let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-        config.peers.push(conf::bgp::PeerConfig {
-            address: "127.0.0.1".to_string(),
-            passive_mode: true,
-            send_notification_without_open: flag,
-            delay_open_time_secs: Some(60), // Delay OPEN so we can send invalid msg first
-            ..Default::default()
-        });
+        config
+            .insert_peer(conf::bgp::PeerConfig {
+                address: "127.0.0.1".to_string(),
+                passive_mode: true,
+                send_notification_without_open: flag,
+                delay_open_time_secs: Some(60),
+                ..Default::default()
+            })
+            .unwrap();
         let server = start_test_server(config).await;
 
         let mut peer = FakePeer::connect(None, &server).await;

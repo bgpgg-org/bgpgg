@@ -1321,11 +1321,7 @@ async fn test_four_octet_asn_propagation() {
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     // Add passive peers for all FakePeer connections
     for addr in ["127.0.0.1", "127.0.0.2", "127.0.0.3"] {
-        config.peers.push(conf::bgp::PeerConfig {
-            address: addr.to_string(),
-            passive_mode: true,
-            ..Default::default()
-        });
+        add_passive_peer(&mut config, addr);
     }
     let server = start_test_server(config).await;
 
@@ -1435,11 +1431,7 @@ async fn test_four_octet_asn_propagation() {
 async fn test_four_octet_asn_malformed_as4_path() {
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     for addr in ["127.0.0.1", "127.0.0.2"] {
-        config.peers.push(conf::bgp::PeerConfig {
-            address: addr.to_string(),
-            passive_mode: true,
-            ..Default::default()
-        });
+        add_passive_peer(&mut config, addr);
     }
     let server = start_test_server(config).await;
 
@@ -1520,11 +1512,7 @@ async fn test_four_octet_asn_malformed_as4_path() {
 async fn test_four_octet_asn_malformed_as4_aggregator() {
     let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
     for addr in ["127.0.0.1", "127.0.0.2"] {
-        config.peers.push(conf::bgp::PeerConfig {
-            address: addr.to_string(),
-            passive_mode: true,
-            ..Default::default()
-        });
+        add_passive_peer(&mut config, addr);
     }
     let server = start_test_server(config).await;
 

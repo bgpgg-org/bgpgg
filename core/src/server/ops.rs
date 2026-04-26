@@ -30,7 +30,7 @@ use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{Path, RouteKey, RoutePath};
 use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
-use conf::bgp::{AddPathSend, MaxPrefixAction, PeerConfig};
+use conf::bgp::{AddPathSend, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -257,7 +257,7 @@ impl BgpServer {
         conn_type: ConnectionType,
     ) {
         let is_ebgp = asn != self.config.asn;
-        let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) else {
+        let Some(peer_config) = self.config.find_peer(peer_ip).cloned() else {
             return;
         };
 
@@ -315,13 +315,13 @@ impl BgpServer {
         negotiated_capabilities: PeerCapabilities,
         conn_type: ConnectionType,
     ) {
-        if let Some(peer) = self.peers.get_mut(&peer_ip) {
-            let local_link_local = peer
-                .config
-                .interface
-                .as_ref()
-                .and_then(|iface| get_interface_link_local(iface).ok());
+        let local_link_local = self
+            .config
+            .find_peer(peer_ip)
+            .and_then(|cfg| cfg.interface.as_ref())
+            .and_then(|iface| get_interface_link_local(iface).ok());
 
+        if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
                 conn.conn_info = Some(super::ConnectionInfo {
                     sent_open,
@@ -543,11 +543,13 @@ impl BgpServer {
         let peer_tx = conn.peer_tx.clone();
 
         // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
-        if peer.config.rs_client && matches!(peer.config.add_path_send, AddPathSend::Disabled) {
-            warn!(
-                %peer_ip,
-                "Route server could hide paths without add-path. Enable add-path send."
-            );
+        if let Some(cfg) = self.config.find_peer(peer_ip) {
+            if cfg.rs_client && matches!(cfg.add_path_send, AddPathSend::Disabled) {
+                warn!(
+                    %peer_ip,
+                    "Route server could hide paths without add-path. Enable add-path send."
+                );
+            }
         }
 
         self.sweep_stale(peer_ip, &capabilities).await;
@@ -818,7 +820,14 @@ impl BgpServer {
 
         let local_asn = self.config.asn;
         let is_ebgp = peer_asn != local_asn;
-        let enforce_first_as = peer.config.enforce_first_as;
+        let peer_cfg = self.config.find_peer(peer_ip).cloned().unwrap_or_default();
+        let max_prefix_for_family: HashMap<AfiSafi, MaxPrefixSetting> = routes
+            .iter()
+            .map(|route| route.route_key().afi_safi())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|af| peer_cfg.effective_max_prefix(&af).map(|s| (af, s)))
+            .collect();
         let local_bgp_id = self.config.router_id;
         let cluster_id = self.config.cluster_id();
 
@@ -842,7 +851,9 @@ impl BgpServer {
         // Treat-as-withdraw: if any check fails, all announcements
         // in the batch are rejected (BGP UPDATE shares attrs across all NLRI)
         if let Some(first_path) = announced.first().map(|prefix_path| &*prefix_path.path) {
-            if (is_ebgp && enforce_first_as && !check_first_as(first_path, peer_asn, peer_ip))
+            if (is_ebgp
+                && peer_cfg.enforce_first_as
+                && !check_first_as(first_path, peer_asn, peer_ip))
                 || is_next_hop_local(first_path, local_address)
                 || has_as_path_loop(first_path, local_asn)
                 || (!is_ebgp && has_route_reflector_loop(first_path, local_bgp_id, cluster_id))
@@ -862,14 +873,14 @@ impl BgpServer {
             routes.iter().map(|r| r.route_key().afi_safi()).collect();
         let mut discard_families: HashSet<AfiSafi> = HashSet::new();
         for family in &families_in_update {
-            if let Some(setting) = peer.config.effective_max_prefix(family) {
+            if let Some(setting) = max_prefix_for_family.get(family) {
                 let current = peer.adj_rib_in.family_count(family);
                 if current > setting.limit as usize {
                     match setting.action {
                         MaxPrefixAction::Terminate => {
                             warn!(%peer_ip, %family, limit = setting.limit, current,
                                   "max prefix limit exceeded");
-                            if peer.config.allow_automatic_stop {
+                            if peer_cfg.allow_automatic_stop {
                                 self.handle_max_prefix_terminate(peer_ip).await;
                             } else {
                                 warn!(%peer_ip, "allow_automatic_stop=false, discarding update");

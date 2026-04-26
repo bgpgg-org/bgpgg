@@ -715,6 +715,22 @@ async fn test_set_policy_assignment() {
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["new-import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["export-policy"]);
+
+    // Persist to rogg.conf and verify the per-family assignment shows up on disk.
+    server1.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    let saved = conf
+        .peers
+        .iter()
+        .find(|peer| peer.address == server2.address.to_string())
+        .expect("peer in saved config");
+    let family = saved
+        .afi_safis
+        .iter()
+        .find(|afi_safi| afi_safi.afi == Afi::Ipv4 && afi_safi.safi == Safi::Unicast)
+        .expect("ipv4 unicast family in saved config");
+    assert_eq!(family.import_policy, vec!["new-import-policy".to_string()]);
+    assert_eq!(family.export_policy, vec!["export-policy".to_string()]);
 }
 
 #[tokio::test]
