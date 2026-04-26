@@ -14,11 +14,13 @@
 
 mod common;
 
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use bgpgg::grpc::proto::SessionConfig;
 use common::{poll_until_ok, Rogg};
+use conf::fs::{read_status, DaemonKind};
 
 /// Seed for read-only/show tests: includes a configured peer so
 /// `show bgp peers` etc. have something to report.
@@ -113,13 +115,33 @@ async fn running_config_round_trips() {
     assert_eq!(cfg.asn, 65042);
 }
 
+/// bgpggd publishes a status file under the runtime dir that ggsh uses
+/// for autodiscovery. The grpc_addr field must be a real socket address
+/// with a bound (non-zero) port.
+#[tokio::test]
+async fn status_file_advertises_grpc_addr() {
+    let rogg = Rogg::new(SEED_EMPTY).await;
+    let status =
+        read_status(rogg.runtime_dir(), DaemonKind::Bgp).expect("status file should exist");
+    let bound: SocketAddr = status.grpc_addr.parse().expect("parse grpc_addr");
+    assert_ne!(bound.port(), 0, "status file must advertise bound port");
+}
+
 /// Type `exit` at the interactive prompt and the ggsh process exits cleanly.
 #[tokio::test]
 async fn test_interactive_exit() {
     let rogg = Rogg::new(SEED_EMPTY).await;
     let (mut pty, mut child) = rogg.ggsh_pty();
+
+    // Drain output so ggsh doesn't block on a full PTY buffer (small on BSD).
+    let mut reader = pty.try_clone().expect("dup pty");
+    let drain = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while reader.read(&mut chunk).unwrap_or(0) > 0 {}
+    });
+
+    std::thread::sleep(Duration::from_millis(300));
     pty.write_all(b"exit\n").unwrap();
-    drop(pty);
 
     let status = poll_until_ok::<_, _, _, ()>(Duration::from_secs(5), || {
         let polled = child.try_wait().ok().flatten().ok_or(());
@@ -127,6 +149,9 @@ async fn test_interactive_exit() {
     })
     .await
     .expect("ggsh did not exit after `exit` command");
+
+    drop(pty);
+    let _ = drain.join();
     assert!(status.success(), "ggsh exit -> non-zero status: {}", status);
 }
 

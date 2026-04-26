@@ -122,6 +122,10 @@ impl Rogg {
         &self.config_path
     }
 
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+
     /// Acquire the EX session lock for an imperative gRPC mutation. The
     /// returned guard cleans up on drop.
     pub fn session(&self) -> Session {
@@ -222,8 +226,8 @@ impl Rogg {
                 &mut pty_fd,
                 &mut tty_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());

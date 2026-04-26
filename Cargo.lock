@@ -1466,6 +1466,7 @@ version = "0.3.0"
 dependencies = [
  "conf",
  "core",
+ "libc",
  "prost",
  "rand 0.8.5",
  "tempfile",

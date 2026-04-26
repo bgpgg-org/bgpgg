@@ -584,8 +584,8 @@ mod tests {
     #[cfg(target_os = "freebsd")]
     #[test]
     fn test_get_interface_link_local_loopback_bsd() {
-        // lo0 has no link-local address
-        let result = get_interface_link_local("lo0");
-        assert!(result.is_err());
+        // FreeBSD's lo0 auto-assigns fe80::1.
+        let addr = get_interface_link_local("lo0").expect("lo0 link-local");
+        assert!(addr.segments()[0] & 0xffc0 == 0xfe80);
     }
 }

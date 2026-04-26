@@ -561,8 +561,8 @@ impl BgpServer {
             return;
         }
 
-        self.config.remove_peer(peer_ip);
         self.shutdown_and_remove_peer(peer_ip).await;
+        self.config.remove_peer(peer_ip);
         let _ = response.send(Ok(()));
     }
 

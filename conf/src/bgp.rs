@@ -1340,16 +1340,25 @@ impl BgpConfig {
     }
 
     /// Convert this BgpConfig back into a language-level `BgpServiceBody` AST.
+    /// Settings at their default values are omitted so a parse-then-render
+    /// round-trip preserves the source file's explicit-setting set.
     pub fn to_bgp_service_body(&self) -> BgpServiceBody {
-        let mut settings = vec![
-            Setting::Asn(self.asn),
-            Setting::RouterId(self.router_id),
-            Setting::ListenAddr(self.listen_addr.clone()),
-            Setting::GrpcListenAddr(self.grpc_listen_addr.clone()),
-            Setting::LogLevel(self.log_level.clone()),
-            Setting::HoldTime(self.hold_time_secs),
-            Setting::ConnectRetry(self.connect_retry_secs),
-        ];
+        let mut settings = vec![Setting::Asn(self.asn), Setting::RouterId(self.router_id)];
+        if self.listen_addr != default_listen_addr() {
+            settings.push(Setting::ListenAddr(self.listen_addr.clone()));
+        }
+        if self.grpc_listen_addr != default_grpc_listen_addr() {
+            settings.push(Setting::GrpcListenAddr(self.grpc_listen_addr.clone()));
+        }
+        if self.log_level != default_log_level() {
+            settings.push(Setting::LogLevel(self.log_level.clone()));
+        }
+        if self.hold_time_secs != default_hold_time() {
+            settings.push(Setting::HoldTime(self.hold_time_secs));
+        }
+        if self.connect_retry_secs != default_connect_retry_time() {
+            settings.push(Setting::ConnectRetry(self.connect_retry_secs));
+        }
         if let Some(cid) = self.cluster_id {
             settings.push(Setting::ClusterId(cid));
         }
@@ -2297,6 +2306,31 @@ service bgp {
         assert_eq!(parsed.asn, original.asn);
         assert_eq!(parsed.passive_mode, original.passive_mode);
         assert_eq!(parsed.rr_client, original.rr_client);
+    }
+
+    #[test]
+    fn test_to_conf_str_omits_default_settings() {
+        // A file that doesn't mention connect-retry/hold-time/log-level/
+        // grpc-listen-addr/listen-addr should round-trip identically -- the
+        // renderer must not re-add the defaults that fill them in.
+        let input = "\
+service bgp {
+  asn 65000
+  router-id 1.1.1.1
+}";
+        let rendered = BgpConfig::from_conf_str(input).unwrap().to_conf_str();
+        for hidden in [
+            "connect-retry",
+            "hold-time",
+            "log-level",
+            "grpc-listen-addr",
+            "listen-addr",
+        ] {
+            assert!(
+                !rendered.contains(hidden),
+                "rendered config should omit `{hidden}` at default value:\n{rendered}"
+            );
+        }
     }
 
     #[test]
