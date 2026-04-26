@@ -20,7 +20,7 @@ pub(crate) mod propagate;
 use crate::bgp::msg::{AddPathMask, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::msg_update::{NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
@@ -33,13 +33,13 @@ use crate::net::apply_tcp_md5;
 use crate::net::remove_tcp_md5;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::set_ttl_max;
-use crate::net::{bind_addr_from_ip, peer_ip};
+use crate::net::{bind_addr_from_ip, peer_ip, IpNetwork};
 use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
 use crate::policy::{AfiSafiPolicies, Policy, PolicyContext};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::{LocRib, LocRibConfig};
-use crate::rib::AdjRibOut;
+use crate::rib::{AdjRibOut, PathAttrs, RouteKey, RouteSource};
 use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager, RtrTransport, SshTransport};
 use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
@@ -53,12 +53,30 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// Parse a CIDR prefix and forwarding next-hop address into runtime types.
+pub(crate) fn parse_prefix_and_nexthop(
+    prefix_str: &str,
+    nh_str: &str,
+) -> Result<(IpNetwork, NextHopAddr), String> {
+    let prefix = IpNetwork::from_str(prefix_str)
+        .map_err(|err| format!("invalid prefix '{}': {}", prefix_str, err))?;
+    let nh_addr: IpAddr = nh_str
+        .parse()
+        .map_err(|_| format!("invalid nexthop '{}'", nh_str))?;
+    let next_hop = match nh_addr {
+        IpAddr::V4(v4) => NextHopAddr::Ipv4(v4),
+        IpAddr::V6(v6) => NextHopAddr::Ipv6(v6),
+    };
+    Ok((prefix, next_hop))
+}
 
 /// Convert RPKI cache transport config to runtime RtrTransport.
 fn rpki_cache_to_transport(config: &RpkiCacheConfig) -> Result<RtrTransport, String> {
@@ -669,6 +687,7 @@ impl BgpServer {
         self.init_configured_peers(bind_addr);
         self.init_configured_bmp_servers();
         self.init_configured_rpki_caches();
+        self.init_configured_originate_routes();
 
         loop {
             tokio::select! {
@@ -970,6 +989,46 @@ impl BgpServer {
             };
             let _ = rpki_tx.send(RpkiOp::AddCache(cache_config));
             info!(%addr, "configured RPKI cache");
+        }
+    }
+
+    fn init_configured_originate_routes(&mut self) {
+        let routes = self.config.originate.clone();
+        for entry in routes {
+            let (prefix, next_hop) = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                              "skipping invalid originate entry");
+                    continue;
+                }
+            };
+            let attrs = PathAttrs {
+                origin: Origin::IGP,
+                as_path: vec![],
+                next_hop,
+                source: RouteSource::Local,
+                local_pref: Some(100),
+                med: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                unknown_attrs: vec![],
+                originator_id: None,
+                cluster_list: vec![],
+                ls_attr: None,
+            };
+            match self
+                .loc_rib
+                .add_local_route(RouteKey::Prefix(prefix), attrs)
+            {
+                Ok(_) => info!(prefix = %entry.prefix, nexthop = %entry.nexthop,
+                               "originated static route"),
+                Err(err) => warn!(prefix = %entry.prefix, ?err,
+                                  "loc-rib rejected static originate entry"),
+            }
         }
     }
 

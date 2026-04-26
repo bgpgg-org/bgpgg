@@ -185,7 +185,9 @@ impl Shell {
             Command::ShowCandidate => cmd_configure::show_candidate(self)?,
 
             Command::SetTop(key) => cmd_configure::apply_set_top(self, key, &args[0])?,
-            Command::SetTopOriginate => cmd_configure::apply_set_top_originate(self, &args[0])?,
+            Command::SetTopOriginate => {
+                cmd_configure::apply_set_top_originate(self, &args[0], &args[1])?
+            }
             Command::SetPeer(key) => cmd_configure::apply_set_peer(self, key, &args[0], &args[1])?,
             Command::SetPeerFamily(directive) => cmd_configure::apply_set_peer_family(
                 self, directive, &args[0], &args[1], &args[2], &args[3],

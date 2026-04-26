@@ -85,7 +85,7 @@ pub enum Setting {
     RrClient(bool),
     RsClient(bool),
     GracefulShutdown(bool),
-    Originate(String),
+    Originate(OriginateRoute),
     DelayOpenTimeSecs(u64),
     IdleHoldTimeSecs(u64),
     DampPeerOscillations(bool),
@@ -95,6 +95,15 @@ pub enum Setting {
     EnforceFirstAs(bool),
     SendRpkiCommunity(bool),
     AdminDown(bool),
+}
+
+/// Static route origination entry: `originate <prefix> nexthop <addr>`.
+/// Both fields stay as strings here -- the language layer keeps tokens raw and
+/// `BgpConfig` validates them when injecting into the loc-rib at startup.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OriginateRoute {
+    pub prefix: String,
+    pub nexthop: String,
 }
 
 /// `peer <ADDRESS> { ... }` block. The block header is the peer's IP address;
@@ -373,7 +382,7 @@ impl fmt::Display for Setting {
             Setting::RrClient(v) => write!(f, "rr-client {}", v),
             Setting::RsClient(v) => write!(f, "rs-client {}", v),
             Setting::GracefulShutdown(v) => write!(f, "graceful-shutdown {}", v),
-            Setting::Originate(v) => write!(f, "originate {}", v),
+            Setting::Originate(r) => write!(f, "originate {} nexthop {}", r.prefix, r.nexthop),
             Setting::DelayOpenTimeSecs(v) => write!(f, "delay-open-time-secs {}", v),
             Setting::IdleHoldTimeSecs(v) => write!(f, "idle-hold-time-secs {}", v),
             Setting::DampPeerOscillations(v) => write!(f, "damp-peer-oscillations {}", v),
@@ -838,7 +847,11 @@ impl Setting {
             "rr-client" => Setting::RrClient(parse_value(key, value)?),
             "rs-client" => Setting::RsClient(parse_value(key, value)?),
             "graceful-shutdown" => Setting::GracefulShutdown(parse_value(key, value)?),
-            "originate" => Setting::Originate(parse_value(key, value)?),
+            "originate" => {
+                return Err(
+                    "originate must be written as 'originate <prefix> nexthop <addr>'".to_string(),
+                )
+            }
             "delay-open-time-secs" => Setting::DelayOpenTimeSecs(parse_value(key, value)?),
             "idle-hold-time-secs" => Setting::IdleHoldTimeSecs(parse_value(key, value)?),
             "damp-peer-oscillations" => Setting::DampPeerOscillations(parse_value(key, value)?),
@@ -991,6 +1004,11 @@ pub(crate) fn parse_bgp_body(
                 expect_open_brace(tokens, pos)?;
                 body.bgp_ls = Some(parse_bgp_ls_block(tokens, pos)?);
             }
+            "originate" => {
+                let route = parse_originate_setting(tokens, pos, line)?;
+                finish_statement(tokens, pos)?;
+                body.settings.push(Setting::Originate(route));
+            }
             _ => {
                 let value = take_word(tokens, pos);
                 finish_statement(tokens, pos)?;
@@ -1002,6 +1020,28 @@ pub(crate) fn parse_bgp_body(
     }
     expect_close_brace(tokens, pos)?;
     Ok(body)
+}
+
+/// Consume the body of an `originate <prefix> nexthop <addr>` line.
+/// The leading `originate` keyword is already consumed by the caller.
+fn parse_originate_setting(
+    tokens: &[Token],
+    pos: &mut usize,
+    line: usize,
+) -> Result<OriginateRoute, ParseError> {
+    let prefix = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, "originate requires a prefix"))?
+        .0;
+    let kw = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, "originate requires 'nexthop <addr>'"))?
+        .0;
+    if kw != "nexthop" {
+        return Err(parse_err(line, format!("expected 'nexthop', got '{}'", kw)));
+    }
+    let nexthop = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, "nexthop requires an address"))?
+        .0;
+    Ok(OriginateRoute { prefix, nexthop })
 }
 
 fn unexpected_eof(tokens: &[Token], pos: usize) -> ParseError {
@@ -2393,17 +2433,42 @@ service bgp {
 service bgp {
   asn 65001
   router-id 1.1.1.1
-  originate 172.23.211.0/27
-  originate fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27 nexthop 192.168.217.19
+  originate fd0d:fbde:bca5::/48 nexthop fe80::ade1
 }";
         let root = parse(input).unwrap();
         let Service::Bgp(body) = &root.services[0];
-        assert!(body
-            .settings
-            .contains(&Setting::Originate("172.23.211.0/27".to_string())));
-        assert!(body
-            .settings
-            .contains(&Setting::Originate("fd0d:fbde:bca5::/48".to_string())));
+        assert!(body.settings.contains(&Setting::Originate(OriginateRoute {
+            prefix: "172.23.211.0/27".to_string(),
+            nexthop: "192.168.217.19".to_string(),
+        })));
+        assert!(body.settings.contains(&Setting::Originate(OriginateRoute {
+            prefix: "fd0d:fbde:bca5::/48".to_string(),
+            nexthop: "fe80::ade1".to_string(),
+        })));
+    }
+
+    #[test]
+    fn test_parse_originate_missing_nexthop() {
+        let err =
+            parse("service bgp { asn 1\n router-id 1.1.1.1\n originate 10.0.0.0/24 }").unwrap_err();
+        assert!(
+            err.message.contains("nexthop"),
+            "expected nexthop in error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parse_originate_wrong_keyword() {
+        let err =
+            parse("service bgp { asn 1\n router-id 1.1.1.1\n originate 10.0.0.0/24 via 1.2.3.4 }")
+                .unwrap_err();
+        assert!(
+            err.message.contains("expected 'nexthop'"),
+            "expected wrong-keyword error: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -2432,8 +2497,8 @@ service bgp {
     }
   }
 
-  originate 172.23.211.0/27
-  originate fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27 nexthop 192.168.217.19
+  originate fd0d:fbde:bca5::/48 nexthop fe80::ade1
 
   policy mine-only {
     match my-prefixes accept
@@ -2452,9 +2517,10 @@ service bgp {
 
         assert!(body.settings.contains(&Setting::Asn(4242423930)));
         assert_eq!(body.peers.len(), 1);
-        assert!(body
-            .settings
-            .contains(&Setting::Originate("172.23.211.0/27".to_string())));
+        assert!(body.settings.contains(&Setting::Originate(OriginateRoute {
+            prefix: "172.23.211.0/27".to_string(),
+            nexthop: "192.168.217.19".to_string(),
+        })));
         assert_eq!(body.policies.len(), 1);
         assert_eq!(body.prefix_lists.len(), 1);
         assert!(body.peers[0].settings.contains(&Setting::NextHopSelf(true)));
@@ -2501,16 +2567,24 @@ service bgp {
                 Some("[::]:179"),
                 Setting::ListenAddr("[::]:179".to_string()),
             ),
-            (
-                "originate",
-                Some("10.0.0.0/24"),
-                Setting::Originate("10.0.0.0/24".to_string()),
-            ),
         ];
         for (key, value, expected) in cases {
             let got = Setting::parse(key, value).unwrap();
             assert_eq!(got, expected, "for ({:?}, {:?})", key, value);
         }
+    }
+
+    #[test]
+    fn test_setting_parse_originate_rejected() {
+        // originate is multi-token (`originate <prefix> nexthop <addr>`) and
+        // is parsed by parse_bgp_body, not Setting::parse. Single-value form
+        // surfaces a clear hint.
+        let err = Setting::parse("originate", Some("10.0.0.0/24")).unwrap_err();
+        assert!(
+            err.contains("originate <prefix> nexthop <addr>"),
+            "expected hint message, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -2599,8 +2673,8 @@ service bgp {
 service bgp {
   asn 65001
   router-id 1.1.1.1
-  originate 172.23.211.0/27
-  originate fd0d:fbde:bca5::/48
+  originate 172.23.211.0/27 nexthop 192.168.217.19
+  originate fd0d:fbde:bca5::/48 nexthop fe80::ade1
 
   policy mine-only {
     match my-prefixes accept

@@ -19,8 +19,8 @@ use conf::bgp::{Afi, Safi, TransportType};
 use conf::language::{Root, Service};
 use conf::language_bgp::{
     BgpLsBlock, BgpLsKey, BgpServiceBody, BmpServerBlock, BmpServerKey, FamilyBlock,
-    FamilyDirective, FamilyDirectiveKey, PeerBlock, PeerKey, PolicyBlock, PolicyRule,
-    PrefixListBlock, RpkiCacheBlock, RpkiCacheKey, Setting, TopKey,
+    FamilyDirective, FamilyDirectiveKey, OriginateRoute, PeerBlock, PeerKey, PolicyBlock,
+    PolicyRule, PrefixListBlock, RpkiCacheBlock, RpkiCacheKey, Setting, TopKey,
 };
 
 use crate::shell::{Shell, ShellLevel};
@@ -155,15 +155,19 @@ pub fn apply_set_top(shell: &mut Shell, key: TopKey, value: &str) -> Result<(), 
     Ok(())
 }
 
-pub fn apply_set_top_originate(shell: &mut Shell, prefix: &str) -> Result<(), String> {
+pub fn apply_set_top_originate(
+    shell: &mut Shell,
+    prefix: &str,
+    nexthop: &str,
+) -> Result<(), String> {
     let body = bgp_body_mut(shell)?;
-    let setting = Setting::parse("originate", Some(prefix))?;
-    if !body.settings.iter().any(|s| match s {
-        Setting::Originate(p) => p == prefix,
-        _ => false,
-    }) {
-        body.settings.push(setting);
-    }
+    let route = OriginateRoute {
+        prefix: prefix.to_string(),
+        nexthop: nexthop.to_string(),
+    };
+    body.settings
+        .retain(|s| !matches!(s, Setting::Originate(r) if r.prefix == prefix));
+    body.settings.push(Setting::Originate(route));
     Ok(())
 }
 
@@ -326,7 +330,7 @@ pub fn apply_unset_top_originate(shell: &mut Shell, prefix: &str) -> Result<(), 
     let body = bgp_body_mut(shell)?;
     let before = body.settings.len();
     body.settings
-        .retain(|s| !matches!(s, Setting::Originate(p) if p == prefix));
+        .retain(|s| !matches!(s, Setting::Originate(r) if r.prefix == prefix));
     if body.settings.len() == before {
         return Err(format!("originate {} not set", prefix));
     }
@@ -984,20 +988,27 @@ mod tests {
     fn test_apply_set_top_originate_appends_dedups() {
         let (_dir, mut shell) = setup_bgp();
 
-        apply_set_top_originate(&mut shell, "10.0.0.0/24").unwrap();
-        apply_set_top_originate(&mut shell, "10.0.1.0/24").unwrap();
-        apply_set_top_originate(&mut shell, "10.0.0.0/24").unwrap(); // dup
+        apply_set_top_originate(&mut shell, "10.0.0.0/24", "192.168.1.1").unwrap();
+        apply_set_top_originate(&mut shell, "10.0.1.0/24", "192.168.1.1").unwrap();
+        // Same prefix, different nexthop -- last write wins.
+        apply_set_top_originate(&mut shell, "10.0.0.0/24", "192.168.1.2").unwrap();
 
         let body = bgp_body_mut(&mut shell).unwrap();
         let originates: Vec<_> = body
             .settings
             .iter()
             .filter_map(|s| match s {
-                Setting::Originate(p) => Some(p.clone()),
+                Setting::Originate(r) => Some((r.prefix.clone(), r.nexthop.clone())),
                 _ => None,
             })
             .collect();
-        assert_eq!(originates, vec!["10.0.0.0/24", "10.0.1.0/24"]);
+        assert_eq!(
+            originates,
+            vec![
+                ("10.0.1.0/24".to_string(), "192.168.1.1".to_string()),
+                ("10.0.0.0/24".to_string(), "192.168.1.2".to_string()),
+            ]
+        );
     }
 
     #[test]

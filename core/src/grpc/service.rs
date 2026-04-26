@@ -21,7 +21,7 @@ use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
-use crate::server::AdminState;
+use crate::server::{parse_prefix_and_nexthop, AdminState};
 use conf::bgp::{
     AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
     RpkiCacheConfig, TransportType,
@@ -246,53 +246,8 @@ fn route_to_proto(route: Route) -> ProtoRoute {
 fn parse_add_ip_route(
     req: &proto::AddIpRouteRequest,
 ) -> Result<(IpNetwork, NextHopAddr, Origin, Vec<AsPathSegment>), String> {
-    // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
-    let parts: Vec<&str> = req.prefix.split('/').collect();
-    if parts.len() != 2 {
-        return Err(
-            "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string(),
-        );
-    }
+    let (prefix, next_hop) = parse_prefix_and_nexthop(&req.prefix, &req.next_hop)?;
 
-    let address: IpAddr = parts[0]
-        .parse()
-        .map_err(|_| "Invalid IP address in prefix".to_string())?;
-    let prefix_length: u8 = parts[1]
-        .parse()
-        .map_err(|_| "Invalid prefix length".to_string())?;
-
-    let prefix = match address {
-        IpAddr::V4(ipv4) => {
-            if prefix_length > 32 {
-                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_length));
-            }
-            IpNetwork::V4(Ipv4Net {
-                address: ipv4,
-                prefix_length,
-            })
-        }
-        IpAddr::V6(ipv6) => {
-            if prefix_length > 128 {
-                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_length));
-            }
-            IpNetwork::V6(Ipv6Net {
-                address: ipv6,
-                prefix_length,
-            })
-        }
-    };
-
-    // Parse next_hop
-    let next_hop_addr: IpAddr = req
-        .next_hop
-        .parse()
-        .map_err(|_| "Invalid next_hop IP address".to_string())?;
-    let next_hop = match next_hop_addr {
-        IpAddr::V4(ipv4) => NextHopAddr::Ipv4(ipv4),
-        IpAddr::V6(ipv6) => NextHopAddr::Ipv6(ipv6),
-    };
-
-    // Convert proto Origin to Rust Origin
     let origin = match req.origin {
         0 => Origin::IGP,
         1 => Origin::EGP,
@@ -300,7 +255,6 @@ fn parse_add_ip_route(
         _ => return Err("Invalid origin value".to_string()),
     };
 
-    // Convert proto AS_PATH segments to internal format
     let as_path: Vec<AsPathSegment> = req
         .as_path
         .iter()
@@ -308,7 +262,7 @@ fn parse_add_ip_route(
             segment_type: match seg.segment_type {
                 0 => AsPathSegmentType::AsSet,
                 1 => AsPathSegmentType::AsSequence,
-                _ => AsPathSegmentType::AsSequence, // Default to AS_SEQUENCE
+                _ => AsPathSegmentType::AsSequence,
             },
             segment_len: seg.asns.len() as u8,
             asn_list: seg.asns.to_vec(),

@@ -22,6 +22,7 @@ use bgpgg::grpc::proto::{
     Route, SessionConfig,
 };
 use conf::bgp::BgpConfig;
+use conf::language_bgp::OriginateRoute;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[tokio::test]
@@ -1240,4 +1241,49 @@ async fn test_ipv6_link_local_nexthop() {
         NextHopAddr::Ipv6WithLinkLocal(global, link_local),
         "iBGP propagation should preserve 32-byte next-hop with link-local"
     );
+}
+
+#[tokio::test]
+async fn test_originate_propagates_at_startup() {
+    // Server1 has a valid `originate` entry plus a bogus one. The bogus
+    // entry must be skipped (warn-and-continue) and the valid one must
+    // propagate to server2 over iBGP without any runtime add_route call.
+    let mut config1 = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    config1.originate.push(OriginateRoute {
+        prefix: "not-a-prefix".to_string(),
+        nexthop: "192.168.1.1".to_string(),
+    });
+    config1.originate.push(OriginateRoute {
+        prefix: "10.99.0.0/24".to_string(),
+        nexthop: "192.168.1.1".to_string(),
+    });
+    let config2 = BgpConfig::new(65001, "127.0.0.2:0", Ipv4Addr::new(2, 2, 2, 2), 90);
+
+    let [server1, server2] = chain_servers(
+        [
+            start_test_server(config1).await,
+            start_test_server(config2).await,
+        ],
+        PeerConfig::default(),
+    )
+    .await;
+
+    poll_rib(&[(
+        &server2,
+        vec![expected_route(
+            "10.99.0.0/24",
+            PathParams {
+                as_path: vec![],
+                next_hop: "192.168.1.1".to_string(),
+                peer_address: server1.address.to_string(),
+                origin: Some(Origin::Igp),
+                local_pref: Some(100),
+                ..Default::default()
+            },
+        )],
+    )])
+    .await;
+
+    assert!(has_route(&server1, "10.99.0.0/24").await);
+    assert!(!has_route(&server1, "not-a-prefix").await);
 }

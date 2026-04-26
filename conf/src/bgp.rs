@@ -18,8 +18,8 @@ use crate::language_bgp::{
     BmpServerBlock, CommunityOp, CommunityOpKind, CommunitySetBlock, Disposition,
     ExtCommunitySetBlock, FamilyBlock, FamilyDirective, LargeCommunitySetBlock, MasklengthRange,
     MatchClause, MatchOptionKind, MatchSetRef, MaxPrefixActionKind, MedSet, NeighborSetBlock,
-    PeerBlock, PolicyBlock, PolicyRule, PrefixListBlock, PrefixListEntry, RpkiCacheBlock,
-    RpkiValidationKind, SetClause, Setting, StatementBlock,
+    OriginateRoute, PeerBlock, PolicyBlock, PolicyRule, PrefixListBlock, PrefixListEntry,
+    RpkiCacheBlock, RpkiValidationKind, SetClause, Setting, StatementBlock,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1086,6 +1086,11 @@ pub struct BgpConfig {
     /// BGP-LS operational configuration (RFC 9552).
     #[serde(default)]
     pub bgp_ls: BgpLsConfig,
+    /// Static prefixes injected into the loc-rib at startup. Each entry pairs a
+    /// prefix with its forwarding next-hop. Validated when the daemon parses
+    /// the config; bad entries log a warning and are skipped at injection time.
+    #[serde(default)]
+    pub originate: Vec<OriginateRoute>,
 }
 
 fn default_listen_addr() -> String {
@@ -1130,6 +1135,7 @@ impl BgpConfig {
             llgr: None,
             enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
             bgp_ls: BgpLsConfig::default(),
+            originate: Vec::new(),
         }
     }
 
@@ -1217,6 +1223,7 @@ impl BgpConfig {
                 Setting::SysName(val) => config.sys_name = Some(val.clone()),
                 Setting::SysDescr(val) => config.sys_descr = Some(val.clone()),
                 Setting::EnhancedRrStaleTtl(val) => config.enhanced_rr_stale_ttl = Some(*val),
+                Setting::Originate(route) => config.originate.push(route.clone()),
                 _ => {}
             }
         }
@@ -1312,6 +1319,7 @@ impl Default for BgpConfig {
             llgr: None,
             enhanced_rr_stale_ttl: default_enhanced_rr_stale_ttl(),
             bgp_ls: BgpLsConfig::default(),
+            originate: Vec::new(),
         }
     }
 }
@@ -1355,6 +1363,9 @@ impl BgpConfig {
             if Some(ttl) != default_enhanced_rr_stale_ttl() {
                 settings.push(Setting::EnhancedRrStaleTtl(ttl));
             }
+        }
+        for route in &self.originate {
+            settings.push(Setting::Originate(route.clone()));
         }
 
         let peers = self
@@ -2343,6 +2354,36 @@ service bgp {
         );
         assert_eq!(parsed.enforce_first_as, original.enforce_first_as);
         assert_eq!(parsed.send_rpki_community, original.send_rpki_community);
+    }
+
+    #[test]
+    fn test_originate_round_trip() {
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  originate 10.0.0.0/24 nexthop 192.168.1.1
+  originate 2001:db8::/32 nexthop fe80::1
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        assert_eq!(
+            config.originate,
+            vec![
+                OriginateRoute {
+                    prefix: "10.0.0.0/24".to_string(),
+                    nexthop: "192.168.1.1".to_string(),
+                },
+                OriginateRoute {
+                    prefix: "2001:db8::/32".to_string(),
+                    nexthop: "fe80::1".to_string(),
+                },
+            ]
+        );
+        let rendered = config.to_conf_str();
+        assert!(rendered.contains("originate 10.0.0.0/24 nexthop 192.168.1.1"));
+        assert!(rendered.contains("originate 2001:db8::/32 nexthop fe80::1"));
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.originate, config.originate);
     }
 
     #[test]

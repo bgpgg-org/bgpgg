@@ -204,7 +204,13 @@ pub fn tree_config_bgp() -> Vec<Node> {
             "Prefix in CIDR notation",
             ValueKind::Prefix,
         )
-        .cmd(Command::SetTopOriginate)]),
+        .children(vec![Node::keyword("nexthop", "Forwarding next-hop")
+            .children(vec![Node::arg(
+                "<addr>",
+                "Next-hop IP address",
+                ValueKind::IpAddr,
+            )
+            .cmd(Command::SetTopOriginate)])])]),
     );
     nodes.push(peer_subtree());
     nodes.push(policy_subtree());

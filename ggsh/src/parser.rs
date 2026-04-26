@@ -63,7 +63,7 @@ pub enum Command {
     ShowCandidate,
 
     SetTop(TopKey),                    // args: [value]
-    SetTopOriginate,                   // args: [prefix]
+    SetTopOriginate,                   // args: [prefix, nexthop]
     SetPeer(PeerKey),                  // args: [addr, value]
     SetPeerFamily(FamilyDirectiveKey), // args: [addr, afi, safi, name]
     SetPolicyMatch,                    // args: [name, set, action]
@@ -376,9 +376,12 @@ mod tests {
         assert_eq!(cmd, Command::SetTop(TopKey::RouterId));
         assert_eq!(args, vec!["1.2.3.4".to_string()]);
 
-        let (cmd, args) = parse_cfg_bgp("originate 10.0.0.0/24");
+        let (cmd, args) = parse_cfg_bgp("originate 10.0.0.0/24 nexthop 192.168.1.1");
         assert_eq!(cmd, Command::SetTopOriginate);
-        assert_eq!(args, vec!["10.0.0.0/24".to_string()]);
+        assert_eq!(
+            args,
+            vec!["10.0.0.0/24".to_string(), "192.168.1.1".to_string()]
+        );
     }
 
     #[test]
