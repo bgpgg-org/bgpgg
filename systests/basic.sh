@@ -57,11 +57,11 @@ service bgp {
 CONF
 
     echo "Starting peer1 (ASN 65001, $p1_ip:$p1_port, router-id 1.1.1.1)..."
-    "$BGPGGD" --config "$TMPDIR/peer1.conf" &
+    "$BGPGGD" --config "$TMPDIR/peer1.conf" --runtime-dir "$TMPDIR/peer1-run" &
     PEER1_PID=$!
 
     echo "Starting peer2 (ASN 65001, $p2_ip:$p2_port, router-id 2.2.2.2)..."
-    "$BGPGGD" --config "$TMPDIR/peer2.conf" &
+    "$BGPGGD" --config "$TMPDIR/peer2.conf" --runtime-dir "$TMPDIR/peer2-run" &
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."

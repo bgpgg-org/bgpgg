@@ -34,16 +34,14 @@ use conf::testutil::TempDir;
 use uuid::Uuid;
 
 /// Subprocess-based ggsh harness. Each `Rogg` owns one `bgpggd` child
-/// plus a tempdir scoped to it: rogg.conf, runtime status file, history,
-/// config home -- all live under the tempdir so parallel tests cannot
-/// trample each other.
+/// plus a tempdir scoped to it: rogg.conf, runtime status file, history --
+/// all live under the tempdir so parallel tests cannot trample each other.
 pub struct Rogg {
     daemon: Child,
     _tempdir: TempDir,
     config_path: PathBuf,
     runtime_dir: PathBuf,
     state_dir: PathBuf,
-    config_home: PathBuf,
     pub client: BgpClient,
 }
 
@@ -75,31 +73,28 @@ impl Rogg {
 
         let runtime_dir = tempdir.path().join("runtime");
         let state_dir = tempdir.path().join("state");
-        let config_home = tempdir.path().join("config");
-        for dir in [&runtime_dir, &state_dir, &config_home] {
-            std::fs::create_dir_all(dir).expect("create xdg dir");
+        for dir in [&runtime_dir, &state_dir] {
+            std::fs::create_dir_all(dir).expect("create harness scratch dir");
         }
 
         let bgpggd_bin = bgpggd_bin_path();
         let mut daemon = Command::new(&bgpggd_bin)
             .arg("--config")
             .arg(&config_path)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .env("XDG_STATE_HOME", &state_dir)
-            .env("XDG_CONFIG_HOME", &config_home)
+            .arg("--runtime-dir")
+            .arg(&runtime_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap_or_else(|e| panic!("spawn {}: {}", bgpggd_bin.display(), e));
 
-        let status_dir = runtime_dir.join("rogg");
-        let url = match wait_for_status(&status_dir, &mut daemon, Duration::from_secs(10)) {
+        let url = match wait_for_status(&runtime_dir, &mut daemon, Duration::from_secs(10)) {
             Ok(s) => format!("http://{}", s.grpc_addr),
             Err(e) => {
                 let _ = daemon.kill();
                 panic!(
                     "daemon never published status under {}: {}",
-                    status_dir.display(),
+                    runtime_dir.display(),
                     e
                 );
             }
@@ -119,7 +114,6 @@ impl Rogg {
             config_path,
             runtime_dir,
             state_dir,
-            config_home,
             client,
         }
     }
@@ -141,16 +135,17 @@ impl Rogg {
         }
     }
 
-    /// Pre-built `Command` with all XDG envs and `--config` set. ggsh's
+    /// Pre-built `Command` with `--config` and `--runtime-dir` set.
     /// `--bgpgg-addr` is intentionally omitted so the run exercises the
-    /// runtime-status autodiscovery path.
+    /// runtime-status autodiscovery path. `XDG_STATE_HOME` is scoped to
+    /// the tempdir so each test gets its own ggsh history file.
     fn ggsh_command(&self) -> Command {
         let mut cmd = Command::new(ggsh_bin_path());
         cmd.arg("--config")
             .arg(&self.config_path)
-            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
-            .env("XDG_STATE_HOME", &self.state_dir)
-            .env("XDG_CONFIG_HOME", &self.config_home);
+            .arg("--runtime-dir")
+            .arg(&self.runtime_dir)
+            .env("XDG_STATE_HOME", &self.state_dir);
         cmd
     }
 

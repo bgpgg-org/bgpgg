@@ -26,7 +26,7 @@ use crate::language::{self, Root, Service};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
@@ -231,26 +231,28 @@ pub fn lock_path_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// XDG-compliant default path for `rogg.conf`:
-/// `${XDG_CONFIG_HOME:-$HOME/.config}/rogg/rogg.conf`.
+/// Default path for `rogg.conf`: `/etc/rogg/rogg.conf`. System daemon
+/// config lives under `/etc/`, matching FRR (`/etc/frr/`) and BIRD
+/// (`/etc/bird/`). Callers can override with `--config <path>`.
 pub fn default_config_path() -> PathBuf {
-    xdg_dir("XDG_CONFIG_HOME", ".config")
-        .join("rogg")
-        .join("rogg.conf")
+    PathBuf::from("/etc/rogg/rogg.conf")
 }
 
-/// XDG-compliant per-user state directory for rogg:
-/// `${XDG_STATE_HOME:-$HOME/.local/state}/rogg`. Callers append a
-/// tool-prefixed filename (e.g. `ggsh_history`).
+/// XDG-compliant per-user state directory for ggsh client data
+/// (currently just `ggsh_history`). `${XDG_STATE_HOME:-$HOME/.local/state}/rogg`.
+/// Per-operator client tooling stays on XDG; daemon paths do not.
 pub fn user_state_dir() -> PathBuf {
     xdg_dir("XDG_STATE_HOME", ".local/state").join("rogg")
 }
 
-/// Per-user runtime directory for rogg state files (e.g. the daemon's
-/// `bgpggd.json`). `${XDG_RUNTIME_DIR:-$HOME/.local/state}/rogg`. The
-/// chosen directory is created with mode 0700 by `write_status`.
-pub fn rogg_runtime_dir() -> PathBuf {
-    xdg_dir("XDG_RUNTIME_DIR", ".local/state").join("rogg")
+/// Runtime directory for the daemon's discovery file (`bgpggd.json`).
+/// Returns `override_path` if set (the `--runtime-dir` CLI flag), else
+/// `/run/rogg/` (provisioned by systemd `RuntimeDirectory=rogg` in
+/// production).
+pub fn rogg_runtime_dir(override_path: Option<&Path>) -> PathBuf {
+    override_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/run/rogg"))
 }
 
 /// Which rogg daemon a status file belongs to. Each daemon publishes
@@ -277,13 +279,13 @@ pub struct StatusFile {
     pub grpc_addr: String,
 }
 
-/// Atomically write the status file under `dir`. Directory mode 0700,
-/// file mode 0600 -- the file may name an internal management endpoint,
-/// so it stays user-private. Callers pass `rogg_runtime_dir()` in
-/// production; tests pass a tempdir.
+/// Atomically write the status file under `dir`. The directory's mode
+/// is left to the deployment (systemd `RuntimeDirectory=rogg` in
+/// production; the developer's umask in dev). The file mode is 0644:
+/// the JSON only contains a gRPC listen address, which is already
+/// visible via `ss -tlnp`, so there is nothing to keep private.
 pub fn write_status(dir: &Path, daemon: DaemonKind, status: &StatusFile) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
 
     let final_path = dir.join(daemon.filename());
     let tmp_path = dir.join(format!("{}.tmp", daemon.filename()));
@@ -295,7 +297,7 @@ pub fn write_status(dir: &Path, daemon: DaemonKind, status: &StatusFile) -> io::
         .create(true)
         .write(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(0o644)
         .open(&tmp_path)?;
     file.write_all(&json)?;
     file.sync_all()?;
@@ -350,6 +352,19 @@ mod tests {
             read_status(dir.path(), DaemonKind::Bgp).unwrap().grpc_addr,
             written.grpc_addr,
         );
+    }
+
+    #[test]
+    fn runtime_dir_lookup_order() {
+        assert_eq!(rogg_runtime_dir(None), PathBuf::from("/run/rogg"));
+
+        let override_path = PathBuf::from("/tmp/explicit-flag");
+        assert_eq!(rogg_runtime_dir(Some(&override_path)), override_path);
+    }
+
+    #[test]
+    fn default_config_path_is_etc() {
+        assert_eq!(default_config_path(), PathBuf::from("/etc/rogg/rogg.conf"),);
     }
 
     /// Wraps `TempDir` with conveniences for the fs tests.

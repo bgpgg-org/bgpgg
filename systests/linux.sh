@@ -97,11 +97,11 @@ CONF
 
     # Start bgpggd in each namespace
     echo "Starting peer1 in $NS1..."
-    ip netns exec "$NS1" "$BGPGGD" --config "$TMPDIR/peer1.conf" &
+    ip netns exec "$NS1" "$BGPGGD" --config "$TMPDIR/peer1.conf" --runtime-dir "$TMPDIR/peer1-run" &
     PEER1_PID=$!
 
     echo "Starting peer2 in $NS2..."
-    ip netns exec "$NS2" "$BGPGGD" --config "$TMPDIR/peer2.conf" &
+    ip netns exec "$NS2" "$BGPGGD" --config "$TMPDIR/peer2.conf" --runtime-dir "$TMPDIR/peer2-run" &
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."

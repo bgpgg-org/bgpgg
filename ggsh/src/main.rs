@@ -24,7 +24,7 @@ mod util;
 
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use conf::fs::DaemonKind;
@@ -45,6 +45,7 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
     let mut args = std::env::args().skip(1);
     let mut bgpgg_addr: Option<String> = None;
     let mut config_path = conf::fs::default_config_path();
+    let mut runtime_dir_override: Option<PathBuf> = None;
     let mut command = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -61,6 +62,12 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
                     process::exit(1);
                 }));
             }
+            "--runtime-dir" => {
+                runtime_dir_override = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("--runtime-dir requires a value");
+                    process::exit(1);
+                })));
+            }
             _ => {
                 command.push(arg);
                 command.extend(args);
@@ -70,7 +77,7 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
     }
 
     let bgpgg_addr = bgpgg_addr.unwrap_or_else(|| {
-        read_bgpggd_grpc_endpoint().unwrap_or_else(|err| {
+        read_bgpggd_grpc_endpoint(runtime_dir_override.as_deref()).unwrap_or_else(|err| {
             eprintln!("{}", err);
             process::exit(1);
         })
@@ -91,8 +98,8 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
 /// Read the bgpggd runtime status file and turn its `grpc_addr` into a
 /// tonic-friendly URL. Lets operators skip `--bgpgg-addr` when the
 /// daemon is running on the same host.
-fn read_bgpggd_grpc_endpoint() -> Result<String, String> {
-    let runtime_dir = conf::fs::rogg_runtime_dir();
+fn read_bgpggd_grpc_endpoint(runtime_dir_override: Option<&Path>) -> Result<String, String> {
+    let runtime_dir = conf::fs::rogg_runtime_dir(runtime_dir_override);
     let path = runtime_dir.join(DaemonKind::Bgp.filename());
     match conf::fs::read_status(&runtime_dir, DaemonKind::Bgp) {
         Ok(status) => Ok(format!("http://{}", status.grpc_addr)),

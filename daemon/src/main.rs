@@ -30,10 +30,15 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[command(name = "bgpggd")]
 #[command(about = "BGP daemon server", version)]
 struct Args {
-    /// Path to rogg.conf. Defaults to `$XDG_CONFIG_HOME/rogg/rogg.conf`
-    /// (i.e. `~/.config/rogg/rogg.conf`).
+    /// Path to rogg.conf. Defaults to `/etc/rogg/rogg.conf`.
     #[arg(short, long, default_value_os_t = conf::fs::default_config_path())]
     config: PathBuf,
+
+    /// Directory where the daemon publishes its discovery file
+    /// (`bgpggd.json`). Defaults to `/run/rogg/`, provisioned in
+    /// production by `RuntimeDirectory=rogg` in the systemd unit.
+    #[arg(long)]
+    runtime_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -78,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_listener = TcpListener::bind(&server.config.grpc_listen_addr).await?;
     let grpc_bound = grpc_listener.local_addr()?;
 
-    let runtime_dir = conf_fs::rogg_runtime_dir();
+    let runtime_dir = conf_fs::rogg_runtime_dir(args.runtime_dir.as_deref());
     conf_fs::write_status(
         &runtime_dir,
         DaemonKind::Bgp,

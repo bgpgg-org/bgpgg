@@ -58,11 +58,11 @@ service bgp {
 EOF
 
 echo "Starting peer1 (ASN 65001, 127.0.0.1:14179, router-id 1.1.1.1)..."
-"$BGPGGD" --config "$TMPDIR/peer1.conf" &
+"$BGPGGD" --config "$TMPDIR/peer1.conf" --runtime-dir "$TMPDIR/peer1-run" &
 PEER1_PID=$!
 
 echo "Starting peer2 (ASN 65001, 127.0.0.2:14179, router-id 2.2.2.2)..."
-"$BGPGGD" --config "$TMPDIR/peer2.conf" &
+"$BGPGGD" --config "$TMPDIR/peer2.conf" --runtime-dir "$TMPDIR/peer2-run" &
 PEER2_PID=$!
 
 echo "Waiting for gRPC..."
@@ -113,7 +113,7 @@ echo "$OUTPUT" | grep -q "65001" || { echo "FAIL: expected ASN in peer detail"; 
 echo "  ok"
 
 echo "=== ggsh one-shot: show version ==="
-OUTPUT=$("$GGSH" show version)
+OUTPUT=$("$GGSH" --runtime-dir "$TMPDIR/peer1-run" show version)
 echo "$OUTPUT"
 echo "$OUTPUT" | grep -q "ggsh" || { echo "FAIL: expected ggsh in version"; exit 1; }
 echo "  ok"
