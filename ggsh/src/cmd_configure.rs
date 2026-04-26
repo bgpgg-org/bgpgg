@@ -242,8 +242,11 @@ pub fn apply_set_prefix_list_entry(
 ) -> Result<(), String> {
     let body = bgp_body_mut(shell)?;
     let plist = prefix_list_mut(body, name);
-    if !plist.prefixes.iter().any(|p| p == prefix) {
-        plist.prefixes.push(prefix.to_string());
+    if !plist.prefixes.iter().any(|e| e.prefix == prefix) {
+        plist.prefixes.push(conf::language_bgp::PrefixListEntry {
+            prefix: prefix.to_string(),
+            range: None,
+        });
     }
     Ok(())
 }
@@ -448,7 +451,7 @@ pub fn apply_unset_prefix_list_entry(
         .find(|p| p.name == name)
         .ok_or_else(|| format!("prefix-list {} not found", name))?;
     let before = plist.prefixes.len();
-    plist.prefixes.retain(|p| p != prefix);
+    plist.prefixes.retain(|e| e.prefix != prefix);
     if plist.prefixes.len() == before {
         return Err(format!("prefix {} not in prefix-list {}", prefix, name));
     }
@@ -1087,10 +1090,12 @@ mod tests {
         apply_set_prefix_list_entry(&mut shell, "p", "10.0.0.0/24").unwrap();
 
         let body = bgp_body_mut(&mut shell).unwrap();
-        assert_eq!(
-            body.prefix_lists[0].prefixes,
-            vec!["10.0.0.0/24", "10.0.1.0/24"]
-        );
+        let prefixes: Vec<&str> = body.prefix_lists[0]
+            .prefixes
+            .iter()
+            .map(|e| e.prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["10.0.0.0/24", "10.0.1.0/24"]);
     }
 
     #[test]
@@ -1202,7 +1207,12 @@ mod tests {
 
         apply_unset_prefix_list_entry(&mut shell, "p", "10.0.0.0/24").unwrap();
         let body = bgp_body_mut(&mut shell).unwrap();
-        assert_eq!(body.prefix_lists[0].prefixes, vec!["10.0.1.0/24"]);
+        let prefixes: Vec<&str> = body.prefix_lists[0]
+            .prefixes
+            .iter()
+            .map(|e| e.prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["10.0.1.0/24"]);
     }
 
     #[test]

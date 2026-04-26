@@ -277,6 +277,30 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
     }
 }
 
+pub fn afi_safi_ipv4_unicast() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 1,
+        safi: 1,
+        ..Default::default()
+    }
+}
+
+pub fn afi_safi_ipv6_unicast() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 2,
+        safi: 1,
+        ..Default::default()
+    }
+}
+
+pub fn afi_safi_link_state() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 16388,
+        safi: 71,
+        ..Default::default()
+    }
+}
+
 /// Create SessionConfig with custom graceful restart timer
 pub fn session_config_with_gr_timer(restart_time_secs: u32) -> SessionConfig {
     SessionConfig {
@@ -2989,16 +3013,7 @@ pub async fn apply_export_prefix_reject_policy(
         .await
         .unwrap();
 
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec![policy_name.to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", policy_name).await;
 }
 
 /// Create an export policy that rejects routes sourced from a specific neighbor and accepts
@@ -3036,16 +3051,7 @@ pub async fn apply_export_neighbor_reject_policy(
         .await
         .unwrap();
 
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec![policy_name.to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", policy_name).await;
 }
 
 /// Build Enhanced Route Refresh capability (RFC 7313, code 70, zero-length)
@@ -3090,16 +3096,7 @@ pub async fn apply_import_accept_all(server: &TestServer, peer_addr: &str) {
             }],
         )
         .await;
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "import".to_string(),
-            vec!["permit-all".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "import", "permit-all").await;
 }
 
 /// Apply accept-all export policy on a server for a specific peer.
@@ -3118,16 +3115,7 @@ pub async fn apply_export_accept_all(server: &TestServer, peer_addr: &str) {
             }],
         )
         .await;
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec!["permit-all".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", "permit-all").await;
 }
 
 /// Apply accept-all import and export on a server for a specific peer address.
@@ -3140,4 +3128,34 @@ pub async fn apply_permit_all(server: &TestServer, peer_addr: &str) {
 pub async fn apply_permit_all_routes(server1: &TestServer, server2: &TestServer) {
     apply_permit_all(server1, &server2.address.to_string()).await;
     apply_permit_all(server2, &server1.address.to_string()).await;
+}
+
+/// Attach `policy_name` to the peer's IPv4-unicast, IPv6-unicast, and BGP-LS
+/// families in `direction`. Tests that need single-family attachment should
+/// call `set_policy_assignment` directly with explicit afi/safi.
+pub async fn apply_policy_to_common_families(
+    server: &TestServer,
+    peer_addr: &str,
+    direction: &str,
+    policy_name: &str,
+) {
+    use conf::bgp::{Afi, Safi};
+    for (afi, safi) in [
+        (Afi::Ipv4 as u32, Safi::Unicast as u32),
+        (Afi::Ipv6 as u32, Safi::Unicast as u32),
+        (Afi::LinkState as u32, Safi::LinkState as u32),
+    ] {
+        server
+            .client
+            .set_policy_assignment(
+                peer_addr.to_string(),
+                afi,
+                safi,
+                direction.to_string(),
+                vec![policy_name.to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 }

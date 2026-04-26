@@ -79,8 +79,6 @@ impl BgpServer {
             let send_format = conn.send_format();
             let negotiated_afi_safis = conn.negotiated_afi_safis();
 
-            let export_policies = entry.policy_out().to_vec();
-
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
                 peer_tx: &peer_tx,
@@ -88,7 +86,7 @@ impl BgpServer {
                 peer_asn,
                 local_next_hop,
                 local_link_local,
-                export_policies: &export_policies,
+                export_policies: &entry.export_policies,
                 rr_client: entry.config.rr_client,
                 rs_client: entry.config.rs_client,
                 cluster_id,
@@ -161,8 +159,6 @@ impl BgpServer {
             )
         };
 
-        let export_policies = &peer_info.export_policies;
-
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
             peer_tx: &peer_tx,
@@ -170,7 +166,7 @@ impl BgpServer {
             peer_asn,
             local_next_hop,
             local_link_local,
-            export_policies,
+            export_policies: &peer_info.export_policies,
             rr_client: peer_info.config.rr_client,
             rs_client: peer_info.config.rs_client,
             cluster_id: self.config.cluster_id(),

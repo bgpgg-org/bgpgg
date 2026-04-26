@@ -383,8 +383,6 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
             .send_notification_without_open
             .unwrap_or(defaults.send_notification_without_open),
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
-        import_policy: Vec::new(),
-        export_policy: Vec::new(),
         graceful_restart,
         rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
         rs_client: cfg.rs_client.unwrap_or(defaults.rs_client),
@@ -463,6 +461,8 @@ fn proto_to_afi_safis(entries: &[proto::AfiSafiConfig]) -> Result<Vec<AfiSafiCon
             safi,
             max_prefix,
             add_path_send,
+            import_policy: entry.import_policy.clone(),
+            export_policy: entry.export_policy.clone(),
         });
     }
     Ok(result)
@@ -552,6 +552,8 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
                     safi: entry.safi as u8 as u32,
                     max_prefix,
                     add_path_send,
+                    import_policy: entry.import_policy.clone(),
+                    export_policy: entry.export_policy.clone(),
                 }
             })
             .collect(),
@@ -1875,6 +1877,12 @@ impl BgpService for BgpGrpcService {
             }
         };
 
+        let afi = Afi::try_from(inner.afi as u16)
+            .map_err(|_| Status::invalid_argument(format!("unknown AFI {}", inner.afi)))?;
+        let safi = Safi::try_from(inner.safi as u8)
+            .map_err(|_| Status::invalid_argument(format!("unknown SAFI {}", inner.safi)))?;
+        let family = AfiSafi::new(afi, safi);
+
         // Parse default action
         let default_action = inner
             .default_action
@@ -1888,6 +1896,7 @@ impl BgpService for BgpGrpcService {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::SetPolicyAssignment {
             peer_addr,
+            family,
             direction,
             policy_names: inner.policy_names,
             default_action,

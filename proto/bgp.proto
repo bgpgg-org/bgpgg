@@ -163,6 +163,8 @@ message AfiSafiConfig {
     uint32 safi = 2;
     optional MaxPrefixSetting max_prefix = 3;
     optional AddPathSendMode add_path_send = 4;
+    repeated string import_policy = 5;  // Import policy names applied to inbound routes for this family.
+    repeated string export_policy = 6;  // Export policy names applied to outbound routes for this family.
 }
 
 // Per-peer session configuration (RFC 4271 Section 8.1 optional attributes)
@@ -189,7 +191,7 @@ message SessionConfig {
     optional uint32 ttl_min = 20;  // RFC 5082: GTSM min inbound TTL (1-255). absent = disabled; 0 or >255 = invalid
     optional LlgrConfig llgr = 21;  // RFC 9494: Long-Lived Graceful Restart settings
     optional bool send_rpki_community = 22;  // RFC 8097: attach RPKI state extended community on export
-    repeated AfiSafiConfig afi_safis = 23;  // additional AFI/SAFIs beyond default IPv4/IPv6 unicast
+    repeated AfiSafiConfig afi_safis = 23;  // AFI/SAFIs to enable for this peer; if empty, IPv4 Unicast is the implicit default
     optional string interface = 24;  // Network interface for link-local IPv6 peers (e.g., "eth0")
 }
 
@@ -791,9 +793,13 @@ message StatementInfo {
     ActionsConfig actions = 2;
 }
 
-// Policy Assignment
+// Policy Assignment. Replaces all currently-attached policies for the
+// peer's (afi, safi) in the given direction with `policy_names` (the
+// list is the authoritative new value, not append).
 message SetPolicyAssignmentRequest {
     string peer_address = 1;
+    uint32 afi = 5;
+    uint32 safi = 6;
     string direction = 2;  // "import" or "export"
     repeated string policy_names = 3;
     optional string default_action = 4;  // "accept" or "reject"

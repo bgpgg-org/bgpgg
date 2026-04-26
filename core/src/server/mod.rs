@@ -36,7 +36,7 @@ use crate::net::set_ttl_max;
 use crate::net::{bind_addr_from_ip, peer_ip};
 use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
-use crate::policy::{Policy, PolicyContext};
+use crate::policy::{AfiSafiPolicies, Policy, PolicyContext};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::{LocRib, LocRibConfig};
 use crate::rib::AdjRibOut;
@@ -320,8 +320,10 @@ impl ConnectionState {
 /// (outgoing vs incoming), not by a conn_type field.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    pub import_policies: Vec<Arc<Policy>>,
-    pub export_policies: Vec<Arc<Policy>>,
+    /// Resolved import policies. Populated from `config.afi_safis` at handshake.
+    pub import_policies: AfiSafiPolicies,
+    /// Resolved export policies. Populated from `config.afi_safis` at handshake.
+    pub export_policies: AfiSafiPolicies,
     /// Per-peer session configuration
     pub config: PeerConfig,
     /// Outgoing connection slot (we initiated)
@@ -417,8 +419,8 @@ impl PeerInfo {
         };
         Self {
             admin_state,
-            import_policies: Vec::new(),
-            export_policies: Vec::new(),
+            import_policies: HashMap::new(),
+            export_policies: HashMap::new(),
             config,
             outgoing,
             incoming,
@@ -502,12 +504,48 @@ impl PeerInfo {
         rx.await.ok()
     }
 
-    pub fn policy_in(&self) -> &[Arc<Policy>] {
-        &self.import_policies
+    /// Import policies attached to the given family. Empty if no entry.
+    pub fn policy_in_for(&self, family: AfiSafi) -> &[Arc<Policy>] {
+        self.import_policies
+            .get(&family)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
-    pub fn policy_out(&self) -> &[Arc<Policy>] {
-        &self.export_policies
+    /// Export policies attached to the given family. Empty if no entry.
+    pub fn policy_out_for(&self, family: AfiSafi) -> &[Arc<Policy>] {
+        self.export_policies
+            .get(&family)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Deduplicated import-policy names across all families, in declaration order.
+    pub fn import_policy_names(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for entry in &self.config.afi_safis {
+            for name in &entry.import_policy {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Deduplicated export-policy names across all families, in declaration order.
+    pub fn export_policy_names(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for entry in &self.config.afi_safis {
+            for name in &entry.export_policy {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn supports_4byte_asn(&self) -> bool {

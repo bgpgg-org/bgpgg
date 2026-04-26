@@ -1747,8 +1747,16 @@ async fn test_ggsh_set_then_commit_persists() {
         }],
         prefix_lists: vec![PrefixListBlock {
             name: "my-prefixes".to_string(),
-            prefixes: vec!["172.23.211.0/27".to_string()],
+            prefixes: vec![conf::language_bgp::PrefixListEntry {
+                prefix: "172.23.211.0/27".to_string(),
+                range: None,
+            }],
         }],
+        neighbor_sets: Vec::new(),
+        as_path_sets: Vec::new(),
+        community_sets: Vec::new(),
+        ext_community_sets: Vec::new(),
+        large_community_sets: Vec::new(),
         bmp_servers: Vec::new(),
         rpki_caches: Vec::new(),
         bgp_ls: None,
@@ -1769,9 +1777,21 @@ async fn test_ggsh_set_then_commit_persists() {
     assert_eq!(after.peers[0].asn, Some(65002));
     assert_eq!(after.peers[0].interface.as_deref(), Some("eth0"));
     assert!(after.peers[0].next_hop_self);
-    // policy / prefix-list / family blocks are syntactically accepted but
-    // silently stripped by `BgpConfig::from_conf_str` until the round-trip
-    // ticket lands (`.claude/tasks/open/20260421-grammar-roundtrip-gaps.md`,
-    // also `20260425-ggsh-policy-roundtrip-gap.md` for the ggsh-side
-    // exposure). Don't assert them here.
+
+    // policy / prefix-list / family blocks now survive the round-trip.
+    assert_eq!(after.policy_definitions.len(), 1);
+    assert_eq!(after.policy_definitions[0].name, "mine-only");
+    assert_eq!(after.policy_definitions[0].statements.len(), 2);
+
+    assert_eq!(after.defined_sets.prefix_sets.len(), 1);
+    assert_eq!(after.defined_sets.prefix_sets[0].name, "my-prefixes");
+    assert_eq!(
+        after.defined_sets.prefix_sets[0].prefixes[0].prefix,
+        "172.23.211.0/27"
+    );
+
+    assert_eq!(
+        after.peers[0].export_policy_for(conf::bgp::Afi::Ipv4, conf::bgp::Safi::Unicast),
+        ["mine-only".to_string()]
+    );
 }

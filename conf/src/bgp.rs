@@ -14,7 +14,12 @@
 
 use crate::language::{self, Service};
 use crate::language_bgp::{
-    BgpLsBlock, BgpServiceBody, BmpServerBlock, PeerBlock, RpkiCacheBlock, Setting,
+    AddPathSendMode as LangAddPathSendMode, AsPathSetBlock, BgpLsBlock, BgpServiceBody,
+    BmpServerBlock, CommunityOp, CommunityOpKind, CommunitySetBlock, Disposition,
+    ExtCommunitySetBlock, FamilyBlock, FamilyDirective, LargeCommunitySetBlock, MasklengthRange,
+    MatchClause, MatchOptionKind, MatchSetRef, MaxPrefixActionKind, MedSet, NeighborSetBlock,
+    PeerBlock, PolicyBlock, PolicyRule, PrefixListBlock, PrefixListEntry, RpkiCacheBlock,
+    RpkiValidationKind, SetClause, Setting, StatementBlock,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -357,8 +362,10 @@ pub enum AddPathSend {
     All,
 }
 
-/// Per address-family configuration overrides.
-/// Fields set to None inherit from the peer-level PeerConfig defaults.
+/// Per address-family configuration. Enables the family on the peer and
+/// optionally attaches per-family overrides (max-prefix, add-path) and
+/// per-family policy attachments (import/export). Policies are scoped to
+/// the family — runtime evaluates them only against routes of this AFI/SAFI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct AfiSafiConfig {
@@ -370,6 +377,12 @@ pub struct AfiSafiConfig {
     /// Override peer-level add_path_send for this family.
     #[serde(default)]
     pub add_path_send: Option<AddPathSend>,
+    /// Import policy names applied to inbound routes for this family.
+    #[serde(default)]
+    pub import_policy: Vec<String>,
+    /// Export policy names applied to outbound routes for this family.
+    #[serde(default)]
+    pub export_policy: Vec<String>,
 }
 
 impl AfiSafiConfig {
@@ -380,6 +393,8 @@ impl AfiSafiConfig {
             safi,
             max_prefix: None,
             add_path_send: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
         }
     }
 
@@ -425,12 +440,6 @@ pub struct PeerConfig {
     /// Default: 30 seconds for eBGP, 5 seconds for iBGP (or disabled for iBGP).
     #[serde(default)]
     pub min_route_advertisement_interval_secs: Option<u64>,
-    /// List of import policy names to apply (evaluated in order)
-    #[serde(default)]
-    pub import_policy: Vec<String>,
-    /// List of export policy names to apply (evaluated in order)
-    #[serde(default)]
-    pub export_policy: Vec<String>,
     /// Graceful Restart configuration (RFC 4724)
     #[serde(default)]
     pub graceful_restart: GracefulRestartConfig,
@@ -560,6 +569,26 @@ impl PeerConfig {
             .or(self.max_prefix)
     }
 
+    /// Import policy names attached to the given family. Empty if the family
+    /// is not listed in `afi_safis` or has no import policies.
+    pub fn import_policy_for(&self, afi: Afi, safi: Safi) -> &[String] {
+        self.afi_safis
+            .iter()
+            .find(|c| c.afi == afi && c.safi == safi)
+            .map(|c| c.import_policy.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Export policy names attached to the given family. Empty if the family
+    /// is not listed in `afi_safis` or has no export policies.
+    pub fn export_policy_for(&self, afi: Afi, safi: Safi) -> &[String] {
+        self.afi_safis
+            .iter()
+            .find(|c| c.afi == afi && c.safi == safi)
+            .map(|c| c.export_policy.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Validate peer configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.rr_client && self.rs_client {
@@ -614,8 +643,6 @@ impl Default for PeerConfig {
             max_prefix: None,
             send_notification_without_open: false,
             min_route_advertisement_interval_secs: None,
-            import_policy: Vec::new(),
-            export_policy: Vec::new(),
             graceful_restart: GracefulRestartConfig::default(),
             rr_client: false,
             rs_client: false,
@@ -1145,6 +1172,49 @@ impl BgpConfig {
             config.peers.push(peer_config_from_block(peer_block));
         }
 
+        for prefix_list_block in &bgp.prefix_lists {
+            config
+                .defined_sets
+                .prefix_sets
+                .push(prefix_list_block_to_set(prefix_list_block));
+        }
+        for block in &bgp.neighbor_sets {
+            config
+                .defined_sets
+                .neighbor_sets
+                .push(neighbor_set_block_to_config(block));
+        }
+        for block in &bgp.as_path_sets {
+            config
+                .defined_sets
+                .as_path_sets
+                .push(as_path_set_block_to_config(block));
+        }
+        for block in &bgp.community_sets {
+            config
+                .defined_sets
+                .community_sets
+                .push(community_set_block_to_config(block));
+        }
+        for block in &bgp.ext_community_sets {
+            config
+                .defined_sets
+                .ext_community_sets
+                .push(ext_community_set_block_to_config(block));
+        }
+        for block in &bgp.large_community_sets {
+            config
+                .defined_sets
+                .large_community_sets
+                .push(large_community_set_block_to_config(block));
+        }
+
+        for policy_block in &bgp.policies {
+            config
+                .policy_definitions
+                .push(policy_block_to_definition(policy_block)?);
+        }
+
         for bmp_block in &bgp.bmp_servers {
             config.bmp_servers.push(bmp_config_from_block(bmp_block));
         }
@@ -1229,8 +1299,55 @@ impl BgpConfig {
             .map(|p| PeerBlock {
                 address: p.address.clone(),
                 settings: peer_settings_from_config(p),
-                families: Vec::new(),
+                families: families_from_peer_config(p),
             })
+            .collect();
+
+        // Prefix sets: emit only entries the grammar can express. Sets that
+        // become empty after filtering masklength-range entries are dropped.
+        let prefix_lists = self
+            .defined_sets
+            .prefix_sets
+            .iter()
+            .filter_map(prefix_set_to_block)
+            .collect();
+        let neighbor_sets = self
+            .defined_sets
+            .neighbor_sets
+            .iter()
+            .map(neighbor_set_config_to_block)
+            .collect();
+        let as_path_sets = self
+            .defined_sets
+            .as_path_sets
+            .iter()
+            .map(as_path_set_config_to_block)
+            .collect();
+        let community_sets = self
+            .defined_sets
+            .community_sets
+            .iter()
+            .map(community_set_config_to_block)
+            .collect();
+        let ext_community_sets = self
+            .defined_sets
+            .ext_community_sets
+            .iter()
+            .map(ext_community_set_config_to_block)
+            .collect();
+        let large_community_sets = self
+            .defined_sets
+            .large_community_sets
+            .iter()
+            .map(large_community_set_config_to_block)
+            .collect();
+
+        // Policies: skip any whose statements fall outside the rogg.conf
+        // subset (rich condition kinds, attribute-rewriting actions, etc.).
+        let policies = self
+            .policy_definitions
+            .iter()
+            .filter_map(policy_definition_to_block)
             .collect();
 
         let bmp_servers = self.bmp_servers.iter().map(bmp_block_from_config).collect();
@@ -1252,8 +1369,13 @@ impl BgpConfig {
         BgpServiceBody {
             settings,
             peers,
-            policies: Vec::new(),
-            prefix_lists: Vec::new(),
+            policies,
+            prefix_lists,
+            neighbor_sets,
+            as_path_sets,
+            community_sets,
+            ext_community_sets,
+            large_community_sets,
             bmp_servers,
             rpki_caches,
             bgp_ls,
@@ -1381,7 +1503,10 @@ fn rpki_config_from_block(block: &RpkiCacheBlock) -> RpkiCacheConfig {
     }
 }
 
-/// Build a PeerConfig from a typed PeerBlock.
+/// Build a PeerConfig from a typed PeerBlock. Family blocks become per-(afi,
+/// safi) entries in `afi_safis`, with `import policy NAME` / `export policy
+/// NAME` directives flattened into the matching entry's `import_policy` /
+/// `export_policy` lists.
 fn peer_config_from_block(peer: &PeerBlock) -> PeerConfig {
     let mut config = PeerConfig {
         address: peer.address.clone(),
@@ -1415,7 +1540,644 @@ fn peer_config_from_block(peer: &PeerBlock) -> PeerConfig {
             _ => {}
         }
     }
+
+    for family in &peer.families {
+        let entry = afi_safi_entry_mut(&mut config.afi_safis, family.afi, family.safi);
+        for directive in &family.directives {
+            match directive {
+                FamilyDirective::ImportPolicy(name) => entry.import_policy.push(name.clone()),
+                FamilyDirective::ExportPolicy(name) => entry.export_policy.push(name.clone()),
+                FamilyDirective::MaxPrefix { limit, action } => {
+                    entry.max_prefix = Some(MaxPrefixSetting {
+                        limit: *limit,
+                        action: match action {
+                            MaxPrefixActionKind::Terminate => MaxPrefixAction::Terminate,
+                            MaxPrefixActionKind::Discard => MaxPrefixAction::Discard,
+                        },
+                    });
+                }
+                FamilyDirective::AddPathSend(mode) => {
+                    entry.add_path_send = Some(match mode {
+                        LangAddPathSendMode::All => AddPathSend::All,
+                        LangAddPathSendMode::Disabled => AddPathSend::Disabled,
+                    });
+                }
+            }
+        }
+    }
+
     config
+}
+
+/// Mutable reference to the `AfiSafiConfig` matching `(afi, safi)`. Inserts
+/// a new entry if none exists.
+pub fn afi_safi_entry_mut(
+    afi_safis: &mut Vec<AfiSafiConfig>,
+    afi: Afi,
+    safi: Safi,
+) -> &mut AfiSafiConfig {
+    if let Some(idx) = afi_safis
+        .iter()
+        .position(|c| c.afi == afi && c.safi == safi)
+    {
+        return &mut afi_safis[idx];
+    }
+    afi_safis.push(AfiSafiConfig::new(afi, safi));
+    afi_safis.last_mut().unwrap()
+}
+
+/// Convert a `PolicyBlock` into a runtime `PolicyDefinitionConfig`.
+/// `match <set> -> ACTION` becomes a statement with a `match_prefix_set`
+/// condition; `default -> ACTION` becomes a statement with no conditions.
+/// Action strings outside `{accept, reject}` are a parse error.
+fn policy_block_to_definition(block: &PolicyBlock) -> Result<PolicyDefinitionConfig, String> {
+    let mut statements = Vec::with_capacity(block.rules.len());
+    for rule in &block.rules {
+        match rule {
+            PolicyRule::Match { set_name, action } => {
+                statements.push(StatementConfig {
+                    name: None,
+                    conditions: ConditionsConfig {
+                        match_prefix_set: Some(MatchSetRefConfig {
+                            set_name: set_name.clone(),
+                            match_option: MatchOptionConfig::Any,
+                        }),
+                        ..Default::default()
+                    },
+                    actions: action_to_config(action)?,
+                });
+            }
+            PolicyRule::Default { action } => {
+                statements.push(StatementConfig {
+                    name: None,
+                    conditions: ConditionsConfig::default(),
+                    actions: action_to_config(action)?,
+                });
+            }
+            PolicyRule::Statement(stmt) => {
+                statements.push(statement_block_to_config(stmt)?);
+            }
+        }
+    }
+    Ok(PolicyDefinitionConfig {
+        name: block.name.clone(),
+        statements,
+    })
+}
+
+fn statement_block_to_config(block: &StatementBlock) -> Result<StatementConfig, String> {
+    let mut conditions = ConditionsConfig::default();
+    for clause in &block.matches {
+        apply_match_clause(&mut conditions, clause)?;
+    }
+    let mut actions = ActionsConfig::default();
+    for clause in &block.sets {
+        apply_set_clause(&mut actions, clause);
+    }
+    match block.disposition {
+        Some(Disposition::Accept) => actions.accept = Some(true),
+        Some(Disposition::Reject) => actions.reject = Some(true),
+        None => {}
+    }
+    Ok(StatementConfig {
+        name: block.name.clone(),
+        conditions,
+        actions,
+    })
+}
+
+fn apply_match_clause(
+    conditions: &mut ConditionsConfig,
+    clause: &MatchClause,
+) -> Result<(), String> {
+    match clause {
+        MatchClause::PrefixSet(r) => conditions.match_prefix_set = Some(match_set_ref_to_config(r)),
+        MatchClause::NeighborSet(r) => {
+            conditions.match_neighbor_set = Some(match_set_ref_to_config(r))
+        }
+        MatchClause::AsPathSet(r) => {
+            conditions.match_as_path_set = Some(match_set_ref_to_config(r))
+        }
+        MatchClause::CommunitySet(r) => {
+            conditions.match_community_set = Some(match_set_ref_to_config(r))
+        }
+        MatchClause::ExtCommunitySet(r) => {
+            conditions.match_ext_community_set = Some(match_set_ref_to_config(r))
+        }
+        MatchClause::LargeCommunitySet(r) => {
+            conditions.match_large_community_set = Some(match_set_ref_to_config(r))
+        }
+        MatchClause::Prefix(s) => conditions.prefix = Some(s.clone()),
+        MatchClause::Neighbor(s) => conditions.neighbor = Some(s.clone()),
+        MatchClause::HasAsn(v) => conditions.has_asn = Some(*v),
+        MatchClause::RouteType(s) => conditions.route_type = Some(s.clone()),
+        MatchClause::Community(s) => conditions.community = Some(s.clone()),
+        MatchClause::Rpki(v) => conditions.rpki_validation = Some(rpki_kind_to_config(*v)),
+        MatchClause::AfiSafi(s) => conditions.afi_safi = Some(s.clone()),
+        MatchClause::LsNlriType(s) => conditions.ls_nlri_type = Some(s.clone()),
+        MatchClause::LsProtocolId(s) => conditions.ls_protocol_id = Some(s.clone()),
+        MatchClause::LsInstanceId(v) => conditions.ls_instance_id = Some(*v),
+        MatchClause::LsNodeAs(v) => conditions.ls_node_as = Some(*v),
+        MatchClause::LsNodeRouterId(s) => conditions.ls_node_router_id = Some(s.clone()),
+    }
+    Ok(())
+}
+
+fn apply_set_clause(actions: &mut ActionsConfig, clause: &SetClause) {
+    match clause {
+        SetClause::LocalPref { value, force } => {
+            actions.local_pref = Some(if *force {
+                LocalPrefActionConfig::Force {
+                    value: *value,
+                    force: true,
+                }
+            } else {
+                LocalPrefActionConfig::Set(*value)
+            });
+        }
+        SetClause::Med(MedSet::Set(v)) => actions.med = Some(MedActionConfig::Set(*v)),
+        SetClause::Med(MedSet::Remove) => {
+            actions.med = Some(MedActionConfig::Remove { remove: true })
+        }
+        SetClause::Community(op) => {
+            actions.community = Some(CommunityActionConfig {
+                operation: community_op_to_str(op.op).to_string(),
+                communities: op.values.clone(),
+            });
+        }
+        SetClause::ExtCommunity(op) => {
+            actions.ext_community = Some(ExtCommunityActionConfig {
+                operation: community_op_to_str(op.op).to_string(),
+                ext_communities: op.values.clone(),
+            });
+        }
+        SetClause::LargeCommunity(op) => {
+            actions.large_community = Some(LargeCommunityActionConfig {
+                operation: community_op_to_str(op.op).to_string(),
+                large_communities: op.values.clone(),
+            });
+        }
+        SetClause::SetRpkiState(v) => actions.set_rpki_state = Some(rpki_kind_to_config(*v)),
+    }
+}
+
+fn match_set_ref_to_config(r: &MatchSetRef) -> MatchSetRefConfig {
+    MatchSetRefConfig {
+        set_name: r.set_name.clone(),
+        match_option: match r.option {
+            MatchOptionKind::Any => MatchOptionConfig::Any,
+            MatchOptionKind::All => MatchOptionConfig::All,
+            MatchOptionKind::Invert => MatchOptionConfig::Invert,
+        },
+    }
+}
+
+fn match_set_ref_from_config(c: &MatchSetRefConfig) -> MatchSetRef {
+    MatchSetRef {
+        set_name: c.set_name.clone(),
+        option: match c.match_option {
+            MatchOptionConfig::Any => MatchOptionKind::Any,
+            MatchOptionConfig::All => MatchOptionKind::All,
+            MatchOptionConfig::Invert => MatchOptionKind::Invert,
+        },
+    }
+}
+
+fn rpki_kind_to_config(v: RpkiValidationKind) -> RpkiValidationConfig {
+    match v {
+        RpkiValidationKind::Valid => RpkiValidationConfig::Valid,
+        RpkiValidationKind::Invalid => RpkiValidationConfig::Invalid,
+        RpkiValidationKind::NotFound => RpkiValidationConfig::NotFound,
+    }
+}
+
+fn rpki_config_to_kind(v: RpkiValidationConfig) -> RpkiValidationKind {
+    match v {
+        RpkiValidationConfig::Valid => RpkiValidationKind::Valid,
+        RpkiValidationConfig::Invalid => RpkiValidationKind::Invalid,
+        RpkiValidationConfig::NotFound => RpkiValidationKind::NotFound,
+    }
+}
+
+fn community_op_to_str(op: CommunityOpKind) -> &'static str {
+    match op {
+        CommunityOpKind::Add => "add",
+        CommunityOpKind::Remove => "remove",
+        CommunityOpKind::Replace => "replace",
+    }
+}
+
+fn community_op_from_str(s: &str) -> Option<CommunityOpKind> {
+    match s {
+        "add" => Some(CommunityOpKind::Add),
+        "remove" => Some(CommunityOpKind::Remove),
+        "replace" => Some(CommunityOpKind::Replace),
+        _ => None,
+    }
+}
+
+/// Convert a runtime `PolicyDefinitionConfig` back into a `PolicyBlock`.
+/// Statements that fit the simple shorthand (single `match_prefix_set`
+/// with `Any` or no conditions, action exactly `accept` xor `reject`,
+/// no transformations, no statement name) emit as `match` / `default`.
+/// Anything else emits as a full `statement { ... }` block.
+fn policy_definition_to_block(def: &PolicyDefinitionConfig) -> Option<PolicyBlock> {
+    let mut rules = Vec::with_capacity(def.statements.len());
+    for stmt in &def.statements {
+        if let Some(rule) = shorthand_for(stmt) {
+            rules.push(rule);
+        } else {
+            let block = statement_config_to_block(stmt)?;
+            rules.push(PolicyRule::Statement(block));
+        }
+    }
+    Some(PolicyBlock {
+        name: def.name.clone(),
+        rules,
+    })
+}
+
+/// Try to express `stmt` as a `match SET ACTION` or `default ACTION`
+/// shorthand. Returns `None` if any statement field falls outside the
+/// shorthand subset.
+fn shorthand_for(stmt: &StatementConfig) -> Option<PolicyRule> {
+    if stmt.name.is_some() {
+        return None;
+    }
+    let conds = &stmt.conditions;
+    let has_other_conditions = conds.match_neighbor_set.is_some()
+        || conds.match_as_path_set.is_some()
+        || conds.match_community_set.is_some()
+        || conds.match_ext_community_set.is_some()
+        || conds.match_large_community_set.is_some()
+        || conds.prefix.is_some()
+        || conds.neighbor.is_some()
+        || conds.has_asn.is_some()
+        || conds.route_type.is_some()
+        || conds.community.is_some()
+        || conds.rpki_validation.is_some()
+        || conds.afi_safi.is_some()
+        || conds.ls_nlri_type.is_some()
+        || conds.ls_protocol_id.is_some()
+        || conds.ls_instance_id.is_some()
+        || conds.ls_node_as.is_some()
+        || conds.ls_node_router_id.is_some();
+    if has_other_conditions {
+        return None;
+    }
+    let action = config_to_action(&stmt.actions)?;
+    match &conds.match_prefix_set {
+        Some(set_ref) if set_ref.match_option == MatchOptionConfig::Any => {
+            Some(PolicyRule::Match {
+                set_name: set_ref.set_name.clone(),
+                action,
+            })
+        }
+        Some(_) => None,
+        None => Some(PolicyRule::Default { action }),
+    }
+}
+
+/// Convert a `StatementConfig` to a `StatementBlock`. Action fields that
+/// have no grammar (e.g. empty community op string) are dropped via `?`.
+fn statement_config_to_block(stmt: &StatementConfig) -> Option<StatementBlock> {
+    let mut matches = Vec::new();
+    let conds = &stmt.conditions;
+    if let Some(r) = &conds.match_prefix_set {
+        matches.push(MatchClause::PrefixSet(match_set_ref_from_config(r)));
+    }
+    if let Some(r) = &conds.match_neighbor_set {
+        matches.push(MatchClause::NeighborSet(match_set_ref_from_config(r)));
+    }
+    if let Some(r) = &conds.match_as_path_set {
+        matches.push(MatchClause::AsPathSet(match_set_ref_from_config(r)));
+    }
+    if let Some(r) = &conds.match_community_set {
+        matches.push(MatchClause::CommunitySet(match_set_ref_from_config(r)));
+    }
+    if let Some(r) = &conds.match_ext_community_set {
+        matches.push(MatchClause::ExtCommunitySet(match_set_ref_from_config(r)));
+    }
+    if let Some(r) = &conds.match_large_community_set {
+        matches.push(MatchClause::LargeCommunitySet(match_set_ref_from_config(r)));
+    }
+    if let Some(s) = &conds.prefix {
+        matches.push(MatchClause::Prefix(s.clone()));
+    }
+    if let Some(s) = &conds.neighbor {
+        matches.push(MatchClause::Neighbor(s.clone()));
+    }
+    if let Some(v) = conds.has_asn {
+        matches.push(MatchClause::HasAsn(v));
+    }
+    if let Some(s) = &conds.route_type {
+        matches.push(MatchClause::RouteType(s.clone()));
+    }
+    if let Some(s) = &conds.community {
+        matches.push(MatchClause::Community(s.clone()));
+    }
+    if let Some(v) = conds.rpki_validation {
+        matches.push(MatchClause::Rpki(rpki_config_to_kind(v)));
+    }
+    if let Some(s) = &conds.afi_safi {
+        matches.push(MatchClause::AfiSafi(s.clone()));
+    }
+    if let Some(s) = &conds.ls_nlri_type {
+        matches.push(MatchClause::LsNlriType(s.clone()));
+    }
+    if let Some(s) = &conds.ls_protocol_id {
+        matches.push(MatchClause::LsProtocolId(s.clone()));
+    }
+    if let Some(v) = conds.ls_instance_id {
+        matches.push(MatchClause::LsInstanceId(v));
+    }
+    if let Some(v) = conds.ls_node_as {
+        matches.push(MatchClause::LsNodeAs(v));
+    }
+    if let Some(s) = &conds.ls_node_router_id {
+        matches.push(MatchClause::LsNodeRouterId(s.clone()));
+    }
+
+    let mut sets = Vec::new();
+    let acts = &stmt.actions;
+    if let Some(lp) = &acts.local_pref {
+        sets.push(match lp {
+            LocalPrefActionConfig::Set(v) => SetClause::LocalPref {
+                value: *v,
+                force: false,
+            },
+            LocalPrefActionConfig::Force { value, force } => SetClause::LocalPref {
+                value: *value,
+                force: *force,
+            },
+        });
+    }
+    if let Some(med) = &acts.med {
+        sets.push(SetClause::Med(match med {
+            MedActionConfig::Set(v) => MedSet::Set(*v),
+            MedActionConfig::Remove { .. } => MedSet::Remove,
+        }));
+    }
+    if let Some(c) = &acts.community {
+        sets.push(SetClause::Community(CommunityOp {
+            op: community_op_from_str(&c.operation)?,
+            values: c.communities.clone(),
+        }));
+    }
+    if let Some(c) = &acts.ext_community {
+        sets.push(SetClause::ExtCommunity(CommunityOp {
+            op: community_op_from_str(&c.operation)?,
+            values: c.ext_communities.clone(),
+        }));
+    }
+    if let Some(c) = &acts.large_community {
+        sets.push(SetClause::LargeCommunity(CommunityOp {
+            op: community_op_from_str(&c.operation)?,
+            values: c.large_communities.clone(),
+        }));
+    }
+    if let Some(v) = acts.set_rpki_state {
+        sets.push(SetClause::SetRpkiState(rpki_config_to_kind(v)));
+    }
+
+    let disposition = match (acts.accept.unwrap_or(false), acts.reject.unwrap_or(false)) {
+        (true, false) => Some(Disposition::Accept),
+        (false, true) => Some(Disposition::Reject),
+        (false, false) => None,
+        (true, true) => return None,
+    };
+
+    Some(StatementBlock {
+        name: stmt.name.clone(),
+        matches,
+        sets,
+        disposition,
+    })
+}
+
+fn action_to_config(action: &str) -> Result<ActionsConfig, String> {
+    match action {
+        "accept" => Ok(ActionsConfig {
+            accept: Some(true),
+            ..Default::default()
+        }),
+        "reject" => Ok(ActionsConfig {
+            reject: Some(true),
+            ..Default::default()
+        }),
+        other => Err(format!(
+            "policy rule action must be 'accept' or 'reject', got '{}'",
+            other
+        )),
+    }
+}
+
+fn config_to_action(actions: &ActionsConfig) -> Option<String> {
+    let accept = actions.accept.unwrap_or(false);
+    let reject = actions.reject.unwrap_or(false);
+    let has_transform = actions.local_pref.is_some()
+        || actions.med.is_some()
+        || actions.community.is_some()
+        || actions.ext_community.is_some()
+        || actions.large_community.is_some()
+        || actions.set_rpki_state.is_some();
+    if has_transform {
+        return None;
+    }
+    match (accept, reject) {
+        (true, false) => Some("accept".to_string()),
+        (false, true) => Some("reject".to_string()),
+        _ => None,
+    }
+}
+
+/// Convert a `PrefixListBlock` into a runtime `PrefixSetConfig`. The
+/// optional `range` on each entry maps to the runtime
+/// `masklength_range` string format (`"exact"`, `"X..Y"`, `"..Y"`, `"X.."`).
+fn prefix_list_block_to_set(block: &PrefixListBlock) -> PrefixSetConfig {
+    PrefixSetConfig {
+        name: block.name.clone(),
+        prefixes: block
+            .prefixes
+            .iter()
+            .map(|e| PrefixMatchConfig {
+                prefix: e.prefix.clone(),
+                masklength_range: e.range.as_ref().map(masklength_range_to_runtime),
+            })
+            .collect(),
+    }
+}
+
+fn masklength_range_to_runtime(range: &MasklengthRange) -> String {
+    match range {
+        MasklengthRange::Exact => "exact".to_string(),
+        MasklengthRange::Range { ge, le } => {
+            let lhs = ge.map(|v| v.to_string()).unwrap_or_default();
+            let rhs = le.map(|v| v.to_string()).unwrap_or_default();
+            format!("{}..{}", lhs, rhs)
+        }
+    }
+}
+
+fn runtime_to_masklength_range(s: &str) -> Option<MasklengthRange> {
+    if s == "exact" {
+        return Some(MasklengthRange::Exact);
+    }
+    let (min_str, max_str) = s.split_once("..")?;
+    let ge = if min_str.is_empty() {
+        None
+    } else {
+        Some(min_str.parse::<u8>().ok()?)
+    };
+    let le = if max_str.is_empty() {
+        None
+    } else {
+        Some(max_str.parse::<u8>().ok()?)
+    };
+    if ge.is_none() && le.is_none() {
+        None
+    } else {
+        Some(MasklengthRange::Range { ge, le })
+    }
+}
+
+fn neighbor_set_block_to_config(block: &NeighborSetBlock) -> NeighborSetConfig {
+    NeighborSetConfig {
+        name: block.name.clone(),
+        neighbors: block.neighbors.clone(),
+    }
+}
+
+fn neighbor_set_config_to_block(cfg: &NeighborSetConfig) -> NeighborSetBlock {
+    NeighborSetBlock {
+        name: cfg.name.clone(),
+        neighbors: cfg.neighbors.clone(),
+    }
+}
+
+fn as_path_set_block_to_config(block: &AsPathSetBlock) -> AsPathSetConfig {
+    AsPathSetConfig {
+        name: block.name.clone(),
+        patterns: block.patterns.clone(),
+    }
+}
+
+fn as_path_set_config_to_block(cfg: &AsPathSetConfig) -> AsPathSetBlock {
+    AsPathSetBlock {
+        name: cfg.name.clone(),
+        patterns: cfg.patterns.clone(),
+    }
+}
+
+fn community_set_block_to_config(block: &CommunitySetBlock) -> CommunitySetConfig {
+    CommunitySetConfig {
+        name: block.name.clone(),
+        communities: block.communities.clone(),
+    }
+}
+
+fn community_set_config_to_block(cfg: &CommunitySetConfig) -> CommunitySetBlock {
+    CommunitySetBlock {
+        name: cfg.name.clone(),
+        communities: cfg.communities.clone(),
+    }
+}
+
+fn ext_community_set_block_to_config(block: &ExtCommunitySetBlock) -> ExtCommunitySetConfig {
+    ExtCommunitySetConfig {
+        name: block.name.clone(),
+        ext_communities: block.ext_communities.clone(),
+    }
+}
+
+fn ext_community_set_config_to_block(cfg: &ExtCommunitySetConfig) -> ExtCommunitySetBlock {
+    ExtCommunitySetBlock {
+        name: cfg.name.clone(),
+        ext_communities: cfg.ext_communities.clone(),
+    }
+}
+
+fn large_community_set_block_to_config(block: &LargeCommunitySetBlock) -> LargeCommunitySetConfig {
+    LargeCommunitySetConfig {
+        name: block.name.clone(),
+        large_communities: block.large_communities.clone(),
+    }
+}
+
+fn large_community_set_config_to_block(cfg: &LargeCommunitySetConfig) -> LargeCommunitySetBlock {
+    LargeCommunitySetBlock {
+        name: cfg.name.clone(),
+        large_communities: cfg.large_communities.clone(),
+    }
+}
+
+/// Convert a runtime `PrefixSetConfig` into a `PrefixListBlock`. Entries
+/// whose `masklength_range` string fails to parse fall back to no range
+/// (rare; grammar accepts the same shapes the runtime emits).
+fn prefix_set_to_block(set: &PrefixSetConfig) -> Option<PrefixListBlock> {
+    let prefixes: Vec<PrefixListEntry> = set
+        .prefixes
+        .iter()
+        .map(|e| PrefixListEntry {
+            prefix: e.prefix.clone(),
+            range: e
+                .masklength_range
+                .as_deref()
+                .and_then(runtime_to_masklength_range),
+        })
+        .collect();
+    if prefixes.is_empty() {
+        None
+    } else {
+        Some(PrefixListBlock {
+            name: set.name.clone(),
+            prefixes,
+        })
+    }
+}
+
+/// Build the `family` blocks for a peer's `afi_safis` entries that carry
+/// any per-family setting (policies, max-prefix, or add-path-send).
+fn families_from_peer_config(peer: &PeerConfig) -> Vec<FamilyBlock> {
+    let mut blocks = Vec::new();
+    for entry in &peer.afi_safis {
+        let has_anything = !entry.import_policy.is_empty()
+            || !entry.export_policy.is_empty()
+            || entry.max_prefix.is_some()
+            || entry.add_path_send.is_some();
+        if !has_anything {
+            continue;
+        }
+        let mut directives = Vec::new();
+        if let Some(mp) = &entry.max_prefix {
+            directives.push(FamilyDirective::MaxPrefix {
+                limit: mp.limit,
+                action: match mp.action {
+                    MaxPrefixAction::Terminate => MaxPrefixActionKind::Terminate,
+                    MaxPrefixAction::Discard => MaxPrefixActionKind::Discard,
+                },
+            });
+        }
+        if let Some(aps) = entry.add_path_send {
+            let mode = match aps {
+                AddPathSend::All => LangAddPathSendMode::All,
+                AddPathSend::Disabled => LangAddPathSendMode::Disabled,
+            };
+            directives.push(FamilyDirective::AddPathSend(mode));
+        }
+        for name in &entry.import_policy {
+            directives.push(FamilyDirective::ImportPolicy(name.clone()));
+        }
+        for name in &entry.export_policy {
+            directives.push(FamilyDirective::ExportPolicy(name.clone()));
+        }
+        blocks.push(FamilyBlock {
+            afi: entry.afi,
+            safi: entry.safi,
+            directives,
+        });
+    }
+    blocks
 }
 
 #[cfg(test)]
@@ -1513,6 +2275,467 @@ service bgp {
         );
         assert_eq!(parsed.enforce_first_as, original.enforce_first_as);
         assert_eq!(parsed.send_rpki_community, original.send_rpki_community);
+    }
+
+    #[test]
+    fn test_policy_round_trip() {
+        // Policies with `match <set> -> ACTION` and `default -> ACTION` rules
+        // round-trip through the full conf-text path.
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  policy mine-only {
+    match my-prefixes accept
+    default reject
+  }
+
+  prefix-list my-prefixes {
+    172.23.211.0/27
+    fd0d:fbde:bca5::/48
+  }
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        assert_eq!(config.policy_definitions.len(), 1);
+        let policy = &config.policy_definitions[0];
+        assert_eq!(policy.name, "mine-only");
+        assert_eq!(policy.statements.len(), 2);
+        assert_eq!(
+            policy.statements[0]
+                .conditions
+                .match_prefix_set
+                .as_ref()
+                .map(|m| m.set_name.as_str()),
+            Some("my-prefixes")
+        );
+        assert_eq!(policy.statements[0].actions.accept, Some(true));
+        assert!(policy.statements[1].conditions.match_prefix_set.is_none());
+        assert_eq!(policy.statements[1].actions.reject, Some(true));
+
+        assert_eq!(config.defined_sets.prefix_sets.len(), 1);
+        let set = &config.defined_sets.prefix_sets[0];
+        assert_eq!(set.name, "my-prefixes");
+        assert_eq!(set.prefixes.len(), 2);
+        assert_eq!(set.prefixes[0].prefix, "172.23.211.0/27");
+        assert!(set.prefixes[0].masklength_range.is_none());
+
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.policy_definitions.len(), 1);
+        assert_eq!(reparsed.policy_definitions[0].name, policy.name);
+        assert_eq!(
+            reparsed.policy_definitions[0].statements.len(),
+            policy.statements.len()
+        );
+        assert_eq!(reparsed.defined_sets.prefix_sets.len(), 1);
+        assert_eq!(reparsed.defined_sets.prefix_sets[0].name, set.name);
+        assert_eq!(
+            reparsed.defined_sets.prefix_sets[0].prefixes.len(),
+            set.prefixes.len()
+        );
+    }
+
+    #[test]
+    fn test_peer_family_policy_round_trip() {
+        // `peer X { family afi safi { import policy A; export policy B } }`
+        // populates `peer.afi_safis[(afi,safi)].{import,export}_policy` and
+        // round-trips through to_conf_str.
+        let input = "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  peer 10.0.0.1 {
+    remote-as 65002
+
+    family ipv4 unicast {
+      import policy in-v4
+      export policy out-v4
+    }
+
+    family ipv6 unicast {
+      export policy out-v6
+    }
+  }
+}";
+        let config = BgpConfig::from_conf_str(input).unwrap();
+        assert_eq!(config.peers.len(), 1);
+        let peer = &config.peers[0];
+        assert_eq!(
+            peer.import_policy_for(Afi::Ipv4, Safi::Unicast),
+            ["in-v4".to_string()]
+        );
+        assert_eq!(
+            peer.export_policy_for(Afi::Ipv4, Safi::Unicast),
+            ["out-v4".to_string()]
+        );
+        assert!(peer.import_policy_for(Afi::Ipv6, Safi::Unicast).is_empty());
+        assert_eq!(
+            peer.export_policy_for(Afi::Ipv6, Safi::Unicast),
+            ["out-v6".to_string()]
+        );
+
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        let parsed_peer = &reparsed.peers[0];
+        assert_eq!(
+            parsed_peer.import_policy_for(Afi::Ipv4, Safi::Unicast),
+            peer.import_policy_for(Afi::Ipv4, Safi::Unicast)
+        );
+        assert_eq!(
+            parsed_peer.export_policy_for(Afi::Ipv4, Safi::Unicast),
+            peer.export_policy_for(Afi::Ipv4, Safi::Unicast)
+        );
+        assert_eq!(
+            parsed_peer.export_policy_for(Afi::Ipv6, Safi::Unicast),
+            peer.export_policy_for(Afi::Ipv6, Safi::Unicast)
+        );
+    }
+
+    #[test]
+    fn test_defined_set_round_trip() {
+        // All five non-prefix defined-set types round-trip end-to-end.
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.defined_sets.neighbor_sets.push(NeighborSetConfig {
+            name: "peers".to_string(),
+            neighbors: vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()],
+        });
+        config.defined_sets.as_path_sets.push(AsPathSetConfig {
+            name: "ribbons".to_string(),
+            patterns: vec!["^65001 65002$".to_string(), "^65003".to_string()],
+        });
+        config.defined_sets.community_sets.push(CommunitySetConfig {
+            name: "comm".to_string(),
+            communities: vec!["65000:100".to_string(), "65000:200".to_string()],
+        });
+        config
+            .defined_sets
+            .ext_community_sets
+            .push(ExtCommunitySetConfig {
+                name: "ext".to_string(),
+                ext_communities: vec!["rt:65000:100".to_string()],
+            });
+        config
+            .defined_sets
+            .large_community_sets
+            .push(LargeCommunitySetConfig {
+                name: "lc".to_string(),
+                large_communities: vec!["65000:1:1".to_string()],
+            });
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.defined_sets.neighbor_sets.len(), 1);
+        assert_eq!(
+            reparsed.defined_sets.neighbor_sets[0].neighbors,
+            vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()]
+        );
+        assert_eq!(
+            reparsed.defined_sets.as_path_sets[0].patterns,
+            vec!["^65001 65002$".to_string(), "^65003".to_string()]
+        );
+        assert_eq!(
+            reparsed.defined_sets.community_sets[0].communities,
+            vec!["65000:100".to_string(), "65000:200".to_string()]
+        );
+        assert_eq!(
+            reparsed.defined_sets.ext_community_sets[0].ext_communities,
+            vec!["rt:65000:100".to_string()]
+        );
+        assert_eq!(
+            reparsed.defined_sets.large_community_sets[0].large_communities,
+            vec!["65000:1:1".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_per_family_max_prefix_round_trip() {
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        let mut peer = PeerConfig {
+            address: "10.0.0.1".to_string(),
+            asn: Some(65002),
+            ..Default::default()
+        };
+        peer.afi_safis.push(AfiSafiConfig {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            max_prefix: Some(MaxPrefixSetting {
+                limit: 1000,
+                action: MaxPrefixAction::Terminate,
+            }),
+            add_path_send: Some(AddPathSend::All),
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+        });
+        peer.afi_safis.push(AfiSafiConfig {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            max_prefix: Some(MaxPrefixSetting {
+                limit: 5000,
+                action: MaxPrefixAction::Discard,
+            }),
+            add_path_send: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+        });
+        config.peers.push(peer);
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        let p = &reparsed.peers[0];
+        let v4 = p
+            .afi_safis
+            .iter()
+            .find(|c| c.afi == Afi::Ipv4)
+            .expect("v4 family");
+        assert_eq!(v4.max_prefix.as_ref().map(|m| m.limit), Some(1000));
+        assert!(matches!(
+            v4.max_prefix.as_ref().map(|m| m.action),
+            Some(MaxPrefixAction::Terminate)
+        ));
+        assert_eq!(v4.add_path_send, Some(AddPathSend::All));
+        let v6 = p
+            .afi_safis
+            .iter()
+            .find(|c| c.afi == Afi::Ipv6)
+            .expect("v6 family");
+        assert_eq!(v6.max_prefix.as_ref().map(|m| m.limit), Some(5000));
+        assert!(matches!(
+            v6.max_prefix.as_ref().map(|m| m.action),
+            Some(MaxPrefixAction::Discard)
+        ));
+        assert!(v6.add_path_send.is_none());
+    }
+
+    #[test]
+    fn test_full_statement_round_trip() {
+        // Every ConditionsConfig + ActionsConfig field in one statement.
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.policy_definitions.push(PolicyDefinitionConfig {
+            name: "kitchen-sink".to_string(),
+            statements: vec![StatementConfig {
+                name: Some("st1".to_string()),
+                conditions: ConditionsConfig {
+                    match_prefix_set: Some(MatchSetRefConfig {
+                        set_name: "ps".to_string(),
+                        match_option: MatchOptionConfig::Any,
+                    }),
+                    match_neighbor_set: Some(MatchSetRefConfig {
+                        set_name: "ns".to_string(),
+                        match_option: MatchOptionConfig::All,
+                    }),
+                    match_as_path_set: Some(MatchSetRefConfig {
+                        set_name: "as".to_string(),
+                        match_option: MatchOptionConfig::Invert,
+                    }),
+                    match_community_set: Some(MatchSetRefConfig {
+                        set_name: "cs".to_string(),
+                        match_option: MatchOptionConfig::Any,
+                    }),
+                    match_ext_community_set: Some(MatchSetRefConfig {
+                        set_name: "es".to_string(),
+                        match_option: MatchOptionConfig::Any,
+                    }),
+                    match_large_community_set: Some(MatchSetRefConfig {
+                        set_name: "ls".to_string(),
+                        match_option: MatchOptionConfig::Any,
+                    }),
+                    prefix: Some("10.0.0.0/8".to_string()),
+                    neighbor: Some("10.0.0.1".to_string()),
+                    has_asn: Some(65000),
+                    route_type: Some("internal".to_string()),
+                    community: Some("65000:100".to_string()),
+                    rpki_validation: Some(RpkiValidationConfig::Valid),
+                    afi_safi: Some("ipv4-unicast".to_string()),
+                    ls_nlri_type: Some("node".to_string()),
+                    ls_protocol_id: Some("ospf-v2".to_string()),
+                    ls_instance_id: Some(7),
+                    ls_node_as: Some(65001),
+                    ls_node_router_id: Some("1.1.1.1".to_string()),
+                },
+                actions: ActionsConfig {
+                    accept: Some(true),
+                    reject: None,
+                    local_pref: Some(LocalPrefActionConfig::Force {
+                        value: 200,
+                        force: true,
+                    }),
+                    med: Some(MedActionConfig::Set(100)),
+                    community: Some(CommunityActionConfig {
+                        operation: "add".to_string(),
+                        communities: vec!["65000:100".to_string(), "65000:200".to_string()],
+                    }),
+                    ext_community: Some(ExtCommunityActionConfig {
+                        operation: "remove".to_string(),
+                        ext_communities: vec!["rt:65000:100".to_string()],
+                    }),
+                    large_community: Some(LargeCommunityActionConfig {
+                        operation: "replace".to_string(),
+                        large_communities: vec!["65000:1:1".to_string()],
+                    }),
+                    set_rpki_state: Some(RpkiValidationConfig::Invalid),
+                },
+            }],
+        });
+
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.policy_definitions.len(), 1);
+        let stmt = &reparsed.policy_definitions[0].statements[0];
+        // Conditions
+        let conds = &stmt.conditions;
+        assert_eq!(stmt.name.as_deref(), Some("st1"));
+        assert_eq!(
+            conds.match_prefix_set.as_ref().map(|c| c.match_option),
+            Some(MatchOptionConfig::Any)
+        );
+        assert_eq!(
+            conds.match_neighbor_set.as_ref().map(|c| c.match_option),
+            Some(MatchOptionConfig::All)
+        );
+        assert_eq!(
+            conds.match_as_path_set.as_ref().map(|c| c.match_option),
+            Some(MatchOptionConfig::Invert)
+        );
+        assert_eq!(conds.prefix.as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(conds.neighbor.as_deref(), Some("10.0.0.1"));
+        assert_eq!(conds.has_asn, Some(65000));
+        assert_eq!(conds.route_type.as_deref(), Some("internal"));
+        assert_eq!(conds.community.as_deref(), Some("65000:100"));
+        assert_eq!(conds.rpki_validation, Some(RpkiValidationConfig::Valid));
+        assert_eq!(conds.afi_safi.as_deref(), Some("ipv4-unicast"));
+        assert_eq!(conds.ls_nlri_type.as_deref(), Some("node"));
+        assert_eq!(conds.ls_protocol_id.as_deref(), Some("ospf-v2"));
+        assert_eq!(conds.ls_instance_id, Some(7));
+        assert_eq!(conds.ls_node_as, Some(65001));
+        assert_eq!(conds.ls_node_router_id.as_deref(), Some("1.1.1.1"));
+        // Actions
+        let acts = &stmt.actions;
+        assert_eq!(acts.accept, Some(true));
+        assert!(matches!(
+            acts.local_pref,
+            Some(LocalPrefActionConfig::Force { value: 200, .. })
+        ));
+        assert!(matches!(acts.med, Some(MedActionConfig::Set(100))));
+        let comm = acts.community.as_ref().expect("community");
+        assert_eq!(comm.operation, "add");
+        assert_eq!(comm.communities.len(), 2);
+        let ext = acts.ext_community.as_ref().expect("ext");
+        assert_eq!(ext.operation, "remove");
+        let lg = acts.large_community.as_ref().expect("large");
+        assert_eq!(lg.operation, "replace");
+        assert_eq!(acts.set_rpki_state, Some(RpkiValidationConfig::Invalid));
+    }
+
+    #[test]
+    fn test_med_remove_round_trip() {
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.policy_definitions.push(PolicyDefinitionConfig {
+            name: "p".to_string(),
+            statements: vec![StatementConfig {
+                name: None,
+                conditions: ConditionsConfig::default(),
+                actions: ActionsConfig {
+                    med: Some(MedActionConfig::Remove { remove: true }),
+                    accept: Some(true),
+                    ..Default::default()
+                },
+            }],
+        });
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        let stmt = &reparsed.policy_definitions[0].statements[0];
+        assert!(matches!(
+            stmt.actions.med,
+            Some(MedActionConfig::Remove { remove: true })
+        ));
+    }
+
+    #[test]
+    fn test_rich_policy_emits_statement_block() {
+        // A policy whose statement uses a community-set match -- now
+        // expressible -- emits as a `statement { ... }` block and
+        // round-trips with the full match preserved.
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.policy_definitions.push(PolicyDefinitionConfig {
+            name: "rich".to_string(),
+            statements: vec![StatementConfig {
+                name: None,
+                conditions: ConditionsConfig {
+                    match_community_set: Some(MatchSetRefConfig {
+                        set_name: "my-comms".to_string(),
+                        match_option: MatchOptionConfig::Any,
+                    }),
+                    ..Default::default()
+                },
+                actions: ActionsConfig {
+                    accept: Some(true),
+                    ..Default::default()
+                },
+            }],
+        });
+        let rendered = config.to_conf_str();
+        assert!(
+            rendered.contains("policy rich"),
+            "rich policy not emitted: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("match community-set my-comms"),
+            "community-set match not emitted: {}",
+            rendered
+        );
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        assert_eq!(reparsed.policy_definitions.len(), 1);
+        let stmt = &reparsed.policy_definitions[0].statements[0];
+        assert_eq!(
+            stmt.conditions
+                .match_community_set
+                .as_ref()
+                .map(|c| c.set_name.as_str()),
+            Some("my-comms")
+        );
+        assert_eq!(stmt.actions.accept, Some(true));
+    }
+
+    #[test]
+    fn test_prefix_masklength_range_round_trip() {
+        // Each masklength_range shape (exact / "X..Y" / "X.." / "..Y")
+        // round-trips through to_conf_str -> from_conf_str.
+        let mut config = BgpConfig::new(65001, "127.0.0.1:179", Ipv4Addr::new(1, 1, 1, 1), 90);
+        config.defined_sets.prefix_sets.push(PrefixSetConfig {
+            name: "v4".to_string(),
+            prefixes: vec![
+                PrefixMatchConfig {
+                    prefix: "10.0.0.0/8".to_string(),
+                    masklength_range: Some("16..24".to_string()),
+                },
+                PrefixMatchConfig {
+                    prefix: "172.16.0.0/12".to_string(),
+                    masklength_range: Some("exact".to_string()),
+                },
+                PrefixMatchConfig {
+                    prefix: "192.168.0.0/16".to_string(),
+                    masklength_range: Some("..32".to_string()),
+                },
+                PrefixMatchConfig {
+                    prefix: "203.0.113.0/24".to_string(),
+                    masklength_range: Some("28..".to_string()),
+                },
+                PrefixMatchConfig {
+                    prefix: "198.51.100.0/24".to_string(),
+                    masklength_range: None,
+                },
+            ],
+        });
+        let rendered = config.to_conf_str();
+        let reparsed = BgpConfig::from_conf_str(&rendered).unwrap();
+        let set = &reparsed.defined_sets.prefix_sets[0];
+        let original = &config.defined_sets.prefix_sets[0];
+        assert_eq!(set.prefixes.len(), original.prefixes.len());
+        for (got, want) in set.prefixes.iter().zip(original.prefixes.iter()) {
+            assert_eq!(got.prefix, want.prefix);
+            assert_eq!(got.masklength_range, want.masklength_range);
+        }
     }
 
     #[test]
@@ -1801,6 +3024,8 @@ service bgp {
                         action: MaxPrefixAction::Terminate,
                     }),
                     add_path_send: None,
+                    import_policy: Vec::new(),
+                    export_policy: Vec::new(),
                 }],
                 ..Default::default()
             };
@@ -1829,6 +3054,8 @@ service bgp {
                     action: MaxPrefixAction::Discard,
                 }),
                 add_path_send: None,
+                import_policy: Vec::new(),
+                export_policy: Vec::new(),
             }],
             ..Default::default()
         };

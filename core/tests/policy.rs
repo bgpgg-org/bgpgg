@@ -24,14 +24,14 @@ use bgpgg::bgp::ext_community::from_rpki_state_community;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config,
     extended_community::{Community, Opaque},
-    ActionsConfig, AddLsRouteRequest, AddRouteRequest, AfiSafiConfig, ConditionsConfig,
-    DefinedSetConfig, ExtendedCommunity, ExtendedCommunitySetData, ListRoutesRequest, LsAttribute,
-    LsNlri, LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, MatchSetRef, RibType,
-    Route, RpkiValidation, StatementConfig,
+    ActionsConfig, AddLsRouteRequest, AddRouteRequest, ConditionsConfig, DefinedSetConfig,
+    ExtendedCommunity, ExtendedCommunitySetData, ListRoutesRequest, LsAttribute, LsNlri,
+    LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, MatchSetRef, RibType, Route,
+    RpkiValidation, StatementConfig,
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
 use bgpgg::rpki::vrp::{RpkiValidation as RpkiState, Vrp};
-use conf::bgp::{BgpConfig, RpkiCacheConfig};
+use conf::bgp::{Afi, BgpConfig, RpkiCacheConfig, Safi};
 use utils::rtr::FakeTcpCache;
 
 #[tokio::test]
@@ -187,6 +187,8 @@ async fn test_export_policy_large_community_match() {
         .client
         .set_policy_assignment(
             server1.address.to_string(),
+            Afi::Ipv4 as u32,
+            Safi::Unicast as u32,
             "export".to_string(),
             vec!["export-policy".to_string()],
             None,
@@ -332,6 +334,8 @@ async fn test_export_policy_ext_community_match() {
         .client
         .set_policy_assignment(
             server1.address.to_string(),
+            Afi::Ipv4 as u32,
+            Safi::Unicast as u32,
             "export".to_string(),
             vec!["export-policy".to_string()],
             None,
@@ -527,6 +531,8 @@ async fn test_import_policy_rpki_validation() {
         .client
         .set_policy_assignment(
             peer_addr.clone(),
+            Afi::Ipv4 as u32,
+            Safi::Unicast as u32,
             "import".to_string(),
             vec!["rpki-filter".to_string()],
             None,
@@ -665,6 +671,8 @@ async fn test_rpki_state_community_set_policy() {
         .client
         .set_policy_assignment(
             peer_addr,
+            Afi::Ipv4 as u32,
+            Safi::Unicast as u32,
             "import".to_string(),
             vec!["rpki-import".to_string()],
             None,
@@ -729,11 +737,7 @@ fn make_ls_attr(name: &str) -> LsAttribute {
 
 fn ls_peer_config() -> PeerConfig {
     PeerConfig {
-        afi_safis: vec![AfiSafiConfig {
-            afi: 16388,
-            safi: 71,
-            ..Default::default()
-        }],
+        afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_link_state()],
         ..Default::default()
     }
 }
@@ -767,10 +771,16 @@ async fn apply_afi_safi_reject_policy(server: &TestServer, peer_addr: &str, dire
         .await
         .unwrap();
 
+    // Attach the deny policy to the BGP-LS family on the peer. With per-AF
+    // runtime attachment, only BGP-LS routes traverse this policy; IP routes
+    // see only the implicit RFC 8212 fallback (accept-all on iBGP, the
+    // session type used by `setup_two_peered_servers`).
     server
         .client
         .set_policy_assignment(
             peer_addr.to_string(),
+            Afi::LinkState as u32,
+            Safi::LinkState as u32,
             direction.to_string(),
             vec!["ls-deny".to_string()],
             None,

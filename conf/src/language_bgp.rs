@@ -50,6 +50,11 @@ pub struct BgpServiceBody {
     pub peers: Vec<PeerBlock>,
     pub policies: Vec<PolicyBlock>,
     pub prefix_lists: Vec<PrefixListBlock>,
+    pub neighbor_sets: Vec<NeighborSetBlock>,
+    pub as_path_sets: Vec<AsPathSetBlock>,
+    pub community_sets: Vec<CommunitySetBlock>,
+    pub ext_community_sets: Vec<ExtCommunitySetBlock>,
+    pub large_community_sets: Vec<LargeCommunitySetBlock>,
     pub bmp_servers: Vec<BmpServerBlock>,
     pub rpki_caches: Vec<RpkiCacheBlock>,
     pub bgp_ls: Option<BgpLsBlock>,
@@ -114,6 +119,28 @@ pub struct FamilyBlock {
 pub enum FamilyDirective {
     ExportPolicy(String),
     ImportPolicy(String),
+    /// `max-prefix N [action terminate|discard]`. Action defaults to
+    /// terminate (matches `MaxPrefixSetting`'s default).
+    MaxPrefix {
+        limit: u32,
+        action: MaxPrefixActionKind,
+    },
+    /// `add-path-send all|disabled` — RFC 7911 send mode override.
+    AddPathSend(AddPathSendMode),
+}
+
+/// `action` qualifier on `max-prefix`. Maps to `conf::bgp::MaxPrefixAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxPrefixActionKind {
+    Terminate,
+    Discard,
+}
+
+/// `add-path-send` value. Maps to `conf::bgp::AddPathSend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddPathSendMode {
+    All,
+    Disabled,
 }
 
 /// `policy <name> { ... }` block.
@@ -123,18 +150,176 @@ pub struct PolicyBlock {
     pub rules: Vec<PolicyRule>,
 }
 
-/// Rule inside a policy block.
+/// Rule inside a policy block. Two surfaces coexist: shorthand `match SET
+/// ACTION` / `default ACTION` for the common case, and full `statement
+/// { ... }` blocks for the rest of `StatementConfig`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyRule {
+    /// `match <prefix-set> <accept|reject>` shorthand.
     Match { set_name: String, action: String },
+    /// `default <accept|reject>` shorthand.
     Default { action: String },
+    /// Full statement block.
+    Statement(StatementBlock),
+}
+
+/// Full statement block with arbitrary match clauses, set clauses, and a
+/// final disposition. Mirrors `conf::bgp::StatementConfig`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StatementBlock {
+    pub name: Option<String>,
+    pub matches: Vec<MatchClause>,
+    pub sets: Vec<SetClause>,
+    pub disposition: Option<Disposition>,
+}
+
+/// Match clause inside a statement block. Each variant maps to a single
+/// `ConditionsConfig` field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchClause {
+    PrefixSet(MatchSetRef),
+    NeighborSet(MatchSetRef),
+    AsPathSet(MatchSetRef),
+    CommunitySet(MatchSetRef),
+    ExtCommunitySet(MatchSetRef),
+    LargeCommunitySet(MatchSetRef),
+    Prefix(String),
+    Neighbor(String),
+    HasAsn(u32),
+    RouteType(String),
+    Community(String),
+    Rpki(RpkiValidationKind),
+    AfiSafi(String),
+    LsNlriType(String),
+    LsProtocolId(String),
+    LsInstanceId(u64),
+    LsNodeAs(u32),
+    LsNodeRouterId(String),
+}
+
+/// Reference to a defined-set in a match clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchSetRef {
+    pub set_name: String,
+    pub option: MatchOptionKind,
+}
+
+/// `any` (default), `all`, or `invert` modifier on a defined-set match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOptionKind {
+    Any,
+    All,
+    Invert,
+}
+
+/// RFC 6811 RPKI validation states recognized in match / set clauses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpkiValidationKind {
+    Valid,
+    Invalid,
+    NotFound,
+}
+
+/// Set clause inside a statement block. Each variant maps to a single
+/// `ActionsConfig` field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetClause {
+    LocalPref { value: u32, force: bool },
+    Med(MedSet),
+    Community(CommunityOp),
+    ExtCommunity(CommunityOp),
+    LargeCommunity(CommunityOp),
+    SetRpkiState(RpkiValidationKind),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MedSet {
+    Set(u32),
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommunityOp {
+    pub op: CommunityOpKind,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityOpKind {
+    Add,
+    Remove,
+    Replace,
+}
+
+/// Final disposition of a statement: `accept` or `reject`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    Accept,
+    Reject,
 }
 
 /// `prefix-list <name> { ... }` block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrefixListBlock {
     pub name: String,
-    pub prefixes: Vec<String>,
+    pub prefixes: Vec<PrefixListEntry>,
+}
+
+/// One entry in a `prefix-list` block. The optional `range` lets an
+/// operator widen or narrow the match: `prefix exact` matches only the
+/// configured masklen; `prefix ge N le M` matches masklens in `[N, M]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrefixListEntry {
+    pub prefix: String,
+    pub range: Option<MasklengthRange>,
+}
+
+/// Optional masklength qualifier on a prefix-list entry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MasklengthRange {
+    /// `prefix exact` -- matches only the prefix's own masklen.
+    Exact,
+    /// `prefix [ge N] [le M]` -- at least one of `ge`/`le` is `Some`.
+    /// `ge` defaults to the prefix's masklen; `le` defaults to the AFI max.
+    Range { ge: Option<u8>, le: Option<u8> },
+}
+
+/// `neighbor-set <name> { ADDR; ADDR }` block. Entries are IP literals
+/// (parsing accepts any token; the runtime validates the address shape).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NeighborSetBlock {
+    pub name: String,
+    pub neighbors: Vec<String>,
+}
+
+/// `as-path-set <name> { "REGEX"; "REGEX" }` block. Entries are
+/// quote-wrapped regex strings; parser strips the quotes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsPathSetBlock {
+    pub name: String,
+    pub patterns: Vec<String>,
+}
+
+/// `community-set <name> { AA:NN; AA:NN }` block. Entry shape is a
+/// 32-bit community in `AA:NN` notation; parser stores it as a token.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommunitySetBlock {
+    pub name: String,
+    pub communities: Vec<String>,
+}
+
+/// `ext-community-set <name> { rt:AA:NN; soo:AA:NN }` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtCommunitySetBlock {
+    pub name: String,
+    pub ext_communities: Vec<String>,
+}
+
+/// `large-community-set <name> { GA:LD1:LD2 }` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LargeCommunitySetBlock {
+    pub name: String,
+    pub large_communities: Vec<String>,
 }
 
 /// `bmp-server <ADDR> { ... }` block. Mirrors `conf::bgp::BmpConfig`.
@@ -211,6 +396,16 @@ impl fmt::Display for FamilyDirective {
         match self {
             FamilyDirective::ExportPolicy(name) => write!(f, "export policy {}", name),
             FamilyDirective::ImportPolicy(name) => write!(f, "import policy {}", name),
+            FamilyDirective::MaxPrefix { limit, action } => match action {
+                MaxPrefixActionKind::Terminate => write!(f, "max-prefix {}", limit),
+                MaxPrefixActionKind::Discard => {
+                    write!(f, "max-prefix {} action discard", limit)
+                }
+            },
+            FamilyDirective::AddPathSend(mode) => match mode {
+                AddPathSendMode::All => write!(f, "add-path-send all"),
+                AddPathSendMode::Disabled => write!(f, "add-path-send disabled"),
+            },
         }
     }
 }
@@ -220,6 +415,7 @@ impl fmt::Display for PolicyRule {
         match self {
             PolicyRule::Match { set_name, action } => write!(f, "match {} {}", set_name, action),
             PolicyRule::Default { action } => write!(f, "default {}", action),
+            PolicyRule::Statement(block) => write!(f, "{}", block),
         }
     }
 }
@@ -243,17 +439,199 @@ impl fmt::Display for PolicyBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "policy {} {{", self.name)?;
         for rule in &self.rules {
-            writeln!(f, "  {}", rule)?;
+            match rule {
+                PolicyRule::Statement(block) => {
+                    for line in block.to_string().lines() {
+                        writeln!(f, "  {}", line)?;
+                    }
+                }
+                PolicyRule::Match { .. } | PolicyRule::Default { .. } => writeln!(f, "  {}", rule)?,
+            }
         }
         write!(f, "}}")
+    }
+}
+
+impl fmt::Display for StatementBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            Some(name) => writeln!(f, "statement {} {{", name)?,
+            None => writeln!(f, "statement {{")?,
+        }
+        for m in &self.matches {
+            writeln!(f, "  {}", m)?;
+        }
+        for s in &self.sets {
+            writeln!(f, "  {}", s)?;
+        }
+        if let Some(d) = self.disposition {
+            writeln!(
+                f,
+                "  {}",
+                match d {
+                    Disposition::Accept => "accept",
+                    Disposition::Reject => "reject",
+                }
+            )?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for MatchSetRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.option {
+            MatchOptionKind::Any => write!(f, "{}", self.set_name),
+            MatchOptionKind::All => write!(f, "{} all", self.set_name),
+            MatchOptionKind::Invert => write!(f, "{} invert", self.set_name),
+        }
+    }
+}
+
+impl fmt::Display for MatchClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchClause::PrefixSet(r) => write!(f, "match prefix-set {}", r),
+            MatchClause::NeighborSet(r) => write!(f, "match neighbor-set {}", r),
+            MatchClause::AsPathSet(r) => write!(f, "match as-path-set {}", r),
+            MatchClause::CommunitySet(r) => write!(f, "match community-set {}", r),
+            MatchClause::ExtCommunitySet(r) => write!(f, "match ext-community-set {}", r),
+            MatchClause::LargeCommunitySet(r) => write!(f, "match large-community-set {}", r),
+            MatchClause::Prefix(s) => write!(f, "match prefix {}", s),
+            MatchClause::Neighbor(s) => write!(f, "match neighbor {}", s),
+            MatchClause::HasAsn(v) => write!(f, "match has-asn {}", v),
+            MatchClause::RouteType(s) => write!(f, "match route-type {}", s),
+            MatchClause::Community(s) => write!(f, "match community {}", s),
+            MatchClause::Rpki(v) => write!(f, "match rpki {}", rpki_validation_to_str(*v)),
+            MatchClause::AfiSafi(s) => write!(f, "match afi-safi {}", s),
+            MatchClause::LsNlriType(s) => write!(f, "match ls-nlri-type {}", s),
+            MatchClause::LsProtocolId(s) => write!(f, "match ls-protocol-id {}", s),
+            MatchClause::LsInstanceId(v) => write!(f, "match ls-instance-id {}", v),
+            MatchClause::LsNodeAs(v) => write!(f, "match ls-node-as {}", v),
+            MatchClause::LsNodeRouterId(s) => write!(f, "match ls-node-router-id {}", s),
+        }
+    }
+}
+
+impl fmt::Display for SetClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SetClause::LocalPref { value, force } => {
+                if *force {
+                    write!(f, "set local-pref force {}", value)
+                } else {
+                    write!(f, "set local-pref {}", value)
+                }
+            }
+            SetClause::Med(MedSet::Set(v)) => write!(f, "set med {}", v),
+            SetClause::Med(MedSet::Remove) => write!(f, "set med remove"),
+            SetClause::Community(op) => write_community_set(f, "community", op),
+            SetClause::ExtCommunity(op) => write_community_set(f, "ext-community", op),
+            SetClause::LargeCommunity(op) => write_community_set(f, "large-community", op),
+            SetClause::SetRpkiState(v) => {
+                write!(f, "set rpki-state {}", rpki_validation_to_str(*v))
+            }
+        }
+    }
+}
+
+fn write_community_set(f: &mut fmt::Formatter<'_>, keyword: &str, op: &CommunityOp) -> fmt::Result {
+    let op_str = match op.op {
+        CommunityOpKind::Add => "add",
+        CommunityOpKind::Remove => "remove",
+        CommunityOpKind::Replace => "replace",
+    };
+    write!(f, "set {} {}", keyword, op_str)?;
+    for v in &op.values {
+        write!(f, " {}", v)?;
+    }
+    Ok(())
+}
+
+fn rpki_validation_to_str(v: RpkiValidationKind) -> &'static str {
+    match v {
+        RpkiValidationKind::Valid => "valid",
+        RpkiValidationKind::Invalid => "invalid",
+        RpkiValidationKind::NotFound => "not-found",
     }
 }
 
 impl fmt::Display for PrefixListBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "prefix-list {} {{", self.name)?;
-        for prefix in &self.prefixes {
-            writeln!(f, "  {}", prefix)?;
+        for entry in &self.prefixes {
+            writeln!(f, "  {}", entry)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for PrefixListEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.range {
+            None => write!(f, "{}", self.prefix),
+            Some(MasklengthRange::Exact) => write!(f, "{} exact", self.prefix),
+            Some(MasklengthRange::Range { ge, le }) => {
+                write!(f, "{}", self.prefix)?;
+                if let Some(g) = ge {
+                    write!(f, " ge {}", g)?;
+                }
+                if let Some(l) = le {
+                    write!(f, " le {}", l)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl fmt::Display for NeighborSetBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "neighbor-set {} {{", self.name)?;
+        for entry in &self.neighbors {
+            writeln!(f, "  {}", entry)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for AsPathSetBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "as-path-set {} {{", self.name)?;
+        for pattern in &self.patterns {
+            // AS-path patterns can contain whitespace; emit them quoted so the
+            // tokenizer treats each one as a single token on parse.
+            writeln!(f, "  \"{}\"", pattern)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for CommunitySetBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "community-set {} {{", self.name)?;
+        for entry in &self.communities {
+            writeln!(f, "  {}", entry)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for ExtCommunitySetBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "ext-community-set {} {{", self.name)?;
+        for entry in &self.ext_communities {
+            writeln!(f, "  {}", entry)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl fmt::Display for LargeCommunitySetBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "large-community-set {} {{", self.name)?;
+        for entry in &self.large_communities {
+            writeln!(f, "  {}", entry)?;
         }
         write!(f, "}}")
     }
@@ -368,11 +746,56 @@ impl fmt::Display for BgpServiceBody {
             }
             first = false;
         }
-        for plist in &self.prefix_lists {
+        for prefix_list in &self.prefix_lists {
             if !first {
                 writeln!(f)?;
             }
-            for line in plist.to_string().lines() {
+            for line in prefix_list.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for neighbor_set in &self.neighbor_sets {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in neighbor_set.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for as_path_set in &self.as_path_sets {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in as_path_set.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for community_set in &self.community_sets {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in community_set.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for ext_community_set in &self.ext_community_sets {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in ext_community_set.to_string().lines() {
+                writeln!(f, "  {}", line)?;
+            }
+            first = false;
+        }
+        for large_community_set in &self.large_community_sets {
+            if !first {
+                writeln!(f)?;
+            }
+            for line in large_community_set.to_string().lines() {
                 writeln!(f, "  {}", line)?;
             }
             first = false;
@@ -496,6 +919,51 @@ pub(crate) fn parse_bgp_body(
                 expect_open_brace(tokens, pos)?;
                 body.prefix_lists
                     .push(parse_prefix_list_block(name, tokens, pos)?);
+            }
+            "neighbor-set" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "neighbor-set requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.neighbor_sets
+                    .push(parse_neighbor_set_block(name, tokens, pos)?);
+            }
+            "as-path-set" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "as-path-set requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.as_path_sets
+                    .push(parse_as_path_set_block(name, tokens, pos)?);
+            }
+            "community-set" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "community-set requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.community_sets
+                    .push(parse_community_set_block(name, tokens, pos)?);
+            }
+            "ext-community-set" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "ext-community-set requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.ext_community_sets
+                    .push(parse_ext_community_set_block(name, tokens, pos)?);
+            }
+            "large-community-set" => {
+                let name = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "large-community-set requires a name"))?
+                    .0;
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                body.large_community_sets
+                    .push(parse_large_community_set_block(name, tokens, pos)?);
             }
             "bmp-server" => {
                 let address = expect_word(tokens, pos)
@@ -634,6 +1102,55 @@ fn parse_family_block(
                     FamilyDirective::ImportPolicy(policy_name)
                 }
             }
+            "max-prefix" => {
+                // `max-prefix N [action terminate|discard]`
+                let (limit_str, _) = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "max-prefix requires a value"))?;
+                let limit: u32 = limit_str.parse().map_err(|_| {
+                    parse_err(line, format!("invalid max-prefix value '{}'", limit_str))
+                })?;
+                let mut action = MaxPrefixActionKind::Terminate;
+                if let Some(TokenKind::Word(w)) = peek_kind(tokens, *pos) {
+                    if w == "action" {
+                        take_word(tokens, pos);
+                        let action_word = expect_word(tokens, pos)
+                            .map_err(|_| parse_err(line, "action requires terminate|discard"))?
+                            .0;
+                        action = match action_word.as_str() {
+                            "terminate" => MaxPrefixActionKind::Terminate,
+                            "discard" => MaxPrefixActionKind::Discard,
+                            other => {
+                                return Err(parse_err(
+                                    line,
+                                    format!(
+                                        "max-prefix action must be 'terminate' or 'discard', got '{}'",
+                                        other
+                                    ),
+                                ));
+                            }
+                        };
+                    }
+                }
+                finish_statement(tokens, pos)?;
+                FamilyDirective::MaxPrefix { limit, action }
+            }
+            "add-path-send" => {
+                let val = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "add-path-send requires a value"))?
+                    .0;
+                let mode = match val.as_str() {
+                    "all" => AddPathSendMode::All,
+                    "disabled" => AddPathSendMode::Disabled,
+                    other => {
+                        return Err(parse_err(
+                            line,
+                            format!("add-path-send must be 'all' or 'disabled', got '{}'", other),
+                        ));
+                    }
+                };
+                finish_statement(tokens, pos)?;
+                FamilyDirective::AddPathSend(mode)
+            }
             other => {
                 return Err(parse_err(
                     line,
@@ -641,7 +1158,12 @@ fn parse_family_block(
                 ));
             }
         };
-        finish_statement(tokens, pos)?;
+        if !matches!(
+            &directive,
+            FamilyDirective::MaxPrefix { .. } | FamilyDirective::AddPathSend(_)
+        ) {
+            finish_statement(tokens, pos)?;
+        }
         directives.push(directive);
     }
     expect_close_brace(tokens, pos)?;
@@ -677,23 +1199,276 @@ fn parse_policy_block(
                 let action = expect_word(tokens, pos)
                     .map_err(|_| parse_err(line, "match requires an action"))?
                     .0;
+                finish_statement(tokens, pos)?;
                 PolicyRule::Match { set_name, action }
             }
             "default" => {
                 let action = expect_word(tokens, pos)
                     .map_err(|_| parse_err(line, "default requires an action"))?
                     .0;
+                finish_statement(tokens, pos)?;
                 PolicyRule::Default { action }
+            }
+            "statement" => {
+                // `statement [NAME] { ... }` — the optional name precedes the open brace.
+                let stmt_name = match peek_kind(tokens, *pos) {
+                    Some(TokenKind::OpenBrace) => None,
+                    Some(TokenKind::Word(_)) => {
+                        let (n, _) = expect_word(tokens, pos)?;
+                        Some(n)
+                    }
+                    _ => None,
+                };
+                skip_newlines(tokens, pos);
+                expect_open_brace(tokens, pos)?;
+                let block = parse_statement_block(stmt_name, tokens, pos)?;
+                PolicyRule::Statement(block)
             }
             other => {
                 return Err(parse_err(line, format!("unknown policy rule '{}'", other)));
             }
         };
-        finish_statement(tokens, pos)?;
         rules.push(rule);
     }
     expect_close_brace(tokens, pos)?;
     Ok(PolicyBlock { name, rules })
+}
+
+fn parse_statement_block(
+    name: Option<String>,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<StatementBlock, ParseError> {
+    let mut block = StatementBlock {
+        name,
+        ..Default::default()
+    };
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(
+                    tokens[*pos].line,
+                    "unexpected '{' inside statement",
+                ));
+            }
+            _ => {}
+        }
+        let (key, line) = expect_word(tokens, pos)?;
+        match key.as_str() {
+            "match" => block.matches.push(parse_match_clause(line, tokens, pos)?),
+            "set" => block.sets.push(parse_set_clause(line, tokens, pos)?),
+            "accept" => {
+                if block.disposition.is_some() {
+                    return Err(parse_err(line, "duplicate disposition"));
+                }
+                block.disposition = Some(Disposition::Accept);
+                finish_statement(tokens, pos)?;
+            }
+            "reject" => {
+                if block.disposition.is_some() {
+                    return Err(parse_err(line, "duplicate disposition"));
+                }
+                block.disposition = Some(Disposition::Reject);
+                finish_statement(tokens, pos)?;
+            }
+            other => {
+                return Err(parse_err(
+                    line,
+                    format!("unknown statement directive '{}'", other),
+                ));
+            }
+        }
+    }
+    expect_close_brace(tokens, pos)?;
+    Ok(block)
+}
+
+fn parse_match_clause(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<MatchClause, ParseError> {
+    let (kind, _) =
+        expect_word(tokens, pos).map_err(|_| parse_err(line, "match requires a directive"))?;
+    let clause = match kind.as_str() {
+        "prefix-set" => MatchClause::PrefixSet(parse_match_set_ref(line, tokens, pos)?),
+        "neighbor-set" => MatchClause::NeighborSet(parse_match_set_ref(line, tokens, pos)?),
+        "as-path-set" => MatchClause::AsPathSet(parse_match_set_ref(line, tokens, pos)?),
+        "community-set" => MatchClause::CommunitySet(parse_match_set_ref(line, tokens, pos)?),
+        "ext-community-set" => {
+            MatchClause::ExtCommunitySet(parse_match_set_ref(line, tokens, pos)?)
+        }
+        "large-community-set" => {
+            MatchClause::LargeCommunitySet(parse_match_set_ref(line, tokens, pos)?)
+        }
+        "prefix" => MatchClause::Prefix(expect_word(tokens, pos)?.0),
+        "neighbor" => MatchClause::Neighbor(expect_word(tokens, pos)?.0),
+        "has-asn" => {
+            let (s, _) = expect_word(tokens, pos)?;
+            MatchClause::HasAsn(
+                s.parse()
+                    .map_err(|_| parse_err(line, format!("invalid has-asn '{}'", s)))?,
+            )
+        }
+        "route-type" => MatchClause::RouteType(expect_word(tokens, pos)?.0),
+        "community" => MatchClause::Community(expect_word(tokens, pos)?.0),
+        "rpki" => MatchClause::Rpki(parse_rpki_validation(line, tokens, pos)?),
+        "afi-safi" => MatchClause::AfiSafi(expect_word(tokens, pos)?.0),
+        "ls-nlri-type" => MatchClause::LsNlriType(expect_word(tokens, pos)?.0),
+        "ls-protocol-id" => MatchClause::LsProtocolId(expect_word(tokens, pos)?.0),
+        "ls-instance-id" => {
+            let (s, _) = expect_word(tokens, pos)?;
+            MatchClause::LsInstanceId(
+                s.parse()
+                    .map_err(|_| parse_err(line, format!("invalid ls-instance-id '{}'", s)))?,
+            )
+        }
+        "ls-node-as" => {
+            let (s, _) = expect_word(tokens, pos)?;
+            MatchClause::LsNodeAs(
+                s.parse()
+                    .map_err(|_| parse_err(line, format!("invalid ls-node-as '{}'", s)))?,
+            )
+        }
+        "ls-node-router-id" => MatchClause::LsNodeRouterId(expect_word(tokens, pos)?.0),
+        other => {
+            return Err(parse_err(
+                line,
+                format!("unknown match directive '{}'", other),
+            ));
+        }
+    };
+    finish_statement(tokens, pos)?;
+    Ok(clause)
+}
+
+fn parse_match_set_ref(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<MatchSetRef, ParseError> {
+    let (set_name, _) =
+        expect_word(tokens, pos).map_err(|_| parse_err(line, "match-set requires a set name"))?;
+    let mut option = MatchOptionKind::Any;
+    if let Some(TokenKind::Word(w)) = peek_kind(tokens, *pos) {
+        match w.as_str() {
+            "all" => {
+                take_word(tokens, pos);
+                option = MatchOptionKind::All;
+            }
+            "invert" => {
+                take_word(tokens, pos);
+                option = MatchOptionKind::Invert;
+            }
+            "any" => {
+                take_word(tokens, pos);
+                option = MatchOptionKind::Any;
+            }
+            _ => {}
+        }
+    }
+    Ok(MatchSetRef { set_name, option })
+}
+
+fn parse_rpki_validation(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<RpkiValidationKind, ParseError> {
+    let (s, _) = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, "rpki requires valid|invalid|not-found"))?;
+    match s.as_str() {
+        "valid" => Ok(RpkiValidationKind::Valid),
+        "invalid" => Ok(RpkiValidationKind::Invalid),
+        "not-found" => Ok(RpkiValidationKind::NotFound),
+        other => Err(parse_err(
+            line,
+            format!("rpki must be valid|invalid|not-found, got '{}'", other),
+        )),
+    }
+}
+
+fn parse_set_clause(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<SetClause, ParseError> {
+    let (kind, _) =
+        expect_word(tokens, pos).map_err(|_| parse_err(line, "set requires a directive"))?;
+    let clause = match kind.as_str() {
+        "local-pref" => {
+            // `local-pref N` or `local-pref force N`
+            let (next, _) = expect_word(tokens, pos)?;
+            if next == "force" {
+                let (val, _) = expect_word(tokens, pos)?;
+                SetClause::LocalPref {
+                    value: val
+                        .parse()
+                        .map_err(|_| parse_err(line, format!("invalid local-pref '{}'", val)))?,
+                    force: true,
+                }
+            } else {
+                SetClause::LocalPref {
+                    value: next
+                        .parse()
+                        .map_err(|_| parse_err(line, format!("invalid local-pref '{}'", next)))?,
+                    force: false,
+                }
+            }
+        }
+        "med" => {
+            let (val, _) = expect_word(tokens, pos)?;
+            if val == "remove" {
+                SetClause::Med(MedSet::Remove)
+            } else {
+                SetClause::Med(MedSet::Set(
+                    val.parse()
+                        .map_err(|_| parse_err(line, format!("invalid med '{}'", val)))?,
+                ))
+            }
+        }
+        "community" => SetClause::Community(parse_community_op(line, tokens, pos)?),
+        "ext-community" => SetClause::ExtCommunity(parse_community_op(line, tokens, pos)?),
+        "large-community" => SetClause::LargeCommunity(parse_community_op(line, tokens, pos)?),
+        "rpki-state" => SetClause::SetRpkiState(parse_rpki_validation(line, tokens, pos)?),
+        other => {
+            return Err(parse_err(
+                line,
+                format!("unknown set directive '{}'", other),
+            ));
+        }
+    };
+    finish_statement(tokens, pos)?;
+    Ok(clause)
+}
+
+fn parse_community_op(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<CommunityOp, ParseError> {
+    let (op_str, _) = expect_word(tokens, pos)
+        .map_err(|_| parse_err(line, "community requires add|remove|replace"))?;
+    let op = match op_str.as_str() {
+        "add" => CommunityOpKind::Add,
+        "remove" => CommunityOpKind::Remove,
+        "replace" => CommunityOpKind::Replace,
+        other => {
+            return Err(parse_err(
+                line,
+                format!("community op must be add|remove|replace, got '{}'", other),
+            ));
+        }
+    };
+    let mut values = Vec::new();
+    while let Some(TokenKind::Word(_)) = peek_kind(tokens, *pos) {
+        let (v, _) = expect_word(tokens, pos)?;
+        values.push(v);
+    }
+    Ok(CommunityOp { op, values })
 }
 
 fn parse_prefix_list_block(
@@ -715,12 +1490,168 @@ fn parse_prefix_list_block(
             }
             _ => {}
         }
-        let (prefix, _) = expect_word(tokens, pos)?;
+        let (prefix, line) = expect_word(tokens, pos)?;
+        let range = parse_optional_masklength_range(line, tokens, pos)?;
         finish_statement(tokens, pos)?;
-        prefixes.push(prefix);
+        prefixes.push(PrefixListEntry { prefix, range });
     }
     expect_close_brace(tokens, pos)?;
     Ok(PrefixListBlock { name, prefixes })
+}
+
+/// Parse the optional `exact | ge N [le M] | le M [ge N]` tail after a
+/// prefix-list entry's prefix. Caller has consumed the prefix word.
+/// Returns `None` if the next token is a newline or close brace.
+fn parse_optional_masklength_range(
+    line: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<Option<MasklengthRange>, ParseError> {
+    let mut ge = None;
+    let mut le = None;
+    let mut exact = false;
+    while let Some(TokenKind::Word(w)) = peek_kind(tokens, *pos) {
+        match w.as_str() {
+            "exact" => {
+                if exact {
+                    return Err(parse_err(line, "duplicate 'exact'"));
+                }
+                if ge.is_some() || le.is_some() {
+                    return Err(parse_err(line, "'exact' cannot combine with ge/le"));
+                }
+                take_word(tokens, pos);
+                exact = true;
+            }
+            "ge" => {
+                if exact {
+                    return Err(parse_err(line, "'ge' cannot combine with 'exact'"));
+                }
+                take_word(tokens, pos);
+                let (val, _) = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "'ge' requires a masklen value"))?;
+                let n: u8 = val
+                    .parse()
+                    .map_err(|_| parse_err(line, format!("invalid masklen for 'ge': '{}'", val)))?;
+                if ge.is_some() {
+                    return Err(parse_err(line, "duplicate 'ge'"));
+                }
+                ge = Some(n);
+            }
+            "le" => {
+                if exact {
+                    return Err(parse_err(line, "'le' cannot combine with 'exact'"));
+                }
+                take_word(tokens, pos);
+                let (val, _) = expect_word(tokens, pos)
+                    .map_err(|_| parse_err(line, "'le' requires a masklen value"))?;
+                let n: u8 = val
+                    .parse()
+                    .map_err(|_| parse_err(line, format!("invalid masklen for 'le': '{}'", val)))?;
+                if le.is_some() {
+                    return Err(parse_err(line, "duplicate 'le'"));
+                }
+                le = Some(n);
+            }
+            _ => break,
+        }
+    }
+    if exact {
+        Ok(Some(MasklengthRange::Exact))
+    } else if ge.is_some() || le.is_some() {
+        Ok(Some(MasklengthRange::Range { ge, le }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_word_list_block<F>(
+    block_kind: &str,
+    tokens: &[Token],
+    pos: &mut usize,
+    mut on_entry: F,
+) -> Result<(), ParseError>
+where
+    F: FnMut(String),
+{
+    loop {
+        skip_newlines(tokens, pos);
+        match peek_kind(tokens, *pos) {
+            Some(TokenKind::CloseBrace) => break,
+            None => return Err(unexpected_eof(tokens, *pos)),
+            Some(TokenKind::OpenBrace) => {
+                return Err(parse_err(
+                    tokens[*pos].line,
+                    format!("unexpected '{{' inside {}", block_kind),
+                ));
+            }
+            _ => {}
+        }
+        let (entry, _) = expect_word(tokens, pos)?;
+        finish_statement(tokens, pos)?;
+        on_entry(entry);
+    }
+    expect_close_brace(tokens, pos)?;
+    Ok(())
+}
+
+fn parse_neighbor_set_block(
+    name: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<NeighborSetBlock, ParseError> {
+    let mut neighbors = Vec::new();
+    parse_word_list_block("neighbor-set", tokens, pos, |w| neighbors.push(w))?;
+    Ok(NeighborSetBlock { name, neighbors })
+}
+
+fn parse_as_path_set_block(
+    name: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<AsPathSetBlock, ParseError> {
+    let mut patterns = Vec::new();
+    parse_word_list_block("as-path-set", tokens, pos, |w| patterns.push(w))?;
+    Ok(AsPathSetBlock { name, patterns })
+}
+
+fn parse_community_set_block(
+    name: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<CommunitySetBlock, ParseError> {
+    let mut communities = Vec::new();
+    parse_word_list_block("community-set", tokens, pos, |w| communities.push(w))?;
+    Ok(CommunitySetBlock { name, communities })
+}
+
+fn parse_ext_community_set_block(
+    name: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<ExtCommunitySetBlock, ParseError> {
+    let mut ext_communities = Vec::new();
+    parse_word_list_block("ext-community-set", tokens, pos, |w| {
+        ext_communities.push(w)
+    })?;
+    Ok(ExtCommunitySetBlock {
+        name,
+        ext_communities,
+    })
+}
+
+fn parse_large_community_set_block(
+    name: String,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<LargeCommunitySetBlock, ParseError> {
+    let mut large_communities = Vec::new();
+    parse_word_list_block("large-community-set", tokens, pos, |w| {
+        large_communities.push(w)
+    })?;
+    Ok(LargeCommunitySetBlock {
+        name,
+        large_communities,
+    })
 }
 
 /// Parse a scalar `key VALUE\n` line. `T` decides how the value is interpreted.
@@ -1444,10 +2375,16 @@ service bgp {
 
         let prefix_list = &body.prefix_lists[0];
         assert_eq!(prefix_list.name, "my-prefixes");
+        let prefix_strings: Vec<&str> = prefix_list
+            .prefixes
+            .iter()
+            .map(|e| e.prefix.as_str())
+            .collect();
         assert_eq!(
-            prefix_list.prefixes,
+            prefix_strings,
             vec!["172.23.211.0/27", "fd0d:fbde:bca5::/48"]
         );
+        assert!(prefix_list.prefixes.iter().all(|e| e.range.is_none()));
     }
 
     #[test]
@@ -1605,7 +2542,9 @@ service bgp {
     #[test]
     fn test_display_round_trip() {
         let cases = vec![
+            // minimal config
             "service bgp {\n  asn 65001\n  router-id 1.1.1.1\n}",
+            // top-level service settings
             "\
 service bgp {
   asn 65001
@@ -1616,6 +2555,7 @@ service bgp {
   hold-time 90
   connect-retry 10
 }",
+            // peer settings
             "\
 service bgp {
   asn 65001
@@ -1636,6 +2576,7 @@ service bgp {
     rr-client true
   }
 }",
+            // peer family directives (export/import policy, max-prefix, add-path-send)
             "\
 service bgp {
   asn 65001
@@ -1644,6 +2585,8 @@ service bgp {
   peer 10.0.0.1 {
     family ipv4 unicast {
       export policy mine-only
+      max-prefix 1000 action discard
+      add-path-send all
     }
 
     family ipv6 unicast {
@@ -1651,6 +2594,7 @@ service bgp {
     }
   }
 }",
+            // originate + shorthand-form policy + bare prefix-list
             "\
 service bgp {
   asn 65001
@@ -1668,6 +2612,7 @@ service bgp {
     fd0d:fbde:bca5::/48
   }
 }",
+            // bmp-server and rpki-cache blocks
             "\
 service bgp {
   asn 65001
@@ -1683,6 +2628,77 @@ service bgp {
     ssh-username rtr-user
     ssh-private-key-file /etc/bgp/rtr.key
     retry-interval 60
+  }
+}",
+            // statement-form policy with typed match/set clauses
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  policy mine-only {
+    statement allow-customers {
+      match prefix-set my-prefixes
+      match neighbor-set my-neighbors all
+      match as-path-set transit-as invert
+      match community-set well-known
+      match has-asn 65000
+      match rpki valid
+      match afi-safi ipv4-unicast
+      set local-pref force 200
+      set med remove
+      set community add 65001:100 65001:200
+      set ext-community remove rt:65001:1
+      set large-community replace 65001:1:1
+      set rpki-state valid
+      accept
+    }
+    default reject
+  }
+}",
+            // prefix-list masklength range variants
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  prefix-list ranged {
+    10.0.0.0/8 exact
+    172.16.0.0/12 ge 16
+    192.168.0.0/16 ge 24 le 28
+    fd00::/8
+  }
+}",
+            // named set blocks + bgp-ls
+            "\
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+
+  neighbor-set my-neighbors {
+    10.0.0.1
+    10.0.0.2
+  }
+
+  as-path-set transit-as {
+    \"_65000_\"
+    \"^65001$\"
+  }
+
+  community-set well-known {
+    65001:100
+  }
+
+  ext-community-set rt-set {
+    rt:65001:1
+  }
+
+  large-community-set lc-set {
+    65001:1:1
+  }
+
+  bgp-ls {
+    instance-id 0
   }
 }",
         ];

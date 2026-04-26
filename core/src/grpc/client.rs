@@ -530,10 +530,13 @@ impl BgpClient {
         }
     }
 
-    /// Set policy assignment for a peer
+    /// Set policy assignment for a peer's (afi, safi). Replaces all
+    /// currently-attached policies for that direction with `policy_names`.
     pub async fn set_policy_assignment(
         &self,
         peer_address: String,
+        afi: u32,
+        safi: u32,
         direction: String,
         policy_names: Vec<String>,
         default_action: Option<String>,
@@ -543,6 +546,8 @@ impl BgpClient {
             .clone()
             .set_policy_assignment(SetPolicyAssignmentRequest {
                 peer_address,
+                afi,
+                safi,
                 direction,
                 policy_names,
                 default_action,

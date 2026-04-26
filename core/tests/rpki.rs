@@ -93,7 +93,14 @@ async fn setup_rpki_peer(
         90,
     ))
     .await;
-    let [server2, server1] = chain_servers([server2, server1], PeerConfig::default()).await;
+    let [server2, server1] = chain_servers(
+        [server2, server1],
+        PeerConfig {
+            afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()],
+            ..Default::default()
+        },
+    )
+    .await;
     (server1, server2)
 }
 

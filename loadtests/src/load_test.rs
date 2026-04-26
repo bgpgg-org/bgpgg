@@ -213,6 +213,8 @@ async fn establish_upstream_peers(
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "import".to_string(),
                         policy_names: vec!["accept-all".to_string()],
                         default_action: None,
@@ -222,6 +224,8 @@ async fn establish_upstream_peers(
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "export".to_string(),
                         policy_names: vec!["reject-all".to_string()],
                         default_action: None,
@@ -692,6 +696,8 @@ async fn test_route_convergence() {
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "export".to_string(),
                         policy_names: vec!["accept-all".to_string()],
                         default_action: None,

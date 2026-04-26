@@ -29,10 +29,11 @@ use crate::policy::sets::{
 use crate::policy::{DefinedSetType, Policy};
 use crate::rib::{PathAttrs, Route, RouteKey};
 use conf::bgp::{
-    AsPathSetConfig, BgpConfig, BmpConfig, CommunitySetConfig, DefinedSetConfig, NeighborSetConfig,
-    PeerConfig, PolicyDefinitionConfig, PrefixMatchConfig, PrefixSetConfig, RpkiCacheConfig,
-    StatementConfig,
+    afi_safi_entry_mut, AsPathSetConfig, BgpConfig, BmpConfig, CommunitySetConfig,
+    DefinedSetConfig, NeighborSetConfig, PeerConfig, PolicyDefinitionConfig, PrefixMatchConfig,
+    PrefixSetConfig, RpkiCacheConfig, StatementConfig,
 };
+
 use conf::fs::{list_snapshots, load_snapshot, SnapshotInfo, SNAPSHOT_COUNT};
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
@@ -160,6 +161,7 @@ pub enum MgmtOp {
     },
     SetPolicyAssignment {
         peer_addr: IpAddr,
+        family: AfiSafi,
         direction: PolicyDirection,
         policy_names: Vec<String>,
         default_action: Option<crate::policy::PolicyResult>,
@@ -356,6 +358,7 @@ impl BgpServer {
             }
             MgmtOp::SetPolicyAssignment {
                 peer_addr,
+                family,
                 direction,
                 policy_names,
                 default_action,
@@ -363,6 +366,7 @@ impl BgpServer {
             } => {
                 self.handle_set_policy_assignment(
                     peer_addr,
+                    family,
                     direction,
                     policy_names,
                     default_action,
@@ -925,16 +929,8 @@ impl BgpServer {
                     asn: asn.or(entry.config.asn),
                     state,
                     admin_state: entry.admin_state,
-                    import_policies: entry
-                        .import_policies
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
-                    export_policies: entry
-                        .export_policies
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
+                    import_policies: entry.import_policy_names(),
+                    export_policies: entry.export_policy_names(),
                 }
             })
             .collect();
@@ -968,16 +964,8 @@ impl BgpServer {
             asn: asn.or(entry.config.asn),
             state,
             admin_state: entry.admin_state,
-            import_policies: entry
-                .import_policies
-                .iter()
-                .map(|p| p.name.clone())
-                .collect(),
-            export_policies: entry
-                .export_policies
-                .iter()
-                .map(|p| p.name.clone())
-                .collect(),
+            import_policies: entry.import_policy_names(),
+            export_policies: entry.export_policy_names(),
             statistics: stats,
             config: entry.config.clone(),
         }));
@@ -1053,16 +1041,8 @@ impl BgpServer {
                 asn: asn.or(entry.config.asn),
                 state,
                 admin_state: entry.admin_state,
-                import_policies: entry
-                    .import_policies
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect(),
-                export_policies: entry
-                    .export_policies
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect(),
+                import_policies: entry.import_policy_names(),
+                export_policies: entry.export_policy_names(),
             };
             if tx.send(peer).is_err() {
                 break;
@@ -1691,6 +1671,7 @@ impl BgpServer {
     fn handle_set_policy_assignment(
         &mut self,
         peer_addr: IpAddr,
+        family: AfiSafi,
         direction: PolicyDirection,
         policy_names: Vec<String>,
         _default_action: Option<crate::policy::PolicyResult>,
@@ -1703,16 +1684,8 @@ impl BgpServer {
                 return;
             }
         };
-        // Check if peer exists
-        let peer = match self.peers.get_mut(&peer_addr) {
-            Some(p) => p,
-            None => {
-                let _ = response.send(Err(format!("peer {} not found", peer_addr)));
-                return;
-            }
-        };
 
-        // Resolve policy names to Policy objects
+        // Resolve policy names to Policy objects.
         let mut resolved_policies = Vec::new();
         for name in &policy_names {
             match self.policy_ctx.policies.get(name) {
@@ -1724,24 +1697,39 @@ impl BgpServer {
             }
         }
 
-        // Update peer's policy list and persist names in config so policies
-        // survive session reconnections.
+        let peer = match self.peers.get_mut(&peer_addr) {
+            Some(p) => p,
+            None => {
+                let _ = response.send(Err(format!("peer {} not found", peer_addr)));
+                return;
+            }
+        };
+
+        // Persist the assignment in the peer's per-family config so it
+        // survives session reconnections. Auto-create the family entry if
+        // the peer didn't have one for this (afi, safi) yet.
+        let entry = afi_safi_entry_mut(&mut peer.config.afi_safis, family.afi, family.safi);
+        match direction {
+            PolicyDirection::Import => entry.import_policy = policy_names.clone(),
+            PolicyDirection::Export => entry.export_policy = policy_names.clone(),
+        }
+
+        // Update resolved runtime policies for this family.
         match direction {
             PolicyDirection::Import => {
-                peer.config.import_policy = policy_names.clone();
-                peer.import_policies = resolved_policies;
+                peer.import_policies.insert(family, resolved_policies);
             }
             PolicyDirection::Export => {
-                peer.config.export_policy = policy_names.clone();
-                peer.export_policies = resolved_policies;
+                peer.export_policies.insert(family, resolved_policies);
             }
         }
 
         // Mirror to self.config so SaveConfig persists the assignment.
         if let Some(cfg) = self.find_peer_config_mut(peer_addr) {
+            let entry = afi_safi_entry_mut(&mut cfg.afi_safis, family.afi, family.safi);
             match direction {
-                PolicyDirection::Import => cfg.import_policy = policy_names,
-                PolicyDirection::Export => cfg.export_policy = policy_names,
+                PolicyDirection::Import => entry.import_policy = policy_names,
+                PolicyDirection::Export => entry.export_policy = policy_names,
             }
         }
 

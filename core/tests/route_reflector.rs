@@ -19,9 +19,8 @@ pub use utils::*;
 
 use bgpgg::bgp::msg_update::{attr_flags, attr_type_code};
 use bgpgg::grpc::proto::{
-    remove_route_request, AfiSafiConfig, BgpState, ListRoutesRequest, LsAttribute, LsNlri,
-    LsNlriType, LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest,
-    SessionConfig,
+    remove_route_request, BgpState, ListRoutesRequest, LsAttribute, LsNlri, LsNlriType,
+    LsNodeAttribute, LsNodeDescriptor, LsProtocolId, Origin, RemoveRouteRequest, SessionConfig,
 };
 use std::net::Ipv4Addr;
 
@@ -220,11 +219,7 @@ async fn test_route_reflector_basic() {
     let client2 = start_test_server(test_config(asn, 3)).await;
 
     let ls_config = SessionConfig {
-        afi_safis: vec![AfiSafiConfig {
-            afi: 16388,
-            safi: 71,
-            ..Default::default()
-        }],
+        afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_link_state()],
         ..Default::default()
     };
     setup_rr(vec![&rr], vec![vec![&client1, &client2]], vec![], ls_config).await;

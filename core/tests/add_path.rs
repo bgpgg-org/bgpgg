@@ -755,6 +755,7 @@ async fn test_addpath_per_afi_safi_negotiation() {
                     port: Some(fake.port() as u32),
                     add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
                     add_path_receive: Some(true),
+                    afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()],
                     ..Default::default()
                 }),
             )

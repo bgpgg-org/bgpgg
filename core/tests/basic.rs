@@ -428,7 +428,11 @@ async fn test_as_loop_prevention() {
 
 #[tokio::test]
 async fn test_ipv6_route_exchange() {
-    let (server1, server2) = setup_two_peered_servers(PeerConfig::default()).await;
+    let (server1, server2) = setup_two_peered_servers(PeerConfig {
+        afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()],
+        ..PeerConfig::default()
+    })
+    .await;
 
     // Server2 announces both IPv4 and IPv6 routes to Server1 via gRPC
     announce_route(
@@ -512,7 +516,14 @@ async fn test_ipv6_nexthop_rewrite() {
     ))
     .await;
 
-    let [server1, server2] = chain_servers([server1, server2], PeerConfig::default()).await;
+    let [server1, server2] = chain_servers(
+        [server1, server2],
+        PeerConfig {
+            afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()],
+            ..PeerConfig::default()
+        },
+    )
+    .await;
 
     // Server2 announces IPv6 route with explicit next-hop
     announce_and_verify_route(
@@ -1123,10 +1134,18 @@ async fn test_ipv6_link_local_nexthop() {
     ))
     .await;
 
+    let v4_v6 = vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()];
+
     // Add eBGP peer (FakePeer1) that will inject the 32-byte next-hop
     server
         .client
-        .add_peer("127.0.0.2".to_string(), Some(SessionConfig::default()))
+        .add_peer(
+            "127.0.0.2".to_string(),
+            Some(SessionConfig {
+                afi_safis: v4_v6.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
     apply_permit_all(&server, "127.0.0.2").await;
@@ -1138,6 +1157,7 @@ async fn test_ipv6_link_local_nexthop() {
             "127.0.0.3".to_string(),
             Some(SessionConfig {
                 asn: Some(65001),
+                afi_safis: v4_v6,
                 ..Default::default()
             }),
         )

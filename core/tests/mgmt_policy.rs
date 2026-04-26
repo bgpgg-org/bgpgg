@@ -22,7 +22,7 @@ use bgpgg::grpc::proto::{
     ConditionsConfig, DefinedSetConfig, DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo,
     PrefixMatch, PrefixSetData, StatementConfig, StatementInfo,
 };
-use conf::bgp::BgpConfig;
+use conf::bgp::{Afi, BgpConfig, Safi};
 use std::net::Ipv4Addr;
 
 // Test fixtures
@@ -624,43 +624,60 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    // Set import policy
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "import".to_string(),
-            vec!["import-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    // Replace import on every common family so the assertion stays clean.
+    // (Helper applied permit-all to ipv4/ipv6/LinkState.)
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "import".to_string(),
+                vec!["import-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: import policy replaced, export unchanged from helper setup
+    // Assert: import policy replaced on all families, export unchanged.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["permit-all"]);
 
-    // Set export policy
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "export".to_string(),
-            vec!["export-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    // Replace export on every common family.
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "export".to_string(),
+                vec!["export-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: both user policies set
+    // Assert: both user policies set.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["export-policy"]);
 
-    // Create another policy and override import
+    // Create another policy and override import on every common family.
     server1
         .client
         .add_policy(
@@ -674,18 +691,26 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "import".to_string(),
-            vec!["new-import-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "import".to_string(),
+                vec!["new-import-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: import policy was overridden, export remains unchanged
+    // Assert: import policy overridden on all families; export remains.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["new-import-policy"]);
