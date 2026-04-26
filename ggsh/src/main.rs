@@ -23,11 +23,12 @@ mod shell;
 mod util;
 
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
+use std::process;
 
+use conf::fs::DaemonKind;
 use shell::{Service, Shell};
-
-const DEFAULT_BGPGG_ADDR: &str = "http://127.0.0.1:50051";
 
 #[tokio::main]
 async fn main() {
@@ -36,28 +37,28 @@ async fn main() {
 
     if let Err(err) = shell.run().await {
         eprintln!("{}", err);
-        std::process::exit(1);
+        process::exit(1);
     }
 }
 
 fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
     let mut args = std::env::args().skip(1);
-    let mut bgpgg_addr = DEFAULT_BGPGG_ADDR.to_string();
+    let mut bgpgg_addr: Option<String> = None;
     let mut config_path = conf::fs::default_config_path();
     let mut command = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bgpgg-addr" => {
-                bgpgg_addr = args.next().unwrap_or_else(|| {
+                bgpgg_addr = Some(args.next().unwrap_or_else(|| {
                     eprintln!("--bgpgg-addr requires a value");
-                    std::process::exit(1);
-                });
+                    process::exit(1);
+                }));
             }
             "--config" => {
                 config_path = PathBuf::from(args.next().unwrap_or_else(|| {
                     eprintln!("--config requires a value");
-                    std::process::exit(1);
+                    process::exit(1);
                 }));
             }
             _ => {
@@ -67,6 +68,13 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
             }
         }
     }
+
+    let bgpgg_addr = bgpgg_addr.unwrap_or_else(|| {
+        read_bgpggd_grpc_endpoint().unwrap_or_else(|err| {
+            eprintln!("{}", err);
+            process::exit(1);
+        })
+    });
 
     let mut grpc_addrs = HashMap::new();
     grpc_addrs.insert(Service::Bgpgg, bgpgg_addr);
@@ -78,4 +86,24 @@ fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
     };
 
     (grpc_addrs, command, config_path)
+}
+
+/// Read the bgpggd runtime status file and turn its `grpc_addr` into a
+/// tonic-friendly URL. Lets operators skip `--bgpgg-addr` when the
+/// daemon is running on the same host.
+fn read_bgpggd_grpc_endpoint() -> Result<String, String> {
+    let runtime_dir = conf::fs::rogg_runtime_dir();
+    let path = runtime_dir.join(DaemonKind::Bgp.filename());
+    match conf::fs::read_status(&runtime_dir, DaemonKind::Bgp) {
+        Ok(status) => Ok(format!("http://{}", status.grpc_addr)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(format!(
+            "no running daemon found at {}; pass --bgpgg-addr <addr>",
+            path.display()
+        )),
+        Err(e) => Err(format!(
+            "failed to read {}: {}; pass --bgpgg-addr <addr>",
+            path.display(),
+            e
+        )),
+    }
 }

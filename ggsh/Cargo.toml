@@ -15,3 +15,6 @@ tonic.workspace = true
 prost.workspace = true
 uuid.workspace = true
 rustyline = { version = "15", features = ["derive"] }
+
+[dev-dependencies]
+libc = "0.2"

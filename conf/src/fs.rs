@@ -23,8 +23,10 @@
 //! caller's session_uuid against the file content.
 
 use crate::language::{self, Root, Service};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
@@ -244,6 +246,80 @@ pub fn user_state_dir() -> PathBuf {
     xdg_dir("XDG_STATE_HOME", ".local/state").join("rogg")
 }
 
+/// Per-user runtime directory for rogg state files (e.g. the daemon's
+/// `bgpggd.json`). `${XDG_RUNTIME_DIR:-$HOME/.local/state}/rogg`. The
+/// chosen directory is created with mode 0700 by `write_status`.
+pub fn rogg_runtime_dir() -> PathBuf {
+    xdg_dir("XDG_RUNTIME_DIR", ".local/state").join("rogg")
+}
+
+/// Which rogg daemon a status file belongs to. Each daemon publishes
+/// its own runtime file under `rogg_runtime_dir()` so a single host
+/// can run any combination without filename collisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonKind {
+    Bgp,
+}
+
+impl DaemonKind {
+    pub fn filename(self) -> &'static str {
+        match self {
+            DaemonKind::Bgp => "bgpggd.json",
+        }
+    }
+}
+
+/// Daemon-published runtime info: written by the daemon after listeners
+/// bind; read by ggsh and tooling for endpoint discovery. JSON schema is
+/// intentionally minimal so additive fields don't break existing readers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusFile {
+    pub grpc_addr: String,
+}
+
+/// Atomically write the status file under `dir`. Directory mode 0700,
+/// file mode 0600 -- the file may name an internal management endpoint,
+/// so it stays user-private. Callers pass `rogg_runtime_dir()` in
+/// production; tests pass a tempdir.
+pub fn write_status(dir: &Path, daemon: DaemonKind, status: &StatusFile) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+
+    let final_path = dir.join(daemon.filename());
+    let tmp_path = dir.join(format!("{}.tmp", daemon.filename()));
+
+    let json = serde_json::to_vec_pretty(status)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp_path)?;
+    file.write_all(&json)?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&tmp_path, &final_path)?;
+    Ok(())
+}
+
+pub fn read_status(dir: &Path, daemon: DaemonKind) -> io::Result<StatusFile> {
+    let bytes = fs::read(dir.join(daemon.filename()))?;
+    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Best-effort delete on graceful shutdown. Missing file is not an error.
+pub fn remove_status(dir: &Path, daemon: DaemonKind) {
+    let path = dir.join(daemon.filename());
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => tracing::debug!(path = %path.display(), error = %e, "remove_status failed"),
+    }
+}
+
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     if let Some(v) = std::env::var_os(var) {
         if !v.is_empty() {
@@ -262,6 +338,19 @@ mod tests {
     use crate::bgp::BgpConfig;
     use crate::testutil::TempDir;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn status_file_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let written = StatusFile {
+            grpc_addr: "127.0.0.1:50123".into(),
+        };
+        write_status(dir.path(), DaemonKind::Bgp, &written).unwrap();
+        assert_eq!(
+            read_status(dir.path(), DaemonKind::Bgp).unwrap().grpc_addr,
+            written.grpc_addr,
+        );
+    }
 
     /// Wraps `TempDir` with conveniences for the fs tests.
     struct TestDir(TempDir);

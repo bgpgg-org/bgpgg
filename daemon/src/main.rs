@@ -16,9 +16,13 @@ use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::BgpGrpcService;
 use bgpgg::server::BgpServer;
 use clap::Parser;
+use conf::fs::{self as conf_fs, DaemonKind, StatusFile};
 use std::path::PathBuf;
 use std::process;
-use tracing::info;
+use tokio::net::TcpListener;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio_stream::wrappers::TcpListenerStream;
+use tracing::{error, info};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -71,33 +75,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_span_events(FmtSpan::NONE)
         .init();
 
-    let grpc_addr = server.config.grpc_listen_addr.parse()?;
+    let grpc_listener = TcpListener::bind(&server.config.grpc_listen_addr).await?;
+    let grpc_bound = grpc_listener.local_addr()?;
+
+    let runtime_dir = conf_fs::rogg_runtime_dir();
+    conf_fs::write_status(
+        &runtime_dir,
+        DaemonKind::Bgp,
+        &StatusFile {
+            grpc_addr: grpc_bound.to_string(),
+        },
+    )?;
 
     info!(
         bgp_addr = %server.config.listen_addr,
-        grpc_addr = %server.config.grpc_listen_addr,
+        grpc_addr = %grpc_bound,
         asn = server.config.asn,
         router_id = %server.config.router_id,
-        "starting BGP daemon"
+        status_file = %runtime_dir.join(DaemonKind::Bgp.filename()).display(),
+        "BGP daemon starting"
     );
 
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {
-                tracing::error!(error = %e, "BGP server error");
+                error!(error = %e, "BGP server error");
             }
         },
 
         result = tonic::transport::Server::builder()
             .add_service(BgpServiceServer::new(grpc_service))
-            .serve(grpc_addr) => {
+            .serve_with_incoming(TcpListenerStream::new(grpc_listener)) => {
             if let Err(e) = result {
-                tracing::error!(error = %e, "gRPC server error");
+                error!(error = %e, "gRPC server error");
             }
+        },
+
+        _ = sigterm.recv() => {
+            info!("received SIGTERM; shutting down");
+        },
+
+        _ = sigint.recv() => {
+            info!("received SIGINT; shutting down");
         },
     }
 
+    conf_fs::remove_status(&runtime_dir, DaemonKind::Bgp);
     Ok(())
 }

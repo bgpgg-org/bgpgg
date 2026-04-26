@@ -1,4 +1,4 @@
-.PHONY: all build clean run test fmt setup loadtest lint build-docker systest systest-linux
+.PHONY: all build clean run test fmt setup loadtest lint build-docker systest systest-ggsh systest-linux
 
 all: setup
 	cargo build --release
@@ -28,6 +28,7 @@ lint: setup
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test: lint
+	cargo build --bin bgpggd --bin ggsh
 	cargo test --workspace --exclude loadtests --no-fail-fast -- --nocapture
 
 fmt:

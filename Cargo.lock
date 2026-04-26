@@ -682,6 +682,7 @@ dependencies = [
  "core",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
@@ -1070,6 +1071,7 @@ version = "0.3.0"
 dependencies = [
  "conf",
  "core",
+ "libc",
  "prost",
  "rustyline",
  "tokio",
