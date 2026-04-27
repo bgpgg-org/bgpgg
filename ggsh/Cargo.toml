@@ -1,15 +1,20 @@
 [package]
-name = "cli"
+name = "ggsh"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "bgpgg"
+name = "ggsh"
 path = "src/main.rs"
 
 [dependencies]
 core = { path = "../core" }
+conf = { path = "../conf" }
 tokio.workspace = true
 tonic.workspace = true
-clap.workspace = true
 prost.workspace = true
+uuid.workspace = true
+rustyline = { version = "15", features = ["derive"] }
+
+[dev-dependencies]
+libc = "0.2"

@@ -17,12 +17,12 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     defined_set_config, defined_set_info, ActionsConfig, AsPathSetData, CommunitySetData,
     ConditionsConfig, DefinedSetConfig, DefinedSetInfo, MatchSetRef, NeighborSetData, PolicyInfo,
     PrefixMatch, PrefixSetData, StatementConfig, StatementInfo,
 };
+use conf::bgp::{Afi, BgpConfig, Safi};
 use std::net::Ipv4Addr;
 
 // Test fixtures
@@ -235,7 +235,7 @@ async fn test_add_defined_sets() {
     ];
 
     for (desc, input, expected) in test_cases {
-        let server = start_test_server(Config::new(
+        let server = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -259,7 +259,7 @@ async fn test_add_defined_sets() {
 
 #[tokio::test]
 async fn test_add_duplicate_set_fails() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -287,7 +287,7 @@ async fn test_add_duplicate_set_fails() {
 
 #[tokio::test]
 async fn test_list_defined_sets() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -331,7 +331,7 @@ async fn test_list_defined_sets() {
 
 #[tokio::test]
 async fn test_remove_defined_set() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -370,7 +370,7 @@ async fn test_remove_defined_set() {
 
 #[tokio::test]
 async fn test_add_policy() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -433,7 +433,7 @@ async fn test_add_policy() {
 
 #[tokio::test]
 async fn test_add_policy_missing_defined_set() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -461,7 +461,7 @@ async fn test_add_policy_missing_defined_set() {
 
 #[tokio::test]
 async fn test_list_policies() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -540,7 +540,7 @@ async fn test_list_policies() {
 
 #[tokio::test]
 async fn test_remove_policy() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -624,43 +624,60 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    // Set import policy
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "import".to_string(),
-            vec!["import-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    // Replace import on every common family so the assertion stays clean.
+    // (Helper applied permit-all to ipv4/ipv6/LinkState.)
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "import".to_string(),
+                vec!["import-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: import policy replaced, export unchanged from helper setup
+    // Assert: import policy replaced on all families, export unchanged.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["permit-all"]);
 
-    // Set export policy
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "export".to_string(),
-            vec!["export-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    // Replace export on every common family.
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "export".to_string(),
+                vec!["export-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: both user policies set
+    // Assert: both user policies set.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["export-policy"]);
 
-    // Create another policy and override import
+    // Create another policy and override import on every common family.
     server1
         .client
         .add_policy(
@@ -674,27 +691,51 @@ async fn test_set_policy_assignment() {
         .await
         .unwrap();
 
-    server1
-        .client
-        .set_policy_assignment(
-            server2.address.to_string(),
-            "import".to_string(),
-            vec!["new-import-policy".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::LinkState, Safi::LinkState),
+    ] {
+        server1
+            .client
+            .set_policy_assignment(
+                server2.address.to_string(),
+                afi as u32,
+                safi as u32,
+                "import".to_string(),
+                vec!["new-import-policy".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Assert: import policy was overridden, export remains unchanged
+    // Assert: import policy overridden on all families; export remains.
     let peers = server1.client.get_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].import_policies, vec!["new-import-policy"]);
     assert_eq!(peers[0].export_policies, vec!["export-policy"]);
+
+    // Persist to rogg.conf and verify the per-family assignment shows up on disk.
+    server1.save_config().await.unwrap();
+    let conf = server1.read_conf();
+    let saved = conf
+        .peers
+        .iter()
+        .find(|peer| peer.address == server2.address.to_string())
+        .expect("peer in saved config");
+    let family = saved
+        .afi_safis
+        .iter()
+        .find(|afi_safi| afi_safi.afi == Afi::Ipv4 && afi_safi.safi == Safi::Unicast)
+        .expect("ipv4 unicast family in saved config");
+    assert_eq!(family.import_policy, vec!["new-import-policy".to_string()]);
+    assert_eq!(family.export_policy, vec!["export-policy".to_string()]);
 }
 
 #[tokio::test]
 async fn test_reject_policy_name_starting_with_underscore() {
-    let server = start_test_server(Config::new(
+    let server = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),

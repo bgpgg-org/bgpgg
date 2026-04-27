@@ -6,10 +6,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BGPGGD="${BGPGGD:-$PROJECT_DIR/target/release/bgpggd}"
-BGPGG="${BGPGG:-$PROJECT_DIR/target/release/bgpgg}"
+GGSH="${GGSH:-$PROJECT_DIR/target/release/ggsh}"
 
 PEER1_PID=
 PEER2_PID=
+TMPDIR=$(mktemp -d)
 
 cleanup() {
     [ -n "$PEER1_PID" ] && kill "$PEER1_PID" 2>/dev/null || true
@@ -18,7 +19,7 @@ cleanup() {
     PEER1_PID=
     PEER2_PID=
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup; rm -rf "$TMPDIR"' EXIT INT TERM
 
 poll_until() {
     local desc=$1 timeout=$2
@@ -33,25 +34,54 @@ poll_until() {
     return 1
 }
 
+# Drive ggsh through configure mode to apply BGP service settings on a
+# running daemon. Each `cmd` arg is one line inside `service bgp`.
+ggsh_configure() {
+    local grpc=$1 conf=$2
+    shift 2
+    {
+        echo configure
+        echo service bgp
+        for line in "$@"; do echo "$line"; done
+        echo commit
+        echo exit
+        echo exit
+    } | "$GGSH" --bgpgg-addr "$grpc" --config "$conf" >/dev/null
+}
+
 start_peers() {
     local p1_grpc=$1 p2_grpc=$2 p1_port=$3 p2_port=$4
     local p1_ip=127.0.0.1 p2_ip=127.0.0.2
 
+    cat > "$TMPDIR/peer1.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 1.1.1.1
+  listen-addr ${p1_ip}:${p1_port}
+  grpc-listen-addr ${p1_grpc#http://}
+}
+CONF
+
+    cat > "$TMPDIR/peer2.conf" <<CONF
+service bgp {
+  asn 65001
+  router-id 2.2.2.2
+  listen-addr ${p2_ip}:${p2_port}
+  grpc-listen-addr ${p2_grpc#http://}
+}
+CONF
+
     echo "Starting peer1 (ASN 65001, $p1_ip:$p1_port, router-id 1.1.1.1)..."
-    "$BGPGGD" --asn 65001 --router-id 1.1.1.1 \
-        --listen-addr "$p1_ip:$p1_port" \
-        --grpc-listen-addr "${p1_grpc#http://}" &
+    "$BGPGGD" --config "$TMPDIR/peer1.conf" --runtime-dir "$TMPDIR/peer1-run" &
     PEER1_PID=$!
 
     echo "Starting peer2 (ASN 65001, $p2_ip:$p2_port, router-id 2.2.2.2)..."
-    "$BGPGGD" --asn 65001 --router-id 2.2.2.2 \
-        --listen-addr "$p2_ip:$p2_port" \
-        --grpc-listen-addr "${p2_grpc#http://}" &
+    "$BGPGGD" --config "$TMPDIR/peer2.conf" --runtime-dir "$TMPDIR/peer2-run" &
     PEER2_PID=$!
 
     echo "Waiting for gRPC..."
-    poll_until "peer1 gRPC not ready" 10 "$BGPGG --addr $p1_grpc peer list"
-    poll_until "peer2 gRPC not ready" 10 "$BGPGG --addr $p2_grpc peer list"
+    poll_until "peer1 gRPC not ready" 10 "$GGSH --bgpgg-addr $p1_grpc show bgp summary"
+    poll_until "peer2 gRPC not ready" 10 "$GGSH --bgpgg-addr $p2_grpc show bgp summary"
 }
 
 test_basic_peering() {
@@ -61,25 +91,34 @@ test_basic_peering() {
     start_peers "$p1_grpc" "$p2_grpc" 11179 11179
 
     echo "Adding peers..."
-    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65001 --port 11179
-    "$BGPGG" --addr "$p2_grpc" peer add 127.0.0.1 65001 --port 11179
+    ggsh_configure "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "peer 127.0.0.2 remote-as 65001" \
+        "peer 127.0.0.2 port 11179"
+    ggsh_configure "$p2_grpc" "$TMPDIR/peer2.conf" \
+        "peer 127.0.0.1 remote-as 65001" \
+        "peer 127.0.0.1 port 11179"
 
     echo "Waiting for BGP session to establish..."
-    poll_until "Peering failed to establish" 30 "$BGPGG --addr $p1_grpc peer list | grep -q Established"
+    poll_until "Peering failed to establish" 30 \
+        "$GGSH --bgpgg-addr $p1_grpc show bgp summary | grep -q Established"
     echo "  established"
 
     echo "Announcing 10.99.0.0/24 from peer1..."
-    "$BGPGG" --addr "$p1_grpc" global rib add 10.99.0.0/24 --nexthop 192.168.1.1
+    ggsh_configure "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "originate 10.99.0.0/24 nexthop 192.168.1.1"
 
     echo "Waiting for route to propagate to peer2..."
-    poll_until "Route did not propagate" 10 "$BGPGG --addr $p2_grpc global rib show | grep -q 10.99.0.0/24"
+    poll_until "Route did not propagate" 10 \
+        "$GGSH --bgpgg-addr $p2_grpc show bgp routes | grep -q 10.99.0.0/24"
     echo "  propagated"
 
     echo "Withdrawing 10.99.0.0/24 from peer1..."
-    "$BGPGG" --addr "$p1_grpc" global rib del 10.99.0.0/24
+    ggsh_configure "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "unset originate 10.99.0.0/24"
 
     echo "Waiting for route withdrawal on peer2..."
-    poll_until "Route withdrawal failed" 10 "! $BGPGG --addr $p2_grpc global rib show | grep -q 10.99.0.0/24"
+    poll_until "Route withdrawal failed" 10 \
+        "! $GGSH --bgpgg-addr $p2_grpc show bgp routes | grep -q 10.99.0.0/24"
     echo "  withdrawn"
 
     cleanup
@@ -97,11 +136,18 @@ test_tcp_md5() {
     start_peers "$p1_grpc" "$p2_grpc" 12179 12179
 
     echo "Adding peers with MD5 key..."
-    "$BGPGG" --addr "$p1_grpc" peer add 127.0.0.2 65001 --port 12179 --md5-key-file "$key_file"
-    "$BGPGG" --addr "$p2_grpc" peer add 127.0.0.1 65001 --port 12179 --md5-key-file "$key_file"
+    ggsh_configure "$p1_grpc" "$TMPDIR/peer1.conf" \
+        "peer 127.0.0.2 remote-as 65001" \
+        "peer 127.0.0.2 port 12179" \
+        "peer 127.0.0.2 md5-key-file $key_file"
+    ggsh_configure "$p2_grpc" "$TMPDIR/peer2.conf" \
+        "peer 127.0.0.1 remote-as 65001" \
+        "peer 127.0.0.1 port 12179" \
+        "peer 127.0.0.1 md5-key-file $key_file"
 
     echo "Waiting for BGP session to establish..."
-    poll_until "MD5 peering failed to establish" 30 "$BGPGG --addr $p1_grpc peer list | grep -q Established"
+    poll_until "MD5 peering failed to establish" 30 \
+        "$GGSH --bgpgg-addr $p1_grpc show bgp summary | grep -q Established"
     echo "  established"
 
     rm -f "$key_file"

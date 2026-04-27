@@ -19,7 +19,7 @@ pub use utils::*;
 
 use bgpgg::bgp::msg::BGP_MARKER;
 use bgpgg::bgp::msg_notification::{BgpError, MessageHeaderError};
-use bgpgg::config::Config;
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
@@ -151,14 +151,16 @@ async fn test_invalid_message_type() {
 #[tokio::test]
 async fn test_send_notification_without_open() {
     for flag in [true, false] {
-        let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-        config.peers.push(bgpgg::config::PeerConfig {
-            address: "127.0.0.1".to_string(),
-            passive_mode: true,
-            send_notification_without_open: flag,
-            delay_open_time_secs: Some(60), // Delay OPEN so we can send invalid msg first
-            ..Default::default()
-        });
+        let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+        config
+            .insert_peer(conf::bgp::PeerConfig {
+                address: "127.0.0.1".to_string(),
+                passive_mode: true,
+                send_notification_without_open: flag,
+                delay_open_time_secs: Some(60),
+                ..Default::default()
+            })
+            .unwrap();
         let server = start_test_server(config).await;
 
         let mut peer = FakePeer::connect(None, &server).await;

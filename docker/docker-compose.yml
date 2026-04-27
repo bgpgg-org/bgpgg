@@ -4,7 +4,7 @@ services:
     container_name: bgpgg1
     configs:
       - source: speaker1_config
-        target: /etc/bgpgg/config.yaml
+        target: /etc/rogg/rogg.conf
     networks:
       bgp_network:
         ipv4_address: 172.20.0.10
@@ -14,7 +14,7 @@ services:
     container_name: bgpgg2
     configs:
       - source: speaker2_config
-        target: /etc/bgpgg/config.yaml
+        target: /etc/rogg/rogg.conf
     networks:
       bgp_network:
         ipv4_address: 172.20.0.20
@@ -22,17 +22,27 @@ services:
 configs:
   speaker1_config:
     content: |
-      asn: 65001
-      router_id: 1.1.1.1
-      peers:
-        - address: "172.20.0.20"
+      service bgp {
+        asn 65001
+        router-id 1.1.1.1
+        listen-addr 0.0.0.0:179
+
+        peer 172.20.0.20 {
+          remote-as 65002
+        }
+      }
 
   speaker2_config:
     content: |
-      asn: 65002
-      router_id: 2.2.2.2
-      peers:
-        - address: "172.20.0.10"
+      service bgp {
+        asn 65002
+        router-id 2.2.2.2
+        listen-addr 0.0.0.0:179
+
+        peer 172.20.0.10 {
+          remote-as 65001
+        }
+      }
 
 networks:
   bgp_network:

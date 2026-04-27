@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod config;
 pub(crate) mod ops;
 pub(crate) mod ops_mgmt;
 pub(crate) mod propagate;
@@ -19,36 +20,41 @@ pub(crate) mod propagate;
 use crate::bgp::msg::{AddPathMask, Message, MessageFormat, PRE_OPEN_FORMAT};
 use crate::bgp::msg_notification::{BgpError, CeaseSubcode, NotificationMessage};
 use crate::bgp::msg_open::OpenMessage;
-use crate::bgp::msg_update::UpdateMessage;
+use crate::bgp::msg_update::{NextHopAddr, Origin, UpdateMessage};
 use crate::bgp::multiprotocol::AfiSafi;
 use crate::bmp::destination::{BmpDestination, BmpTcpClient};
 use crate::bmp::task::BmpTask;
-use crate::config::{get_peer_llgr, Config, PeerConfig};
 use crate::log::{error, info, warn};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_gtsm;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::apply_tcp_md5;
+#[cfg(target_os = "freebsd")]
+use crate::net::remove_tcp_md5;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::net::set_ttl_max;
-use crate::net::{bind_addr_from_ip, peer_ip};
+use crate::net::{bind_addr_from_ip, peer_ip, IpNetwork};
 use crate::peer::BgpState;
 use crate::peer::{LocalConfig, Peer, PeerCapabilities, PeerOp, PeerStatistics};
-use crate::policy::{Policy, PolicyContext};
+use crate::policy::{AfiSafiPolicies, Policy, PolicyContext};
 use crate::rib::rib_in::AdjRibIn;
 use crate::rib::rib_loc::{LocRib, LocRibConfig};
-use crate::rib::AdjRibOut;
-use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager};
+use crate::rib::{AdjRibOut, PathAttrs, RouteKey, RouteSource};
+use crate::rpki::manager::{RpkiOp, RtrCacheConfig, RtrManager, RtrTransport, SshTransport};
 use crate::rpki::vrp::VrpTable;
 use crate::types::PeerDownReason;
+use conf::bgp::{get_peer_llgr, BgpConfig, BmpConfig, PeerConfig, RpkiCacheConfig, TransportType};
+use conf::language_bgp::OriginateRoute;
 use ops::ServerOp;
 use ops_mgmt::MgmtOp;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -56,12 +62,75 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+/// PathAttrs for a configured `originate` entry. Locally-sourced, IGP origin,
+/// empty AS_PATH, default local-pref 100. Used by both startup-time
+/// initialization and runtime commit.
+fn originate_path_attrs(next_hop: NextHopAddr) -> PathAttrs {
+    PathAttrs {
+        origin: Origin::IGP,
+        as_path: vec![],
+        next_hop,
+        source: RouteSource::Local,
+        local_pref: Some(100),
+        med: None,
+        atomic_aggregate: false,
+        aggregator: None,
+        communities: vec![],
+        extended_communities: vec![],
+        large_communities: vec![],
+        unknown_attrs: vec![],
+        originator_id: None,
+        cluster_list: vec![],
+        ls_attr: None,
+    }
+}
+
+/// Parse a CIDR prefix and forwarding next-hop address into runtime types.
+pub(crate) fn parse_prefix_and_nexthop(
+    prefix_str: &str,
+    nh_str: &str,
+) -> Result<(IpNetwork, NextHopAddr), String> {
+    let prefix = IpNetwork::from_str(prefix_str)
+        .map_err(|err| format!("invalid prefix '{}': {}", prefix_str, err))?;
+    let nh_addr: IpAddr = nh_str
+        .parse()
+        .map_err(|_| format!("invalid nexthop '{}'", nh_str))?;
+    let next_hop = match nh_addr {
+        IpAddr::V4(v4) => NextHopAddr::Ipv4(v4),
+        IpAddr::V6(v6) => NextHopAddr::Ipv6(v6),
+    };
+    Ok((prefix, next_hop))
+}
+
+/// Convert RPKI cache transport config to runtime RtrTransport.
+fn rpki_cache_to_transport(config: &RpkiCacheConfig) -> Result<RtrTransport, String> {
+    match config.transport {
+        TransportType::Tcp => Ok(RtrTransport::Tcp),
+        TransportType::Ssh => {
+            let username = config
+                .ssh_username
+                .as_ref()
+                .ok_or("SSH transport requires ssh-username")?;
+            let private_key_file = config
+                .ssh_private_key_file
+                .as_ref()
+                .ok_or("SSH transport requires ssh-private-key-file")?;
+            Ok(RtrTransport::Ssh(SshTransport {
+                username: username.clone(),
+                private_key_file: private_key_file.clone(),
+                known_hosts_file: config.ssh_known_hosts_file.clone(),
+            }))
+        }
+    }
+}
+
 /// Errors that can occur during server initialization or operation.
 #[derive(Debug)]
 pub enum ServerError {
     InvalidListenAddr(String),
     BindError(io::Error),
     IoError(io::Error),
+    ConfigParse(String),
 }
 
 impl std::fmt::Display for ServerError {
@@ -70,6 +139,7 @@ impl std::fmt::Display for ServerError {
             ServerError::InvalidListenAddr(addr) => write!(f, "Invalid listen address: {}", addr),
             ServerError::BindError(e) => write!(f, "Failed to bind listener: {}", e),
             ServerError::IoError(e) => write!(f, "I/O error: {}", e),
+            ServerError::ConfigParse(msg) => write!(f, "Failed to parse rogg.conf: {}", msg),
         }
     }
 }
@@ -201,6 +271,8 @@ pub struct ConnectionInfo {
     pub local_address: IpAddr,
     pub local_port: u16,
     pub remote_port: u16,
+    /// Link-local IPv6 address of the local interface (for 32-byte next-hop encoding)
+    pub local_link_local: Option<Ipv6Addr>,
 }
 
 /// Connection-specific state.
@@ -290,10 +362,12 @@ impl ConnectionState {
 /// (outgoing vs incoming), not by a conn_type field.
 pub struct PeerInfo {
     pub admin_state: AdminState,
-    pub import_policies: Vec<Arc<Policy>>,
-    pub export_policies: Vec<Arc<Policy>>,
-    /// Per-peer session configuration
-    pub config: PeerConfig,
+    /// Resolved import policies. Populated from `BgpConfig.peers[ip].afi_safis`
+    /// at handshake.
+    pub import_policies: AfiSafiPolicies,
+    /// Resolved export policies. Populated from `BgpConfig.peers[ip].afi_safis`
+    /// at handshake.
+    pub export_policies: AfiSafiPolicies,
     /// Outgoing connection slot (we initiated)
     pub outgoing: Option<ConnectionState>,
     /// Incoming connection slot (peer initiated)
@@ -370,7 +444,7 @@ impl<K: Eq + Hash + Copy> ServerOpTimers<K> {
 
 impl PeerInfo {
     pub fn new(
-        config: PeerConfig,
+        admin_down: bool,
         peer_tx: Option<mpsc::UnboundedSender<PeerOp>>,
         conn_type: Option<ConnectionType>,
     ) -> Self {
@@ -380,11 +454,15 @@ impl PeerInfo {
             Some(ConnectionType::Incoming) => (None, Some(conn_state)),
             None => (None, None),
         };
+        let admin_state = if admin_down {
+            AdminState::Down
+        } else {
+            AdminState::Up
+        };
         Self {
-            admin_state: AdminState::Up,
-            import_policies: Vec::new(),
-            export_policies: Vec::new(),
-            config,
+            admin_state,
+            import_policies: HashMap::new(),
+            export_policies: HashMap::new(),
             outgoing,
             incoming,
             adj_rib_in: AdjRibIn::new(),
@@ -467,12 +545,20 @@ impl PeerInfo {
         rx.await.ok()
     }
 
-    pub fn policy_in(&self) -> &[Arc<Policy>] {
-        &self.import_policies
+    /// Import policies attached to the given family. Empty if no entry.
+    pub fn policy_in_for(&self, family: AfiSafi) -> &[Arc<Policy>] {
+        self.import_policies
+            .get(&family)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
-    pub fn policy_out(&self) -> &[Arc<Policy>] {
-        &self.export_policies
+    /// Export policies attached to the given family. Empty if no entry.
+    pub fn policy_out_for(&self, family: AfiSafi) -> &[Arc<Policy>] {
+        self.export_policies
+            .get(&family)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn supports_4byte_asn(&self) -> bool {
@@ -492,7 +578,7 @@ impl PeerInfo {
 pub struct BgpServer {
     pub(crate) peers: HashMap<IpAddr, PeerInfo>,
     pub(crate) loc_rib: LocRib,
-    pub(crate) config: Config,
+    pub config: BgpConfig,
     pub(crate) policy_ctx: PolicyContext,
     local_bgp_id: u32,
     pub(crate) local_addr: IpAddr,
@@ -508,10 +594,17 @@ pub struct BgpServer {
     pub(crate) vrp_table: VrpTable,
     /// Raw fd of the listener socket, stored for TCP MD5 setup on new peers
     pub(crate) listener_fd: Option<i32>,
+    /// Path to rogg.conf. Commits write here.
+    pub(crate) config_path: PathBuf,
 }
 
 impl BgpServer {
-    pub fn new(config: Config) -> Result<Self, ServerError> {
+    /// Read and parse `rogg.conf` from `config_path`, then construct the server.
+    /// `config_path` is the single source of truth -- the daemon owns the read,
+    /// not the caller.
+    pub fn new(config_path: PathBuf) -> Result<Self, ServerError> {
+        let config = BgpConfig::from_conf_file(&config_path)
+            .map_err(|e| ServerError::ConfigParse(e.to_string()))?;
         let local_bgp_id = u32::from(config.router_id);
         let sock_addr: SocketAddr = config
             .listen_addr
@@ -543,6 +636,7 @@ impl BgpServer {
             rpki_tx: None,
             vrp_table: VrpTable::new(),
             listener_fd: None,
+            config_path,
         })
     }
 
@@ -617,6 +711,7 @@ impl BgpServer {
         self.init_configured_peers(bind_addr);
         self.init_configured_bmp_servers();
         self.init_configured_rpki_caches();
+        self.init_configured_originate_routes();
 
         loop {
             tokio::select! {
@@ -638,17 +733,20 @@ impl BgpServer {
         }
     }
 
-    /// Initialize configured peers from config and spawn their tasks.
+    /// Initialize configured peers from `self.config.peers` and spawn their
+    /// tasks. Per-peer config stays in `self.config.peers` for the lifetime
+    /// of the server; `PeerInfo` only carries runtime state.
     fn init_configured_peers(&mut self, bind_addr: SocketAddr) {
-        for peer_cfg in &self.config.peers.clone() {
+        let peer_specs: Vec<PeerConfig> = self.config.peers.clone();
+        for peer_cfg in peer_specs {
             let Ok(peer_addr) = peer_cfg.socket_addr() else {
                 error!(addr = %peer_cfg.address, "invalid peer address in config");
                 continue;
             };
             let peer_ip = peer_addr.ip();
-            let config = peer_cfg.clone();
-            let passive = config.passive_mode;
-            let allow_auto_start = config.allow_automatic_start();
+            let passive = peer_cfg.passive_mode;
+            let admin_down = peer_cfg.admin_down;
+            let allow_auto_start = peer_cfg.allow_automatic_start();
 
             // Passive mode peers only accept incoming connections
             let conn_type = if passive {
@@ -657,10 +755,10 @@ impl BgpServer {
                 ConnectionType::Outgoing
             };
 
-            let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
+            let peer_tx = self.spawn_peer(peer_addr, peer_cfg, bind_addr, conn_type);
 
             // Create peer with connection in the appropriate slot
-            let mut entry = PeerInfo::new(config, None, None);
+            let mut entry = PeerInfo::new(admin_down, None, None);
             let conn_state = ConnectionState::new(Some(peer_tx.clone()));
             match conn_type {
                 ConnectionType::Outgoing => entry.outgoing = Some(conn_state),
@@ -668,15 +766,49 @@ impl BgpServer {
             }
             self.peers.insert(peer_ip, entry);
 
-            // RFC 4271: AutomaticStart for configured peers (if allowed)
-            if allow_auto_start {
+            // RFC 4271: AutomaticStart for configured peers (if allowed and not admin-down)
+            if allow_auto_start && !admin_down {
                 if passive {
                     let _ = peer_tx.send(PeerOp::AutomaticStartPassive);
                 } else {
                     let _ = peer_tx.send(PeerOp::AutomaticStart);
                 }
             }
-            info!(%peer_ip, passive, "configured peer");
+            info!(%peer_ip, passive, admin_down, "configured peer");
+        }
+    }
+
+    /// Diff `self.config.peers` (the running peer set) vs `new.peers` and
+    /// apply: spawn added, drop removed, restart modified. Called by
+    /// `commit_config` BEFORE `self.config` is replaced with `new`.
+    pub(crate) async fn reconfigure_peers(&mut self, new: &BgpConfig, bind_addr: SocketAddr) {
+        let old_ips: Vec<IpAddr> = self
+            .config
+            .peers
+            .iter()
+            .filter_map(|cfg| cfg.ip())
+            .collect();
+        let new_ips: HashSet<IpAddr> = new.peers.iter().filter_map(|cfg| cfg.ip()).collect();
+
+        for ip in &old_ips {
+            if !new_ips.contains(ip) {
+                self.shutdown_and_remove_peer(*ip).await;
+            }
+        }
+
+        for new_cfg in &new.peers {
+            let Some(ip) = new_cfg.ip() else {
+                continue;
+            };
+            match self.config.find_peer(ip) {
+                None => self.spawn_and_start_peer(ip, new_cfg.clone(), bind_addr),
+                Some(old_cfg) if old_cfg != new_cfg => {
+                    info!(%ip, "peer config changed -- restarting session");
+                    self.shutdown_and_remove_peer(ip).await;
+                    self.spawn_and_start_peer(ip, new_cfg.clone(), bind_addr);
+                }
+                Some(_) => {}
+            }
         }
     }
 
@@ -695,6 +827,161 @@ impl BgpServer {
         }
     }
 
+    /// Diff `old.bmp_servers` vs `new.bmp_servers` by address; spawn added,
+    /// drop removed, restart on statistics-timeout change. Called by
+    /// `commit_config`.
+    pub(crate) async fn reconfigure_bmp_servers(
+        &mut self,
+        old: &BgpConfig,
+        new: &BgpConfig,
+    ) -> Result<(), String> {
+        let mut new_by_addr: HashMap<SocketAddr, &BmpConfig> = HashMap::new();
+        for cfg in &new.bmp_servers {
+            let addr = cfg
+                .address
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid BMP server address '{}': {}", cfg.address, e))?;
+            new_by_addr.insert(addr, cfg);
+        }
+        let old_by_addr: HashMap<SocketAddr, &BmpConfig> = old
+            .bmp_servers
+            .iter()
+            .filter_map(|c| c.address.parse::<SocketAddr>().ok().map(|a| (a, c)))
+            .collect();
+
+        for addr in old_by_addr.keys() {
+            if !new_by_addr.contains_key(addr) {
+                self.stop_single_bmp_task(*addr);
+            }
+        }
+
+        for (addr, cfg) in &new_by_addr {
+            let stats = cfg.statistics_timeout;
+            let needs_spawn = match old_by_addr.get(addr) {
+                None => true,
+                Some(old_cfg) => old_cfg.statistics_timeout != stats,
+            };
+            if !needs_spawn {
+                continue;
+            }
+            self.spawn_single_bmp_task(*addr, stats);
+        }
+        Ok(())
+    }
+
+    /// Spawn (or restart) a BMP task for `addr` with the given statistics
+    /// timeout. Sends the established-peer initial state once spawned so the
+    /// remote sees existing peers immediately. Used by both
+    /// `reconfigure_bmp_servers` and `handle_add_bmp_server`.
+    pub(crate) fn spawn_single_bmp_task(
+        &mut self,
+        addr: SocketAddr,
+        statistics_timeout: Option<u64>,
+    ) {
+        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
+            drop(task_info.task_tx);
+        }
+        let task_tx = self.spawn_bmp_task(addr, statistics_timeout);
+        self.bmp_tasks
+            .insert(addr, BmpTaskInfo::new(addr, statistics_timeout, task_tx));
+        info!(%addr, "BMP task spawned");
+        let established = self.get_established_peers();
+        if let Some(info_ref) = self.bmp_tasks.get(&addr) {
+            ops_mgmt::send_initial_bmp_state(&info_ref.task_tx, established);
+        }
+    }
+
+    /// Drop the BMP task for `addr` if running. Idempotent.
+    pub(crate) fn stop_single_bmp_task(&mut self, addr: SocketAddr) {
+        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
+            drop(task_info.task_tx);
+            info!(%addr, "BMP task stopped");
+        }
+    }
+
+    /// Diff `old.rpki_caches` vs `new.rpki_caches` by address. Spawns the RTR
+    /// manager on first addition; sends `AddCache`/`RemoveCache` for deltas.
+    pub(crate) async fn reconfigure_rpki_caches(
+        &mut self,
+        old: &BgpConfig,
+        new: &BgpConfig,
+    ) -> Result<(), String> {
+        let mut new_by_addr: HashMap<SocketAddr, &RpkiCacheConfig> = HashMap::new();
+        for cfg in &new.rpki_caches {
+            let addr = cfg
+                .address
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid RPKI cache address '{}': {}", cfg.address, e))?;
+            rpki_cache_to_transport(cfg)?;
+            new_by_addr.insert(addr, cfg);
+        }
+        let old_by_addr: HashMap<SocketAddr, &RpkiCacheConfig> = old
+            .rpki_caches
+            .iter()
+            .filter_map(|c| c.address.parse::<SocketAddr>().ok().map(|a| (a, c)))
+            .collect();
+
+        if new_by_addr.is_empty() && old_by_addr.is_empty() {
+            return Ok(());
+        }
+
+        for addr in old_by_addr.keys() {
+            if !new_by_addr.contains_key(addr) {
+                self.stop_single_rpki_cache(*addr)?;
+            }
+        }
+
+        for (addr, cfg) in &new_by_addr {
+            if old_by_addr.contains_key(addr) {
+                continue;
+            }
+            self.spawn_single_rpki_cache(cfg)?;
+            let _ = addr;
+        }
+        Ok(())
+    }
+
+    /// Send `AddCache` to the RTR manager for `cfg`, spawning the manager if
+    /// it isn't running yet. Used by both `reconfigure_rpki_caches` and
+    /// `handle_add_rpki_cache`.
+    pub(crate) fn spawn_single_rpki_cache(&mut self, cfg: &RpkiCacheConfig) -> Result<(), String> {
+        let addr: SocketAddr = cfg
+            .address
+            .parse()
+            .map_err(|e| format!("invalid RPKI cache address '{}': {}", cfg.address, e))?;
+        let transport = rpki_cache_to_transport(cfg)?;
+        let rpki_tx = match &self.rpki_tx {
+            Some(tx) => tx.clone(),
+            None => self.spawn_rtr_manager(),
+        };
+        let cache_config = RtrCacheConfig {
+            address: addr,
+            preference: cfg.preference,
+            transport,
+            retry_interval: cfg.retry_interval,
+            refresh_interval: cfg.refresh_interval,
+            expire_interval: cfg.expire_interval,
+        };
+        if rpki_tx.send(RpkiOp::AddCache(cache_config)).is_err() {
+            return Err("RPKI manager not running".to_string());
+        }
+        info!(%addr, "RPKI cache added");
+        Ok(())
+    }
+
+    /// Send `RemoveCache` to the RTR manager. Returns Err if the manager isn't
+    /// running.
+    pub(crate) fn stop_single_rpki_cache(&mut self, addr: SocketAddr) -> Result<(), String> {
+        let Some(rpki_tx) = &self.rpki_tx else {
+            return Err("RPKI manager not running".to_string());
+        };
+        if rpki_tx.send(RpkiOp::RemoveCache(addr)).is_err() {
+            return Err("RPKI manager not running".to_string());
+        }
+        info!(%addr, "RPKI cache removed");
+        Ok(())
+    }
+
     fn init_configured_rpki_caches(&mut self) {
         if self.config.rpki_caches.is_empty() {
             return;
@@ -708,7 +995,7 @@ impl BgpServer {
                 continue;
             };
 
-            let transport = match rpki_cfg.to_rtr_transport() {
+            let transport = match rpki_cache_to_transport(rpki_cfg) {
                 Ok(transport) => transport,
                 Err(err) => {
                     error!(%addr, %err, "invalid RPKI cache transport config");
@@ -726,6 +1013,99 @@ impl BgpServer {
             };
             let _ = rpki_tx.send(RpkiOp::AddCache(cache_config));
             info!(%addr, "configured RPKI cache");
+        }
+    }
+
+    fn init_configured_originate_routes(&mut self) {
+        let routes = self.config.originate.clone();
+        for entry in &routes {
+            let (prefix, next_hop) = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                              "skipping invalid originate entry");
+                    continue;
+                }
+            };
+            match self
+                .loc_rib
+                .add_local_route(RouteKey::Prefix(prefix), originate_path_attrs(next_hop))
+            {
+                Ok(_) => info!(prefix = %entry.prefix, nexthop = %entry.nexthop,
+                               "originated static route"),
+                Err(err) => warn!(prefix = %entry.prefix, ?err,
+                                  "loc-rib rejected static originate entry"),
+            }
+        }
+    }
+
+    /// Diff `old.originate` vs `new.originate` and apply the change to the
+    /// loc-RIB plus propagate. Called by `commit_config` after originate
+    /// entries have been pre-validated. A changed nexthop counts as
+    /// remove + add. Same prefix+nexthop is a no-op.
+    pub(crate) async fn reconfigure_originate_routes(&mut self, old: &BgpConfig, new: &BgpConfig) {
+        let new_by_prefix: HashMap<&str, &OriginateRoute> = new
+            .originate
+            .iter()
+            .map(|entry| (entry.prefix.as_str(), entry))
+            .collect();
+        let old_by_prefix: HashMap<&str, &OriginateRoute> = old
+            .originate
+            .iter()
+            .map(|entry| (entry.prefix.as_str(), entry))
+            .collect();
+
+        for entry in &old.originate {
+            let needs_remove = match new_by_prefix.get(entry.prefix.as_str()) {
+                Some(new_entry) => new_entry.nexthop != entry.nexthop,
+                None => true,
+            };
+            if !needs_remove {
+                continue;
+            }
+            let prefix = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok((prefix, _)) => prefix,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                          "skipping originate removal: invalid entry");
+                    continue;
+                }
+            };
+            let delta = self.loc_rib.remove_local_route(&RouteKey::Prefix(prefix));
+            self.propagate_routes(delta, None).await;
+            info!(prefix = %entry.prefix, "withdrew configured originate");
+        }
+
+        for entry in &new.originate {
+            let needs_add = match old_by_prefix.get(entry.prefix.as_str()) {
+                Some(old_entry) => old_entry.nexthop != entry.nexthop,
+                None => true,
+            };
+            if !needs_add {
+                continue;
+            }
+            let (prefix, next_hop) = match parse_prefix_and_nexthop(&entry.prefix, &entry.nexthop) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, nexthop = %entry.nexthop, %err,
+                          "skipping originate add: invalid entry (should have been caught at validate)");
+                    continue;
+                }
+            };
+            match self
+                .loc_rib
+                .add_local_route(RouteKey::Prefix(prefix), originate_path_attrs(next_hop))
+            {
+                Ok(delta) => {
+                    self.propagate_routes(delta, None).await;
+                    info!(prefix = %entry.prefix, nexthop = %entry.nexthop,
+                          "originated configured route");
+                }
+                Err(err) => {
+                    warn!(prefix = %entry.prefix, ?err,
+                          "loc-rib rejected configured originate");
+                }
+            }
         }
     }
 
@@ -778,6 +1158,90 @@ impl BgpServer {
         peer_tx
     }
 
+    /// Spawn a peer task and start it. Honors `config.admin_down`: the task is
+    /// spawned but no Start op is sent.
+    pub(crate) fn spawn_and_start_peer(
+        &mut self,
+        peer_ip: IpAddr,
+        config: PeerConfig,
+        bind_addr: SocketAddr,
+    ) {
+        let peer_addr = SocketAddr::new(peer_ip, config.port);
+
+        let conn_type = if config.passive_mode {
+            ConnectionType::Incoming
+        } else {
+            ConnectionType::Outgoing
+        };
+
+        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
+
+        self.peers.insert(
+            peer_ip,
+            PeerInfo::new(config.admin_down, Some(peer_tx.clone()), Some(conn_type)),
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
+            if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
+                error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
+            }
+        }
+
+        if !config.admin_down {
+            if config.passive_mode {
+                let _ = peer_tx.send(PeerOp::ManualStartPassive);
+            } else {
+                let _ = peer_tx.send(PeerOp::ManualStart);
+            }
+        }
+
+        info!(%peer_ip, passive = config.passive_mode, admin_down = config.admin_down, total_peers = self.peers.len(), "peer added");
+    }
+
+    /// Tear down a peer session and drop it.
+    pub(crate) async fn shutdown_and_remove_peer(&mut self, peer_ip: IpAddr) {
+        let Some(entry) = self.peers.get(&peer_ip) else {
+            return;
+        };
+
+        entry.send_to_all(|| PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
+
+        if let Some(conn) = entry.established_conn() {
+            if let (Some(asn), Some(bgp_id)) = (conn.asn, conn.bgp_id) {
+                let use_4byte_asn = entry.supports_4byte_asn();
+                self.broadcast_bmp(BmpOp::PeerDown {
+                    peer_ip,
+                    peer_as: asn,
+                    peer_bgp_id: bgp_id,
+                    reason: PeerDownReason::PeerDeConfigured,
+                    use_4byte_asn,
+                });
+            }
+        }
+
+        #[cfg(target_os = "freebsd")]
+        if let (Some(fd), Some(cfg)) = (self.listener_fd, self.config.find_peer(peer_ip)) {
+            if cfg.md5_key_file.is_some() {
+                if let Err(e) = remove_tcp_md5(fd, peer_ip) {
+                    error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
+                }
+            }
+        }
+
+        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
+            peer_info.llgr_timers.cancel_all();
+            peer_info.rr_stale_timers.cancel_all();
+        }
+
+        self.peers.remove(&peer_ip);
+
+        let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
+        self.propagate_routes(delta, None).await;
+
+        info!(%peer_ip, "peer removed");
+    }
+
     async fn accept_peer(&mut self, stream: TcpStream) {
         let Some(peer_ip) = peer_ip(&stream) else {
             error!("failed to get peer address");
@@ -802,22 +1266,26 @@ impl BgpServer {
     /// a collision candidate in the incoming slot.
     /// Caller must ensure peer is pre-configured (via should_accept_peer check).
     pub(crate) fn accept_incoming_connection(&mut self, stream: TcpStream, peer_ip: IpAddr) {
-        let Some(peer) = self.peers.get_mut(&peer_ip) else {
+        let Some(peer_cfg) = self.config.find_peer(peer_ip).cloned() else {
             // This should not happen - should_accept_peer should have rejected
             error!(%peer_ip, "accept_incoming_connection called for unconfigured peer");
+            return;
+        };
+        let Some(peer) = self.peers.get_mut(&peer_ip) else {
+            error!(%peer_ip, "accept_incoming_connection: PeerInfo missing");
             return;
         };
 
         // Apply GTSM on the accepted socket if configured
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let Some(min_ttl) = peer.config.ttl_min {
+        if let Some(min_ttl) = peer_cfg.ttl_min {
             if let Err(e) = apply_gtsm(stream.as_raw_fd(), peer_ip, min_ttl) {
                 warn!(%peer_ip, error = %e, "failed to apply GTSM on incoming connection");
             }
         }
 
         // Passive mode with existing task: send connection to existing task
-        if peer.config.passive_mode {
+        if peer_cfg.passive_mode {
             if let Some(peer_tx) = peer
                 .slot(ConnectionType::Incoming)
                 .and_then(|c| c.peer_tx.as_ref())
@@ -865,10 +1333,9 @@ impl BgpServer {
         }
 
         // Spawn incoming connection - let check_collision() decide winner
-        let config = peer.config.clone();
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
         peer.incoming = Some(ConnectionState::new(Some(peer_tx.clone())));
-        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, config);
+        self.spawn_incoming_with_stream(peer_rx, &peer_tx, stream, peer_ip, peer_cfg);
         info!(%peer_ip, "spawned incoming connection");
     }
 
@@ -978,15 +1445,22 @@ impl BgpServer {
 mod tests {
     use super::*;
     use crate::policy::{Policy, DEFAULT_DENY_ALL, DEFAULT_PERMIT_ALL};
+    use conf::testutil::TempDir;
     use std::net::Ipv4Addr;
 
     fn peer_info() -> PeerInfo {
-        PeerInfo::new(PeerConfig::default(), None, None)
+        PeerInfo::new(false, None, None)
     }
 
-    fn make_server() -> BgpServer {
-        let config = Config::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
-        BgpServer::new(config).expect("valid config")
+    /// Returns the server plus the TempDir guard. The caller must keep the
+    /// guard alive for the test's lifetime; dropping it removes rogg.conf.
+    fn make_server() -> (BgpServer, TempDir) {
+        let config = BgpConfig::new(65000, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 180);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rogg.conf");
+        std::fs::write(&path, config.to_conf_str()).unwrap();
+        let server = BgpServer::new(path).expect("valid config");
+        (server, dir)
     }
 
     #[test]
@@ -994,11 +1468,11 @@ mod tests {
         let peer_ip: IpAddr = "10.0.0.1".parse().unwrap();
 
         // Unconfigured peer -> reject
-        let server = make_server();
+        let (server, _dir) = make_server();
         assert!(!server.should_accept_peer(peer_ip));
 
         // Configured peer -> accept
-        let mut server = make_server();
+        let (mut server, _dir) = make_server();
         server.peers.insert(peer_ip, peer_info());
         assert!(server.should_accept_peer(peer_ip));
     }
@@ -1040,7 +1514,7 @@ mod tests {
         ];
 
         for tc in cases {
-            let mut server = make_server();
+            let (mut server, _dir) = make_server();
 
             for name in &tc.user_policies {
                 server

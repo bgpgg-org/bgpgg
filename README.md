@@ -14,47 +14,59 @@ tar xzf bgpgg-v0.2.0-x86_64-linux.tar.gz
 
 Create a config file:
 
-```yaml
-# config.yaml
-asn: 65000
-router-id: 1.1.1.1
-listen-addr: "0.0.0.0:17900"  # (Optional) Use high port to avoid needing root
-peers:
-  - address: "192.168.1.1"
-    port: 17900
-    asn: 65001
+```
+# rogg.conf
+service bgp {
+  asn 65000
+  router-id 1.1.1.1
+  listen-addr 0.0.0.0:17900
+
+  peer 192.168.1.1 {
+    remote-as 65001
+    port 17900
+  }
+}
 ```
 
-Run it:
+Start the daemon:
 
 ```bash
-./bgpgg-v0.2.0-x86_64-linux/bgpggd -c config.yaml
-./bgpgg-v0.2.0-x86_64-linux/bgpgg peer list
-./bgpgg-v0.2.0-x86_64-linux/bgpgg global rib add 10.0.0.0/24 --nexthop 192.168.1.1
+./bgpggd --config rogg.conf
 ```
+
+Use ggsh (gg shell) to manage it:
+
+```
+$ ggsh
+ggsh> show bgp summary
+BGP router listening on 0.0.0.0:17900
+RIB entries 1200, 2400 paths
+Peers 2, 2 established
+
+Neighbor             AS            MsgRcvd  MsgSent  State/PfxRcd
+10.0.0.1             65001            4821     3200  Established
+
+ggsh> show bgp routes
+> 10.0.0.0/24
+    via 10.0.0.1  lp 100  path 65001  [best]
+
+ggsh> exit
+```
+
+For scripting: `ggsh show bgp summary`
 
 ## Build from Source
 
 ```bash
 make
-./target/release/bgpggd -c config.yaml
-./target/release/bgpgg peer list
+./target/release/bgpggd --config rogg.conf
+./target/release/ggsh
 ```
 
-## Try with Docker
-
-Run two BGP speakers and watch them peer:
+## Docker
 
 ```bash
 curl -LO https://raw.githubusercontent.com/bgpgg-org/bgpgg/master/docker/docker-compose.yml
 docker compose up -d
-
-# Check peering
-docker exec bgpgg1 bgpgg peer list
-
-# Add a route on speaker 1
-docker exec bgpgg1 bgpgg global rib add 10.0.0.0/24 --nexthop 172.20.0.10
-
-# See it on speaker 2
-docker exec bgpgg2 bgpgg global rib show
+docker exec bgpgg1 ggsh show bgp summary
 ```

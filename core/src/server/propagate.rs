@@ -22,6 +22,8 @@ use crate::peer::outgoing::{
 };
 use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{split_withdrawals, RouteKey, RoutePath, Withdrawal};
+use conf::bgp::PeerConfig;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -55,8 +57,17 @@ impl BgpServer {
         let cluster_id = self.config.cluster_id();
         let local_addr = self.local_addr;
         let loc_rib = &self.loc_rib;
+        let peer_cfg_by_ip: HashMap<IpAddr, &PeerConfig> = self
+            .config
+            .peers
+            .iter()
+            .filter_map(|cfg| cfg.ip().map(|ip| (ip, cfg)))
+            .collect();
 
         for (peer_addr, entry) in self.peers.iter_mut() {
+            let Some(peer_cfg) = peer_cfg_by_ip.get(peer_addr).copied() else {
+                continue;
+            };
             let Some(conn) = entry.established_conn() else {
                 continue;
             };
@@ -73,15 +84,11 @@ impl BgpServer {
             };
 
             let peer_asn = conn.asn.unwrap_or(local_asn);
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
-                .map(|conn_info| conn_info.local_address)
-                .unwrap_or(local_addr);
+            let conn_info = conn.conn_info.as_ref();
+            let local_next_hop = conn_info.map(|ci| ci.local_address).unwrap_or(local_addr);
+            let local_link_local = conn_info.and_then(|ci| ci.local_link_local);
             let send_format = conn.send_format();
             let negotiated_afi_safis = conn.negotiated_afi_safis();
-
-            let export_policies = entry.policy_out().to_vec();
 
             let ctx = PeerExportContext {
                 peer_addr: *peer_addr,
@@ -89,16 +96,17 @@ impl BgpServer {
                 local_asn,
                 peer_asn,
                 local_next_hop,
-                export_policies: &export_policies,
-                rr_client: entry.config.rr_client,
-                rs_client: entry.config.rs_client,
+                local_link_local,
+                export_policies: &entry.export_policies,
+                rr_client: peer_cfg.rr_client,
+                rs_client: peer_cfg.rs_client,
                 cluster_id,
                 send_format,
                 negotiated_afi_safis: &negotiated_afi_safis,
-                next_hop_self: entry.config.next_hop_self,
-                graceful_shutdown: entry.config.graceful_shutdown,
+                next_hop_self: peer_cfg.next_hop_self,
+                graceful_shutdown: peer_cfg.graceful_shutdown,
                 capabilities: &capabilities,
-                send_rpki_community: entry.config.send_rpki_community,
+                send_rpki_community: peer_cfg.send_rpki_community,
             };
 
             propagate_routes_to_peer(&ctx, &delta, loc_rib, &mut entry.adj_rib_out);
@@ -123,7 +131,15 @@ impl BgpServer {
         }
         // Extract values from conn before dropping the immutable borrow on peer_info,
         // since propagate_routes_to_peer needs &mut peer_info.adj_rib_out.
-        let (peer_asn, peer_tx, capabilities, send_format, local_next_hop, negotiated_afi_safis) = {
+        let (
+            peer_asn,
+            peer_tx,
+            capabilities,
+            send_format,
+            local_next_hop,
+            local_link_local,
+            negotiated_afi_safis,
+        ) = {
             let Some(conn) = peer_info.established_conn() else {
                 return;
             };
@@ -137,11 +153,11 @@ impl BgpServer {
                 return;
             };
             let send_format = conn.send_format();
-            let local_next_hop = conn
-                .conn_info
-                .as_ref()
+            let conn_info = conn.conn_info.as_ref();
+            let local_next_hop = conn_info
                 .map(|ci| ci.local_address)
                 .unwrap_or(self.local_addr);
+            let local_link_local = conn_info.and_then(|ci| ci.local_link_local);
             let negotiated_afi_safis = conn.negotiated_afi_safis();
             (
                 peer_asn,
@@ -149,28 +165,32 @@ impl BgpServer {
                 capabilities,
                 send_format,
                 local_next_hop,
+                local_link_local,
                 negotiated_afi_safis,
             )
         };
 
-        let export_policies = &peer_info.export_policies;
-
+        let Some(peer_cfg) = self.config.find_peer(peer_ip) else {
+            warn!(%peer_ip, "resend routes: peer config missing");
+            return;
+        };
         let ctx = PeerExportContext {
             peer_addr: peer_ip,
             peer_tx: &peer_tx,
             local_asn: self.config.asn,
             peer_asn,
             local_next_hop,
-            export_policies,
-            rr_client: peer_info.config.rr_client,
-            rs_client: peer_info.config.rs_client,
+            local_link_local,
+            export_policies: &peer_info.export_policies,
+            rr_client: peer_cfg.rr_client,
+            rs_client: peer_cfg.rs_client,
             cluster_id: self.config.cluster_id(),
             send_format,
             negotiated_afi_safis: &negotiated_afi_safis,
-            next_hop_self: peer_info.config.next_hop_self,
-            graceful_shutdown: peer_info.config.graceful_shutdown,
+            next_hop_self: peer_cfg.next_hop_self,
+            graceful_shutdown: peer_cfg.graceful_shutdown,
             capabilities: &capabilities,
-            send_rpki_community: peer_info.config.send_rpki_community,
+            send_rpki_community: peer_cfg.send_rpki_community,
         };
 
         let all_keys: Vec<RouteKey> = self

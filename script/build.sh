@@ -23,12 +23,12 @@ build_and_package() {
     local PLATFORM=$2
 
     echo "Building bgpgg $VERSION for $PLATFORM..."
-    cross build --release --target "$TARGET"
+    cross build --release --target "$TARGET" --bin bgpggd --bin ggsh
 
     # Strip binaries (skip for FreeBSD)
     if [[ "$TARGET" != *"freebsd"* ]]; then
         strip "target/$TARGET/release/bgpggd" 2>/dev/null || true
-        strip "target/$TARGET/release/bgpgg" 2>/dev/null || true
+        strip "target/$TARGET/release/ggsh" 2>/dev/null || true
     fi
 
     # Package
@@ -37,7 +37,7 @@ build_and_package() {
 
     mkdir -p "$ARCHIVE_NAME"
     cp "target/$TARGET/release/bgpggd" "$ARCHIVE_NAME/"
-    cp "target/$TARGET/release/bgpgg" "$ARCHIVE_NAME/"
+    cp "target/$TARGET/release/ggsh" "$ARCHIVE_NAME/"
     cp LICENSE "$ARCHIVE_NAME/" 2>/dev/null || true
 
     tar czf "$ARCHIVE_FILE" "$ARCHIVE_NAME"

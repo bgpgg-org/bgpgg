@@ -19,19 +19,23 @@ use crate::route_generator::{
 use crate::{
     calculate_expected_best_paths, proto_path_to_rib_path, transform_path_for_ebgp_export,
 };
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_client::BgpServiceClient;
 use bgpgg::grpc::proto::route;
 use bgpgg::net::IpNetwork;
 use bgpgg::rib::Path;
+use conf::bgp::BgpConfig;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tonic::transport::Channel;
 
 type BgpClient = BgpServiceClient<Channel>;
+
+// Memory cap for bgpggd in load tests.
+const BGPGGD_AS_LIMIT_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 
 // === Load Test Configuration ===
 // Ingestion test: just tests route ingestion and loc-rib best path selection
@@ -213,6 +217,8 @@ async fn establish_upstream_peers(
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "import".to_string(),
                         policy_names: vec!["accept-all".to_string()],
                         default_action: None,
@@ -222,6 +228,8 @@ async fn establish_upstream_peers(
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "export".to_string(),
                         policy_names: vec!["reject-all".to_string()],
                         default_action: None,
@@ -427,6 +435,7 @@ async fn verify_loc_rib(client: &mut BgpClient, expected_best_paths: &HashMap<Ip
 struct BgpggProcess {
     process: Child,
     _config_file: tempfile::NamedTempFile,
+    _runtime_dir: tempfile::TempDir,
     bgp_port: u16,
     grpc_addr: String,
 }
@@ -436,19 +445,20 @@ impl BgpggProcess {
         // Create temporary config file
         use std::io::Write;
         let mut config_file = tempfile::NamedTempFile::new()?;
+        let runtime_dir = tempfile::tempdir()?;
 
         // Use port 0 for dynamic BGP port, but fixed gRPC port for easy connection
         let grpc_port = 50051 + (asn - 65000); // Offset by ASN to avoid conflicts
         let grpc_addr = format!("127.0.0.1:{}", grpc_port);
 
-        let config = Config {
+        let config = BgpConfig {
             asn: asn as u32,
             listen_addr: "127.0.0.1:0".to_string(),
             router_id,
             grpc_listen_addr: grpc_addr.clone(),
             hold_time_secs: 3600, // 1 hour for long-running load tests
             connect_retry_secs: 30,
-            peers: vec![],
+            peers: Vec::new(),
             bmp_servers: vec![],
             rpki_caches: vec![],
             defined_sets: Default::default(),
@@ -460,16 +470,31 @@ impl BgpggProcess {
             llgr: None,
             enhanced_rr_stale_ttl: Some(360),
             bgp_ls: Default::default(),
+            originate: Vec::new(),
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        config_file.write_all(yaml.as_bytes())?;
+        config_file.write_all(config.to_conf_str().as_bytes())?;
         config_file.flush()?;
 
-        let process = Command::new("../target/release/bgpggd")
+        let mut command = Command::new("../target/release/bgpggd");
+        command
             .arg("--config")
             .arg(config_file.path())
-            .spawn()?;
+            .arg("--runtime-dir")
+            .arg(runtime_dir.path());
+        unsafe {
+            command.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: BGPGGD_AS_LIMIT_BYTES as libc::rlim_t,
+                    rlim_max: BGPGGD_AS_LIMIT_BYTES as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let process = command.spawn()?;
 
         // Wait a bit for server to start
         sleep(Duration::from_millis(500)).await;
@@ -477,6 +502,7 @@ impl BgpggProcess {
         Ok(Self {
             process,
             _config_file: config_file,
+            _runtime_dir: runtime_dir,
             bgp_port: 0, // Will be populated after connecting
             grpc_addr: format!("http://{}", grpc_addr),
         })
@@ -693,6 +719,8 @@ async fn test_route_convergence() {
                 client
                     .set_policy_assignment(bgpgg::grpc::proto::SetPolicyAssignmentRequest {
                         peer_address: bind_addr.ip().to_string(),
+                        afi: 1,
+                        safi: 1,
                         direction: "export".to_string(),
                         policy_names: vec!["accept-all".to_string()],
                         default_action: None,

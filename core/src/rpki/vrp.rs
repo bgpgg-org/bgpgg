@@ -16,6 +16,7 @@
 
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::table::{Prefix, PrefixTrie};
+use conf::bgp::RpkiValidationConfig;
 
 /// A Validated ROA Payload entry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +54,26 @@ impl RpkiValidation {
             RpkiValidation::NotFound => Self::NOT_FOUND,
             RpkiValidation::Invalid => Self::INVALID,
         }
+    }
+}
+
+impl From<RpkiValidationConfig> for RpkiValidation {
+    fn from(config: RpkiValidationConfig) -> Self {
+        match config {
+            RpkiValidationConfig::Valid => RpkiValidation::Valid,
+            RpkiValidationConfig::Invalid => RpkiValidation::Invalid,
+            RpkiValidationConfig::NotFound => RpkiValidation::NotFound,
+        }
+    }
+}
+
+/// Convert RpkiValidation to RpkiValidationConfig.
+/// Free function because orphan rules prevent From impl (both types are foreign to each other).
+pub fn rpki_validation_to_config(state: RpkiValidation) -> RpkiValidationConfig {
+    match state {
+        RpkiValidation::Valid => RpkiValidationConfig::Valid,
+        RpkiValidation::Invalid => RpkiValidationConfig::Invalid,
+        RpkiValidation::NotFound => RpkiValidationConfig::NotFound,
     }
 }
 

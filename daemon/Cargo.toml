@@ -9,7 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 core = { path = "../core" }
+conf = { path = "../conf" }
 tokio.workspace = true
+tokio-stream = "0.1"
 tonic.workspace = true
 clap.workspace = true
 serde_json.workspace = true

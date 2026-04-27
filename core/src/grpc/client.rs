@@ -22,6 +22,7 @@ use super::proto::{
     AddRouteRequest,
     // RPKI
     AddRpkiCacheRequest,
+    CommitConfigRequest,
     DefinedSetConfig,
     DefinedSetInfo,
     DisablePeerRequest,
@@ -29,8 +30,10 @@ use super::proto::{
     GetPeerRequest,
     GetRpkiValidationRequest,
     GetRpkiValidationResponse,
+    GetRunningConfigRequest,
     GetServerInfoRequest,
     ListBmpServersRequest,
+    ListConfigSnapshotsRequest,
     ListDefinedSetsRequest,
     ListPeersRequest,
     ListPoliciesRequest,
@@ -47,7 +50,9 @@ use super::proto::{
     RemoveRouteRequest,
     RemoveRpkiCacheRequest,
     ResetPeerRequest,
+    RollbackConfigRequest,
     Route,
+    SaveConfigRequest,
     SessionConfig,
     SetPeerGracefulShutdownRequest,
     SetPolicyAssignmentRequest,
@@ -281,6 +286,92 @@ impl BgpClient {
         Ok((addr, resp.listen_port as u16, resp.num_routes))
     }
 
+    /// Commit `text` as the new running config.
+    pub async fn commit_config(
+        &self,
+        text: String,
+        session_uuid: uuid::Uuid,
+    ) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .commit_config(CommitConfigRequest {
+                text,
+                session_uuid: session_uuid.to_string(),
+            })
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
+    }
+
+    /// Fetch the daemon's current running config as rogg.conf brace-format text.
+    /// Used by ggsh for `show running-config` and `show diff`.
+    pub async fn get_running_config(&self) -> Result<String, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .get_running_config(GetRunningConfigRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.text)
+    }
+
+    /// List stored config snapshots. Returns one entry per existing
+    /// `rogg.<n>.conf` file, sorted by index ascending.
+    pub async fn list_config_snapshots(&self) -> Result<Vec<proto::ConfigSnapshot>, tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .list_config_snapshots(ListConfigSnapshotsRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.snapshots)
+    }
+
+    /// Persist the daemon's current `self.config` to `rogg.conf`.
+    pub async fn save_config(&self, session_uuid: uuid::Uuid) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .save_config(SaveConfigRequest {
+                session_uuid: session_uuid.to_string(),
+            })
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
+    }
+
+    /// Roll back to the config at `index` (1-based). Loads the snapshot file,
+    /// parses it, and commits it — the rollback itself becomes a new commit.
+    pub async fn rollback_config(
+        &self,
+        index: u32,
+        session_uuid: uuid::Uuid,
+    ) -> Result<(), tonic::Status> {
+        let resp = self
+            .inner
+            .clone()
+            .rollback_config(RollbackConfigRequest {
+                index,
+                session_uuid: session_uuid.to_string(),
+            })
+            .await?
+            .into_inner();
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(tonic::Status::unknown(resp.error))
+        }
+    }
+
     /// Add a BMP server destination
     pub async fn add_bmp_server(
         &self,
@@ -439,10 +530,13 @@ impl BgpClient {
         }
     }
 
-    /// Set policy assignment for a peer
+    /// Set policy assignment for a peer's (afi, safi). Replaces all
+    /// currently-attached policies for that direction with `policy_names`.
     pub async fn set_policy_assignment(
         &self,
         peer_address: String,
+        afi: u32,
+        safi: u32,
         direction: String,
         policy_names: Vec<String>,
         default_action: Option<String>,
@@ -452,6 +546,8 @@ impl BgpClient {
             .clone()
             .set_policy_assignment(SetPolicyAssignmentRequest {
                 peer_address,
+                afi,
+                safi,
                 direction,
                 policy_names,
                 default_action,

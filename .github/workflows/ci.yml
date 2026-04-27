@@ -25,6 +25,9 @@ jobs:
     - name: Run system tests
       run: make systest
 
+    - name: Run ggsh system tests
+      run: make systest-ggsh
+
     - name: Run Linux system tests
       run: make systest-linux
 
@@ -56,3 +59,4 @@ jobs:
         run: |
           gmake test
           gmake systest
+          gmake systest-ggsh

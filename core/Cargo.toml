@@ -14,7 +14,9 @@ regex.workspace = true
 tracing.workspace = true
 tokio-stream = "0.1"
 libc = "0.2"
+conf = { path = "../conf" }
 russh = "0.58"
+uuid.workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

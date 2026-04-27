@@ -378,10 +378,10 @@ impl Peer {
 pub(super) mod tests {
     use super::*;
     use crate::bgp::msg_notification::{BgpError, CeaseSubcode, UpdateMessageError};
-    use crate::config::PeerConfig;
     use crate::peer::BgpOpenParams;
     use crate::peer::{BgpState, Fsm, LocalConfig, PeerStatistics, SessionType};
     use crate::server::ConnectionType;
+    use conf::bgp::PeerConfig;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;

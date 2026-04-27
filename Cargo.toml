@@ -1,8 +1,9 @@
 [workspace]
 members = [
+    "conf",
     "core",
     "daemon",
-    "cli",
+    "ggsh",
     "loadtests",
 ]
 resolver = "2"
@@ -22,3 +23,4 @@ serde_json = "1.0"
 regex = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }

@@ -30,7 +30,7 @@ use crate::net::IpNetwork;
 use crate::peer::BgpState;
 use crate::peer::PeerCapabilities;
 use crate::peer::PeerOp;
-use crate::policy::PolicyResult;
+use crate::policy::{AfiSafiPolicies, PolicyResult};
 use crate::rib::rib_loc::{LocRib, RouteDelta};
 use crate::rib::{
     split_withdrawals, AdjRibOut, Path, PathAttrs, RouteKey, RoutePath, RouteSource, Withdrawal,
@@ -40,7 +40,7 @@ use crate::rpki::vrp::RpkiValidation;
 #[cfg(test)]
 use crate::policy::Policy;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -92,7 +92,10 @@ pub struct PeerExportContext<'a> {
     pub local_asn: u32,
     pub peer_asn: u32,
     pub local_next_hop: IpAddr,
-    pub export_policies: &'a [Arc<crate::policy::Policy>],
+    /// RFC 2545: local link-local IPv6 for 32-byte next-hop in MP_REACH_NLRI
+    pub local_link_local: Option<Ipv6Addr>,
+    /// Vec already includes RFC 8212 fallback (eBGP deny-all, iBGP accept-all).
+    pub export_policies: &'a AfiSafiPolicies,
     pub rr_client: bool,
     pub rs_client: bool,
     pub cluster_id: Ipv4Addr,
@@ -448,7 +451,9 @@ pub(crate) fn batch_announcements(to_announce: &[RoutePath]) -> Vec<Announcement
 fn address_families_match(next_hop: &NextHopAddr, ip_addr: IpAddr) -> bool {
     matches!(
         (next_hop, ip_addr),
-        (NextHopAddr::Ipv4(_), IpAddr::V4(_)) | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+        (NextHopAddr::Ipv4(_), IpAddr::V4(_))
+            | (NextHopAddr::Ipv6(_), IpAddr::V6(_))
+            | (NextHopAddr::Ipv6WithLinkLocal(_, _), IpAddr::V6(_))
     )
 }
 
@@ -532,12 +537,20 @@ fn build_export_next_hop(
         return Some(*path.next_hop());
     }
 
-    if ctx.is_ebgp() {
+    let next_hop = if ctx.is_ebgp() {
         build_ebgp_next_hop(path, ctx.local_next_hop, prefix)
     } else if ctx.next_hop_self {
         Some(ctx.local_next_hop.into())
     } else {
         build_ibgp_next_hop(path, ctx.local_next_hop, prefix)
+    };
+
+    // RFC 2545: for eBGP IPv6, include link-local in 32-byte next-hop
+    match (next_hop, ctx.local_link_local) {
+        (Some(NextHopAddr::Ipv6(global)), Some(link_local)) if ctx.is_ebgp() => {
+            Some(NextHopAddr::Ipv6WithLinkLocal(global, link_local))
+        }
+        _ => next_hop,
     }
 }
 
@@ -613,7 +626,12 @@ fn compute_export_path(
     }
 
     let mut exported = Path::clone(path);
-    if !evaluate_export_policy(ctx.export_policies, route_key, &mut exported) {
+    let policies = ctx
+        .export_policies
+        .get(&route_key.afi_safi())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    if !evaluate_export_policy(policies, route_key, &mut exported) {
         return None;
     }
 
@@ -885,6 +903,22 @@ mod tests {
         }
     }
 
+    /// Build a per-family export-policy lookup that applies the same
+    /// `policies` list to every common test family (IPv4/IPv6 unicast,
+    /// LinkState). Tests that need per-family discrimination should
+    /// build their own HashMap.
+    fn test_export_policies(policies: Vec<Arc<Policy>>) -> AfiSafiPolicies {
+        let mut map = HashMap::new();
+        for fam in [
+            AfiSafi::new(Afi::Ipv4, Safi::Unicast),
+            AfiSafi::new(Afi::Ipv6, Safi::Unicast),
+            AfiSafi::new(Afi::LinkState, Safi::LinkState),
+        ] {
+            map.insert(fam, policies.clone());
+        }
+        map
+    }
+
     fn make_peer_export_ctx(
         local_asn: u32,
         peer_asn: u32,
@@ -905,6 +939,7 @@ mod tests {
             .into_iter()
             .collect(),
         ));
+        let empty_policies: &'static AfiSafiPolicies = Box::leak(Box::new(AfiSafiPolicies::new()));
 
         let capabilities: &'static PeerCapabilities =
             Box::leak(Box::new(PeerCapabilities::default()));
@@ -915,7 +950,8 @@ mod tests {
             local_asn,
             peer_asn,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            export_policies: &[],
+            local_link_local: None,
+            export_policies: empty_policies,
             rr_client: false,
             rs_client,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -1698,6 +1734,7 @@ mod tests {
 
         // Send announcements - should skip due to size
         let policies = vec![policy];
+        let export_policies = test_export_policies(policies);
         let negotiated: HashSet<AfiSafi> = vec![
             AfiSafi::new(Afi::Ipv4, Safi::Unicast),
             AfiSafi::new(Afi::Ipv6, Safi::Unicast),
@@ -1710,7 +1747,8 @@ mod tests {
             local_asn: 65000,
             peer_asn: 65001,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            export_policies: &policies,
+            local_link_local: None,
+            export_policies: &export_policies,
             rr_client: false,
             rs_client: false,
             cluster_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -2022,13 +2060,15 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let empty_policies = AfiSafiPolicies::new();
         let ctx = PeerExportContext {
             peer_addr: test_ip(2),
             peer_tx: &tokio::sync::mpsc::unbounded_channel().0,
             local_asn: 65000,
             peer_asn: 65000,
             local_next_hop: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            export_policies: &[],
+            local_link_local: None,
+            export_policies: &empty_policies,
             rr_client: false,
             rs_client: false,
             cluster_id,
@@ -2116,12 +2156,13 @@ mod tests {
                 )
                 .with(Statement::new().then(Action::Accept)),
         )];
+        let export_policies = test_export_policies(policies);
         let rs_ctx = PeerExportContext {
-            export_policies: &policies,
+            export_policies: &export_policies,
             ..make_peer_export_ctx(65000, 65003, true, false, false)
         };
         let non_rs_ctx = PeerExportContext {
-            export_policies: &policies,
+            export_policies: &export_policies,
             ..make_peer_export_ctx(65000, 65003, false, false, false)
         };
 

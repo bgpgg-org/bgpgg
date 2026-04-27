@@ -12,37 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::config::{commit_config, save_config};
 use super::{
-    AdminState, BgpServer, BmpOp, BmpPeerStats, BmpTaskInfo, ConnectionType, GetPeerResponse,
-    GetPeersResponse, PeerInfo, PolicyDirection, ResetType,
+    AdminState, BgpServer, BmpOp, BmpPeerStats, GetPeerResponse, GetPeersResponse, PeerInfo,
+    PolicyDirection, ResetType,
 };
 use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{DefinedSetConfig, PeerConfig};
-use crate::log::{error, info};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::net::apply_tcp_md5;
-#[cfg(target_os = "freebsd")]
-use crate::net::remove_tcp_md5;
+use crate::log::info;
 use crate::net::IpNetwork;
 use crate::peer::PeerOp;
 use crate::policy::sets::{
     AsPathSet, CommunitySet, ExtCommunitySet, LargeCommunitySet, NeighborSet, PrefixMatch,
     PrefixSet,
 };
-use crate::policy::DefinedSetType;
+use crate::policy::{DefinedSetType, Policy};
 use crate::rib::{PathAttrs, Route, RouteKey};
-use crate::types::PeerDownReason;
+use conf::bgp::{
+    afi_safi_entry_mut, AsPathSetConfig, BgpConfig, BmpConfig, CommunitySetConfig,
+    DefinedSetConfig, NeighborSetConfig, PeerConfig, PolicyDefinitionConfig, PrefixMatchConfig,
+    PrefixSetConfig, RpkiCacheConfig, StatementConfig,
+};
+
+use conf::fs::{list_snapshots, load_snapshot, SnapshotInfo, SNAPSHOT_COUNT};
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::bgp::msg_notification::CeaseSubcode;
 use crate::grpc::proto::RibType;
-use crate::rpki::manager::{RpkiCacheState, RpkiOp, RtrCacheConfig};
+use crate::rpki::manager::{RpkiCacheState, RpkiOp};
 use crate::rpki::vrp::{RpkiValidation, Vrp};
+
+/// Map a DefinedSetConfig to its DefinedSetType.
+fn defined_set_type(set: &DefinedSetConfig) -> DefinedSetType {
+    match set {
+        DefinedSetConfig::PrefixSet(_) => DefinedSetType::PrefixSet,
+        DefinedSetConfig::NeighborSet(_) => DefinedSetType::NeighborSet,
+        DefinedSetConfig::AsPathSet(_) => DefinedSetType::AsPathSet,
+        DefinedSetConfig::CommunitySet(_) => DefinedSetType::CommunitySet,
+        DefinedSetConfig::ExtCommunitySet(_) => DefinedSetType::ExtCommunitySet,
+        DefinedSetConfig::LargeCommunitySet(_) => DefinedSetType::LargeCommunitySet,
+    }
+}
 
 // Management operations that can be sent to the BGP server
 pub enum MgmtOp {
@@ -135,7 +148,7 @@ pub enum MgmtOp {
     },
     AddPolicy {
         name: String,
-        statements: Vec<crate::config::StatementConfig>,
+        statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemovePolicy {
@@ -148,6 +161,7 @@ pub enum MgmtOp {
     },
     SetPolicyAssignment {
         peer_addr: IpAddr,
+        family: AfiSafi,
         direction: PolicyDirection,
         policy_names: Vec<String>,
         default_action: Option<crate::policy::PolicyResult>,
@@ -160,7 +174,7 @@ pub enum MgmtOp {
     },
     // RPKI Cache Management
     AddRpkiCache {
-        config: RtrCacheConfig,
+        config: RpkiCacheConfig,
         response: oneshot::Sender<Result<(), String>>,
     },
     RemoveRpkiCache {
@@ -175,12 +189,43 @@ pub enum MgmtOp {
         origin_as: u32,
         response: oneshot::Sender<(RpkiValidation, Vec<Vrp>)>,
     },
+    // Config-mode management (ggsh configure/commit flow).
+    GetRunningConfig {
+        response: oneshot::Sender<String>,
+    },
+    /// Apply the candidate config text supplied by the caller.
+    /// `session_uuid` must match the per-session UUID written by the
+    /// operator (ggsh) into `<config>.lock` on `configure`.
+    CommitConfig {
+        text: String,
+        session_uuid: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Persist the daemon's current `self.config` to `rogg.conf`.
+    /// `CommitConfig` already persists; this exists for callers that
+    /// mutated state via AddPeer/etc. and want the result on disk.
+    SaveConfig {
+        session_uuid: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Load `rogg.<index>.conf`, parse, commit it. The rollback itself
+    /// becomes a new commit (forward history preserved). Same
+    /// `session_uuid` rule.
+    RollbackConfig {
+        index: u32,
+        session_uuid: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Return metadata for each stored snapshot that currently exists.
+    ListConfigSnapshots {
+        response: oneshot::Sender<Vec<SnapshotInfo>>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct PolicyInfoResponse {
     pub name: String,
-    pub statements: Vec<crate::config::StatementConfig>,
+    pub statements: Vec<StatementConfig>,
 }
 
 impl BgpServer {
@@ -195,7 +240,7 @@ impl BgpServer {
                     .await;
             }
             MgmtOp::RemovePeer { addr, response } => {
-                self.handle_remove_peer(addr, response).await;
+                self.handle_remove_peer(addr, response, bind_addr).await;
             }
             MgmtOp::DisablePeer { addr, response } => {
                 self.handle_disable_peer(addr, response);
@@ -261,11 +306,12 @@ impl BgpServer {
                 statistics_timeout,
                 response,
             } => {
-                self.handle_add_bmp_server(addr, statistics_timeout, response)
+                self.handle_add_bmp_server(addr, statistics_timeout, response, bind_addr)
                     .await;
             }
             MgmtOp::RemoveBmpServer { addr, response } => {
-                self.handle_remove_bmp_server(addr, response);
+                self.handle_remove_bmp_server(addr, response, bind_addr)
+                    .await;
             }
             MgmtOp::GetBmpServers { response } => {
                 self.handle_get_bmp_servers(response);
@@ -302,6 +348,7 @@ impl BgpServer {
             }
             MgmtOp::SetPolicyAssignment {
                 peer_addr,
+                family,
                 direction,
                 policy_names,
                 default_action,
@@ -309,6 +356,7 @@ impl BgpServer {
             } => {
                 self.handle_set_policy_assignment(
                     peer_addr,
+                    family,
                     direction,
                     policy_names,
                     default_action,
@@ -323,10 +371,12 @@ impl BgpServer {
                 self.handle_set_peer_graceful_shutdown(addr, enabled, response);
             }
             MgmtOp::AddRpkiCache { config, response } => {
-                self.handle_add_rpki_cache(config, response);
+                self.handle_add_rpki_cache(config, response, bind_addr)
+                    .await;
             }
             MgmtOp::RemoveRpkiCache { addr, response } => {
-                self.handle_remove_rpki_cache(addr, response);
+                self.handle_remove_rpki_cache(addr, response, bind_addr)
+                    .await;
             }
             MgmtOp::GetRpkiCaches { response } => {
                 self.handle_get_rpki_caches(response).await;
@@ -338,25 +388,127 @@ impl BgpServer {
             } => {
                 self.handle_get_rpki_validation(prefix, origin_as, response);
             }
+            MgmtOp::GetRunningConfig { response } => {
+                let _ = response.send(self.config.to_conf_str());
+            }
+            MgmtOp::CommitConfig {
+                text,
+                session_uuid,
+                response,
+            } => {
+                self.handle_commit_config(text, session_uuid, response, bind_addr)
+                    .await;
+            }
+            MgmtOp::SaveConfig {
+                session_uuid,
+                response,
+            } => {
+                let _ = response.send(self.handle_save_config(&session_uuid));
+            }
+            MgmtOp::RollbackConfig {
+                index,
+                session_uuid,
+                response,
+            } => {
+                self.handle_rollback_config(index, session_uuid, response, bind_addr)
+                    .await;
+            }
+            MgmtOp::ListConfigSnapshots { response } => {
+                let _ = response.send(list_snapshots(&self.config_path, SNAPSHOT_COUNT));
+            }
         }
+    }
+
+    fn verify_session_uuid(&self, session_uuid: &str) -> Result<(), String> {
+        let parsed = uuid::Uuid::parse_str(session_uuid)
+            .map_err(|_| "session_uuid is not a valid UUID".to_string())?;
+        match conf::fs::read_session_uuid(&self.config_path) {
+            Ok(Some(file_uuid)) => {
+                if file_uuid == parsed {
+                    Ok(())
+                } else {
+                    Err("session UUID mismatch".into())
+                }
+            }
+            Ok(None) => Err("no active configure session (lock file missing or empty)".into()),
+            Err(e) => Err(format!("failed to read session UUID: {}", e)),
+        }
+    }
+
+    fn handle_save_config(&self, session_uuid: &str) -> Result<(), String> {
+        self.verify_session_uuid(session_uuid)?;
+        save_config(self)
+    }
+
+    /// Load `rogg.<index>.conf` from disk, parse it, run `commit_config`.
+    /// The rollback itself goes through the normal snapshot-rotate flow — the
+    /// current `rogg.conf` becomes the new `rogg.1.conf`, so a subsequent
+    /// rollback can recover from a bad rollback.
+    async fn handle_rollback_config(
+        &mut self,
+        index: u32,
+        session_uuid: String,
+        response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
+    ) {
+        if let Err(e) = self.verify_session_uuid(&session_uuid) {
+            let _ = response.send(Err(e));
+            return;
+        }
+        let text = match load_snapshot(&self.config_path, index) {
+            Ok(text) => text,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to read snapshot {}: {}", index, e)));
+                return;
+            }
+        };
+        let new_config = match BgpConfig::from_conf_str(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to parse snapshot {}: {}", index, e)));
+                return;
+            }
+        };
+        let _ = response.send(commit_config(self, new_config, bind_addr).await);
+    }
+
+    async fn handle_commit_config(
+        &mut self,
+        text: String,
+        session_uuid: String,
+        response: oneshot::Sender<Result<(), String>>,
+        bind_addr: SocketAddr,
+    ) {
+        if let Err(e) = self.verify_session_uuid(&session_uuid) {
+            let _ = response.send(Err(e));
+            return;
+        }
+        let new_config = match BgpConfig::from_conf_str(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let _ = response.send(Err(format!("failed to parse candidate config: {}", e)));
+                return;
+            }
+        };
+        let _ = response.send(commit_config(self, new_config, bind_addr).await);
     }
 
     async fn handle_add_peer(
         &mut self,
         addr: String,
-        config: PeerConfig,
+        mut config: PeerConfig,
         response: oneshot::Sender<Result<(), String>>,
         bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         info!(peer_addr = %addr, "adding peer via request");
 
-        // Validate peer configuration
-        if let Err(e) = config.validate() {
-            let _ = response.send(Err(e));
-            return;
-        }
-
-        // Parse peer IP address
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -365,44 +517,19 @@ impl BgpServer {
             }
         };
 
-        let peer_addr = SocketAddr::new(peer_ip, config.port);
-
-        // Check if peer already exists
         if self.peers.contains_key(&peer_ip) {
             let _ = response.send(Err(format!("peer {} already exists", peer_ip)));
             return;
         }
 
-        // Create Peer and spawn task (runs forever in Idle state until ManualStart)
-        // Passive mode peers only accept incoming connections
-        let conn_type = if config.passive_mode {
-            ConnectionType::Incoming
-        } else {
-            ConnectionType::Outgoing
-        };
-
-        let peer_tx = self.spawn_peer(peer_addr, config.clone(), bind_addr, conn_type);
-
-        self.peers.insert(
-            peer_ip,
-            PeerInfo::new(config.clone(), Some(peer_tx.clone()), Some(conn_type)),
-        );
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let (Some(fd), Some(key)) = (self.listener_fd, config.read_md5_key()) {
-            if let Err(e) = apply_tcp_md5(fd, peer_ip, &key) {
-                error!(peer = %peer_ip, error = %e, "failed to set TCP MD5 on listener for new peer");
-            }
+        config.address = addr;
+        if let Err(e) = config.validate() {
+            let _ = response.send(Err(e));
+            return;
         }
 
-        // RFC 4271: ManualStart for admin-added peers
-        if config.passive_mode {
-            let _ = peer_tx.send(PeerOp::ManualStartPassive);
-        } else {
-            let _ = peer_tx.send(PeerOp::ManualStart);
-        }
-
-        info!(%peer_ip, passive = config.passive_mode, total_peers = self.peers.len(), "peer added");
+        self.config.peers.push(config.clone());
+        self.spawn_and_start_peer(peer_ip, config, bind_addr);
         let _ = response.send(Ok(()));
     }
 
@@ -410,10 +537,17 @@ impl BgpServer {
         &mut self,
         addr: String,
         response: oneshot::Sender<Result<(), String>>,
+        _bind_addr: SocketAddr,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         info!(peer_ip = %addr, "removing peer via request");
 
-        // Parse the address to get IpAddr
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -422,59 +556,24 @@ impl BgpServer {
             }
         };
 
-        // Send graceful shutdown notification to all active connections
-        if let Some(entry) = self.peers.get(&peer_ip) {
-            entry.send_to_all(|| PeerOp::Shutdown(CeaseSubcode::PeerDeconfigured));
-        } else {
+        if !self.peers.contains_key(&peer_ip) {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         }
 
-        // Send BMP PeerDown before removing peer (if session reached ESTABLISHED)
-        if let Some(entry) = self.peers.get(&peer_ip) {
-            if let Some(conn) = entry.established_conn() {
-                if let (Some(asn), Some(bgp_id)) = (conn.asn, conn.bgp_id) {
-                    let use_4byte_asn = entry.supports_4byte_asn();
-                    self.broadcast_bmp(BmpOp::PeerDown {
-                        peer_ip,
-                        peer_as: asn,
-                        peer_bgp_id: bgp_id,
-                        reason: PeerDownReason::PeerDeConfigured,
-                        use_4byte_asn,
-                    });
-                }
-            }
-        }
-
-        // Clean up SADB entries on FreeBSD when the peer had MD5 configured.
-        #[cfg(target_os = "freebsd")]
-        if let (Some(fd), Some(entry)) = (self.listener_fd, self.peers.get(&peer_ip)) {
-            if entry.config.md5_key_file.is_some() {
-                if let Err(e) = remove_tcp_md5(fd, peer_ip) {
-                    error!(peer = %peer_ip, error = %e, "failed to remove TCP MD5 from listener");
-                }
-            }
-        }
-
-        // Cancel any running timers before removing the peer
-        if let Some(peer_info) = self.peers.get_mut(&peer_ip) {
-            peer_info.llgr_timers.cancel_all();
-            peer_info.rr_stale_timers.cancel_all();
-        }
-
-        // Now remove the peer from the map
-        self.peers.remove(&peer_ip);
-
-        // Notify Loc-RIB to remove routes from this peer
-        let delta = self.loc_rib.remove_routes_from_peer(peer_ip);
-
-        // Propagate route changes (withdrawals or new best paths) to all remaining peers
-        self.propagate_routes(delta, None).await;
-
+        self.shutdown_and_remove_peer(peer_ip).await;
+        self.config.remove_peer(peer_ip);
         let _ = response.send(Ok(()));
     }
 
     fn handle_disable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -489,14 +588,23 @@ impl BgpServer {
         };
 
         entry.admin_state = AdminState::Down;
-
-        // Stop all active sessions
         entry.send_to_all(|| PeerOp::ManualStop);
+
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
+            cfg.admin_down = true;
+        }
 
         let _ = response.send(Ok(()));
     }
 
     fn handle_enable_peer(&mut self, addr: String, response: oneshot::Sender<Result<(), String>>) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -505,15 +613,18 @@ impl BgpServer {
             }
         };
 
+        let passive = self
+            .config
+            .find_peer(peer_ip)
+            .is_some_and(|cfg| cfg.passive_mode);
+
         let Some(entry) = self.peers.get_mut(&peer_ip) else {
             let _ = response.send(Err(format!("peer {} not found", addr)));
             return;
         };
 
         entry.admin_state = AdminState::Up;
-
         // RFC 4271: ManualStart for admin-enabled peers (send to all tasks)
-        let passive = entry.config.passive_mode;
         entry.send_to_all(|| {
             if passive {
                 PeerOp::ManualStartPassive
@@ -521,6 +632,10 @@ impl BgpServer {
                 PeerOp::ManualStart
             }
         });
+
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
+            cfg.admin_down = false;
+        }
 
         let _ = response.send(Ok(()));
     }
@@ -533,8 +648,6 @@ impl BgpServer {
         safi: Option<Safi>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        use crate::bgp::multiprotocol::AfiSafi;
-
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -709,6 +822,13 @@ impl BgpServer {
         enabled: bool,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         let peer_ip: IpAddr = match addr.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -730,11 +850,9 @@ impl BgpServer {
             .map(|conn| conn.negotiated_afi_safis().into_iter().collect())
             .unwrap_or_default();
 
-        self.peers
-            .get_mut(&peer_ip)
-            .expect("peer should exist after contains_key check")
-            .config
-            .graceful_shutdown = enabled;
+        if let Some(cfg) = self.config.find_peer_mut(peer_ip) {
+            cfg.graceful_shutdown = enabled;
+        }
         info!(%peer_ip, enabled, "set graceful_shutdown");
 
         // Resend all routes so the updated community list is propagated.
@@ -790,21 +908,14 @@ impl BgpServer {
             .iter()
             .map(|(addr, entry)| {
                 let (asn, state) = entry.max_state();
+                let cfg = self.config.find_peer(*addr);
                 GetPeersResponse {
                     address: addr.to_string(),
-                    asn: asn.or(entry.config.asn),
+                    asn: asn.or_else(|| cfg.and_then(|c| c.asn)),
                     state,
                     admin_state: entry.admin_state,
-                    import_policies: entry
-                        .import_policies
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
-                    export_policies: entry
-                        .export_policies
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
+                    import_policies: cfg.map(|c| c.import_policy_names()).unwrap_or_default(),
+                    export_policies: cfg.map(|c| c.export_policy_names()).unwrap_or_default(),
                 }
             })
             .collect();
@@ -828,6 +939,10 @@ impl BgpServer {
             let _ = response.send(None);
             return;
         };
+        let Some(cfg) = self.config.find_peer(peer_ip) else {
+            let _ = response.send(None);
+            return;
+        };
 
         let mut stats = entry.get_statistics().await.unwrap_or_default();
         stats.adj_rib_in_count = entry.adj_rib_in.prefix_count() as u64;
@@ -835,21 +950,13 @@ impl BgpServer {
 
         let _ = response.send(Some(GetPeerResponse {
             address: addr,
-            asn: asn.or(entry.config.asn),
+            asn: asn.or(cfg.asn),
             state,
             admin_state: entry.admin_state,
-            import_policies: entry
-                .import_policies
-                .iter()
-                .map(|p| p.name.clone())
-                .collect(),
-            export_policies: entry
-                .export_policies
-                .iter()
-                .map(|p| p.name.clone())
-                .collect(),
+            import_policies: cfg.import_policy_names(),
+            export_policies: cfg.export_policy_names(),
             statistics: stats,
-            config: entry.config.clone(),
+            config: cfg.clone(),
         }));
     }
 
@@ -918,21 +1025,14 @@ impl BgpServer {
     fn handle_get_peers_stream(&self, tx: mpsc::UnboundedSender<GetPeersResponse>) {
         for (addr, entry) in self.peers.iter() {
             let (asn, state) = entry.max_state();
+            let cfg = self.config.find_peer(*addr);
             let peer = GetPeersResponse {
                 address: addr.to_string(),
-                asn: asn.or(entry.config.asn),
+                asn: asn.or_else(|| cfg.and_then(|c| c.asn)),
                 state,
                 admin_state: entry.admin_state,
-                import_policies: entry
-                    .import_policies
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect(),
-                export_policies: entry
-                    .export_policies
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect(),
+                import_policies: cfg.map(|c| c.import_policy_names()).unwrap_or_default(),
+                export_policies: cfg.map(|c| c.export_policy_names()).unwrap_or_default(),
             };
             if tx.send(peer).is_err() {
                 break;
@@ -945,37 +1045,49 @@ impl BgpServer {
         addr: SocketAddr,
         statistics_timeout: Option<u64>,
         response: oneshot::Sender<Result<(), String>>,
+        _bind_addr: SocketAddr,
     ) {
-        // Spawn new BmpTask
-        let task_tx = self.spawn_bmp_task(addr, statistics_timeout);
-
-        // Store in HashMap
-        let task_info = BmpTaskInfo::new(addr, statistics_timeout, task_tx);
-        self.bmp_tasks.insert(addr, task_info);
-
-        info!(%addr, "BMP task added");
-
-        // Send initial state to new BMP destination
-        let established_peers = self.get_established_peers();
-        send_initial_bmp_state_to_task(
-            &self.bmp_tasks.get(&addr).unwrap().task_tx,
-            established_peers,
-            response,
-        );
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
+        if self.bmp_tasks.contains_key(&addr) {
+            let _ = response.send(Err(format!("BMP server {} already exists", addr)));
+            return;
+        }
+        self.config.bmp_servers.push(BmpConfig {
+            address: addr.to_string(),
+            statistics_timeout,
+        });
+        self.spawn_single_bmp_task(addr, statistics_timeout);
+        let _ = response.send(Ok(()));
     }
 
-    fn handle_remove_bmp_server(
+    async fn handle_remove_bmp_server(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
+        _bind_addr: SocketAddr,
     ) {
-        if let Some(task_info) = self.bmp_tasks.remove(&addr) {
-            drop(task_info.task_tx); // Channel drop triggers graceful shutdown
-            info!(%addr, "BMP task removed");
-            let _ = response.send(Ok(()));
-        } else {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
+        if !self.bmp_tasks.contains_key(&addr) {
             let _ = response.send(Err(format!("BMP server not found: {}", addr)));
+            return;
         }
+        self.config
+            .bmp_servers
+            .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
+        self.stop_single_bmp_task(addr);
+        let _ = response.send(Ok(()));
     }
 
     fn handle_get_bmp_servers(&self, response: oneshot::Sender<Vec<String>>) {
@@ -1008,38 +1120,71 @@ impl BgpServer {
         let _ = response.send(stats);
     }
 
-    fn handle_add_rpki_cache(
+    async fn handle_add_rpki_cache(
         &mut self,
-        config: RtrCacheConfig,
+        config: RpkiCacheConfig,
         response: oneshot::Sender<Result<(), String>>,
+        _bind_addr: SocketAddr,
     ) {
-        let rpki_tx = match &self.rpki_tx {
-            Some(tx) => tx.clone(),
-            None => self.spawn_rtr_manager(),
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
         };
-        let addr = config.address;
-        if rpki_tx.send(RpkiOp::AddCache(config)).is_err() {
-            let _ = response.send(Err("RPKI manager not running".to_string()));
+        let addr: SocketAddr = match config.address.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = response.send(Err(format!(
+                    "invalid RPKI cache address '{}': {}",
+                    config.address, e
+                )));
+                return;
+            }
+        };
+        if self
+            .config
+            .rpki_caches
+            .iter()
+            .any(|c| c.address.parse::<SocketAddr>().ok() == Some(addr))
+        {
+            let _ = response.send(Err(format!("RPKI cache {} already exists", addr)));
             return;
         }
-        info!(%addr, "RPKI cache added via gRPC");
+        if let Err(e) = self.spawn_single_rpki_cache(&config) {
+            let _ = response.send(Err(e));
+            return;
+        }
+        self.config.rpki_caches.push(config);
         let _ = response.send(Ok(()));
     }
 
-    fn handle_remove_rpki_cache(
+    async fn handle_remove_rpki_cache(
         &mut self,
         addr: SocketAddr,
         response: oneshot::Sender<Result<(), String>>,
+        _bind_addr: SocketAddr,
     ) {
-        let Some(rpki_tx) = &self.rpki_tx else {
-            let _ = response.send(Err("no RPKI caches configured".to_string()));
-            return;
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
         };
-        if rpki_tx.send(RpkiOp::RemoveCache(addr)).is_err() {
-            let _ = response.send(Err("RPKI manager not running".to_string()));
+        let before = self.config.rpki_caches.len();
+        self.config
+            .rpki_caches
+            .retain(|c| c.address.parse::<SocketAddr>().ok() != Some(addr));
+        if self.config.rpki_caches.len() == before {
+            let _ = response.send(Err(format!("RPKI cache {} not found", addr)));
             return;
         }
-        info!(%addr, "RPKI cache removed via gRPC");
+        if let Err(e) = self.stop_single_rpki_cache(addr) {
+            let _ = response.send(Err(e));
+            return;
+        }
         let _ = response.send(Ok(()));
     }
 
@@ -1089,17 +1234,24 @@ impl BgpServer {
         set: DefinedSetConfig,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Clone current defined sets (clone-on-write pattern)
         let mut new_sets = (*self.policy_ctx.defined_sets).clone();
 
         // Fail if set already exists
-        if new_sets.contains(set.set_type(), set.name()) {
+        if new_sets.contains(defined_set_type(&set), set.name()) {
             let _ = response.send(Err(format!("defined set '{}' already exists", set.name())));
             return;
         }
 
         // Add the set - convert config to runtime type
-        match set {
+        match &set {
             DefinedSetConfig::PrefixSet(config) => {
                 let mut prefix_matches = Vec::new();
                 for pm_config in &config.prefixes {
@@ -1223,6 +1375,20 @@ impl BgpServer {
         // Replace the Arc (atomic update)
         self.policy_ctx.defined_sets = Arc::new(new_sets);
 
+        // Mirror to self.config so SaveConfig persists the addition.
+        match set {
+            DefinedSetConfig::PrefixSet(c) => self.config.defined_sets.prefix_sets.push(c),
+            DefinedSetConfig::AsPathSet(c) => self.config.defined_sets.as_path_sets.push(c),
+            DefinedSetConfig::CommunitySet(c) => self.config.defined_sets.community_sets.push(c),
+            DefinedSetConfig::ExtCommunitySet(c) => {
+                self.config.defined_sets.ext_community_sets.push(c)
+            }
+            DefinedSetConfig::NeighborSet(c) => self.config.defined_sets.neighbor_sets.push(c),
+            DefinedSetConfig::LargeCommunitySet(c) => {
+                self.config.defined_sets.large_community_sets.push(c)
+            }
+        }
+
         let _ = response.send(Ok(()));
     }
 
@@ -1232,6 +1398,13 @@ impl BgpServer {
         name: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Check if any policy references this set
         for (policy_name, policy) in &self.policy_ctx.policies {
             if self.policy_references_set(policy, set_type, &name) {
@@ -1250,6 +1423,41 @@ impl BgpServer {
         // Delete specific set (idempotent - succeed even if not found)
         new_sets.remove(set_type, &name);
         self.policy_ctx.defined_sets = Arc::new(new_sets);
+
+        // Mirror to self.config so SaveConfig persists the removal.
+        match set_type {
+            DefinedSetType::PrefixSet => self
+                .config
+                .defined_sets
+                .prefix_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::AsPathSet => self
+                .config
+                .defined_sets
+                .as_path_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::CommunitySet => self
+                .config
+                .defined_sets
+                .community_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::ExtCommunitySet => self
+                .config
+                .defined_sets
+                .ext_community_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::NeighborSet => self
+                .config
+                .defined_sets
+                .neighbor_sets
+                .retain(|s| s.name != name),
+            DefinedSetType::LargeCommunitySet => self
+                .config
+                .defined_sets
+                .large_community_sets
+                .retain(|s| s.name != name),
+        }
+
         let _ = response.send(Ok(()));
     }
 
@@ -1259,11 +1467,6 @@ impl BgpServer {
         name: Option<String>,
         response: oneshot::Sender<Vec<DefinedSetConfig>>,
     ) {
-        use crate::config::{
-            AsPathSetConfig, CommunitySetConfig, NeighborSetConfig, PrefixMatchConfig,
-            PrefixSetConfig,
-        };
-
         let mut results = Vec::new();
 
         // Collect prefix sets
@@ -1359,12 +1562,16 @@ impl BgpServer {
     fn handle_add_policy(
         &mut self,
         name: String,
-        statements: Vec<crate::config::StatementConfig>,
+        statements: Vec<StatementConfig>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        use crate::config::PolicyDefinitionConfig;
-        use crate::policy::Policy;
-
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Reject policy names starting with underscore (reserved for built-in policies)
         if name.starts_with('_') {
             let _ = response.send(Err(
@@ -1383,7 +1590,20 @@ impl BgpServer {
         // Build Policy from definition using current defined_sets
         match Policy::from_config(&policy_def, &self.policy_ctx.defined_sets) {
             Ok(policy) => {
-                self.policy_ctx.policies.insert(name, Arc::new(policy));
+                self.policy_ctx
+                    .policies
+                    .insert(name.clone(), Arc::new(policy));
+                // Mirror to self.config: replace existing or append.
+                if let Some(existing) = self
+                    .config
+                    .policy_definitions
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    *existing = policy_def;
+                } else {
+                    self.config.policy_definitions.push(policy_def);
+                }
                 let _ = response.send(Ok(()));
             }
             Err(e) => {
@@ -1397,8 +1617,16 @@ impl BgpServer {
         name: String,
         response: oneshot::Sender<Result<(), String>>,
     ) {
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
+                return;
+            }
+        };
         // Idempotent - succeed even if policy doesn't exist
         self.policy_ctx.policies.remove(&name);
+        self.config.policy_definitions.retain(|p| p.name != name);
         let _ = response.send(Ok(()));
     }
 
@@ -1433,21 +1661,21 @@ impl BgpServer {
     fn handle_set_policy_assignment(
         &mut self,
         peer_addr: IpAddr,
+        family: AfiSafi,
         direction: PolicyDirection,
         policy_names: Vec<String>,
         _default_action: Option<crate::policy::PolicyResult>,
         response: oneshot::Sender<Result<(), String>>,
     ) {
-        // Check if peer exists
-        let peer = match self.peers.get_mut(&peer_addr) {
-            Some(p) => p,
-            None => {
-                let _ = response.send(Err(format!("peer {} not found", peer_addr)));
+        let _lock = match conf::fs::acquire_shared_lock(&self.config_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = response.send(Err(e));
                 return;
             }
         };
 
-        // Resolve policy names to Policy objects
+        // Resolve policy names to Policy objects.
         let mut resolved_policies = Vec::new();
         for name in &policy_names {
             match self.policy_ctx.policies.get(name) {
@@ -1459,23 +1687,36 @@ impl BgpServer {
             }
         }
 
-        // Update peer's policy list and persist names in config so policies
-        // survive session reconnections.
+        let Some(peer) = self.peers.get_mut(&peer_addr) else {
+            let _ = response.send(Err(format!("peer {} not found", peer_addr)));
+            return;
+        };
+
+        // Update resolved runtime policies for this family.
         match direction {
             PolicyDirection::Import => {
-                peer.config.import_policy = policy_names;
-                peer.import_policies = resolved_policies;
+                peer.import_policies.insert(family, resolved_policies);
             }
             PolicyDirection::Export => {
-                peer.config.export_policy = policy_names;
-                peer.export_policies = resolved_policies;
+                peer.export_policies.insert(family, resolved_policies);
+            }
+        }
+
+        // Persist the assignment in the peer's per-family config so it
+        // survives session reconnections. Auto-create the family entry if
+        // the peer didn't have one for this (afi, safi) yet.
+        if let Some(cfg) = self.config.find_peer_mut(peer_addr) {
+            let entry = afi_safi_entry_mut(&mut cfg.afi_safis, family.afi, family.safi);
+            match direction {
+                PolicyDirection::Import => entry.import_policy = policy_names,
+                PolicyDirection::Export => entry.export_policy = policy_names,
             }
         }
 
         let _ = response.send(Ok(()));
     }
 
-    fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
+    pub(super) fn get_established_peers(&self) -> Vec<(IpAddr, &PeerInfo)> {
         self.peers
             .iter()
             .filter(|(_, peer_info)| peer_info.established_conn().is_some())
@@ -1607,11 +1848,10 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     ))
 }
 
-/// Send initial BMP messages for existing peers after BMP server connects
-fn send_initial_bmp_state_to_task(
+/// Send initial BMP messages for existing peers after BMP server connects.
+pub(super) fn send_initial_bmp_state(
     task_tx: &mpsc::UnboundedSender<Arc<BmpOp>>,
     established_peers: Vec<(IpAddr, &PeerInfo)>,
-    response: oneshot::Sender<Result<(), String>>,
 ) {
     use crate::bgp::msg::MessageFormat;
     use crate::peer::outgoing::batch_announcements;
@@ -1675,5 +1915,4 @@ fn send_initial_bmp_state_to_task(
             }
         }
     }
-    let _ = response.send(Ok(()));
 }

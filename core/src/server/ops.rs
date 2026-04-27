@@ -22,15 +22,15 @@ use crate::bgp::msg_route_refresh::RouteRefreshSubtype;
 use crate::bgp::msg_update::NextHopAddr;
 use crate::bgp::msg_update_types::AS_TRANS;
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::MaxPrefixAction;
 use crate::log::{debug, info, warn};
-use crate::net::IpNetwork;
+use crate::net::{get_interface_link_local, IpNetwork};
 use crate::peer::{BgpState, PeerCapabilities, PeerOp, PendingRoute};
-use crate::policy::{Policy, PolicyResult};
+use crate::policy::{AfiSafiPolicies, PolicyResult};
 use crate::rib::rib_loc::RouteDelta;
 use crate::rib::{Path, RouteKey, RoutePath};
 use crate::rpki::vrp::{Vrp, VrpTable};
 use crate::types::PeerDownReason;
+use conf::bgp::{AddPathSend, MaxPrefixAction, MaxPrefixSetting, PeerConfig};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -256,13 +256,12 @@ impl BgpServer {
         asn: u32,
         conn_type: ConnectionType,
     ) {
-        // Clone config for immutable access, then mutate peer
-        let Some(peer_config) = self.peers.get(&peer_ip).map(|p| p.config.clone()) else {
+        let is_ebgp = asn != self.config.asn;
+        let Some(peer_config) = self.config.find_peer(peer_ip).cloned() else {
             return;
         };
-        let is_ebgp = asn != self.config.asn;
-        let import_policies = self.resolve_policies(&peer_config.import_policy, is_ebgp);
-        let export_policies = self.resolve_policies(&peer_config.export_policy, is_ebgp);
+
+        let (import_policies, export_policies) = self.build_peer_policies(&peer_config, is_ebgp);
 
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
@@ -272,6 +271,36 @@ impl BgpServer {
             peer.export_policies = export_policies;
             info!(%peer_ip, asn, ?conn_type, "peer handshake complete");
         }
+    }
+
+    /// Resolve (import, export) policy maps for every configured family.
+    /// Falls back to IPv4 Unicast if no families are configured (RFC 4760).
+    fn build_peer_policies(
+        &self,
+        peer_config: &PeerConfig,
+        is_ebgp: bool,
+    ) -> (AfiSafiPolicies, AfiSafiPolicies) {
+        let mut by_family: HashMap<AfiSafi, (&[String], &[String])> = peer_config
+            .afi_safis
+            .iter()
+            .map(|c| {
+                (
+                    AfiSafi::new(c.afi, c.safi),
+                    (c.import_policy.as_slice(), c.export_policy.as_slice()),
+                )
+            })
+            .collect();
+        if by_family.is_empty() {
+            by_family.insert(AfiSafi::new(Afi::Ipv4, Safi::Unicast), (&[], &[]));
+        }
+
+        let mut import_policies = AfiSafiPolicies::new();
+        let mut export_policies = AfiSafiPolicies::new();
+        for (family, (imports, exports)) in by_family {
+            import_policies.insert(family, self.resolve_policies(imports, is_ebgp));
+            export_policies.insert(family, self.resolve_policies(exports, is_ebgp));
+        }
+        (import_policies, export_policies)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -286,6 +315,12 @@ impl BgpServer {
         negotiated_capabilities: PeerCapabilities,
         conn_type: ConnectionType,
     ) {
+        let local_link_local = self
+            .config
+            .find_peer(peer_ip)
+            .and_then(|cfg| cfg.interface.as_ref())
+            .and_then(|iface| get_interface_link_local(iface).ok());
+
         if let Some(peer) = self.peers.get_mut(&peer_ip) {
             if let Some(conn) = peer.slot_mut(conn_type).as_mut() {
                 conn.conn_info = Some(super::ConnectionInfo {
@@ -294,6 +329,7 @@ impl BgpServer {
                     local_address,
                     local_port,
                     remote_port,
+                    local_link_local,
                 });
                 conn.capabilities = Some(negotiated_capabilities);
             }
@@ -507,16 +543,13 @@ impl BgpServer {
         let peer_tx = conn.peer_tx.clone();
 
         // RFC 7947: Warn if route-server client doesn't have ADD-PATH enabled
-        if peer.config.rs_client
-            && matches!(
-                peer.config.add_path_send,
-                crate::config::AddPathSend::Disabled
-            )
-        {
-            warn!(
-                %peer_ip,
-                "Route server could hide paths without add-path. Enable add-path send."
-            );
+        if let Some(cfg) = self.config.find_peer(peer_ip) {
+            if cfg.rs_client && matches!(cfg.add_path_send, AddPathSend::Disabled) {
+                warn!(
+                    %peer_ip,
+                    "Route server could hide paths without add-path. Enable add-path send."
+                );
+            }
         }
 
         self.sweep_stale(peer_ip, &capabilities).await;
@@ -787,7 +820,14 @@ impl BgpServer {
 
         let local_asn = self.config.asn;
         let is_ebgp = peer_asn != local_asn;
-        let enforce_first_as = peer.config.enforce_first_as;
+        let peer_cfg = self.config.find_peer(peer_ip).cloned().unwrap_or_default();
+        let max_prefix_for_family: HashMap<AfiSafi, MaxPrefixSetting> = routes
+            .iter()
+            .map(|route| route.route_key().afi_safi())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|af| peer_cfg.effective_max_prefix(&af).map(|s| (af, s)))
+            .collect();
         let local_bgp_id = self.config.router_id;
         let cluster_id = self.config.cluster_id();
 
@@ -811,7 +851,9 @@ impl BgpServer {
         // Treat-as-withdraw: if any check fails, all announcements
         // in the batch are rejected (BGP UPDATE shares attrs across all NLRI)
         if let Some(first_path) = announced.first().map(|prefix_path| &*prefix_path.path) {
-            if (is_ebgp && enforce_first_as && !check_first_as(first_path, peer_asn, peer_ip))
+            if (is_ebgp
+                && peer_cfg.enforce_first_as
+                && !check_first_as(first_path, peer_asn, peer_ip))
                 || is_next_hop_local(first_path, local_address)
                 || has_as_path_loop(first_path, local_asn)
                 || (!is_ebgp && has_route_reflector_loop(first_path, local_bgp_id, cluster_id))
@@ -831,14 +873,14 @@ impl BgpServer {
             routes.iter().map(|r| r.route_key().afi_safi()).collect();
         let mut discard_families: HashSet<AfiSafi> = HashSet::new();
         for family in &families_in_update {
-            if let Some(setting) = peer.config.effective_max_prefix(family) {
+            if let Some(setting) = max_prefix_for_family.get(family) {
                 let current = peer.adj_rib_in.family_count(family);
                 if current > setting.limit as usize {
                     match setting.action {
                         MaxPrefixAction::Terminate => {
                             warn!(%peer_ip, %family, limit = setting.limit, current,
                                   "max prefix limit exceeded");
-                            if peer.config.allow_automatic_stop {
+                            if peer_cfg.allow_automatic_stop {
                                 self.handle_max_prefix_terminate(peer_ip).await;
                             } else {
                                 warn!(%peer_ip, "allow_automatic_stop=false, discarding update");
@@ -865,7 +907,7 @@ impl BgpServer {
         let Some(peer) = self.peers.get_mut(&peer_ip) else {
             return;
         };
-        let import_policies = peer.policy_in().to_vec();
+        let import_policies = peer.import_policies.clone();
         let (bmp_peer_asn, bmp_peer_bgp_id) = peer
             .established_conn()
             .map(|c| (c.asn, c.bgp_id))
@@ -923,8 +965,8 @@ impl BgpServer {
         let local_asn = self.config.asn;
         let mut delta = RouteDelta::new();
         for (peer_ip, peer_routes) in routes {
-            let policies = match self.peers.get(&peer_ip) {
-                Some(peer) => peer.policy_in().to_vec(),
+            let import_policies = match self.peers.get(&peer_ip) {
+                Some(peer) => peer.import_policies.clone(),
                 None => continue,
             };
             let vrp_table = &self.vrp_table;
@@ -935,7 +977,7 @@ impl BgpServer {
             let peer_delta = self
                 .loc_rib
                 .apply_peer_update(peer_ip, &routes, |route_key, path| {
-                    apply_import(vrp_table, local_asn, &policies, route_key, path)
+                    apply_import(vrp_table, local_asn, &import_policies, route_key, path)
                 });
             delta.extend(peer_delta);
         }
@@ -1079,11 +1121,11 @@ fn has_route_reflector_loop(path: &Path, local_bgp_id: Ipv4Addr, cluster_id: Ipv
 }
 
 /// Shared import policy evaluation: stamp RPKI validation state, set default
-/// LOCAL_PREF, then run import policies.
+/// LOCAL_PREF, then run the import policies for the route's AFI/SAFI.
 fn apply_import(
     vrp_table: &VrpTable,
     local_asn: u32,
-    policies: &[Arc<Policy>],
+    import_policies: &AfiSafiPolicies,
     route_key: &RouteKey,
     path: &mut Path,
 ) -> bool {
@@ -1094,6 +1136,10 @@ fn apply_import(
     if path.attrs.local_pref.is_none() {
         path.attrs_mut().local_pref = Some(100);
     }
+    let policies = import_policies
+        .get(&route_key.afi_safi())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     for policy in policies {
         match policy.evaluate(route_key, path) {
             PolicyResult::Accept => return true,

@@ -18,11 +18,11 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::LlgrConfig;
 use bgpgg::grpc::proto::{
     AfiSafi as ProtoAfiSafi, BgpState, GracefulRestartConfig, ListRoutesRequest,
     LlgrConfig as ProtoLlgrConfig, SessionConfig,
 };
+use conf::bgp::LlgrConfig;
 use std::net::Ipv4Addr;
 
 const LLGR_STALE: u32 = 0xFFFF0006;
@@ -37,21 +37,23 @@ async fn setup_llgr_server(
 ) -> TestServer {
     let ipv4_unicast = AfiSafi::new(Afi::Ipv4, Safi::Unicast);
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
-        address: peer_ip.to_string(),
-        passive_mode: true,
-        idle_hold_time_secs: Some(0),
-        graceful_restart: bgpgg::config::GracefulRestartConfig {
-            enabled: true,
-            restart_time: gr_restart_time,
-        },
-        llgr: Some(LlgrConfig {
-            enabled: true,
-            stale_time: Some(llgr_stale_time),
-            afi_safis: Some(vec![ipv4_unicast]),
-        }),
-        ..Default::default()
-    });
+    config
+        .insert_peer(conf::bgp::PeerConfig {
+            address: peer_ip.to_string(),
+            passive_mode: true,
+            idle_hold_time_secs: Some(0),
+            graceful_restart: conf::bgp::GracefulRestartConfig {
+                enabled: true,
+                restart_time: gr_restart_time,
+            },
+            llgr: Some(LlgrConfig {
+                enabled: true,
+                stale_time: Some(llgr_stale_time),
+                afi_safis: Some(vec![ipv4_unicast]),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
     start_test_server(config).await
 }
 
@@ -144,11 +146,7 @@ async fn poll_routes_swept(server: &TestServer, msg: &str, timeout: Duration) {
 #[tokio::test]
 async fn test_llgr_ignored_without_gr() {
     let mut config = test_config(65001, 1);
-    config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.2".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    add_passive_peer(&mut config, "127.0.0.2");
     let server = start_test_server(config).await;
 
     // FakePeer connects with LLGR capability but NO GR capability

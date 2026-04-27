@@ -1,0 +1,116 @@
+// Copyright 2026 bgpgg Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod cmd_bgp;
+mod cmd_config;
+mod cmd_configure;
+mod cmd_rpki;
+mod cmd_show;
+mod grammar;
+mod parser;
+mod shell;
+mod util;
+
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process;
+
+use conf::fs::DaemonKind;
+use shell::{Service, Shell};
+
+#[tokio::main]
+async fn main() {
+    let (grpc_addrs, command, config_path) = parse_args();
+    let shell = Shell::new(grpc_addrs, command, config_path);
+
+    if let Err(err) = shell.run().await {
+        eprintln!("{}", err);
+        process::exit(1);
+    }
+}
+
+fn parse_args() -> (HashMap<Service, String>, Option<Vec<String>>, PathBuf) {
+    let mut args = std::env::args().skip(1);
+    let mut bgpgg_addr: Option<String> = None;
+    let mut config_path = conf::fs::default_config_path();
+    let mut runtime_dir_override: Option<PathBuf> = None;
+    let mut command = Vec::new();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--bgpgg-addr" => {
+                bgpgg_addr = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--bgpgg-addr requires a value");
+                    process::exit(1);
+                }));
+            }
+            "--config" => {
+                config_path = PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("--config requires a value");
+                    process::exit(1);
+                }));
+            }
+            "--runtime-dir" => {
+                runtime_dir_override = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("--runtime-dir requires a value");
+                    process::exit(1);
+                })));
+            }
+            _ => {
+                command.push(arg);
+                command.extend(args);
+                break;
+            }
+        }
+    }
+
+    let bgpgg_addr = bgpgg_addr.unwrap_or_else(|| {
+        read_bgpggd_grpc_endpoint(runtime_dir_override.as_deref()).unwrap_or_else(|err| {
+            eprintln!("{}", err);
+            process::exit(1);
+        })
+    });
+
+    let mut grpc_addrs = HashMap::new();
+    grpc_addrs.insert(Service::Bgpgg, bgpgg_addr);
+
+    let command = if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    };
+
+    (grpc_addrs, command, config_path)
+}
+
+/// Read the bgpggd runtime status file and turn its `grpc_addr` into a
+/// tonic-friendly URL. Lets operators skip `--bgpgg-addr` when the
+/// daemon is running on the same host.
+fn read_bgpggd_grpc_endpoint(runtime_dir_override: Option<&Path>) -> Result<String, String> {
+    let runtime_dir = conf::fs::rogg_runtime_dir(runtime_dir_override);
+    let path = runtime_dir.join(DaemonKind::Bgp.filename());
+    match conf::fs::read_status(&runtime_dir, DaemonKind::Bgp) {
+        Ok(status) => Ok(format!("http://{}", status.grpc_addr)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(format!(
+            "no running daemon found at {}; pass --bgpgg-addr <addr>",
+            path.display()
+        )),
+        Err(e) => Err(format!(
+            "failed to read {}: {}; pass --bgpgg-addr <addr>",
+            path.display(),
+            e
+        )),
+    }
+}

@@ -16,16 +16,16 @@ use crate::bgp::msg_update::{
     AsPathSegment, AsPathSegmentType, NextHopAddr, Origin, PathAttrValue,
 };
 use crate::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use crate::config::{
-    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
-};
 use crate::net::{IpNetwork, Ipv4Net, Ipv6Net};
 use crate::peer::BgpState;
 use crate::rib::{PathAttrs, Route, RouteKey, RouteSource};
-use crate::rpki::manager::{RtrCacheConfig, RtrTransport, SshTransport};
 use crate::rpki::vrp::RpkiValidation;
 use crate::server::ops_mgmt::MgmtOp;
-use crate::server::AdminState;
+use crate::server::{parse_prefix_and_nexthop, AdminState};
+use conf::bgp::{
+    AddPathSend, AfiSafiConfig, LlgrConfig, MaxPrefixAction, MaxPrefixSetting, PeerConfig,
+    RpkiCacheConfig, TransportType,
+};
 use std::net::IpAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -50,6 +50,9 @@ use super::proto::{
     AddRpkiCacheResponse,
     AdminState as ProtoAdminState,
     BgpState as ProtoBgpState,
+    CommitConfigRequest,
+    CommitConfigResponse,
+    ConfigSnapshot as ProtoConfigSnapshot,
     DisablePeerRequest,
     DisablePeerResponse,
     EnablePeerRequest,
@@ -58,10 +61,14 @@ use super::proto::{
     GetPeerResponse,
     GetRpkiValidationRequest,
     GetRpkiValidationResponse,
+    GetRunningConfigRequest,
+    GetRunningConfigResponse,
     GetServerInfoRequest,
     GetServerInfoResponse,
     ListBmpServersRequest,
     ListBmpServersResponse,
+    ListConfigSnapshotsRequest,
+    ListConfigSnapshotsResponse,
     ListDefinedSetsRequest,
     ListDefinedSetsResponse,
     ListPeersRequest,
@@ -89,9 +96,13 @@ use super::proto::{
     RemoveRpkiCacheResponse,
     ResetPeerRequest,
     ResetPeerResponse,
+    RollbackConfigRequest,
+    RollbackConfigResponse,
     Route as ProtoRoute,
     RpkiCacheInfo,
     RpkiVrp,
+    SaveConfigRequest,
+    SaveConfigResponse,
     SessionConfig as ProtoSessionConfig,
     SetPeerGracefulShutdownRequest,
     SetPeerGracefulShutdownResponse,
@@ -162,7 +173,8 @@ fn route_to_proto(route: Route) -> ProtoRoute {
                     }
                 })
                 .collect(),
-            next_hop: path.next_hop().to_string(),
+            next_hop: path.next_hop().global_addr().to_string(),
+            link_local_next_hop: path.next_hop().link_local().map(|addr| addr.to_string()),
             peer_address: path
                 .source()
                 .peer_ip()
@@ -234,53 +246,8 @@ fn route_to_proto(route: Route) -> ProtoRoute {
 fn parse_add_ip_route(
     req: &proto::AddIpRouteRequest,
 ) -> Result<(IpNetwork, NextHopAddr, Origin, Vec<AsPathSegment>), String> {
-    // Parse prefix (CIDR format like "10.0.0.0/24" or "2001:db8::/32")
-    let parts: Vec<&str> = req.prefix.split('/').collect();
-    if parts.len() != 2 {
-        return Err(
-            "Invalid prefix format, expected CIDR (e.g., 10.0.0.0/24 or 2001:db8::/32)".to_string(),
-        );
-    }
+    let (prefix, next_hop) = parse_prefix_and_nexthop(&req.prefix, &req.next_hop)?;
 
-    let address: IpAddr = parts[0]
-        .parse()
-        .map_err(|_| "Invalid IP address in prefix".to_string())?;
-    let prefix_length: u8 = parts[1]
-        .parse()
-        .map_err(|_| "Invalid prefix length".to_string())?;
-
-    let prefix = match address {
-        IpAddr::V4(ipv4) => {
-            if prefix_length > 32 {
-                return Err(format!("IPv4 prefix length {} exceeds 32", prefix_length));
-            }
-            IpNetwork::V4(Ipv4Net {
-                address: ipv4,
-                prefix_length,
-            })
-        }
-        IpAddr::V6(ipv6) => {
-            if prefix_length > 128 {
-                return Err(format!("IPv6 prefix length {} exceeds 128", prefix_length));
-            }
-            IpNetwork::V6(Ipv6Net {
-                address: ipv6,
-                prefix_length,
-            })
-        }
-    };
-
-    // Parse next_hop
-    let next_hop_addr: IpAddr = req
-        .next_hop
-        .parse()
-        .map_err(|_| "Invalid next_hop IP address".to_string())?;
-    let next_hop = match next_hop_addr {
-        IpAddr::V4(ipv4) => NextHopAddr::Ipv4(ipv4),
-        IpAddr::V6(ipv6) => NextHopAddr::Ipv6(ipv6),
-    };
-
-    // Convert proto Origin to Rust Origin
     let origin = match req.origin {
         0 => Origin::IGP,
         1 => Origin::EGP,
@@ -288,7 +255,6 @@ fn parse_add_ip_route(
         _ => return Err("Invalid origin value".to_string()),
     };
 
-    // Convert proto AS_PATH segments to internal format
     let as_path: Vec<AsPathSegment> = req
         .as_path
         .iter()
@@ -296,7 +262,7 @@ fn parse_add_ip_route(
             segment_type: match seg.segment_type {
                 0 => AsPathSegmentType::AsSet,
                 1 => AsPathSegmentType::AsSequence,
-                _ => AsPathSegmentType::AsSequence, // Default to AS_SEQUENCE
+                _ => AsPathSegmentType::AsSequence,
             },
             segment_len: seg.asns.len() as u8,
             asn_list: seg.asns.to_vec(),
@@ -343,7 +309,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
     });
 
     let graceful_restart = if let Some(gr) = cfg.graceful_restart {
-        crate::config::GracefulRestartConfig {
+        conf::bgp::GracefulRestartConfig {
             enabled: gr.enabled.unwrap_or(defaults.graceful_restart.enabled),
             restart_time: gr
                 .restart_time_secs
@@ -371,8 +337,6 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
             .send_notification_without_open
             .unwrap_or(defaults.send_notification_without_open),
         min_route_advertisement_interval_secs: cfg.min_route_advertisement_interval_secs,
-        import_policy: Vec::new(),
-        export_policy: Vec::new(),
         graceful_restart,
         rr_client: cfg.rr_client.unwrap_or(defaults.rr_client),
         rs_client: cfg.rs_client.unwrap_or(defaults.rs_client),
@@ -394,6 +358,7 @@ fn proto_to_peer_config(proto: Option<ProtoSessionConfig>) -> Result<PeerConfig,
             .unwrap_or(defaults.send_rpki_community),
         afi_safis: proto_to_afi_safis(&cfg.afi_safis)?,
         interface: cfg.interface.or(defaults.interface.clone()),
+        admin_down: defaults.admin_down,
     })
 }
 
@@ -450,6 +415,8 @@ fn proto_to_afi_safis(entries: &[proto::AfiSafiConfig]) -> Result<Vec<AfiSafiCon
             safi,
             max_prefix,
             add_path_send,
+            import_policy: entry.import_policy.clone(),
+            export_policy: entry.export_policy.clone(),
         });
     }
     Ok(result)
@@ -539,6 +506,8 @@ fn peer_config_to_proto(config: &PeerConfig) -> ProtoSessionConfig {
                     safi: entry.safi as u8 as u32,
                     max_prefix,
                     add_path_send,
+                    import_policy: entry.import_policy.clone(),
+                    export_policy: entry.export_policy.clone(),
                 }
             })
             .collect(),
@@ -1231,6 +1200,150 @@ impl BgpService for BgpGrpcService {
         }))
     }
 
+    async fn get_running_config(
+        &self,
+        _request: Request<GetRunningConfigRequest>,
+    ) -> Result<Response<GetRunningConfigResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::GetRunningConfig { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let text = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        Ok(Response::new(GetRunningConfigResponse { text }))
+    }
+
+    async fn commit_config(
+        &self,
+        request: Request<CommitConfigRequest>,
+    ) -> Result<Response<CommitConfigResponse>, Status> {
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::CommitConfig {
+            text: inner.text,
+            session_uuid: inner.session_uuid,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(CommitConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(CommitConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn save_config(
+        &self,
+        request: Request<SaveConfigRequest>,
+    ) -> Result<Response<SaveConfigResponse>, Status> {
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::SaveConfig {
+            session_uuid: inner.session_uuid,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(SaveConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(SaveConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn rollback_config(
+        &self,
+        request: Request<RollbackConfigRequest>,
+    ) -> Result<Response<RollbackConfigResponse>, Status> {
+        let inner = request.into_inner();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::RollbackConfig {
+            index: inner.index,
+            session_uuid: inner.session_uuid,
+            response: tx,
+        };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        match rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?
+        {
+            Ok(()) => Ok(Response::new(RollbackConfigResponse {
+                ok: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(RollbackConfigResponse {
+                ok: false,
+                error: e,
+            })),
+        }
+    }
+
+    async fn list_config_snapshots(
+        &self,
+        _request: Request<ListConfigSnapshotsRequest>,
+    ) -> Result<Response<ListConfigSnapshotsResponse>, Status> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = MgmtOp::ListConfigSnapshots { response: tx };
+
+        self.mgmt_request_tx
+            .send(req)
+            .await
+            .map_err(|_| Status::internal("failed to send request"))?;
+
+        let snapshots = rx
+            .await
+            .map_err(|_| Status::internal("request processing failed"))?;
+
+        let proto_snapshots = snapshots
+            .into_iter()
+            .map(|s| ProtoConfigSnapshot {
+                index: s.index,
+                mtime_unix: s.mtime_unix,
+                size_bytes: s.size_bytes,
+            })
+            .collect();
+
+        Ok(Response::new(ListConfigSnapshotsResponse {
+            snapshots: proto_snapshots,
+        }))
+    }
+
     async fn add_bmp_server(
         &self,
         request: Request<AddBmpServerRequest>,
@@ -1325,27 +1438,33 @@ impl BgpService for BgpGrpcService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {}", e)))?;
 
-        let transport = match inner.transport.as_deref() {
-            Some("ssh") => {
-                let username = inner.ssh_username.ok_or_else(|| {
-                    Status::invalid_argument("ssh_username required for SSH transport")
-                })?;
-                let private_key_file = inner.ssh_private_key_file.ok_or_else(|| {
-                    Status::invalid_argument("ssh_private_key_file required for SSH transport")
-                })?;
-                RtrTransport::Ssh(SshTransport {
-                    username,
-                    private_key_file,
-                    known_hosts_file: inner.ssh_known_hosts_file,
-                })
+        let transport = inner
+            .transport
+            .as_deref()
+            .map(str::parse::<TransportType>)
+            .transpose()
+            .map_err(|e| Status::invalid_argument(format!("invalid transport: {}", e)))?
+            .unwrap_or_default();
+        if matches!(transport, TransportType::Ssh) {
+            if inner.ssh_username.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_username required for SSH transport",
+                ));
             }
-            _ => RtrTransport::Tcp,
-        };
+            if inner.ssh_private_key_file.is_none() {
+                return Err(Status::invalid_argument(
+                    "ssh_private_key_file required for SSH transport",
+                ));
+            }
+        }
 
-        let config = RtrCacheConfig {
-            address: addr,
+        let config = RpkiCacheConfig {
+            address: addr.to_string(),
             preference: inner.preference.map(|p| p as u8).unwrap_or(0),
             transport,
+            ssh_username: inner.ssh_username,
+            ssh_private_key_file: inner.ssh_private_key_file,
+            ssh_known_hosts_file: inner.ssh_known_hosts_file,
             retry_interval: inner.retry_interval,
             refresh_interval: inner.refresh_interval,
             expire_interval: inner.expire_interval,
@@ -1712,6 +1831,12 @@ impl BgpService for BgpGrpcService {
             }
         };
 
+        let afi = Afi::try_from(inner.afi as u16)
+            .map_err(|_| Status::invalid_argument(format!("unknown AFI {}", inner.afi)))?;
+        let safi = Safi::try_from(inner.safi as u8)
+            .map_err(|_| Status::invalid_argument(format!("unknown SAFI {}", inner.safi)))?;
+        let family = AfiSafi::new(afi, safi);
+
         // Parse default action
         let default_action = inner
             .default_action
@@ -1725,6 +1850,7 @@ impl BgpService for BgpGrpcService {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = MgmtOp::SetPolicyAssignment {
             peer_addr,
+            family,
             direction,
             policy_names: inner.policy_names,
             default_action,

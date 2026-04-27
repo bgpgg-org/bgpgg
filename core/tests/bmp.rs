@@ -20,11 +20,11 @@ pub use utils::bmp::*;
 pub use utils::*;
 
 use bgpgg::bmp::msg_termination::TerminationReason;
-use bgpgg::config::BmpConfig;
 use bgpgg::grpc::proto::{
     remove_route_request, BgpState, ListRoutesRequest, RemoveRouteRequest, SessionConfig,
 };
 use bgpgg::net::{IpNetwork, Ipv4Net};
+use conf::bgp::BmpConfig;
 use std::net::Ipv4Addr;
 
 #[tokio::test]

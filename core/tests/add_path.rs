@@ -15,11 +15,11 @@
 mod utils;
 pub use utils::*;
 
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{
     remove_route_request, route, AddPathSendMode, BgpState, ListRoutesRequest, Origin,
     RemoveRouteRequest, ResetType, RibType, Route, SessionConfig,
 };
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 
 /// ADD-PATH config: send all paths + receive path IDs
@@ -202,21 +202,21 @@ async fn test_addpath_peer_disconnect() {
 /// All ASN 65001, rr_client + ADD-PATH on all peerings.
 /// Returns (rr, client1, client2) with all sessions Established.
 async fn setup_rr_addpath_topology() -> (TestServer, TestServer, TestServer) {
-    let rr = start_test_server(Config::new(
+    let rr = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let client1 = start_test_server(Config::new(
+    let client1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
         90,
     ))
     .await;
-    let client2 = start_test_server(Config::new(
+    let client2 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.3:0",
         Ipv4Addr::new(3, 3, 3, 3),
@@ -262,7 +262,7 @@ async fn setup_fakepeer_addpath(
     fake_bgp_id: Ipv4Addr,
     gr_restart_time: Option<u32>,
 ) -> (TestServer, FakePeer) {
-    let server = start_test_server(Config::new(65001, "127.0.0.1:0", server_bgp_id, 90)).await;
+    let server = start_test_server(BgpConfig::new(65001, "127.0.0.1:0", server_bgp_id, 90)).await;
     let mut fake = FakePeer::new("127.0.0.2:0", 65001).await;
     server
         .client
@@ -738,7 +738,7 @@ async fn test_addpath_per_afi_safi_negotiation() {
     ];
 
     for (name, addpath_cap, expect_v4_path_id, expect_v6_path_id) in cases {
-        let server = start_test_server(Config::new(
+        let server = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
@@ -755,6 +755,7 @@ async fn test_addpath_per_afi_safi_negotiation() {
                     port: Some(fake.port() as u32),
                     add_path_send: Some(AddPathSendMode::AddPathSendAll.into()),
                     add_path_receive: Some(true),
+                    afi_safis: vec![afi_safi_ipv4_unicast(), afi_safi_ipv6_unicast()],
                     ..Default::default()
                 }),
             )

@@ -39,7 +39,6 @@ use bgpgg::bgp::msg_open::OpenMessage;
 use bgpgg::bgp::msg_update::UpdateMessage;
 use bgpgg::bgp::msg_update_types::AS_TRANS;
 use bgpgg::bgp::multiprotocol::{Afi, AfiSafi, Safi};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::bgp_service_server::BgpServiceServer;
 use bgpgg::grpc::proto::{
     add_route_request, defined_set_config, route, ActionsConfig, AddIpRouteRequest,
@@ -54,9 +53,13 @@ use bgpgg::grpc::{BgpClient, BgpGrpcService};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use bgpgg::net::apply_gtsm;
 use bgpgg::server::BgpServer;
+use conf::bgp::BgpConfig;
+use conf::testutil::TempDir;
+use std::fs;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio::time::Duration;
@@ -90,17 +93,99 @@ pub struct TestServer {
     pub bgp_port: u16,
     pub asn: u32,
     pub address: std::net::IpAddr, // IP address the server is bound to (no port)
-    pub config: Config,
+    pub config: BgpConfig,
     runtime: Option<tokio::runtime::Runtime>,
+    /// Tempdir backing `rogg.conf`. Held so it isn't deleted mid-test.
+    config_dir: TempDir,
 }
 
 impl TestServer {
+    /// Parse the on-disk rogg.conf this server commits to. Panics if missing
+    /// or unparseable -- both are bugs in commit_config.
+    pub fn read_conf(&self) -> BgpConfig {
+        let path = self.config_dir.path().join("rogg.conf");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
+    /// True if `rogg.conf` exists on disk for this server.
+    pub fn rogg_conf_exists(&self) -> bool {
+        self.config_dir.path().join("rogg.conf").exists()
+    }
+
+    /// Path to snapshot file at `index` (e.g. `rogg.1.conf`).
+    pub fn snapshot_path(&self, index: u32) -> PathBuf {
+        self.config_dir.path().join(format!("rogg.{}.conf", index))
+    }
+
+    /// True if snapshot `index` exists on disk.
+    pub fn snapshot_exists(&self, index: u32) -> bool {
+        self.snapshot_path(index).exists()
+    }
+
+    /// Parse the snapshot at `index`. Panics if missing or unparseable.
+    pub fn read_snapshot(&self, index: u32) -> BgpConfig {
+        let path = self.snapshot_path(index);
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        BgpConfig::from_conf_str(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    }
+
     /// Kill the BGP server by shutting down its runtime (simulates process death)
     pub fn kill(&mut self) {
         // Shutdown the runtime - this kills ALL tasks in it (simulates process death)
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+    }
+
+    /// Path to the sibling `<config>.lock` file.
+    pub fn lock_path(&self) -> PathBuf {
+        conf::fs::lock_path_for(&self.config_dir.path().join("rogg.conf"))
+    }
+
+    /// Take EX flock, write UUID, run closure, release. Mimics
+    /// `ggsh configure` for tests calling `save_config` / `commit_config`.
+    pub async fn with_session_lock<F, Fut, T>(&self, f: F) -> T
+    where
+        F: FnOnce(uuid::Uuid) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        use std::io::Write;
+        let lock_path = self.lock_path();
+        let session_uuid = conf::fs::make_session_uuid();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+            .expect("open lock file");
+        file.lock().expect("acquire EX flock");
+        write!(file, "{}", session_uuid).expect("write UUID to lock file");
+        file.flush().expect("flush lock file");
+        let result = f(session_uuid).await;
+        drop(file);
+        let _ = std::fs::remove_file(&lock_path);
+        result
+    }
+
+    pub async fn save_config(&self) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.save_config(uuid).await })
+            .await
+    }
+
+    pub async fn commit_config(&self, text: String) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.commit_config(text, uuid).await })
+            .await
+    }
+
+    pub async fn rollback_config(&self, index: u32) -> Result<(), tonic::Status> {
+        self.with_session_lock(|uuid| async move { self.client.rollback_config(index, uuid).await })
+            .await
     }
 }
 
@@ -192,6 +277,30 @@ pub fn as_set(asns: Vec<u32>) -> AsPathSegment {
     }
 }
 
+pub fn afi_safi_ipv4_unicast() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 1,
+        safi: 1,
+        ..Default::default()
+    }
+}
+
+pub fn afi_safi_ipv6_unicast() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 2,
+        safi: 1,
+        ..Default::default()
+    }
+}
+
+pub fn afi_safi_link_state() -> AfiSafiConfig {
+    AfiSafiConfig {
+        afi: 16388,
+        safi: 71,
+        ..Default::default()
+    }
+}
+
 /// Create SessionConfig with custom graceful restart timer
 pub fn session_config_with_gr_timer(restart_time_secs: u32) -> SessionConfig {
     SessionConfig {
@@ -230,6 +339,8 @@ pub struct PathParams {
     pub rpki_validation: i32,
     /// RFC 9552: BGP-LS attribute (type 29)
     pub ls_attribute: Option<LsAttribute>,
+    /// RFC 2545: link-local IPv6 next-hop
+    pub link_local_next_hop: Option<String>,
 }
 
 impl PathParams {
@@ -309,6 +420,7 @@ pub fn build_path(params: PathParams) -> Path {
         aggregator: params.aggregator,
         rpki_validation: params.rpki_validation,
         ls_attribute: params.ls_attribute,
+        link_local_next_hop: params.link_local_next_hop,
     }
 }
 
@@ -439,9 +551,9 @@ pub fn routes_match(actual: &[Route], expected: &[Route], expect: ExpectPathId) 
 }
 
 /// Helper to create a standard test config with sane defaults
-pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
+pub fn test_config(asn: u32, ip_last_octet: u8) -> BgpConfig {
     let ip = format!("127.0.0.{}", ip_last_octet);
-    let mut config = Config::new(
+    let mut config = BgpConfig::new(
         asn,
         &format!("{}:0", ip),
         Ipv4Addr::new(ip_last_octet, ip_last_octet, ip_last_octet, ip_last_octet),
@@ -453,14 +565,14 @@ pub fn test_config(asn: u32, ip_last_octet: u8) -> Config {
 }
 
 /// Starts a single BGP server with gRPC interface for testing
-pub async fn start_test_server(mut config: Config) -> TestServer {
+pub async fn start_test_server(mut config: BgpConfig) -> TestServer {
     use tokio::net::TcpListener;
 
     init_test_logging();
 
     // Use fast connect retry for tests (default 30s is too slow).
     // If the caller explicitly set a value, preserve it.
-    if config.connect_retry_secs == Config::default().connect_retry_secs {
+    if config.connect_retry_secs == BgpConfig::default().connect_retry_secs {
         config.connect_retry_secs = 1;
     }
 
@@ -491,8 +603,14 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
     let grpc_port = grpc_listener.local_addr().unwrap().port();
     let grpc_listener = grpc_listener.into_std().unwrap();
 
-    let config_clone = config.clone();
-    let server = BgpServer::new(config).expect("valid server config");
+    let config_dir = TempDir::new().expect("create config tempdir");
+    let config_path = config_dir.path().join("rogg.conf");
+    fs::write(&config_path, config.to_conf_str()).expect("write initial rogg.conf");
+    let server = BgpServer::new(config_path).expect("valid server config");
+    // TestServer.config mirrors what the daemon actually loaded -- not the
+    // pre-write input. They diverge whenever the grammar can't round-trip
+    // a field; tests should see what the daemon sees.
+    let loaded_config = server.config.clone();
     let grpc_service = BgpGrpcService::new(server.mgmt_tx.clone());
 
     // Create a separate runtime for this server (simulates separate process)
@@ -554,21 +672,32 @@ pub async fn start_test_server(mut config: Config) -> TestServer {
         bgp_port,
         asn,
         address: bind_ip,
-        config: config_clone,
+        config: loaded_config,
         runtime: Some(runtime),
+        config_dir,
     }
+}
+
+/// Insert a passive peer at the given address into the BgpConfig before
+/// starting the test server. Uses defaults for everything else; for tests
+/// that need extra fields (GR, LLGR, port, ...), build the PeerConfig
+/// inline and call `config.insert_peer(...)` directly.
+pub fn add_passive_peer(config: &mut BgpConfig, address: &str) {
+    config
+        .insert_peer(conf::bgp::PeerConfig {
+            address: address.to_string(),
+            passive_mode: true,
+            ..Default::default()
+        })
+        .unwrap();
 }
 
 /// Setup a test server with a passive peer configured (no connection yet).
 ///
 /// Use when you need custom handshake behavior (e.g., partial handshake for OpenConfirm tests).
 pub async fn setup_server_with_passive_peer() -> TestServer {
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
-    config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.1".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 300);
+    add_passive_peer(&mut config, "127.0.0.1");
     let server = start_test_server(config).await;
     // FakePeer will be eBGP (ASN 65002): apply accept-all policies
     apply_import_accept_all(&server, "127.0.0.1").await;
@@ -638,14 +767,14 @@ pub async fn setup_two_peered_servers(config: PeerConfig) -> (TestServer, TestSe
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2] = chain_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
@@ -679,21 +808,21 @@ pub async fn setup_three_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
@@ -730,28 +859,28 @@ pub async fn setup_four_meshed_servers(
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
     let [server1, server2, server3, server4] = mesh_servers(
         [
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65001,
                 "127.0.0.1:0",
                 Ipv4Addr::new(1, 1, 1, 1),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65002,
                 "127.0.0.2:0",
                 Ipv4Addr::new(2, 2, 2, 2),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65003,
                 "127.0.0.3:0",
                 Ipv4Addr::new(3, 3, 3, 3),
                 hold,
             ))
             .await,
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 65004,
                 "127.0.0.4:0",
                 Ipv4Addr::new(4, 4, 4, 4),
@@ -784,7 +913,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     config: PeerConfig,
 ) -> (TestServer, [TestServer; N]) {
     let hold = config.hold_timer_secs.unwrap_or(90) as u64;
-    let hub = start_test_server(Config::new(
+    let hub = start_test_server(BgpConfig::new(
         hub_asn,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
@@ -795,7 +924,7 @@ pub async fn setup_hub_spoke_servers<const N: usize>(
     for (i, &asn) in spoke_asns.iter().enumerate() {
         let octet = (i + 2) as u8;
         spokes.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
@@ -1356,7 +1485,7 @@ pub async fn create_asn_chain<const N: usize>(
     for (i, asn) in asns.iter().enumerate() {
         let octet = (i + 1) as u8;
         servers.push(
-            start_test_server(Config::new(
+            start_test_server(BgpConfig::new(
                 *asn,
                 &format!("127.0.0.{}:0", octet),
                 Ipv4Addr::new(octet, octet, octet, octet),
@@ -2894,16 +3023,7 @@ pub async fn apply_export_prefix_reject_policy(
         .await
         .unwrap();
 
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec![policy_name.to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", policy_name).await;
 }
 
 /// Create an export policy that rejects routes sourced from a specific neighbor and accepts
@@ -2941,16 +3061,7 @@ pub async fn apply_export_neighbor_reject_policy(
         .await
         .unwrap();
 
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec![policy_name.to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", policy_name).await;
 }
 
 /// Build Enhanced Route Refresh capability (RFC 7313, code 70, zero-length)
@@ -2995,16 +3106,7 @@ pub async fn apply_import_accept_all(server: &TestServer, peer_addr: &str) {
             }],
         )
         .await;
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "import".to_string(),
-            vec!["permit-all".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "import", "permit-all").await;
 }
 
 /// Apply accept-all export policy on a server for a specific peer.
@@ -3023,16 +3125,7 @@ pub async fn apply_export_accept_all(server: &TestServer, peer_addr: &str) {
             }],
         )
         .await;
-    server
-        .client
-        .set_policy_assignment(
-            peer_addr.to_string(),
-            "export".to_string(),
-            vec!["permit-all".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
+    apply_policy_to_common_families(server, peer_addr, "export", "permit-all").await;
 }
 
 /// Apply accept-all import and export on a server for a specific peer address.
@@ -3045,4 +3138,34 @@ pub async fn apply_permit_all(server: &TestServer, peer_addr: &str) {
 pub async fn apply_permit_all_routes(server1: &TestServer, server2: &TestServer) {
     apply_permit_all(server1, &server2.address.to_string()).await;
     apply_permit_all(server2, &server1.address.to_string()).await;
+}
+
+/// Attach `policy_name` to the peer's IPv4-unicast, IPv6-unicast, and BGP-LS
+/// families in `direction`. Tests that need single-family attachment should
+/// call `set_policy_assignment` directly with explicit afi/safi.
+pub async fn apply_policy_to_common_families(
+    server: &TestServer,
+    peer_addr: &str,
+    direction: &str,
+    policy_name: &str,
+) {
+    use conf::bgp::{Afi, Safi};
+    for (afi, safi) in [
+        (Afi::Ipv4 as u32, Safi::Unicast as u32),
+        (Afi::Ipv6 as u32, Safi::Unicast as u32),
+        (Afi::LinkState as u32, Safi::LinkState as u32),
+    ] {
+        server
+            .client
+            .set_policy_assignment(
+                peer_addr.to_string(),
+                afi,
+                safi,
+                direction.to_string(),
+                vec![policy_name.to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+    }
 }

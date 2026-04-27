@@ -183,6 +183,50 @@ pub fn ipv6_from_sockaddr(addr: SocketAddr) -> Option<Ipv6Addr> {
     }
 }
 
+/// Look up the link-local IPv6 address (fe80::/10) on a named interface.
+/// Uses getifaddrs() to walk all addresses and find the matching one.
+pub fn get_interface_link_local(interface: &str) -> io::Result<Ipv6Addr> {
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut current = addrs;
+    let mut result = None;
+
+    while !current.is_null() {
+        let entry = unsafe { &*current };
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) };
+
+        if let Ok(name_str) = name.to_str() {
+            if name_str == interface && !entry.ifa_addr.is_null() {
+                let family = unsafe { (*entry.ifa_addr).sa_family } as i32;
+                if family == libc::AF_INET6 {
+                    let sockaddr = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+                    let addr = Ipv6Addr::from(sockaddr.sin6_addr.s6_addr);
+                    // fe80::/10 check
+                    let octets = addr.octets();
+                    if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
+                        result = Some(addr);
+                        break;
+                    }
+                }
+            }
+        }
+
+        current = entry.ifa_next;
+    }
+
+    unsafe { libc::freeifaddrs(addrs) };
+
+    result.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no link-local IPv6 address on interface {}", interface),
+        )
+    })
+}
+
 /// Resolve a network interface name to its kernel interface index.
 /// Used for link-local IPv6 addresses which require an if_index to route.
 pub fn resolve_interface_index(interface: &str) -> io::Result<u32> {
@@ -520,5 +564,28 @@ mod tests {
     fn test_resolve_interface_index_nonexistent() {
         let result = resolve_interface_index("nonexistent_iface_xyz");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_interface_link_local_nonexistent() {
+        let result = get_interface_link_local("nonexistent_iface_xyz");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_get_interface_link_local_loopback_linux() {
+        // lo has no link-local address
+        let result = get_interface_link_local("lo");
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn test_get_interface_link_local_loopback_bsd() {
+        // FreeBSD's lo0 auto-assigns fe80::1.
+        let addr = get_interface_link_local("lo0").expect("lo0 link-local");
+        assert!(addr.segments()[0] & 0xffc0 == 0xfe80);
     }
 }

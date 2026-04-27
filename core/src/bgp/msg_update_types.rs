@@ -421,6 +421,8 @@ impl TryFrom<u8> for AsPathSegmentType {
 pub enum NextHopAddr {
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
+    /// RFC 2545: global + link-local IPv6 next-hop (32-byte form in MP_REACH_NLRI)
+    Ipv6WithLinkLocal(Ipv6Addr, Ipv6Addr),
 }
 
 impl std::fmt::Display for NextHopAddr {
@@ -428,6 +430,9 @@ impl std::fmt::Display for NextHopAddr {
         match self {
             NextHopAddr::Ipv4(addr) => write!(f, "{}", addr),
             NextHopAddr::Ipv6(addr) => write!(f, "{}", addr),
+            NextHopAddr::Ipv6WithLinkLocal(global, link_local) => {
+                write!(f, "{} ({})", link_local, global)
+            }
         }
     }
 }
@@ -437,6 +442,25 @@ impl NextHopAddr {
         match self {
             NextHopAddr::Ipv4(addr) => addr.is_unspecified(),
             NextHopAddr::Ipv6(addr) => addr.is_unspecified(),
+            NextHopAddr::Ipv6WithLinkLocal(global, link_local) => {
+                global.is_unspecified() && link_local.is_unspecified()
+            }
+        }
+    }
+
+    /// Returns the global IPv6 address, stripping any link-local component.
+    pub fn global_addr(&self) -> NextHopAddr {
+        match self {
+            NextHopAddr::Ipv6WithLinkLocal(global, _) => NextHopAddr::Ipv6(*global),
+            other => *other,
+        }
+    }
+
+    /// Returns the link-local address if present.
+    pub fn link_local(&self) -> Option<Ipv6Addr> {
+        match self {
+            NextHopAddr::Ipv6WithLinkLocal(_, link_local) => Some(*link_local),
+            _ => None,
         }
     }
 }

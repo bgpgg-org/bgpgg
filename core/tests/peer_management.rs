@@ -18,8 +18,8 @@ mod utils;
 pub use utils::*;
 
 use bgpgg::bgp::msg_notification::{BgpError, CeaseSubcode};
-use bgpgg::config::Config;
 use bgpgg::grpc::proto::{AdminState, BgpState, Origin, SessionConfig};
+use conf::bgp::BgpConfig;
 use std::net::Ipv4Addr;
 
 #[tokio::test]
@@ -190,14 +190,14 @@ async fn test_remove_peer_four_node_mesh() {
 
 #[tokio::test]
 async fn test_manually_stopped_no_auto_reconnect() {
-    let server1 = start_test_server(Config::new(
+    let server1 = start_test_server(BgpConfig::new(
         65001,
         "127.0.0.1:0",
         Ipv4Addr::new(1, 1, 1, 1),
         90,
     ))
     .await;
-    let server2 = start_test_server(Config::new(
+    let server2 = start_test_server(BgpConfig::new(
         65002,
         "127.0.0.2:0",
         Ipv4Addr::new(2, 2, 2, 2),
@@ -264,12 +264,8 @@ async fn test_manually_stopped_no_auto_reconnect() {
 #[tokio::test]
 async fn test_reject_unconfigured_peer() {
     // Server with 127.0.0.2 as configured passive peer
-    let mut config = Config::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
-    config.peers.push(bgpgg::config::PeerConfig {
-        address: "127.0.0.2".to_string(),
-        passive_mode: true,
-        ..Default::default()
-    });
+    let mut config = BgpConfig::new(65001, "127.0.0.1:0", Ipv4Addr::new(1, 1, 1, 1), 90);
+    add_passive_peer(&mut config, "127.0.0.2");
     let server = start_test_server(config).await;
 
     // Configured peer from 127.0.0.2 should be accepted
@@ -309,7 +305,7 @@ async fn test_manual_stop() {
     ];
 
     for (starting_state, delay_open_time_secs) in test_cases {
-        let server = start_test_server(Config::new(
+        let server = start_test_server(BgpConfig::new(
             65001,
             "127.0.0.1:0",
             Ipv4Addr::new(1, 1, 1, 1),
